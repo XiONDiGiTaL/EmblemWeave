@@ -1,0 +1,9 @@
+[package]
+name = "ew-gfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "EmblemWeave host graphics: the Vulkan device behind the NVN layer"
+
+[dependencies]
+ash = { version = "0.38", features = ["loaded"] }

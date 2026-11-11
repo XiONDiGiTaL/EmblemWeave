@@ -1,0 +1,31 @@
+[package]
+name = "eblemweave"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "EmblemWeave: native PC recompilation launcher, by XiØN"
+build = "build.rs"
+
+[[bin]]
+name = "EmblemWeave"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ew-format.workspace = true
+ew-lift.workspace = true
+ew-runtime.workspace = true
+ew-boot.workspace = true
+eframe = "0.31"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ruzstd.workspace = true
+roxmltree = "0.20"
+
+[build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_Input_XboxController", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_LibraryLoader", "Win32_UI_Shell"] }

@@ -1,0 +1,18 @@
+# Build output
+/target/
+**/target/
+
+# Derived from the user's own dump — never committed
+/work/
+/build/
+*.bin
+*.exe
+
+# Python bridge environment
+/.venv/
+
+# Local settings and generated scan reports
+*.json
+
+# Launch videos made with /brag (they contain game footage: keep them local)
+brag-output*/

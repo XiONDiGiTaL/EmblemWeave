@@ -1,0 +1,26 @@
+[package]
+name = "ew-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Container and asset format layer for EmblemWeave (NSO0, ExeFS, romfs inventory)"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lz4_flex.workspace = true
+ruzstd.workspace = true
+sha2.workspace = true
+
+[[bin]]
+name = "ew-inspect"
+path = "src/bin/ew_inspect.rs"
+
+[[bin]]
+name = "ew-decode"
+path = "src/bin/ew_decode.rs"
+
+[[bin]]
+name = "ew-nup"
+path = "src/bin/ew_nup.rs"

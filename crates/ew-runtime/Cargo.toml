@@ -1,0 +1,12 @@
+[package]
+name = "ew-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native runtime for recompiled EmblemWeave modules"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ew-format.workspace = true

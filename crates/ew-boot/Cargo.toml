@@ -1,0 +1,19 @@
+[package]
+name = "ew-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Whole-program dispatcher that runs recovered guest code against the module image"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ew-lift.workspace = true
+ew-format.workspace = true
+ew-runtime.workspace = true
+libm = "0.2.11"
+ew-gfx.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_SystemInformation"] }

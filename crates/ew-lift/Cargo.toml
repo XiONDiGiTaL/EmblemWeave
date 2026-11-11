@@ -1,0 +1,24 @@
+[package]
+name = "ew-lift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AArch64 to C static recompilation pipeline for EmblemWeave"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ew-format.workspace = true
+
+[[bin]]
+name = "ew-lift"
+path = "src/bin/ew_lift.rs"
+
+[[bin]]
+name = "ew-tables"
+path = "src/bin/ew_tables.rs"
+
+[[bin]]
+name = "ew-path"
+path = "src/bin/ew_path.rs"
