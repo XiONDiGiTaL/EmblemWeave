@@ -172,7 +172,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             "The game loads its mods in name order, so for these files the last mod wins. Switch one off to decide it yourself.",
         );
         ui.add_space(theme::SPACE_S);
-        egui::ScrollArea::vertical().id_salt("conflicts").max_height(240.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("conflicts").max_height(crate::widgets::list_height(ui, 0.24)).show(ui, |ui| {
             egui::Grid::new("conflict-grid").num_columns(2).spacing([20.0, 6.0]).striped(true).show(ui, |ui| {
                 for c in &shared {
                     ui.label(RichText::new(&c.file).font(theme::mono(11.5)).color(p.body));

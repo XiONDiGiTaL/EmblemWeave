@@ -253,7 +253,7 @@ const SPOTS: [Spot; 15] = [
 /// it without an asset: the outline takes the scheme's accent, and a connected
 /// pad lights each control as it is used.
 fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::config::Binding], live: Option<pad::Live>) {
-    let width = ui.available_width().min(520.0);
+    let width = ui.available_width().min(470.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 0.716), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let at = |x: f32, y: f32| egui::pos2(rect.left() + x * rect.width(), rect.top() + y * rect.height());

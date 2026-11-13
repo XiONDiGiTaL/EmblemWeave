@@ -30,11 +30,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .fill(p.panel)
         .stroke(egui::Stroke::new(1.0_f32, p.line))
         .corner_radius(egui::CornerRadius::same(theme::RADIUS_M + 4))
-        .inner_margin(egui::Margin::symmetric(28, 24))
+        .inner_margin(egui::Margin::symmetric(24, 20))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                logo::show_lockup(ui, &p, 286.0_f32.min(ui.available_width() * 0.42));
+                logo::show_lockup(ui, &p, 244.0_f32.min(ui.available_width() * 0.38));
                 ui.add_space(theme::SPACE_L);
                 ui.vertical(|ui| {
                     ui.set_max_width(ui.available_width());
@@ -57,7 +57,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let ready = crate::engine::ready();
                     let building = app.running(JobKind::Engine).is_some();
                     ui.horizontal(|ui| {
-                        if widgets::hero_button(ui, &p, "PLAY", ready && !building)
+                        if widgets::primary_button(ui, &p, "▶  Play", ready && !building)
                             .on_disabled_hover_text("Build the game first: it is compiled from your dump once, on this PC.")
                             .clicked()
                         {

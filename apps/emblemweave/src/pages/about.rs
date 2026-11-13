@@ -153,7 +153,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 }
                 if !rel.notes.is_empty() {
                     ui.add_space(theme::SPACE_S);
-                    egui::ScrollArea::vertical().id_salt("release-notes").max_height(180.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("release-notes").max_height(crate::widgets::list_height(ui, 0.22)).show(ui, |ui| {
                         ui.label(RichText::new(&rel.notes).size(12.5).color(p.body));
                     });
                 }

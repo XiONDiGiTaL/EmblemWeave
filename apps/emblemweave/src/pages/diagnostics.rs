@@ -187,7 +187,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
             widgets::section(ui, &p, "Imports reached", |ui| {
-                egui::ScrollArea::vertical().id_salt("imports").max_height(260.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("imports").max_height(crate::widgets::list_height(ui, 0.26)).show(ui, |ui| {
                     for i in r.import_calls.iter().filter(|i| matches(&filter, &i.name) || matches(&filter, &widgets::demangle(&i.name))) {
                         ui.horizontal(|ui| {
                             ui.add_sized([70.0, 16.0], egui::Label::new(RichText::new(crate::fmt_count(i.calls)).font(theme::mono(12.0)).color(p.accent_hi)));
@@ -198,7 +198,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
             });
             widgets::section(ui, &p, "Last events before the stop", |ui| {
-                egui::ScrollArea::vertical().id_salt("recent").max_height(300.0).stick_to_bottom(true).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("recent").max_height(crate::widgets::list_height(ui, 0.30)).stick_to_bottom(true).show(ui, |ui| {
                     for e in r.recent.iter().filter(|e| matches(&filter, e)) {
                         widgets::mono_line(ui, &widgets::demangle_line(e), p.body);
                     }

@@ -24,22 +24,27 @@ use serde::{Deserialize, Serialize};
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_S: f32 = 8.0;
 pub const SPACE_M: f32 = 14.0;
-pub const SPACE_L: f32 = 22.0;
-pub const SPACE_XL: f32 = 32.0;
+pub const SPACE_L: f32 = 20.0;
+pub const SPACE_XL: f32 = 30.0;
 /// Corner radii: the site's 11 pixel buttons and `--radius` (18) cards.
-pub const RADIUS_S: u8 = 14;
-pub const RADIUS_M: u8 = 26;
+pub const RADIUS_S: u8 = 12;
+pub const RADIUS_M: u8 = 20;
 /// Width of the navigation rail.
-pub const NAV_WIDTH: f32 = 232.0;
+pub const NAV_WIDTH: f32 = 216.0;
 /// The brand and status strips above and below the pages.
-pub const TOPBAR_HEIGHT: f32 = 50.0;
-pub const STATUSBAR_HEIGHT: f32 = 30.0;
-/// The column of status panels beside the Overview page.
-pub const SIDE_WIDTH: f32 = 322.0;
+pub const TOPBAR_HEIGHT: f32 = 46.0;
+pub const STATUSBAR_HEIGHT: f32 = 28.0;
+/// The column of status panels beside the Overview page, and the window width
+/// below which it steps aside so the page keeps its room.
+pub const SIDE_WIDTH: f32 = 300.0;
+pub const SIDE_MIN_WINDOW: f32 = 1240.0;
+/// The widest the page column grows; wider windows centre it instead of
+/// stretching the text across the screen.
+pub const CONTENT_MAX: f32 = 1180.0;
 /// Fully round controls: buttons and chips are pills.
 pub const RADIUS_PILL: u8 = 200;
 /// A card: soft on three corners, squared where it meets the page's spine.
-pub const CARD: egui::CornerRadius = egui::CornerRadius { nw: 20, ne: 20, sw: 20, se: 6 };
+pub const CARD: egui::CornerRadius = egui::CornerRadius { nw: 18, ne: 18, sw: 18, se: 6 };
 /// Letter spacing for the small-caps labels, as the reference launcher sets it.
 pub const TRACK_WIDE: f32 = 2.4;
 pub const TRACK_MID: f32 = 1.6;
@@ -418,7 +423,9 @@ pub fn apply(ctx: &egui::Context, scheme: Scheme) {
 
     style.spacing.item_spacing = egui::vec2(SPACE_S + 2.0, SPACE_S);
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
-    style.spacing.interact_size.y = 30.0;
+    // Every control on a row — a button, a combo box, a text field — is the
+    // same height, so a toolbar reads as one line.
+    style.spacing.interact_size.y = 32.0;
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_PILL);

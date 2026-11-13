@@ -413,10 +413,10 @@ impl App {
         let fps = self.frames.fps().unwrap_or(0.0);
         egui::TopBottomPanel::top("topbar")
             .exact_height(theme::TOPBAR_HEIGHT)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 6, bottom: 4 }))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 5, bottom: 3 }))
             .show(ctx, |ui| {
                 let strip = ui.available_rect_before_wrap();
-                widgets::glass_panel(ui, strip, &p, egui::CornerRadius::same(16));
+                widgets::glass_panel(ui, strip, &p, egui::CornerRadius::same(14));
                 ui.horizontal_centered(|ui| {
                     ui.add_space(14.0);
                     // The brand mark: a lit diamond, as on the reference bar.
@@ -430,12 +430,12 @@ impl App {
                     ];
                     ui.painter().add(egui::Shape::convex_polygon(diamond, p.accent, egui::Stroke::new(1.0_f32, theme::alpha(egui::Color32::WHITE, 170))));
                     ui.add_space(6.0);
-                    widgets::tracked(ui, "EMBLEMWEAVE", 11.0, p.ink, 3.4);
-                    ui.add_space(14.0);
-                    let (div, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
-                    ui.painter().vline(div.center().x, div.y_range(), egui::Stroke::new(1.0_f32, theme::alpha(p.accent, 70)));
+                    widgets::tracked(ui, "EMBLEMWEAVE", 10.5, p.ink, 3.0);
                     ui.add_space(12.0);
-                    widgets::tracked(ui, &self.page.label().to_uppercase(), 10.0, p.accent_hi, theme::TRACK_MID);
+                    let (div, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
+                    ui.painter().vline(div.center().x, div.y_range(), egui::Stroke::new(1.0_f32, theme::alpha(p.accent, 70)));
+                    ui.add_space(11.0);
+                    widgets::tracked(ui, &self.page.label().to_uppercase(), 9.5, p.accent_hi, theme::TRACK_MID);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(14.0);
                         if self.config.hud.fps {
@@ -509,21 +509,21 @@ impl App {
         egui::SidePanel::left("nav")
             .exact_width(theme::NAV_WIDTH)
             .resizable(false)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 10, right: 4, top: 6, bottom: 8 }))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 8, right: 4, top: 6, bottom: 8 }))
             .show(ctx, |ui| {
                 let full = ui.available_rect_before_wrap();
-                widgets::glass_panel(ui, full, &p, egui::CornerRadius::same(22));
-                ui.spacing_mut().item_spacing.y = 3.0;
-                ui.add_space(theme::SPACE_M);
+                widgets::glass_panel(ui, full, &p, egui::CornerRadius::same(18));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
-                    logo::show_lockup(ui, &p, theme::NAV_WIDTH - 78.0);
-                    ui.add_space(2.0);
-                    widgets::tracked(ui, "NATIVE PC RECOMPILATION", 8.5, p.muted, theme::TRACK_TIGHT);
+                    logo::show_lockup(ui, &p, theme::NAV_WIDTH - 96.0);
+                    ui.add_space(1.0);
+                    widgets::tracked(ui, "NATIVE PC RECOMPILATION", 8.0, p.muted, theme::TRACK_TIGHT);
                 });
-                ui.add_space(2.0);
+                ui.add_space(1.0);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (name, pages) in GROUPS {
-                    ui.add_space(theme::SPACE_S + 2.0);
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.add_space(18.0);
                         widgets::eyebrow(ui, &p, name);
@@ -544,14 +544,16 @@ impl App {
     /// The status column beside the Overview page: where the game, the
     /// recompiler and the runtime stand, and what the launcher just did.
     fn side_panel(&mut self, ctx: &egui::Context) {
-        if self.page != Page::Overview {
+        // The column steps aside on a narrow window: the page keeps its room
+        // instead of both being squeezed into scroll boxes.
+        if self.page != Page::Overview || ctx.screen_rect().width() < theme::SIDE_MIN_WINDOW {
             return;
         }
         let p = self.config.theme.palette();
         egui::SidePanel::right("status-column")
             .exact_width(theme::SIDE_WIDTH)
             .resizable(false)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 0, right: 12, top: 14, bottom: 4 }))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 0, right: 14, top: 12, bottom: 2 }))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     let (ready, r_tone) = pages::overview::readiness(self);
@@ -805,15 +807,24 @@ impl eframe::App for App {
         self.side_panel(ctx);
         let p = self.config.theme.palette();
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 36, right: 36, top: 0, bottom: 0 }))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 0, bottom: 0 }))
             .show(ctx, |ui| {
-                crate::widgets::backdrop(ui.painter(), ui.max_rect().expand2(egui::vec2(36.0, 0.0)), &p);
+                crate::widgets::backdrop(ui.painter(), ui.max_rect().expand2(egui::vec2(28.0, 0.0)), &p);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let w = ui.available_width().min(1100.0);
-                    ui.set_width(w);
-                    ui.set_max_width(w);
-                    pages::show(self, ui);
-                    ui.add_space(theme::SPACE_XL);
+                    // The page column stops growing at CONTENT_MAX and is
+                    // centred in whatever is left, so a wide window gives the
+                    // same measure of text rather than a stretched page.
+                    let avail = ui.available_width();
+                    let w = (avail - 12.0).min(theme::CONTENT_MAX);
+                    let pad = ((avail - w) * 0.5).max(0.0);
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(pad);
+                        ui.vertical(|ui| {
+                            ui.set_max_width(w.max(320.0));
+                            pages::show(self, ui);
+                            ui.add_space(theme::SPACE_XL);
+                        });
+                    });
                 });
             });
         self.overlays(ctx);
@@ -874,8 +885,8 @@ fn main() -> eframe::Result<()> {
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
     }
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1360.0, 860.0])
-        .with_min_inner_size([1080.0, 700.0])
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([1120.0, 720.0])
         .with_title("EmblemWeave");
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
