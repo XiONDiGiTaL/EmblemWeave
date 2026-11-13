@@ -845,26 +845,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "eblemweave"
-version = "0.1.5"
-dependencies = [
- "anyhow",
- "eframe",
- "ew-boot",
- "ew-format",
- "ew-lift",
- "ew-runtime",
- "image",
- "rfd",
- "roxmltree",
- "ruzstd",
- "serde",
- "serde_json",
- "windows-sys 0.59.0",
- "winresource",
-]
-
-[[package]]
 name = "ecolor"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -991,6 +971,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e4cadcff7a5353ba72b7fea76bf2122b5ebdbc68e8155aa56dfdea90083fe1b"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "emblemweave"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "ew-boot",
+ "ew-format",
+ "ew-lift",
+ "ew-runtime",
+ "image",
+ "rfd",
+ "roxmltree",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+ "winresource",
 ]
 
 [[package]]

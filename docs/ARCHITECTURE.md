@@ -11,7 +11,7 @@
 
 ```
                 +----------------------------------------------+
-                |  apps/eblemweave   (launcher, egui/eframe)   |
+                |  apps/emblemweave   (launcher, egui/eframe)   |
                 |  data detection, settings, diagnostics       |
                 +---------------------+------------------------+
                                       |
@@ -153,7 +153,7 @@ Each function returns `1` to continue dispatch and `0` after a trap, so a missin
 
 ## The launcher
 
-`apps/eblemweave` is organised by responsibility: `config` (versioned, atomic
+`apps/emblemweave` is organised by responsibility: `config` (versioned, atomic
 settings), `theme` (palettes, type and spacing tokens), `widgets` (shared
 components), `gamedata` (detection and validation), `jobs` (background work with
 staged progress and cancellation) and one module per page under `pages/`. Long
@@ -176,7 +176,7 @@ crates/ew-format    containers, romfs, probes
 crates/ew-lift      decoder, interpreter, C emitter, ew-lift CLI
 crates/ew-boot      dispatcher, module image, import naming, host services
 crates/ew-runtime   guest memory, HLE registry, readiness
-apps/eblemweave     launcher
+apps/emblemweave     launcher
 tools/              zbic_extract.py, verification scripts, assembler probes
 docs/               feasibility, architecture, status, legal
 ```

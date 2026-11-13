@@ -251,19 +251,22 @@ fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::conf
     let at = |x: f32, y: f32| egui::pos2(rect.left() + x * rect.width(), rect.top() + y * rect.height());
     let line = |on: bool, rest: u8, lit: u8| theme::alpha(p.accent, if on { lit } else { rest });
 
-    // The reference silhouette, clockwise from the notch at the top centre:
-    // two shoulders with a step, the body, the grips and the flat bottom.
+    // The reference silhouette, clockwise from the bottom of the notch under the
+    // small round button: one smooth dip there, then the flat top, the shoulder
+    // steps, the body, the grips and the flat bottom. The dip is two anchors at
+    // the same height either side of its lowest point, so the curve rounds it
+    // instead of kinking.
     let anchors = [
-        (0.395, 0.092), (0.412, 0.103), (0.432, 0.092), (0.480, 0.076), (0.560, 0.074),
-        (0.635, 0.074), (0.700, 0.082), (0.737, 0.098), (0.744, 0.118), (0.800, 0.145),
+        (0.403, 0.095), (0.415, 0.095), (0.430, 0.075), (0.480, 0.068), (0.560, 0.066),
+        (0.635, 0.066), (0.690, 0.076), (0.740, 0.094), (0.775, 0.120), (0.815, 0.148),
         (0.860, 0.185), (0.895, 0.215), (0.925, 0.300), (0.945, 0.400), (0.960, 0.520),
         (0.965, 0.640), (0.955, 0.760), (0.930, 0.860), (0.890, 0.920), (0.840, 0.940),
         (0.790, 0.920), (0.760, 0.860), (0.740, 0.790), (0.700, 0.745), (0.620, 0.735),
         (0.520, 0.735), (0.420, 0.735), (0.340, 0.745), (0.300, 0.790), (0.280, 0.860),
         (0.250, 0.920), (0.200, 0.940), (0.150, 0.920), (0.110, 0.860), (0.085, 0.760),
         (0.075, 0.640), (0.080, 0.520), (0.095, 0.400), (0.115, 0.300), (0.145, 0.215),
-        (0.180, 0.185), (0.215, 0.145), (0.245, 0.118), (0.255, 0.098), (0.290, 0.082),
-        (0.350, 0.074), (0.383, 0.080),
+        (0.180, 0.185), (0.215, 0.145), (0.245, 0.118), (0.290, 0.092), (0.340, 0.078),
+        (0.386, 0.072),
     ];
     let points: Vec<egui::Pos2> = smooth_closed(&anchors).into_iter().map(|(x, y)| at(x, y)).collect();
     for (w, a) in [(9.0_f32, 14u8), (4.5_f32, 40)] {
@@ -271,9 +274,10 @@ fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::conf
     }
     painter.add(egui::Shape::closed_line(points, egui::epaint::PathStroke::new(2.0_f32, p.accent)));
 
-    // The shapes the reference pad has but no action uses: the small round
-    // button under the notch and two beside the face buttons.
-    for (x, y, r) in [(0.409, 0.099, 0.013), (0.623, 0.241, 0.022), (0.563, 0.346, 0.021)] {
+    // The shapes the reference pad has but no action uses: two small buttons
+    // beside the face buttons. (The reference's third, in the notch, sat on the
+    // outline at this size, so the notch alone carries it.)
+    for (x, y, r) in [(0.623, 0.241, 0.022), (0.563, 0.346, 0.021)] {
         painter.circle_stroke(at(x, y), r * rect.width(), egui::Stroke::new(1.5_f32, theme::alpha(p.accent, 90)));
     }
 

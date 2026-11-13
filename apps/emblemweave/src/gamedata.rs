@@ -347,7 +347,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// On a real dump: `EW_NUP=<file.nup> cargo test -p eblemweave -- --ignored`.
+    /// On a real dump: `EW_NUP=<file.nup> cargo test -p emblemweave -- --ignored`.
     #[test]
     #[ignore]
     fn detects_a_nup_dump() {

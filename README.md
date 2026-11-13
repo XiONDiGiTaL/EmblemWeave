@@ -266,7 +266,7 @@ folder, one folder per mod holding `romfs/` (the layout emulators use). Every en
 | `ew-boot` | Module image and imports, SDK startup sequence, guest thread scheduler, and the host services (`nn::os`, `nn::fs`, `nn::oe`, `nn::lmem`, C and C++ runtime) |
 | `ew-gfx` | The host Vulkan device behind the NVN layer |
 | `ew-runtime` | Guest memory bus and service readiness |
-| `apps/eblemweave` | The EmblemWeave launcher |
+| `apps/emblemweave` | The EmblemWeave launcher |
 
 Design details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and the
 reasoning behind static recompilation is in [docs/FEASIBILITY.md](docs/FEASIBILITY.md).
@@ -320,7 +320,7 @@ The verification tools need `pip install ziglang unicorn`.
 ## Project structure
 
 ```
-apps/eblemweave/     the EmblemWeave launcher (egui)
+apps/emblemweave/     the EmblemWeave launcher (egui)
 assets/branding/     the EmblemWeave logo
 crates/ew-format/    container and asset formats
 crates/ew-lift/      decoder, recompiler and reference interpreter

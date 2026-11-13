@@ -6,7 +6,7 @@ members = [
     "crates/ew-runtime",
     "crates/ew-boot",
     "crates/ew-gfx",
-    "apps/eblemweave",
+    "apps/emblemweave",
 ]
 
 [workspace.package]
