@@ -148,6 +148,49 @@ impl Default for Input {
     }
 }
 
+/// Update checking and the launcher's own overlay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Ask GitHub for a newer release when the launcher starts.
+    pub check: bool,
+    /// The tag the user turned down, so a dismissed update is not offered
+    /// again on every start.
+    pub skipped: String,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Updates { check: true, skipped: String::new() }
+    }
+}
+
+/// Which of the launcher's own readouts are shown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hud {
+    /// The frame rate chip in the top bar.
+    pub fps: bool,
+    /// The frame-time graph on the Diagnostics page.
+    pub graph: bool,
+}
+
+impl Default for Hud {
+    fn default() -> Self {
+        Hud { fps: false, graph: true }
+    }
+}
+
+/// A named set of mods to switch on together.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ModProfile {
+    pub name: String,
+    /// Names of the mods that are on in this profile (without the `_` a
+    /// switched-off mod carries).
+    pub enabled: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -158,6 +201,11 @@ pub struct Config {
     pub audio: Audio,
     pub input: Input,
     pub theme: Scheme,
+    pub updates: Updates,
+    pub hud: Hud,
+    pub profiles: Vec<ModProfile>,
+    /// The profile last applied, for the Mods page.
+    pub profile: String,
 }
 
 impl Config {

@@ -110,6 +110,69 @@ pub fn remove(m: &Mod) -> Result<PathBuf, String> {
     Ok(to)
 }
 
+/// A file that two or more switched-on mods each replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// The file inside the RomFS, as `Graphics/Character/x.bin`.
+    pub file: String,
+    /// The mods that replace it, in the order the engine lays them down.
+    pub mods: Vec<String>,
+}
+
+fn romfs_of(m: &Mod) -> Option<PathBuf> {
+    let mut found = Vec::new();
+    find_named(&m.path, "romfs", 3, &mut found);
+    found.into_iter().min()
+}
+
+fn walk_rel(dir: &Path, base: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_rel(&p, base, out);
+        } else if let Ok(rel) = p.strip_prefix(base) {
+            // The engine's file system ignores case, so two spellings of one
+            // path are one file.
+            out.push(rel.to_string_lossy().replace('\\', "/").to_lowercase());
+        }
+    }
+}
+
+/// Every file that two or more switched-on mods replace, with the mods that
+/// replace it. The engine's overlay order decides which one wins; this says
+/// which files are decided that way.
+pub fn conflicts(list: &[Mod]) -> Vec<Conflict> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for m in list.iter().filter(|m| m.enabled) {
+        let Some(root) = romfs_of(m) else { continue };
+        let mut files = Vec::new();
+        walk_rel(&root, &root, &mut files);
+        for f in files {
+            seen.entry(f).or_default().push(m.info.title.clone());
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, mods)| mods.len() > 1)
+        .map(|(file, mods)| Conflict { file, mods })
+        .collect()
+}
+
+/// Switch mods on or off so the set that is on matches `want` (mod names
+/// without the `_` a switched-off one carries). Returns how many changed.
+pub fn apply_profile(list: &[Mod], want: &[String]) -> Result<usize, String> {
+    let mut changed = 0;
+    for m in list {
+        let on = want.iter().any(|w| w.eq_ignore_ascii_case(&m.name));
+        if on != m.enabled {
+            set_enabled(m, on)?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 /// A folder name safe on Windows.
 pub fn clean_name(s: &str) -> String {
     let t: String = s.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
@@ -418,6 +481,45 @@ mod tests {
         let off = set_enabled(w, false).unwrap();
         assert!(off.ends_with("_Witch"));
         assert!(!list(&mods).iter().find(|m| m.name == "Witch").unwrap().enabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two mods that ship the same file are reported, and switched-off ones
+    /// are not counted.
+    #[test]
+    fn finds_shared_files() {
+        let root = temp("conflicts");
+        let mods = root.join("mods");
+        write(&mods.join("Alpha/romfs/Graphics/hair.bin"));
+        write(&mods.join("Alpha/romfs/Msg/story.txt"));
+        write(&mods.join("Beta/romfs/Graphics/Hair.bin"));
+        write(&mods.join("_Off/romfs/Graphics/hair.bin"));
+        let installed = list(&mods);
+        let c = conflicts(&installed);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].file, "graphics/hair.bin");
+        let mut who = c[0].mods.clone();
+        who.sort();
+        assert_eq!(who, vec!["Alpha".to_string(), "Beta".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A profile is a whole set: applying it leaves exactly its mods on.
+    #[test]
+    fn a_profile_switches_the_set_on() {
+        let root = temp("profile");
+        let mods = root.join("mods");
+        write(&mods.join("Alpha/romfs/a.bin"));
+        write(&mods.join("_Beta/romfs/b.bin"));
+        write(&mods.join("Gamma/romfs/c.bin"));
+        let installed = list(&mods);
+        let changed = apply_profile(&installed, &["Beta".to_string()]).unwrap();
+        assert_eq!(changed, 3, "Alpha and Gamma off, Beta on");
+        let after = list(&mods);
+        let on = |n: &str| after.iter().find(|m| m.name == n).unwrap().enabled;
+        assert!(!on("Alpha"));
+        assert!(on("Beta"));
+        assert!(!on("Gamma"));
         let _ = std::fs::remove_dir_all(root);
     }
 

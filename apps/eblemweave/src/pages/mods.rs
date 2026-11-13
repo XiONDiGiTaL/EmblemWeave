@@ -21,6 +21,8 @@ pub struct Ui {
     files: Option<(GbMod, Vec<GbFile>)>,
     fetching: Option<Slot<(GbMod, Vec<GbFile>)>>,
     installing: Option<(String, Slot<Installed>)>,
+    /// The name typed into the save-as-profile box.
+    profile_name: String,
 }
 
 fn spawn<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Slot<T> {
@@ -150,6 +152,114 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(6.0);
         ui.label(RichText::new("Changes apply the next time the game starts. When two mods change the same file, the one later in the list wins.").size(12.5).color(p.muted));
+    });
+
+    // The rest of the page reads the folder once, after the toggles above.
+    let installed = mods::list(&dir);
+    let shared = mods::conflicts(&installed);
+
+    widgets::section(ui, &p, "Conflicts", |ui| {
+        let on = installed.iter().filter(|m| m.enabled).count();
+        if shared.is_empty() {
+            widgets::status_line(ui, &p, Tone::Ok, "No file is replaced twice", &format!("{on} mods are on and none of them ships a file another one ships."));
+            return;
+        }
+        widgets::status_line(
+            ui,
+            &p,
+            Tone::Warn,
+            &format!("{} shared file{}", shared.len(), if shared.len() == 1 { "" } else { "s" }),
+            "The engine lays mods down in name order, so for these files the last mod wins. Switch one off to decide it yourself.",
+        );
+        ui.add_space(theme::SPACE_S);
+        egui::ScrollArea::vertical().id_salt("conflicts").max_height(240.0).show(ui, |ui| {
+            egui::Grid::new("conflict-grid").num_columns(2).spacing([20.0, 6.0]).striped(true).show(ui, |ui| {
+                for c in &shared {
+                    ui.label(RichText::new(&c.file).font(theme::mono(11.5)).color(p.body));
+                    ui.label(RichText::new(c.mods.join("  ›  ")).size(12.0).color(p.warn));
+                    ui.end_row();
+                }
+            });
+        });
+    });
+
+    widgets::section(ui, &p, "Profiles", |ui| {
+        ui.label(
+            RichText::new("A profile is a set of mods to switch on together, so a whole setup can be swapped without touching each mod.")
+                .size(12.5)
+                .color(p.muted),
+        );
+        ui.add_space(theme::SPACE_S);
+        let mut apply = None;
+        let mut overwrite = None;
+        let mut delete = None;
+        for (i, prof) in app.config.profiles.iter().enumerate() {
+            let on = prof.enabled.iter().filter(|n| installed.iter().any(|m| m.name.eq_ignore_ascii_case(n) && m.enabled)).count();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&prof.name).font(theme::semibold(13.5)).color(p.ink));
+                ui.label(RichText::new(format!("{on} of {} mods on", installed.len())).size(12.0).color(p.muted));
+                if app.config.profile.eq_ignore_ascii_case(&prof.name) {
+                    widgets::pill(ui, &p, "applied", Tone::Accent);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::button(ui, &p, "Delete", true).clicked() {
+                        delete = Some(i);
+                    }
+                    if widgets::button(ui, &p, "Update", true)
+                        .on_hover_text("Save the mods that are on now into this profile")
+                        .clicked()
+                    {
+                        overwrite = Some(i);
+                    }
+                    if widgets::button(ui, &p, "Apply", true).clicked() {
+                        apply = Some(i);
+                    }
+                });
+            });
+            ui.add_space(2.0);
+        }
+        if app.config.profiles.is_empty() {
+            ui.label(RichText::new("No profiles yet.").size(12.5).color(p.muted));
+        }
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut app.mods_ui.profile_name).hint_text("Profile name").desired_width(220.0));
+            let named = !app.mods_ui.profile_name.trim().is_empty();
+            if widgets::button(ui, &p, "Save the mods that are on", named).clicked() {
+                let name = app.mods_ui.profile_name.trim().to_string();
+                let enabled: Vec<String> = installed.iter().filter(|m| m.enabled).map(|m| m.name.clone()).collect();
+                match app.config.profiles.iter_mut().find(|x| x.name.eq_ignore_ascii_case(&name)) {
+                    Some(existing) => existing.enabled = enabled,
+                    None => app.config.profiles.push(crate::config::ModProfile { name: name.clone(), enabled }),
+                }
+                app.config.profile = name.clone();
+                app.mods_ui.profile_name.clear();
+                message = Some((format!("Saved the mods that are on as {name}"), Tone::Ok));
+            }
+        });
+
+        if let Some(i) = apply {
+            let want = app.config.profiles[i].enabled.clone();
+            match mods::apply_profile(&installed, &want) {
+                Ok(n) => {
+                    app.config.profile = app.config.profiles[i].name.clone();
+                    message = Some((format!("Applied {}: {n} mods changed", app.config.profiles[i].name), Tone::Ok));
+                }
+                Err(e) => message = Some((e, Tone::Bad)),
+            }
+        }
+        if let Some(i) = overwrite {
+            let enabled: Vec<String> = installed.iter().filter(|m| m.enabled).map(|m| m.name.clone()).collect();
+            app.config.profiles[i].enabled = enabled;
+            message = Some((format!("Updated {}", app.config.profiles[i].name), Tone::Ok));
+        }
+        if let Some(i) = delete {
+            let gone = app.config.profiles.remove(i);
+            if app.config.profile.eq_ignore_ascii_case(&gone.name) {
+                app.config.profile.clear();
+            }
+            message = Some((format!("Removed {}", gone.name), Tone::Ok));
+        }
     });
 
     widgets::section(ui, &p, "Add a mod", |ui| {

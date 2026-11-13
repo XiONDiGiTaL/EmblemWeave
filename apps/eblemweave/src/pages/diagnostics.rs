@@ -13,6 +13,119 @@ pub enum Tab {
     Log,
 }
 
+/// The launcher's own frame times, with the 1 % and 0.1 % lows.
+fn frame_times(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
+    widgets::section(ui, p, "Frame times", |ui| {
+        ui.horizontal(|ui| {
+            let mut shown = app.config.hud.fps;
+            if widgets::toggle(ui, p, &mut shown).changed() {
+                app.config.hud.fps = shown;
+            }
+            ui.label(RichText::new("Show the frame rate in the top bar").color(p.body));
+        });
+        ui.add_space(theme::SPACE_S);
+        let samples = app.frames.samples();
+        let s = app.frames.stats();
+        if samples.is_empty() {
+            ui.label(RichText::new("No frames measured yet.").color(p.muted));
+            return;
+        }
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(860.0), 130.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, egui::CornerRadius::same(6), crate::theme::alpha(p.panel_hi, 90));
+        // The scale follows the 99th percentile: one start-up hitch would
+        // otherwise flatten every other frame against the floor.
+        let ceil = (s.p99_ms * 1.5).clamp(20.0, 100.0);
+        let span = 1000.0 / 60.0;
+        let y = |ms: f32| rect.bottom() - (ms / ceil).clamp(0.0, 1.0) * rect.height();
+        for (ms, label) in [(span, "60 fps"), (2.0 * span, "30 fps")] {
+            if ms < ceil {
+                painter.line_segment([egui::pos2(rect.left(), y(ms)), egui::pos2(rect.right(), y(ms))], egui::Stroke::new(1.0_f32, crate::theme::alpha(p.muted, 60)));
+                painter.text(egui::pos2(rect.right() - 4.0, y(ms) - 7.0), egui::Align2::RIGHT_BOTTOM, label, egui::FontId::new(9.5, egui::FontFamily::Proportional), crate::theme::alpha(p.muted, 160));
+            }
+        }
+        let step = rect.width() / samples.len().max(1) as f32;
+        for (i, t) in samples.iter().enumerate() {
+            let x = rect.left() + i as f32 * step;
+            let h = (t * 1000.0 / ceil).clamp(0.0, 1.0) * rect.height();
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x, rect.bottom() - h), egui::pos2(x + step.max(1.0), rect.bottom())), 0, crate::theme::alpha(p.accent, 150));
+        }
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal_wrapped(|ui| {
+            for (label, value) in [
+                ("Frames", format!("{}", s.frames)),
+                ("Average", format!("{:.1} fps  ({:.1} ms)", s.avg_fps, s.avg_ms)),
+                ("1 % low", format!("{:.0} fps", s.low1_fps)),
+                ("0.1 % low", format!("{:.0} fps", s.low01_fps)),
+                ("Worst frame", format!("{:.1} ms", s.max_ms)),
+            ] {
+                widgets::pill(ui, p, &format!("{label}  {value}"), Tone::Neutral);
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("Measured on the launcher's window, not the game's: the game draws in its own process.").size(12.0).color(p.muted));
+    });
+}
+
+/// Settings the launcher saved before it changed something.
+fn snapshots(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
+    let list = crate::snapshots::list();
+    widgets::section(ui, p, "Settings snapshots", |ui| {
+        ui.horizontal(|ui| {
+            if widgets::button(ui, p, "Snap settings now", true).clicked() {
+                match crate::snapshots::take("manual") {
+                    Some(dir) => app.notify(format!("Settings saved to {}", dir.display()), Tone::Ok),
+                    None => app.notify("There are no settings files to copy yet", Tone::Warn),
+                }
+            }
+            ui.label(RichText::new(format!("{}, newest first, kept from before the launcher changes an engine file.", list.len())).size(12.5).color(p.muted));
+        });
+        if list.is_empty() {
+            ui.label(RichText::new("None yet.").size(12.5).color(p.muted));
+            return;
+        }
+        for s in list.iter().take(6) {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(crate::snapshots::when(&s.name)).font(theme::mono(12.0)).color(p.muted));
+                ui.label(RichText::new(crate::snapshots::reason(&s.name)).color(p.body));
+                ui.label(RichText::new(s.files.join(", ")).size(11.5).color(p.muted));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::button(ui, p, "Restore", true).clicked() {
+                        match crate::snapshots::restore(s) {
+                            Ok(files) => app.notify(format!("Restored {}", files.join(", ")), Tone::Ok),
+                            Err(e) => app.notify(e, Tone::Bad),
+                        }
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// Bundles left by a crash.
+fn crashes(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
+    let list = crate::crash::reports();
+    widgets::section(ui, p, "Crash reports", |ui| {
+        ui.horizontal(|ui| {
+            if widgets::button(ui, p, "Save a report now", true)
+                .on_hover_text("Writes this build, its settings and the recent activity to the crashes folder")
+                .clicked()
+            {
+                match crate::crash::write_bundle(&crate::crash::diagnostics_text(), "saved on request") {
+                    Some(dir) => app.notify(format!("Report written to {}", dir.display()), Tone::Ok),
+                    None => app.notify("The report could not be written", Tone::Bad),
+                }
+            }
+            if !list.is_empty() && widgets::button(ui, p, "Open folder", true).clicked() {
+                if let Some(dir) = crate::crash::reports_dir() {
+                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                }
+            }
+            ui.label(RichText::new(if list.is_empty() { "No crashes recorded.".to_string() } else { format!("{} recorded; the newest is {}", list.len(), list[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) }).size(12.5).color(p.muted));
+        });
+    });
+}
+
 fn matches(filter: &str, text: &str) -> bool {
     filter.is_empty() || text.to_lowercase().contains(&filter.to_lowercase())
 }
@@ -39,6 +152,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     match app.diag_tab {
         Tab::Runtime => {
+            frame_times(app, ui, &p);
+            snapshots(app, ui, &p);
+            crashes(app, ui, &p);
             let Some((r, ms)) = &app.last_boot else {
                 widgets::section(ui, &p, "", |ui| {
                     ui.label(RichText::new("No boot test has run this session. Run one from the Overview.").color(p.body));

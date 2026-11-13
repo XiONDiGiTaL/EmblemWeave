@@ -77,6 +77,9 @@ pub fn ini_get(path: &Path, section: &str, key: &str) -> Option<String> {
 
 /// Set `key` in `[section]`, keeping everything else in the file as it was.
 pub fn ini_set(path: &Path, section: &str, key: &str, value: &str) -> Result<(), String> {
+    // Keep a copy of the settings before the first change of the session, so a
+    // bad one can be undone.
+    crate::snapshots::before("before-engine-settings");
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
     let (mut in_section, mut seen_section, mut done) = (false, false, false);

@@ -19,8 +19,12 @@ mod logo;
 mod pages;
 mod cheats;
 mod ingame;
+mod crash;
 mod mods;
 mod pad;
+mod perf;
+mod snapshots;
+mod updater;
 mod saves;
 mod savefile;
 mod theme;
@@ -39,6 +43,30 @@ pub struct Activity {
     pub at: String,
     pub text: String,
     pub tone: Tone,
+}
+
+/// A slot a background thread leaves its result in.
+type Slot<T> = std::sync::Arc<std::sync::Mutex<Option<Result<T, String>>>>;
+
+/// What the About page says about updates.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    Ready(updater::Release),
+    UpToDate(String),
+    Failed(String),
+    Downloading,
+}
+
+#[derive(Default)]
+pub struct Updating {
+    pub state: UpdateState,
+    slot: Option<Slot<updater::Release>>,
+    install: Option<Slot<std::path::PathBuf>>,
+    /// The replacement is unpacked: close so the script can swap the files.
+    pub restart: bool,
 }
 
 pub struct Toast {
@@ -82,6 +110,9 @@ pub struct App {
     pub cheats_ui: pages::cheats::Ui,
     /// The game's `[pad]` settings as the Controls page last read them.
     pub tuning: Option<pad::Tuning>,
+    /// The launcher's own frame times.
+    pub frames: perf::Frames,
+    pub update: Updating,
     pub ingame: ingame::Ingame,
     pub log_ui: pages::log::Ui,
     /// `--tour`: walk through the features by itself, for recordings.
@@ -131,6 +162,8 @@ impl App {
             mods_ui: Default::default(),
             cheats_ui: Default::default(),
             tuning: None,
+            frames: Default::default(),
+            update: Default::default(),
             ingame: Default::default(),
             log_ui: Default::default(),
             tour: None,
@@ -161,11 +194,17 @@ impl App {
         }
         app.note("Launcher started", Tone::Neutral);
         app.start(JobKind::Detect);
+        if app.config.updates.check {
+            app.check_updates();
+        }
         app
     }
 
     pub fn note(&mut self, text: impl Into<String>, tone: Tone) {
-        self.activity.push(Activity { at: clock(), text: text.into(), tone });
+        let text = text.into();
+        // The crash report carries the last few of these.
+        crate::crash::note(&text);
+        self.activity.push(Activity { at: clock(), text, tone });
         if self.activity.len() > 200 {
             self.activity.remove(0);
         }
@@ -297,6 +336,101 @@ impl App {
             }
             self.tour_step += 1;
         }
+    }
+
+    /// Ask GitHub for the newest release.
+    pub fn check_updates(&mut self) {
+        if self.update.slot.is_some() || self.update.state == UpdateState::Downloading {
+            return;
+        }
+        self.update.state = UpdateState::Checking;
+        let slot: Slot<updater::Release> = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handle = slot.clone();
+        std::thread::spawn(move || {
+            *handle.lock().unwrap() = Some(updater::latest());
+        });
+        self.update.slot = Some(slot);
+    }
+
+    /// Download the release found and swap this build for it.
+    pub fn install_update(&mut self) {
+        let UpdateState::Ready(release) = self.update.state.clone() else { return };
+        self.update.state = UpdateState::Downloading;
+        let slot: Slot<std::path::PathBuf> = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handle = slot.clone();
+        std::thread::spawn(move || {
+            let dir = std::env::temp_dir().join("emblemweave-update");
+            let r = updater::download(&release, &dir).and_then(|exe| updater::install(&exe, true).map(|()| exe));
+            *handle.lock().unwrap() = Some(r);
+        });
+        self.update.install = Some(slot);
+    }
+
+    fn poll_updates(&mut self, ctx: &egui::Context) {
+        if let Some(slot) = self.update.slot.clone() {
+            let done = slot.lock().unwrap().take();
+            if let Some(r) = done {
+                self.update.slot = None;
+                self.update.state = match r {
+                    Ok(rel) if updater::is_newer(&rel.tag, updater::version_now()) => {
+                        if rel.tag == self.config.updates.skipped {
+                            UpdateState::Idle
+                        } else {
+                            self.notify(format!("EmblemWeave {} is available", rel.tag), Tone::Accent);
+                            UpdateState::Ready(rel)
+                        }
+                    }
+                    Ok(rel) => UpdateState::UpToDate(rel.tag),
+                    Err(e) => UpdateState::Failed(e),
+                };
+            }
+        }
+        if let Some(slot) = self.update.install.clone() {
+            let done = slot.lock().unwrap().take();
+            if let Some(r) = done {
+                self.update.install = None;
+                match r {
+                    Ok(_) => {
+                        self.update.restart = true;
+                        self.notify("Installing the new version: the launcher restarts", Tone::Ok);
+                    }
+                    Err(e) => self.update.state = UpdateState::Failed(e),
+                }
+            }
+        }
+        if self.update.restart {
+            ctx.request_repaint();
+        } else if self.update.state == UpdateState::Checking || self.update.state == UpdateState::Downloading {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    /// The frame rate chip, above every page while it is on.
+    fn top_bar(&mut self, ctx: &egui::Context) {
+        if !self.config.hud.fps {
+            return;
+        }
+        let p = self.config.theme.palette();
+        let s = self.frames.stats();
+        let fps = self.frames.fps().unwrap_or(0.0);
+        egui::TopBottomPanel::top("fps-bar")
+            .exact_height(30.0)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 2, bottom: 0 }))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{fps:.0} fps")).font(theme::mono(13.0)).color(p.accent_hi));
+                    ui.label(RichText::new(format!("{:.1} ms", s.avg_ms)).font(theme::mono(12.5)).color(p.body));
+                    if s.frames > 0 {
+                        ui.label(RichText::new(format!("1 % low {:.0}  ·  0.1 % low {:.0}", s.low1_fps, s.low01_fps)).font(theme::mono(12.0)).color(p.muted));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕").on_hover_text("Hide the frame rate").clicked() {
+                            self.config.hud.fps = false;
+                        }
+                        ui.label(RichText::new("the launcher's own frames").size(11.5).color(p.muted));
+                    });
+                });
+            });
     }
 
     fn autosave(&mut self) {
@@ -561,7 +695,19 @@ impl eframe::App for App {
         if self.running(JobKind::Engine).is_some() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        self.frames.tick();
+        self.poll_updates(ctx);
+        if self.update.restart {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if self.config.hud.fps {
+            // An indicator that only moves when something else does measures
+            // nothing: draw every frame while it is up.
+            ctx.request_repaint();
+        }
         self.shortcuts(ctx);
+        self.top_bar(ctx);
         self.nav(ctx);
         self.status_bar(ctx);
         let p = self.config.theme.palette();
@@ -628,6 +774,7 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
 }
 
 fn main() -> eframe::Result<()> {
+    crash::install();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
         let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);

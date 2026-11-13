@@ -71,6 +71,39 @@ pub fn root() -> Option<PathBuf> {
     Some(pick)
 }
 
+/// Every engine checkout the launcher can see: `EW_ENGINE`, the remembered
+/// one, and the ones above the executable or the working folder.
+///
+/// With one engine there is nothing to choose; this is what a selector lists
+/// when a second compatible engine is installed.
+pub fn candidates() -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    if let Some(e) = std::env::var_os("EW_ENGINE") {
+        found.push(PathBuf::from(e));
+    }
+    if let Some(text) = remembered().and_then(|f| std::fs::read_to_string(f).ok()) {
+        found.push(PathBuf::from(text.trim()));
+    }
+    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()].into_iter().flatten() {
+        found.extend(start.ancestors().map(|a| a.join("engine").join("fefw-recomp")));
+    }
+    found.retain(|e| e.is_dir());
+    found.dedup();
+    found
+}
+
+/// Point the launcher at another checkout; the next detection uses it.
+pub fn use_engine(path: &Path) -> Result<(), String> {
+    let f = remembered().ok_or("APPDATA is not set")?;
+    if !path.is_dir() {
+        return Err(format!("{} is not a folder", path.display()));
+    }
+    if let Some(dir) = f.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&f, path.display().to_string()).map_err(|e| format!("writing {}: {e}", f.display()))
+}
+
 /// The built game, if it exists.
 pub fn game_exe(root: &Path) -> PathBuf {
     root.join("game-build").join("fefw").join("build").join("release").join("fefw.exe")
