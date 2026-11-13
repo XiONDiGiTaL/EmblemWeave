@@ -29,10 +29,21 @@ pub const SPACE_XL: f32 = 32.0;
 /// Corner radii: the site's 11 pixel buttons and `--radius` (18) cards.
 pub const RADIUS_S: u8 = 14;
 pub const RADIUS_M: u8 = 26;
-/// The floating navigation rail and large panels.
-pub const RADIUS_L: u8 = 30;
 /// Width of the navigation rail.
-pub const NAV_WIDTH: f32 = 236.0;
+pub const NAV_WIDTH: f32 = 232.0;
+/// The brand and status strips above and below the pages.
+pub const TOPBAR_HEIGHT: f32 = 50.0;
+pub const STATUSBAR_HEIGHT: f32 = 30.0;
+/// The column of status panels beside the Overview page.
+pub const SIDE_WIDTH: f32 = 322.0;
+/// Fully round controls: buttons and chips are pills.
+pub const RADIUS_PILL: u8 = 200;
+/// A card: soft on three corners, squared where it meets the page's spine.
+pub const CARD: egui::CornerRadius = egui::CornerRadius { nw: 20, ne: 20, sw: 20, se: 6 };
+/// Letter spacing for the small-caps labels, as the reference launcher sets it.
+pub const TRACK_WIDE: f32 = 2.4;
+pub const TRACK_MID: f32 = 1.6;
+pub const TRACK_TIGHT: f32 = 0.9;
 
 /// Every colour a screen may use.
 #[derive(Debug, Clone, Copy)]
@@ -408,6 +419,9 @@ pub fn apply(ctx: &egui::Context, scheme: Scheme) {
     style.spacing.item_spacing = egui::vec2(SPACE_S + 2.0, SPACE_S);
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 30.0;
+    style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
+    style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
+    style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.spacing.slider_width = 220.0;
     style.text_styles.insert(TextStyle::Heading, display(26.0));
     style.text_styles.insert(TextStyle::Body, FontId::new(14.0, FontFamily::Proportional));

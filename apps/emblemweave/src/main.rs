@@ -405,29 +405,47 @@ impl App {
         }
     }
 
-    /// The frame rate chip, above every page while it is on.
+    /// The brand strip above every page: the project, the page it is on, and
+    /// the launcher's own frame rate.
     fn top_bar(&mut self, ctx: &egui::Context) {
-        if !self.config.hud.fps {
-            return;
-        }
         let p = self.config.theme.palette();
         let s = self.frames.stats();
         let fps = self.frames.fps().unwrap_or(0.0);
-        egui::TopBottomPanel::top("fps-bar")
-            .exact_height(30.0)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 2, bottom: 0 }))
+        egui::TopBottomPanel::top("topbar")
+            .exact_height(theme::TOPBAR_HEIGHT)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 6, bottom: 4 }))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{fps:.0} fps")).font(theme::mono(13.0)).color(p.accent_hi));
-                    ui.label(RichText::new(format!("{:.1} ms", s.avg_ms)).font(theme::mono(12.5)).color(p.body));
-                    if s.frames > 0 {
-                        ui.label(RichText::new(format!("1 % low {:.0}  ·  0.1 % low {:.0}", s.low1_fps, s.low01_fps)).font(theme::mono(12.0)).color(p.muted));
-                    }
+                let strip = ui.available_rect_before_wrap();
+                widgets::glass_panel(ui, strip, &p, egui::CornerRadius::same(16));
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(14.0);
+                    // The brand mark: a lit diamond, as on the reference bar.
+                    let (mark, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    let c = mark.center();
+                    let diamond = vec![
+                        c + egui::vec2(0.0, -5.5),
+                        c + egui::vec2(5.5, 0.0),
+                        c + egui::vec2(0.0, 5.5),
+                        c + egui::vec2(-5.5, 0.0),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(diamond, p.accent, egui::Stroke::new(1.0_f32, theme::alpha(egui::Color32::WHITE, 170))));
+                    ui.add_space(6.0);
+                    widgets::tracked(ui, "EMBLEMWEAVE", 11.0, p.ink, 3.4);
+                    ui.add_space(14.0);
+                    let (div, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
+                    ui.painter().vline(div.center().x, div.y_range(), egui::Stroke::new(1.0_f32, theme::alpha(p.accent, 70)));
+                    ui.add_space(12.0);
+                    widgets::tracked(ui, &self.page.label().to_uppercase(), 10.0, p.accent_hi, theme::TRACK_MID);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✕").on_hover_text("Hide the frame rate").clicked() {
-                            self.config.hud.fps = false;
+                        ui.add_space(14.0);
+                        if self.config.hud.fps {
+                            if ui.small_button("✕").on_hover_text("Hide the frame rate").clicked() {
+                                self.config.hud.fps = false;
+                            }
+                            ui.label(RichText::new(format!("{fps:.0} fps · {:.1} ms", s.avg_ms)).font(theme::mono(12.0)).color(p.accent_hi));
+                        } else {
+                            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(11.0)).color(p.muted));
                         }
-                        ui.label(RichText::new("the launcher's own frames").size(11.5).color(p.muted));
                     });
                 });
             });
@@ -479,42 +497,120 @@ impl App {
         });
     }
 
+    /// The rail: the lockup, then the pages in named groups.
     fn nav(&mut self, ctx: &egui::Context) {
+        const GROUPS: [(&str, &[Page]); 4] = [
+            ("Play", &[Page::Overview, Page::Setup]),
+            ("Library", &[Page::Saves, Page::Mods, Page::Cheats]),
+            ("Runtime", &[Page::Recompile, Page::Graphics, Page::Audio, Page::Controls]),
+            ("System", &[Page::Appearance, Page::Diagnostics, Page::Log, Page::About]),
+        ];
         let p = self.config.theme.palette();
         egui::SidePanel::left("nav")
             .exact_width(theme::NAV_WIDTH)
             .resizable(false)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 4, top: 14, bottom: 14 }))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 10, right: 4, top: 6, bottom: 8 }))
             .show(ctx, |ui| {
-                // A floating, rounded rail.
                 let full = ui.available_rect_before_wrap();
-                let painter = ui.painter();
-                for i in 1..=6 {
-                    let g = full.expand(i as f32 * 3.0).translate(egui::vec2(0.0, 8.0));
-                    painter.rect_filled(g, egui::CornerRadius::same(theme::RADIUS_L + i as u8 * 3), egui::Color32::from_black_alpha((40 / i) as u8));
-                }
-                painter.rect_filled(full, egui::CornerRadius::same(theme::RADIUS_L), p.panel);
-                widgets::gradient_fill(painter, full.shrink(1.0), theme::RADIUS_L as f32 - 1.0, egui::Color32::from_white_alpha(8), egui::Color32::from_white_alpha(0));
-                painter.rect_stroke(full, egui::CornerRadius::same(theme::RADIUS_L), egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(10)), egui::StrokeKind::Inside);
+                widgets::glass_panel(ui, full, &p, egui::CornerRadius::same(22));
+                ui.spacing_mut().item_spacing.y = 3.0;
                 ui.add_space(theme::SPACE_M);
                 ui.vertical_centered(|ui| {
-                    logo::show_lockup(ui, &p, theme::NAV_WIDTH - 60.0);
-                    ui.label(RichText::new("NATIVE PC RECOMPILATION").font(theme::semibold(10.5)).color(p.muted));
+                    logo::show_lockup(ui, &p, theme::NAV_WIDTH - 78.0);
+                    ui.add_space(2.0);
+                    widgets::tracked(ui, "NATIVE PC RECOMPILATION", 8.5, p.muted, theme::TRACK_TIGHT);
                 });
-                ui.add_space(theme::SPACE_L);
-                for (i, page) in Page::ALL.iter().enumerate() {
-                    let r = widgets::nav_item(ui, &p, page.icon(), page.label(), self.page == *page)
-                        .on_hover_text(format!("{}  (Ctrl+{})", page.label(), i + 1));
-                    if r.clicked() {
-                        self.page = *page;
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for (name, pages) in GROUPS {
+                    ui.add_space(theme::SPACE_S + 2.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        widgets::eyebrow(ui, &p, name);
+                    });
+                    for page in pages {
+                        let i = Page::ALL.iter().position(|q| q == page).unwrap_or(0);
+                        let r = widgets::nav_item(ui, &p, page.icon(), page.label(), self.page == *page)
+                            .on_hover_text(format!("{}  (Ctrl+{})", page.label(), i + 1));
+                        if r.clicked() {
+                            self.page = *page;
+                        }
                     }
                 }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.add_space(theme::SPACE_M);
-                    ui.horizontal(|ui| {
-                        ui.add_space(theme::SPACE_M);
-                        ui.label(RichText::new("by").size(12.0).color(p.muted));
-                        ui.hyperlink_to(RichText::new("XiØN").font(theme::semibold(13.0)).color(p.accent_hi), "https://github.com/XiONDiGiTaL");
+                });
+            });
+    }
+
+    /// The status column beside the Overview page: where the game, the
+    /// recompiler and the runtime stand, and what the launcher just did.
+    fn side_panel(&mut self, ctx: &egui::Context) {
+        if self.page != Page::Overview {
+            return;
+        }
+        let p = self.config.theme.palette();
+        egui::SidePanel::right("status-column")
+            .exact_width(theme::SIDE_WIDTH)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 0, right: 12, top: 14, bottom: 4 }))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let (ready, r_tone) = pages::overview::readiness(self);
+                    widgets::section(ui, &p, "Status", |ui| {
+                        ui.horizontal(|ui| {
+                            widgets::status_dot(ui, &p, r_tone);
+                            ui.label(RichText::new(ready).font(theme::semibold(14.0)).color(r_tone.colour(&p)));
+                        });
+                        ui.add_space(theme::SPACE_S);
+                        let severities = [
+                            (
+                                "Game data",
+                                match self.game.worst() {
+                                    crate::gamedata::Severity::Ok | crate::gamedata::Severity::Info => ("Ready", Tone::Ok),
+                                    crate::gamedata::Severity::Warn => ("Needs attention", Tone::Warn),
+                                    crate::gamedata::Severity::Error => ("Incomplete", Tone::Bad),
+                                },
+                            ),
+                            (
+                                "Recompilation",
+                                match &self.last_pipeline {
+                                    Some(s) => match s.verified {
+                                        Some((ok, n)) if ok == n => ("Verified", Tone::Ok),
+                                        Some(_) => ("Differs", Tone::Warn),
+                                        None => ("Lifted", Tone::Accent),
+                                    },
+                                    None => ("Not run", Tone::Neutral),
+                                },
+                            ),
+                            (
+                                "Runtime",
+                                match &self.last_boot {
+                                    Some(_) => ("Booted", Tone::Accent),
+                                    None => ("Not run", Tone::Neutral),
+                                },
+                            ),
+                        ];
+                        for (label, (value, tone)) in severities {
+                            ui.horizontal(|ui| {
+                                widgets::status_dot(ui, &p, tone);
+                                ui.label(RichText::new(label).size(12.5).color(p.body));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(value).font(theme::semibold(12.0)).color(tone.colour(&p)));
+                                });
+                            });
+                            ui.add_space(3.0);
+                        }
+                    });
+                    widgets::section(ui, &p, "Recent activity", |ui| {
+                        if self.activity.is_empty() {
+                            ui.label(RichText::new("Nothing yet").size(12.5).color(p.muted));
+                        }
+                        for a in self.activity.iter().rev().take(8) {
+                            ui.horizontal_top(|ui| {
+                                ui.label(RichText::new(&a.at).font(theme::mono(10.5)).color(p.muted));
+                                ui.add(egui::Label::new(RichText::new(&a.text).size(12.0).color(a.tone.colour(&p))).wrap());
+                            });
+                            ui.add_space(3.0);
+                        }
                     });
                 });
             });
@@ -523,15 +619,10 @@ impl App {
     fn status_bar(&mut self, ctx: &egui::Context) {
         let p = self.config.theme.palette();
         egui::TopBottomPanel::bottom("status")
-            .exact_height(46.0)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 4, bottom: 10 }))
+            .exact_height(theme::STATUSBAR_HEIGHT)
+            .frame(egui::Frame::new().fill(p.bg_deep).inner_margin(egui::Margin { left: 16, right: 16, top: 4, bottom: 4 }))
             .show(ctx, |ui| {
-                // A floating status pill.
-                let r = ui.available_rect_before_wrap();
-                ui.painter().rect_filled(r, egui::CornerRadius::same(255), p.panel);
-                ui.painter().rect_stroke(r, egui::CornerRadius::same(255), egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(10)), egui::StrokeKind::Inside);
                 ui.horizontal_centered(|ui| {
-                    ui.add_space(16.0);
                     let active = self.jobs.iter().find(|j| !j.finished() && j.kind != JobKind::Detect);
                     match active {
                         Some(job) => {
@@ -539,10 +630,12 @@ impl App {
                             let message = job.snapshot(|pr| pr.message.clone());
                             let steps = job.steps.load(std::sync::atomic::Ordering::Relaxed);
                             ui.spinner();
-                            ui.label(RichText::new(kind.title()).font(theme::semibold(13.0)).color(p.ink));
-                            let extra = if kind == JobKind::Boot && steps > 0 { format!("  {} guest instructions", fmt_count(steps)) } else { String::new() };
-                            ui.label(RichText::new(format!("{message}{extra}")).size(12.5).color(p.body));
-                            ui.label(RichText::new(format!("{:.1}s", job.started.elapsed().as_secs_f32())).font(theme::mono(12.0)).color(p.muted));
+                            ui.label(RichText::new(kind.title().to_uppercase()).font(theme::semibold(10.0)).color(p.accent));
+                            ui.label(RichText::new(message).font(theme::mono(11.0)).color(p.body));
+                            if kind == JobKind::Boot && steps > 0 {
+                                ui.label(RichText::new(format!("{} instr", fmt_count(steps))).font(theme::mono(10.5)).color(p.muted));
+                            }
+                            ui.label(RichText::new(format!("{:.1}s", job.started.elapsed().as_secs_f32())).font(theme::mono(10.5)).color(p.muted));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button("Cancel").on_hover_text("Stop at the next safe point").clicked() {
                                     self.confirm = Some(Confirm::CancelJob(kind));
@@ -551,15 +644,14 @@ impl App {
                             ctx.request_repaint_after(Duration::from_millis(100));
                         }
                         None => {
-                            ui.label(RichText::new("Ready").size(12.5).color(p.muted));
                             let (text, tone) = pages::overview::readiness(self);
-                            ui.add_space(8.0);
-                            let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(dot.center(), 3.5, tone.colour(&p));
-                            ui.label(RichText::new(text).size(12.5).color(p.body));
+                            widgets::status_dot(ui, &p, tone);
+                            ui.label(RichText::new(text.to_uppercase()).font(theme::semibold(9.5)).color(tone.colour(&p)));
+                            ui.label(RichText::new(clock()).font(theme::mono(10.5)).color(p.muted));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add_space(16.0);
-                                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(11.5)).color(p.muted));
+                                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " ", env!("EW_GIT_REV"))).font(theme::mono(10.5)).color(p.muted));
+                                ui.label(RichText::new("by XiØN").font(theme::mono(10.5)).color(p.muted));
+                                ui.label(RichText::new("EMBLEMWEAVE").font(theme::semibold(9.5)).color(p.accent));
                             });
                         }
                     }
@@ -708,8 +800,9 @@ impl eframe::App for App {
         }
         self.shortcuts(ctx);
         self.top_bar(ctx);
-        self.nav(ctx);
         self.status_bar(ctx);
+        self.nav(ctx);
+        self.side_panel(ctx);
         let p = self.config.theme.palette();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 36, right: 36, top: 0, bottom: 0 }))
@@ -781,8 +874,8 @@ fn main() -> eframe::Result<()> {
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
     }
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([980.0, 640.0])
+        .with_inner_size([1360.0, 860.0])
+        .with_min_inner_size([1080.0, 700.0])
         .with_title("EmblemWeave");
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);

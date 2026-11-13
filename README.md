@@ -28,10 +28,13 @@ mods from GameBanana, cheats, and an in-game menu.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current status: playable.** Download the [latest release](https://github.com/XiONDiGiTaL/EmblemWeave/releases/latest),
-> point it at your dump, press **Build the game** once and then **Play**. On an AMD Radeon RX 7900 XT the game runs at about
-> 60 fps with sound. EmblemWeave's own Rust runtime, which will take over running the game, now executes the game's code
-> natively; see [Development status](#development-status) and [docs/ENGINE.md](docs/ENGINE.md).
+> **Current status: playable through the baseline engine.** The published release is **0.1.4**; the tree here is
+> **0.1.5 in development**, and no new release is cut until the runtime work below is ready. Build the game once
+> from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
+> opening movie and cutscenes. EmblemWeave's own Rust runtime is being completed to take over running the game: it
+> now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
+> swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
+> game's own geometry; see [Development status](#development-status) and [docs/ENGINE.md](docs/ENGINE.md).
 
 > **AI-assisted development.** EmblemWeave is designed and directed by [XiØN](https://github.com/XiONDiGiTaL) and developed
 > with the help of AI coding tools. Every change is tested against the real game and the project's own test suite before it
@@ -61,20 +64,20 @@ game code, no assets and no keys, and it only ever reads your files.
 
 ## What EmblemWeave does
 
-EmblemWeave plays *Fire Emblem: Fortune's Weave* natively on Windows, built from your own dump, with no emulator. For now the game is
-built and run by a bundled third-party engine in `engine/` (GPL-3.0, with its own licence and notices in that folder), while
-EmblemWeave's own runtime is completed: it translates the game's code to C++ and compiles it into `fefw.exe`, which draws with
-Vulkan and plays audio through XAudio2. The EmblemWeave launcher finds and
-checks your dump, builds the game with the engine, keeps your saves (including imports from Switch emulators), and starts it.
+EmblemWeave plays *Fire Emblem: Fortune's Weave* natively on Windows, built from your own dump, with no emulator. Today the
+game is built and run by the bundled baseline engine in `engine/` (GPL-3.0, with its own licence and notices in that
+folder): it translates the game's code to C++ and compiles it into `fefw.exe`, which draws with Vulkan, plays audio
+through XAudio2 and decodes the game's movies. The EmblemWeave launcher finds and checks your dump, drives that build,
+keeps your saves (including imports from Switch emulators), and starts the game.
 
-EmblemWeave also has its own recompiler and runtime in Rust, used for research and verification:
+EmblemWeave also has its own recompiler and runtime in Rust, which is being completed to replace the baseline engine:
 
 | Stage | What happens |
 | --- | --- |
 | **Read** | Your extracted ExeFS, RomFS and title metadata are located and validated. |
 | **Decode** | The game's executable is decompressed into its code and data segments. |
 | **Recompile** | Every AArch64 instruction is decoded, functions and control flow are recovered, and the code is emitted as portable C and compiled natively. |
-| **Run** | The runtime maps the game, starts it the way the console's SDK does, and serves its system calls with native implementations. |
+| **Run** | The runtime maps the game, starts it the way the console's SDK does, serves its system calls with native implementations, and presents what the game asks the GPU to produce. |
 
 The launcher wraps all of this in one application: it shows exactly what is
 ready, what is running and where the runtime stops, and it never presents a
@@ -84,22 +87,24 @@ feature as working before it is.
 
 | | |
 | --- | --- |
-| **Play natively** | Build the game once from your own dump, then play it at 60 fps with sound, windowed or full screen. |
+| **Play natively** | Build the game once from your own dump, then play it at 60 fps with sound and its cutscenes, windowed or full screen. |
 | **In-game menu** | F10 or Back + RB while playing: pause, screenshot, restart, stop and return, cheats and display settings. |
 | **Saves** | Save profiles to switch between, imports from yuzu, suyu, sudachi, citron, eden and torzu, and a save editor (gold, renown, level, experience, stats, weapon masteries, items and spells). |
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
-| **Launcher** | Game-data detection and validation, a live Game Log you can pop out, six colour schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+| **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, six colour schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
 
 ## Development status
 
-Measured on the retail game (version 1.1.0, update 131072) on 10 November 2026.
+Measured on the retail game (version 1.1.0, update 131072) on 13 November 2026.
 
-**Playable through the engine.** On an AMD Radeon RX 7900 XT the game runs at about 60 fps, with sound, from the launcher's
-**Build the game** and **Play**. The first build takes a while (the game code is compiled and about 12,000 shaders are translated);
-later builds only redo what changed.
+**Playable through the baseline engine.** On an AMD Radeon RX 7900 XT the game runs at about 60 fps, with sound and
+its movies, from the launcher's **Build the game** and **Play**. The first build takes a while (the game code is
+compiled and about 12,000 shaders are translated); later builds only redo what changed. The baseline is built with
+libvpx for the title's VP9/VP8 codecs and dav1d for its AV1 decoder, so the opening movie and cutscenes decode on the
+host instead of being skipped.
 
-EmblemWeave's own Rust runtime, which is being completed to replace the bundled engine ([docs/ENGINE.md](docs/ENGINE.md)):
+EmblemWeave's own Rust runtime, which is being completed to replace the baseline engine ([docs/ENGINE.md](docs/ENGINE.md)):
 
 | Area | Result |
 | --- | --- |
@@ -108,11 +113,14 @@ EmblemWeave's own Rust runtime, which is being completed to replace the bundled 
 | Emitted C verified | 400 recovered functions and 2,400 vector-instruction runs identical to the reference interpreter |
 | Independent CPU check | Execution compared instruction by instruction against Unicorn (QEMU's AArch64 model) |
 | Program modules | `main` plus the title's own `sdk`, loaded side by side; the C++ standard library and other library code run as the title's own code |
-| Graphics | NVN device on the host GPU through Vulkan; queues, memory pools, buffers, textures (block-linear sizes, BC and ASTC formats), samplers, render state, shaders, swap chain, command buffers and the DLSS upscaler are served; draws are recorded and counted, not yet rendered |
+| Graphics | NVN device on the host GPU through Vulkan: queues, memory pools, buffers, textures (block-linear sizes, BC and ASTC formats), samplers, render state, shaders and the DLSS upscaler are served |
+| Presentation | A window and a Vulkan swap chain present the game's swap texture, untiled from guest memory and scaled to the window; `ew-present` exercises the path on its own |
+| Command buffers | Buffer copies and clears, uniform updates, reports, fences, events, and the texture clears and texture-to-texture copies that write render targets and swap textures, all carried out on the game's tiled storage |
+| Not yet | The game's own draws are recorded and counted but not rendered, so the runtime does not produce the game's picture yet |
 | Input | Player 1 is a Pro Controller fed by the first XInput gamepad |
 | Audio | The audio renderer opens and runs on its 5 ms clock; voices are not yet mixed to the speakers |
 | Content | Content index, shader archives (`.bfsha`), texture archives (`.bntx`) and graphics presets load from RomFS |
-| Own runtime | Runs the frame loop past the autosave notice and the opening movie into the first map load (27.9 billion instructions); draws are counted, not rendered |
+| Own runtime | Runs the frame loop past the autosave notice and the opening movie into the first map load (27.9 billion instructions) |
 | Native execution | The whole main module (807,604 functions, 10.6 million instructions) compiled ahead of time into one library; identical to the reference interpreter over the boot's first billion instructions, and about twice as fast |
 
 The full compatibility matrix, the list of verified host services and the
@@ -123,7 +131,7 @@ known limitations live in [docs/STATUS.md](docs/STATUS.md).
 | | |
 | --- | --- |
 | ![Overview](docs/screenshots/overview.png) | ![Saves](docs/screenshots/saves.png) |
-| **Overview**: Build the game and Play, save profiles, and shortcuts to the save editor, mods and cheats | **Saves**: profiles, the slots in your save and the editor, imports from emulators |
+| **Overview**: Play and Rebuild, save profiles and shortcuts, with the status column beside it | **Saves**: profiles, the slots in your save and the editor, imports from emulators |
 | ![Mods](docs/screenshots/mods.png) | ![Cheats](docs/screenshots/cheats.png) |
 | **Mods**: installed mods with on/off switches, archives, folders and GameBanana | **Cheats**: Atmosphere codes and Cheat Engine tables |
 | ![Game Setup](docs/screenshots/setup.png) | ![Appearance](docs/screenshots/appearance.png) |
@@ -146,14 +154,17 @@ The screenshots are the launcher's own rendering, saved with `EmblemWeave.exe --
   every waiting thread.
 - **Native platform services:** the SDK's startup sequence, heap and frame-heap
   allocators, a read-only RomFS filesystem with a separate save directory, the
-  musl C library (formatted I/O, parsing, a bit-exact math library), libc++
-  runtime pieces, and system settings such as language and profile.
+  musl C library (formatted I/O, parsing, a bit-exact math library), libc++ runtime
+  pieces, and system settings such as language and profile.
 - **Native execution:** the recompiled code compiled ahead of time into one
   library, entered at any block, checked call by call against the interpreter
   (`EW_NATIVE_CHECK=1`).
+- **Its own presenter:** a Win32 window, a Vulkan surface and swap chain, and the
+  game's swap texture untiled per frame and presented, independent of the
+  baseline engine.
 - **A complete launcher** with game-data detection, save profiles and editing,
   mods and cheats, an in-game menu, a staged recompilation pipeline, diagnostics
-  with search and export, and three themes.
+  with search and export, and six colour schemes.
 
 ## System requirements
 
@@ -220,9 +231,15 @@ python -m pip install zbic
 
 ## Using the launcher
 
+The rail groups the pages: **Play** (Overview, Game Setup), **Library** (Saves, Mods, Cheats), **Runtime**
+(Recompilation, Graphics, Audio, Controls) and **System** (Appearance, Diagnostics, Game Log, About). The strip along
+the top names the page you are on and the launcher's own frame rate; the strip along the bottom carries the current
+job's progress or the readiness line, and the version. On **Overview**, the column on the right shows where the game
+data, the recompiler and the runtime stand, and what the launcher has just done.
+
 | Page | Purpose |
 | --- | --- |
-| **Overview** | **Build the game** compiles it from your dump; **Play** starts it. Load a save profile and jump to the save editor, mods and cheats. Also readiness, the boot test of the Rust runtime, and recent activity. |
+| **Overview** | **Play** starts the game; **Build the game** compiles it from your dump. Load a save profile and jump to the save editor, mods and cheats. Also readiness, the boot test of the Rust runtime, next steps, and recent activity. |
 | **Game Setup** | Choose and validate your game data (a `.nup` or a folder) and set the language and profile. |
 | **Saves** | Save profiles: keep the current save under a name and load any profile later (the save it replaces goes to the backups folder). Lists the slots in the current save, with an editor for gold, renown and each unit's level, experience, max HP, stat gains, weapon masteries, items and spells; names come from your own game data. Imports saves from yuzu, suyu, sudachi, citron, eden and torzu, from any folder, and exports to the emulator layout. |
 | **Mods** | Installed RomFS mods, switched on and off with a toggle. Installs from a .zip, .7z or .rar archive, a folder, a GameBanana link, or the game's GameBanana list browsed in the launcher. Mods that only patch the game's code (exefs) are recognised and not installed, since they cannot apply to a recompiled game. |
@@ -234,7 +251,7 @@ python -m pip install zbic
 | **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (the xiondigital.net palette), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. |
 | **Game Log** | The game engine's log, followed live while the game runs: info, warnings and errors (each counted and filterable), search, copy, this run or the previous one, and **Pop out** to keep it in a window of its own. |
-| **About** | Version, build revision, credits and legal information. |
+| **About** | Version, build revision, what each runtime is, credits and legal information. |
 
 Press <kbd>Ctrl</kbd> + <kbd>1</kbd> to <kbd>9</kbd> to jump between pages. From the command line,
 `EmblemWeave.exe --page Diagnostics` opens a page, `--build-engine` builds the game as soon as your game data is detected,
@@ -263,8 +280,8 @@ folder, one folder per mod holding `romfs/` (the layout emulators use). Every en
 | --- | --- |
 | `ew-format` | NSO0, ExeFS and RomFS parsing, LZ4 segments, module validation |
 | `ew-lift` | AArch64 decoder, control-flow and jump-table recovery, C emitter, reference interpreter, Advanced SIMD |
-| `ew-boot` | Module image and imports, SDK startup sequence, guest thread scheduler, and the host services (`nn::os`, `nn::fs`, `nn::oe`, `nn::lmem`, C and C++ runtime) |
-| `ew-gfx` | The host Vulkan device behind the NVN layer |
+| `ew-boot` | Module image and imports, SDK startup sequence, guest thread scheduler, and the host services (`nn::os`, `nn::fs`, `nn::oe`, `nn::lmem`, `nn::nvn`, C and C++ runtime) |
+| `ew-gfx` | The host Vulkan device behind the NVN layer, and the window and swap chain that present its frames |
 | `ew-runtime` | Guest memory bus and service readiness |
 | `apps/emblemweave` | The EmblemWeave launcher |
 
@@ -282,7 +299,7 @@ reasoning behind static recompilation is in [docs/FEASIBILITY.md](docs/FEASIBILI
 ```powershell
 git clone https://github.com/XiONDiGiTaL/EmblemWeave.git
 cd EmblemWeave
-cargo build --release
+cargo build --release -p emblemweave
 ```
 
 The launcher is `target\release\EmblemWeave.exe`. The command-line tools are
@@ -292,7 +309,8 @@ built alongside it:
 | --- | --- |
 | `ew-inspect` | Inspect an ExeFS and RomFS |
 | `ew-lift` | Run the recompiler and emit C, verification campaigns and reports |
-| `ew-run` | Run the game in the console and print a detailed stop report (`--native` runs the compiled library) |
+| `ew-run` | Run the game in the console and print a detailed stop report (`--native` runs the compiled library, `--window` shows its frames) |
+| `ew-present` | Exercise the window and swap chain on their own (`ew-present 30` presents 30 frames) |
 | `ew-native` | Lift, emit and compile the whole main module into `ew_native.dll` |
 
 For example, to run the game from the command line:
@@ -300,6 +318,10 @@ For example, to run the game from the command line:
 ```powershell
 target\release\ew-run --module work\decoded\main --romfs D:\Games\FortunesWeave\romfs --nacp D:\Games\FortunesWeave\data\control\control.nacp
 ```
+
+The baseline engine in `engine/` is a separate checkout with its own build notes (`engine/fefw-recomp/docs/BUILDING.md`).
+It builds `fefw.exe` with CMake, Ninja and `clang-cl`; when a vcpkg `libvpx:x64-windows-static` install is present
+(under `NXRT_LIBVPX_ROOT`, or in `C:\vcpkg`), the runtime also decodes the title's VP9/VP8 movies on the host.
 
 ## Testing and verification
 
@@ -325,9 +347,10 @@ assets/branding/     the EmblemWeave logo
 crates/ew-format/    container and asset formats
 crates/ew-lift/      decoder, recompiler and reference interpreter
 crates/ew-boot/      runtime: image, startup, scheduler, host services
-crates/ew-gfx/       host Vulkan device for the NVN layer
+crates/ew-gfx/       host Vulkan device and the presenter
 crates/ew-runtime/   guest memory and service registry
 docs/                status, architecture, feasibility, legal
+engine/fefw-recomp/  the baseline engine (GPL-3.0, its own licence and notices)
 tools/               decoding helper and verification scripts
 ```
 
@@ -348,6 +371,7 @@ your machine and must not be redistributed. See [docs/LEGAL.md](docs/LEGAL.md).
 - **[XiØN](https://github.com/XiONDiGiTaL)**: Design
 - [Goldoire](https://github.com/Goldoire/fefw-recomp): fefw-recomp as a baseline engine and all others who have contributed to that project.
 - [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) (MIT): shader translation, whose shader code the build uses
+- [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause) and [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause): the host video decoders the baseline build links
 - [roxmltree](https://github.com/RazrFalcon/roxmltree) (MIT / Apache-2.0) reads Cheat Engine tables; [windows-sys](https://github.com/microsoft/windows-rs) (MIT / Apache-2.0) reaches the game's memory and the controller
 - [GameBanana](https://gamebanana.com/mods/games/26274) hosts the mods the Mods page lists; each mod belongs to its author
 - [egui](https://github.com/emilk/egui): the launcher interface

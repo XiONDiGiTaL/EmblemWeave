@@ -7,8 +7,11 @@ retail game, update 131072, runs at about 60 fps with sound, from the
 launcher's **Build the game** and **Play**. The rest of this page covers
 EmblemWeave's own Rust recompiler and runtime, a research path that now
 runs the game's frame loop past the autosave notice and the opening movie
-into its first map load, with draws counted rather than rendered and frames
-presented in a window rather than drawn into.
+into its first map load. Its command buffers now carry out the clears and
+texel copies that write render targets and swap textures, and the launcher's
+runtime presents the presented swap texture in a window of its own; the
+game's draws are still counted rather than rendered, so the window does not
+yet show the game's picture.
 
 A 25-minute headless run reaches 27.9 billion instructions and then stops
 where the game aborts: its pool of sound handles fills up, because the host
@@ -90,7 +93,7 @@ native code runs, as an option, and has since `ew-native` was added.
 | NVN memory pools, buffers, syncs, events | Implemented | storage-backed pools use the guest address as the GPU address |
 | NVN textures, pools, samplers, views | Implemented | block-linear storage sizes by the GOB rules; formats confirmed by the game's own BNTX-to-NVN table, including ASTC |
 | NVN render-state objects | Implemented | state packed into the structure's own bytes, so copies keep it |
-| NVN command buffers and queues | Partial | recorded on the host with copies of their pointed-at memory; memory effects (copies, clears, uniform updates, reports, fences, events) execute; **draws are counted, not rendered** |
+| NVN command buffers and queues | Partial | recorded on the host with copies of their pointed-at memory; memory effects (copies, clears, uniform updates, reports, fences, events) and the texel commands (texture clears, texture-to-texture copies) execute on the game's tiled storage; **draws are counted, not rendered** |
 | NVN window | Implemented | two 3840x2160 swap textures, acquire and present; presents are counted and logged every 300 |
 | NVN programs | Partial | shader stages recorded; not translated |
 | DLSS upscaler | Partial | answered as a host upscaler at half the output resolution; not evaluated yet |
@@ -190,10 +193,11 @@ fs: open Contents:/Map/Btl/..., Map/Com/Obj/..., Map/Tex/... (battle-map data)
    call into the host (a shuffle calling the C library's random number generator
    each iteration, say) still pay for it. Serving simple host calls from inside
    native code is the remaining speed step.
-2. **Nothing is drawn.** Command buffers are recorded and their memory
-   effects carried out, but draws, clears of render targets and texture copies
-   are not executed on the GPU, and the game's shaders (compiled for the
-   console's GPU) are not translated yet.
+2. **Nothing is drawn.** Command buffers are recorded and their memory effects
+   and texel effects (clears, texture copies) carried out, so a render target
+   holds what the game asked for, but draws are not executed and the game's
+   shaders (compiled for the console's GPU) are not translated yet. The window
+   presents the swap texture; until the draws run, it is not the game's picture.
 3. **ZBIC needs an external decoder.** The bridge runs the GPL-2.0 `zbic`
    package out of process. A clean-room Rust decoder is planned.
 4. **Floating point environment.** Only round to nearest is modelled; the
@@ -214,12 +218,13 @@ fs: open Contents:/Map/Btl/..., Map/Com/Obj/..., Map/Tex/... (battle-map data)
    report played samples and consumed wave buffers. The game's sound handles
    are released only then, and today their pool runs out during the first map
    load. Exit criterion: the long run passes the map load without the abort.
-2. **Rendering.** Execute the recorded clears and copies so the frame in the
-   window is the game's own. The window, its swap chain and the upload of the
-   presented swap texture are in (`ew-run --window`); what is missing is
-   executing the clears, texture copies and draws, which is the exit criterion:
-   the game's first frame on screen. Then shader translation from the console
-   GPU's binaries, and texture decoding (block-linear, BC, ASTC).
+2. **Rendering.** Execute the recorded draws so the frame in the window is the
+   game's own. In place already: the window, its swap chain, the upload of the
+   presented swap texture (`ew-run --window`, and the launcher's own presenter in
+   `ew-gfx::present`), and the buffer and texture clears and copies that write
+   render targets. What is missing is the draws themselves, which is the exit
+   criterion: the game's first frame on screen. Then shader translation from the
+   console GPU's binaries, and texture decoding (block-linear, BC, ASTC).
 3. **Host calls from native code**, so a native function that calls the host
    does not return through the whole run loop (see limitation 1).
 4. **Audio mixing** to WASAPI, and voice state updates.
