@@ -7,7 +7,8 @@ use eframe::egui::{self, RichText};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Appearance", "Three coordinated schemes. Each preview is drawn in its own palette; the choice is saved.");
+    let header = format!("{} coordinated schemes. Each preview is drawn in its own palette and its own colourway of the logo; the choice is saved.", Scheme::ALL.len());
+    widgets::page_header(ui, &p, "Appearance", &header);
     let mut chosen = None;
     for scheme in Scheme::ALL {
         let sp = scheme.palette();

@@ -44,8 +44,16 @@ pub struct Ui {
     searching: Option<Arc<Mutex<Option<Vec<u64>>>>>,
     /// Per unit: infinite HP, quick level-up, max stats.
     unit_cheats: HashMap<u64, [bool; 3]>,
-    /// The values those cheats hold, refreshed while the menu is open.
-    unit_freezes: Vec<(u64, Vec<u8>)>,
+}
+
+impl Ui {
+    /// Forget the units of the game that just stopped: their records live at
+    /// different addresses in the next run.
+    pub fn reset_units(&mut self) {
+        self.units.clear();
+        self.unit_cheats.clear();
+        self.searching = None;
+    }
 }
 
 fn load(ui_state: &mut Ui, dir: &std::path::Path) {
@@ -262,8 +270,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             codes.extend(f.codes.iter().filter(|c| c.master).cloned());
             codes.extend(f.codes.iter().filter(|c| !c.master && on.contains(&c.name)).cloned());
         }
-        let mut freezes: Vec<(u64, Vec<u8>)> = app.cheats_ui.tables.iter().flat_map(|t| t.frozen.values().cloned()).collect();
-        freezes.extend(app.cheats_ui.unit_freezes.iter().cloned());
+        let freezes: Vec<(u64, Vec<u8>)> = app.cheats_ui.tables.iter().flat_map(|t| t.frozen.values().cloned()).collect();
         let mut s = r.lock().unwrap();
         s.codes = codes;
         s.freezes = freezes;
@@ -408,9 +415,9 @@ fn all_ids(e: &Entry) -> Vec<String> {
 }
 
 const QUICK: [(&str, &str); 3] = [
-    ("Infinite HP", "HP is held at max HP"),
-    ("Quick level-up", "experience is held at 99, so the next experience gained levels the unit up"),
-    ("Max stats", "max HP and every stat set to 99 (the game may cap them by class)"),
+    ("Infinite HP", "HP is held at the unit's max HP every tick, including from 0 HP"),
+    ("Quick level-up", "the level rises one step every quarter second, up to 40"),
+    ("Max stats", "max HP and every stat set to 200 (the game may cap them by class)"),
 ];
 
 /// Quick cheats: per-unit switches for the units found in the game's memory.
@@ -448,7 +455,6 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
             app.cheats_ui.unit_cheats.retain(|k, _| app.cheats_ui.units.contains(k));
         }
         let Some(g) = game.as_deref() else { return };
-        let mut freezes = Vec::new();
         egui::Grid::new("quick-units").num_columns(6).spacing([12.0, 6.0]).striped(true).show(ui, |ui| {
             if !app.cheats_ui.units.is_empty() {
                 for h in ["Slot", "Lv", "HP", QUICK[0].0, QUICK[1].0, QUICK[2].0] {
@@ -461,39 +467,36 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                 if !g.read(a, &mut b) || !cheats::looks_like_unit(&b) {
                     continue;
                 }
-                let max_hp = u16::from_le_bytes([b[8], b[9]]);
+                let max_hp = b[cheats::unit::MAX_HP as usize];
                 let hp = u16::from_le_bytes([b[0x20], b[0x21]]);
-                ui.label(RichText::new(format!("{}", n + 1)).color(p.ink)).on_hover_text(format!("record at {a:#x}"));
-                ui.label(format!("{}", b[0x26]));
-                ui.label(format!("{hp} / {max_hp}"));
+                let level = b[cheats::unit::LEVEL as usize];
                 let on = app.cheats_ui.unit_cheats.entry(a).or_default();
+                ui.label(RichText::new(format!("{}", n + 1)).color(p.ink)).on_hover_text(format!("record at {a:#x}"));
+                ui.label(format!("{level}"));
+                ui.label(format!("{hp} / {max_hp}"));
                 for (i, (_, help)) in QUICK.iter().enumerate() {
                     widgets::toggle(ui, &p, &mut on[i]).on_hover_text(*help);
                 }
                 ui.end_row();
-                if on[2] {
-                    let mut stats = Vec::new();
-                    for _ in 0..9 {
-                        stats.extend(99u16.to_le_bytes());
-                    }
-                    freezes.push((a + cheats::unit::STATS, stats));
-                }
-                let target_hp = if on[2] { 99 } else { max_hp };
-                if on[0] {
-                    freezes.push((a + cheats::unit::HP, target_hp.to_le_bytes().to_vec()));
-                }
-                if on[1] {
-                    freezes.push((a + cheats::unit::EXP, 99u32.to_le_bytes().to_vec()));
-                }
             }
         });
-        app.cheats_ui.unit_freezes = freezes;
         ui.label(RichText::new("\"Unit can move again\" is not available yet: where the game keeps a unit's moved flag has not been found.").size(12.0).color(p.muted));
     });
-    // The cheat thread picks the held values up from the page's hand-off.
+    // The cheat thread holds each switched-on cheat every tick, so they keep
+    // applying while the menu is closed and to a unit that has just died.
     if let Some(r) = &app.cheats_ui.runner {
         let mut s = r.lock().unwrap();
+        s.units = app
+            .cheats_ui
+            .unit_cheats
+            .iter()
+            .filter(|(a, on)| app.cheats_ui.units.contains(a) && on.iter().any(|x| *x))
+            .map(|(a, on)| (*a, cheats::UnitCheats { infinite_hp: on[0], quick_level: on[1], max_stats: on[2] }))
+            .collect();
         s.freezes.retain(|(a, _)| !app.cheats_ui.units.iter().any(|u| *a >= *u && *a < *u + cheats::unit::LEN as u64));
-        s.freezes.extend(app.cheats_ui.unit_freezes.iter().cloned());
+        if s.rejected > 0 {
+            let n = s.rejected;
+            ui.label(RichText::new(format!("{n} writes were refused by the game: the record may have moved (find units again).")).size(12.0).color(p.warn));
+        }
     }
 }

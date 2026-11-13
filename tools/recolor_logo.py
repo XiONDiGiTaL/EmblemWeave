@@ -1,4 +1,4 @@
-"""Recolour the cut-out EmblemWeave logo for the XiØN scheme.
+"""Recolour the cut-out EmblemWeave logo, one colourway per scheme.
 
 (The Arcade scheme has its own 8-bit artwork, cut out of its white background
 by tools/unmatte_logo.py.)
@@ -10,6 +10,7 @@ colour for that material. Only hue and saturation change; brightness is kept,
 so the metal shading, bevels and highlights of the render survive.
 
 Usage: python tools/recolor_logo.py assets/branding/logo-fe.png assets/branding
+       python tools/recolor_logo.py assets/branding/logo-fe.png assets/branding ember frost
 """
 import colorsys
 import sys
@@ -57,6 +58,26 @@ def recolour(name, gold_to, silver_to, blue_to, gold_sat, silver_sat, blue_sat, 
     print(path)
 
 
-# xiondigital.net: silver-white faces, the site's blue band.
-recolour("xion", "#ecedef", "#c6cad0", "#3f80ff", 0.05, 0.6, 1.1, gold_val=1.18, silver_val=1.05, blue_val=1.45)
-# Arcade has its own pixel-art logo, cut out by tools/unmatte_logo.py.
+# One entry per scheme: the render's three materials mapped to the scheme's
+# colours. Arcade has its own pixel-art logo, cut out by tools/unmatte_logo.py.
+SCHEMES = {
+    # xiondigital.net: silver-white faces, the site's blue band.
+    "xion": dict(gold_to="#ecedef", silver_to="#c6cad0", blue_to="#3f80ff",
+                 gold_sat=0.05, silver_sat=0.6, blue_sat=1.1,
+                 gold_val=1.18, silver_val=1.05, blue_val=1.45),
+    # Ember: forge orange, hot ash silver and oxblood steel.
+    "ember": dict(gold_to="#f97316", silver_to="#e7c8bd", blue_to="#7a1512",
+                  gold_sat=1.15, silver_sat=0.55, blue_sat=1.0,
+                  gold_val=1.05, silver_val=1.02, blue_val=1.15),
+    # Verdant: pale gold, jade silver and deep emerald.
+    "verdant": dict(gold_to="#d9c56a", silver_to="#7fd8b0", blue_to="#0e6b4c",
+                    gold_sat=0.95, silver_sat=0.5, blue_sat=1.0,
+                    gold_val=1.0, silver_val=1.0, blue_val=1.05),
+    # Frost: ice silver, snow white and glacier blue.
+    "frost": dict(gold_to="#bfe9ff", silver_to="#eaf6ff", blue_to="#1d6fa8",
+                  gold_sat=0.6, silver_sat=0.25, blue_sat=1.05,
+                  gold_val=1.1, silver_val=1.12, blue_val=1.05),
+}
+
+for name in sys.argv[3:] or list(SCHEMES):
+    recolour(name, **SCHEMES[name])

@@ -136,6 +136,8 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
         if !app.ingame.running {
             app.ingame.open = false;
             app.ingame.paused = false;
+            // The next run's units live at different addresses.
+            app.cheats_ui.reset_units();
         }
     }
     if !app.ingame.running {

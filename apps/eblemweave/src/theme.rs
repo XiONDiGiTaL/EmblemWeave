@@ -11,6 +11,9 @@
 //!   arcade yellow and cyan over a neon grid.
 //! * **FE**: tactical fantasy, metallic gold and white silver over blackened
 //!   steel, outlined in royal blue: the colours of the original logo render.
+//! * **Ember**: forge fire, ember orange and molten gold over oxblood steel.
+//! * **Verdant**: deep forest, emerald and pale gold over moss-black.
+//! * **Frost**: cold steel, glacier blue and ice silver over midnight.
 //!
 //! Each scheme carries its own colourway of the logo artwork.
 
@@ -85,16 +88,22 @@ pub enum Scheme {
     /// Saved by earlier versions as `emblem`.
     #[serde(alias = "emblem")]
     Fe,
+    Ember,
+    Verdant,
+    Frost,
 }
 
 impl Scheme {
-    pub const ALL: [Scheme; 3] = [Scheme::Xion, Scheme::Arcade, Scheme::Fe];
+    pub const ALL: [Scheme; 6] = [Scheme::Xion, Scheme::Arcade, Scheme::Fe, Scheme::Ember, Scheme::Verdant, Scheme::Frost];
 
     pub fn label(self) -> &'static str {
         match self {
             Scheme::Xion => "XiØN",
             Scheme::Arcade => "Arcade",
             Scheme::Fe => "FE",
+            Scheme::Ember => "Ember",
+            Scheme::Verdant => "Verdant",
+            Scheme::Frost => "Frost",
         }
     }
 
@@ -103,6 +112,9 @@ impl Scheme {
             Scheme::Xion => "xiondigital.net: graphite surfaces, signature blue and a silver wordmark",
             Scheme::Arcade => "Retro arcade: hot pink, arcade yellow and cyan on a violet cabinet",
             Scheme::Fe => "Tactical fantasy: metallic gold, white silver and royal blue",
+            Scheme::Ember => "Forge fire: ember orange and molten gold over oxblood steel",
+            Scheme::Verdant => "Deep forest: emerald and pale gold over moss-black",
+            Scheme::Frost => "Cold steel: glacier blue and ice silver over midnight",
         }
     }
 
@@ -182,6 +194,78 @@ impl Scheme {
                 ok: rgb(0x7C, 0xB3, 0x7C),
                 warn: rgb(0xD4, 0xA0, 0x4C),
                 bad: rgb(0xC4, 0x5E, 0x5E),
+                grid: false,
+            },
+            Scheme::Ember => Palette {
+                bg: rgb(0x12, 0x07, 0x06),
+                bg_deep: rgb(0x0B, 0x04, 0x03),
+                panel: rgb(0x1A, 0x0A, 0x08),
+                panel_hi: rgb(0x2A, 0x12, 0x10),
+                surface: rgb(0x22, 0x0F, 0x0C),
+                line: rgb(0x3A, 0x21, 0x1D),
+                line_strong: rgb(0x55, 0x32, 0x2B),
+                ink: rgb(0xFF, 0xED, 0xE8),
+                body: rgb(0xD9, 0xB3, 0xA8),
+                muted: rgb(0x9C, 0x74, 0x69),
+                accent: rgb(0xF9, 0x73, 0x16),
+                accent_hover: rgb(0xFB, 0x8A, 0x33),
+                accent_hi: rgb(0xFD, 0xBA, 0x74),
+                electric: rgb(0xFB, 0x92, 0x3C),
+                accent_deep: rgb(0x9A, 0x3D, 0x0C),
+                glow: rgba(0xF9, 0x73, 0x16, 48),
+                gold: rgb(0xF4, 0xC1, 0x5A),
+                logo: crate::logo::LOGO_EMBER,
+                ok: rgb(0x6E, 0xCF, 0x8E),
+                warn: rgb(0xF2, 0xB4, 0x4C),
+                bad: rgb(0xE8, 0x62, 0x6D),
+                grid: false,
+            },
+            Scheme::Verdant => Palette {
+                bg: rgb(0x04, 0x12, 0x0C),
+                bg_deep: rgb(0x02, 0x0B, 0x07),
+                panel: rgb(0x08, 0x1A, 0x12),
+                panel_hi: rgb(0x12, 0x29, 0x1F),
+                surface: rgb(0x0C, 0x22, 0x17),
+                line: rgb(0x21, 0x40, 0x2F),
+                line_strong: rgb(0x35, 0x5C, 0x46),
+                ink: rgb(0xE8, 0xFF, 0xF4),
+                body: rgb(0xB4, 0xD9, 0xC6),
+                muted: rgb(0x7C, 0x99, 0x89),
+                accent: rgb(0x10, 0xB9, 0x81),
+                accent_hover: rgb(0x22, 0xC7, 0x93),
+                accent_hi: rgb(0x6E, 0xE7, 0xB7),
+                electric: rgb(0x34, 0xD3, 0x99),
+                accent_deep: rgb(0x0A, 0x6B, 0x4B),
+                glow: rgba(0x10, 0xB9, 0x81, 40),
+                gold: rgb(0xD9, 0xC5, 0x6A),
+                logo: crate::logo::LOGO_VERDANT,
+                ok: rgb(0x5F, 0xD3, 0x9A),
+                warn: rgb(0xE0, 0xB4, 0x5C),
+                bad: rgb(0xD9, 0x6A, 0x6A),
+                grid: false,
+            },
+            Scheme::Frost => Palette {
+                bg: rgb(0x06, 0x10, 0x1A),
+                bg_deep: rgb(0x03, 0x0A, 0x12),
+                panel: rgb(0x0A, 0x17, 0x24),
+                panel_hi: rgb(0x14, 0x26, 0x38),
+                surface: rgb(0x0E, 0x1E, 0x2E),
+                line: rgb(0x22, 0x3A, 0x50),
+                line_strong: rgb(0x34, 0x53, 0x6F),
+                ink: rgb(0xEA, 0xF6, 0xFF),
+                body: rgb(0xB5, 0xCC, 0xDD),
+                muted: rgb(0x7E, 0x97, 0xAC),
+                accent: rgb(0x38, 0xBD, 0xF8),
+                accent_hover: rgb(0x56, 0xCB, 0xFB),
+                accent_hi: rgb(0xA5, 0xE4, 0xFF),
+                electric: rgb(0x7D, 0xD3, 0xFC),
+                accent_deep: rgb(0x14, 0x62, 0x8F),
+                glow: rgba(0x38, 0xBD, 0xF8, 40),
+                gold: rgb(0xCF, 0xE3, 0xF2),
+                logo: crate::logo::LOGO_FROST,
+                ok: rgb(0x5B, 0xD3, 0xA6),
+                warn: rgb(0xE6, 0xC0, 0x5A),
+                bad: rgb(0xE4, 0x77, 0x7F),
                 grid: false,
             },
         }
@@ -372,6 +456,14 @@ mod tests {
     fn an_old_emblem_setting_loads_as_fe() {
         let s: Scheme = serde_json::from_str("\"emblem\"").unwrap();
         assert_eq!(s, Scheme::Fe);
+    }
+
+    #[test]
+    fn every_scheme_has_its_own_colourway() {
+        let mut seen = std::collections::HashSet::new();
+        for s in Scheme::ALL {
+            assert!(seen.insert(s.palette().logo.as_ptr()), "{} reuses another scheme's artwork", s.label());
+        }
     }
 
     #[test]

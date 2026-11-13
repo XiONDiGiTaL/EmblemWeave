@@ -88,7 +88,7 @@ feature as working before it is.
 | **Saves** | Save profiles to switch between, imports from yuzu, suyu, sudachi, citron, eden and torzu, and a save editor (gold, renown, level, experience, stats, weapon masteries, items and spells). |
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
-| **Launcher** | Game-data detection and validation, a live Game Log you can pop out, three colour schemes (XiØN, Arcade, FE), diagnostics, and a recompilation pipeline you can watch run. |
+| **Launcher** | Game-data detection and validation, a live Game Log you can pop out, six colour schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
 
 ## Development status
 
@@ -126,7 +126,7 @@ known limitations live in [docs/STATUS.md](docs/STATUS.md).
 | ![Mods](docs/screenshots/mods.png) | ![Cheats](docs/screenshots/cheats.png) |
 | **Mods**: installed mods with on/off switches, archives, folders and GameBanana | **Cheats**: Atmosphere codes and Cheat Engine tables |
 | ![Game Setup](docs/screenshots/setup.png) | ![Appearance](docs/screenshots/appearance.png) |
-| **Game Setup**: your dump detected and validated | **Appearance**: the XiØN, Arcade and FE schemes |
+| **Game Setup**: your dump detected and validated | **Appearance**: the XiØN, Arcade, FE, Ember, Verdant and Frost schemes |
 | ![Recompilation](docs/screenshots/recompilation.png) | ![Diagnostics](docs/screenshots/diagnostics.png) |
 | **Recompilation**: the nine-stage pipeline | **Diagnostics**: what the runtime did and where it stopped |
 
@@ -227,10 +227,10 @@ python -m pip install zbic
 | **Mods** | Installed RomFS mods, switched on and off with a toggle. Installs from a .zip, .7z or .rar archive, a folder, a GameBanana link, or the game's GameBanana list browsed in the launcher. Mods that only patch the game's code (exefs) are recognised and not installed, since they cannot apply to a recompiled game. |
 | **Cheats** | Atmosphere cheat codes, pasted or imported as `.txt`, each switched on and off and applied about 60 times a second while the game runs (data writes, pointer chains, conditionals, loops and controller-button tests work; instruction patches do not). Cheat Engine tables (`.CT`): `aobscan`/`aobscanregion` entries search the game's memory, and the values below them show live, can be typed in, and can be frozen. |
 | **In-game menu** | While the game runs, F10 (or Back + RB on a controller) opens EmblemWeave's menu on top of it: pause and resume, a screenshot of the game window (saved to Pictures\EmblemWeave), restart at the title screen, stop and return to the launcher, quick cheats, cheat codes and tables, display settings (window mode, picture size, frame rate counter) and the controls in use. |
-| **Quick cheats** | Per-unit switches for the units found in the game's memory: infinite HP, quick level-up (experience held at 99) and max stats. Experimental: the units are found by the record layout Cheat Engine tables for this game use. |
+| **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). Search again after a map loads. |
 | **Recompilation** | Run the nine-stage pipeline (parse, decompress, decode, recover, analyse, emit C, compile, verify, prepare) with live progress. |
 | **Graphics, Audio, Controls** | Options for EmblemWeave's own runtime, saved now and marked until its renderer, mixer and input are in place. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
-| **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (the xiondigital.net palette), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid) and FE (gold, white silver and royal blue). The logo artwork changes with the scheme. |
+| **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (the xiondigital.net palette), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. |
 | **Game Log** | The game engine's log, followed live while the game runs: info, warnings and errors (each counted and filterable), search, copy, this run or the previous one, and **Pop out** to keep it in a window of its own. |
 | **About** | Version, build revision, credits and legal information. |

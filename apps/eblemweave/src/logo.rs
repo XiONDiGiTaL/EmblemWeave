@@ -17,6 +17,9 @@ use crate::theme::Palette;
 pub const LOGO_XION: &[u8] = include_bytes!("../../../assets/branding/logo-xion.png");
 pub const LOGO_ARCADE: &[u8] = include_bytes!("../../../assets/branding/logo-arcade.png");
 pub const LOGO_FE: &[u8] = include_bytes!("../../../assets/branding/logo-fe.png");
+pub const LOGO_EMBER: &[u8] = include_bytes!("../../../assets/branding/logo-ember.png");
+pub const LOGO_VERDANT: &[u8] = include_bytes!("../../../assets/branding/logo-verdant.png");
+pub const LOGO_FROST: &[u8] = include_bytes!("../../../assets/branding/logo-frost.png");
 
 /// Height relative to width of the rendered artwork (FE and XiØN); the
 /// fallback when a scheme's texture cannot be loaded.
@@ -95,7 +98,7 @@ mod tests {
 
     #[test]
     fn the_rendered_colourways_share_a_size() {
-        for png in [LOGO_XION, LOGO_FE] {
+        for png in [LOGO_XION, LOGO_FE, LOGO_EMBER, LOGO_VERDANT, LOGO_FROST] {
             let img = image::load_from_memory(png).unwrap();
             assert_eq!((img.width(), img.height()), (922, 439));
             assert!(img.color().has_alpha());

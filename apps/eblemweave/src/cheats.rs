@@ -207,40 +207,73 @@ pub fn aob_scan_parallel(mem: &(dyn Memory + Sync), lo: u64, hi: u64, pattern: &
 
 /// Offsets in a unit's in-memory record, as Cheat Engine tables for this
 /// game use them: the record starts with five growth-rate bytes and three
-/// zero bytes; max HP and the eight stats follow as u16s.
+/// zero bytes, then max HP and the eight stats follow as single bytes.
 #[allow(dead_code)]
 pub mod unit {
+    /// The five growth-rate bytes that start every record, then three zeros.
+    pub const GROWTH: u64 = 0x00;
+    /// Max HP: one byte, the first of the nine stat bytes.
     pub const MAX_HP: u64 = 0x08;
-    pub const STATS: u64 = 0x08; // nine u16: max HP, Str, Mag, Dex, Spd, Lck, Def, Res, Cha
+    /// The eight other stats, one byte each, two bytes apart: Str, Mag, Dex,
+    /// Spd, Lck, Def, Res, Cha. The community tables read them as bytes at
+    /// +A, +C, +E, +10, +12, +14, +16 and +18.
+    pub const STAT_OFFSETS: [u64; 8] = [0x0A, 0x0C, 0x0E, 0x10, 0x12, 0x14, 0x16, 0x18];
+    /// Current HP, a u16.
     pub const HP: u64 = 0x20;
+    /// Level, one byte.
     pub const LEVEL: u64 = 0x26;
+    /// Experience, a u32: a running total in the thousands, not a 0-99 bar.
     pub const EXP: u64 = 0x2C;
     pub const LEN: usize = 0x30;
+    /// The level the game stops raising at.
+    pub const MAX_LEVEL: u8 = 40;
+    /// The value the community tables use for a maxed stat (the game shows
+    /// 200 without complaint), not the 99 of the older tables' small numbers.
+    pub const MAX_STAT: u8 = 200;
 }
 
 /// Whether `b` (at least `unit::LEN` bytes) looks like a unit record.
+///
+/// The layout is the one the community Cheat Engine tables for this game use:
+/// five growth bytes, three zeros, then max HP and eight stats as single
+/// bytes, current HP as a u16, the level, and experience as a u32.
 pub fn looks_like_unit(b: &[u8]) -> bool {
+    if b.len() < unit::LEN || b[5..8] != [0, 0, 0] {
+        return false;
+    }
     // The five signature bytes are non-zero multiples of 5 in every record
     // the community tables name (50 50 20 90 80, 5 5 90 35 90, ...).
-    if b.len() < unit::LEN || b[5..8] != [0, 0, 0] || b[0..5].iter().any(|&g| g == 0 || g > 100 || g % 5 != 0) {
+    if b[0..5].iter().any(|&g| g == 0 || g > 100 || g % 5 != 0) {
         return false;
     }
-    let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
-    let max_hp = u16_at(8);
-    if !(10..=99).contains(&max_hp) || (0..9).any(|i| u16_at(8 + 2 * i) > 99) {
-        return false;
-    }
-    let hp = u16_at(0x20);
-    let level = b[0x26];
+    // Max HP and the stats are single bytes, so 200 is an ordinary value, not
+    // an outlier; a unit at 0 HP is still a unit, and the one that most needs
+    // infinite HP.
+    let max_hp = b[unit::MAX_HP as usize];
+    let hp = u16::from_le_bytes([b[unit::HP as usize], b[unit::HP as usize + 1]]);
+    let level = b[unit::LEVEL as usize];
     let exp = u32::from_le_bytes(b[0x2C..0x30].try_into().unwrap());
-    (1..=max_hp).contains(&hp) && (1..=40).contains(&level) && exp <= 99
+    max_hp > 0 && hp <= u16::from(max_hp) && (1..=60).contains(&level) && exp < 10_000_000
 }
 
 /// Every unit record in the game's memory, lowest address first.
+///
+/// The guest range is searched first. When it holds nothing — the engine may
+/// map the guest somewhere other than the addresses these constants assume —
+/// every committed read-write region of the process is searched instead.
 pub fn scan_units(mem: &(dyn Memory + Sync)) -> Vec<u64> {
+    let found = scan_units_in(mem, GUEST_RANGE);
+    if found.is_empty() {
+        scan_units_in(mem, (0x1_0000, 0x7FFF_FFFF_FFFF))
+    } else {
+        found
+    }
+}
+
+fn scan_units_in(mem: &(dyn Memory + Sync), range: (u64, u64)) -> Vec<u64> {
     const PIECE: u64 = 64 << 20;
     let mut pieces = Vec::new();
-    for (s, e) in mem.regions(GUEST_RANGE.0, GUEST_RANGE.1) {
+    for (s, e) in mem.regions(range.0, range.1) {
         let mut a = s;
         while a < e {
             pieces.push((a, (a + PIECE + unit::LEN as u64).min(e)));
@@ -267,7 +300,7 @@ pub fn scan_units(mem: &(dyn Memory + Sync)) -> Vec<u64> {
                         if buf[o + 5] == 0 && buf[o + 6] == 0 && buf[o + 7] == 0 && looks_like_unit(&buf[o..o + unit::LEN]) {
                             local.push(a + o as u64);
                         }
-                        o += 8;
+                        o += 4;
                     }
                     found.lock().unwrap().extend(local);
                 }
@@ -908,7 +941,47 @@ pub fn run(words: &[u32], st: &mut VmState, mem: &dyn Memory, keys_held: u32) {
     }
 }
 
+/// Hold one unit's switched-on quick cheats. Runs every tick from the cheat
+/// thread, so it keeps applying while the in-game menu is closed and to a
+/// unit whose HP has just reached 0.
+fn apply_unit(mem: &dyn Memory, a: u64, c: UnitCheats, level_due: bool, rejected: &mut u64) {
+    if c.max_stats {
+        for off in std::iter::once(unit::MAX_HP).chain(unit::STAT_OFFSETS) {
+            if !mem.write(a + off, &[unit::MAX_STAT]) {
+                *rejected += 1;
+            }
+        }
+    }
+    if c.infinite_hp {
+        let max_hp = if c.max_stats {
+            unit::MAX_STAT
+        } else {
+            let mut b = [0u8; 1];
+            if mem.read(a + unit::MAX_HP, &mut b) { b[0] } else { 0 }
+        };
+        if max_hp > 0 && !mem.write(a + unit::HP, &u16::from(max_hp).to_le_bytes()) {
+            *rejected += 1;
+        }
+    }
+    if c.quick_level && level_due {
+        let mut b = [0u8; 1];
+        if !mem.read(a + unit::LEVEL, &mut b) {
+            *rejected += 1;
+        } else if b[0] < unit::MAX_LEVEL && !mem.write(a + unit::LEVEL, &[b[0] + 1]) {
+            *rejected += 1;
+        }
+    }
+}
+
 // ------------------------------------------------------------------ runner
+
+/// The quick cheats switched on for one unit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnitCheats {
+    pub infinite_hp: bool,
+    pub quick_level: bool,
+    pub max_stats: bool,
+}
 
 /// What the cheat thread applies, shared with the launcher's UI.
 #[derive(Default)]
@@ -917,6 +990,11 @@ pub struct Shared {
     pub codes: Vec<Code>,
     /// Frozen values: address and the bytes kept there.
     pub freezes: Vec<(u64, Vec<u8>)>,
+    /// Units with a quick cheat switched on: the record's address and the
+    /// cheats to hold there, applied by the cheat thread every tick.
+    pub units: Vec<(u64, UnitCheats)>,
+    /// Writes the game refused since the units were found.
+    pub rejected: u64,
     /// The game's process id while attached.
     pub attached: Option<u32>,
     pub stop: bool,
@@ -955,26 +1033,36 @@ pub fn start() -> Handle {
         .spawn(move || {
             let mut vm = VmState::default();
             let mut idle = 0u32;
+            let mut seen: Option<u32> = None;
+            let mut leveled = std::time::Instant::now();
             loop {
-                let (codes, freezes) = {
-                    let s = shared.lock().unwrap();
+                let proc = game();
+                let pid = proc.as_ref().map(|p| p.pid);
+                let (codes, freezes, units) = {
+                    let mut s = shared.lock().unwrap();
                     if s.stop {
                         return;
                     }
-                    (s.codes.clone(), s.freezes.clone())
+                    if pid != seen {
+                        // Another run of the game (or none): addresses and
+                        // records from the old one mean nothing now.
+                        s.units.clear();
+                        s.freezes.clear();
+                        s.rejected = 0;
+                        seen = pid;
+                    }
+                    s.attached = pid;
+                    (s.codes.clone(), s.freezes.clone(), s.units.clone())
                 };
-                if codes.is_empty() && freezes.is_empty() {
+                if codes.is_empty() && freezes.is_empty() && units.is_empty() {
                     // Only look for the game now and then when there is nothing to apply.
                     idle += 1;
                     if idle % 60 == 0 {
-                        let pid = game().map(|p| p.pid);
                         shared.lock().unwrap().attached = pid;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(16));
                     continue;
                 }
-                let proc = game();
-                shared.lock().unwrap().attached = proc.as_ref().map(|p| p.pid);
                 if let Some(p) = proc {
                     let k = held_keys();
                     for c in &codes {
@@ -982,6 +1070,17 @@ pub fn start() -> Handle {
                     }
                     for (a, b) in &freezes {
                         p.write(*a, b);
+                    }
+                    let due = leveled.elapsed() >= std::time::Duration::from_millis(250);
+                    let mut rejected = 0u64;
+                    for (a, c) in &units {
+                        apply_unit(p.as_ref(), *a, *c, due, &mut rejected);
+                    }
+                    if due && units.iter().any(|(_, c)| c.quick_level) {
+                        leveled = std::time::Instant::now();
+                    }
+                    if rejected > 0 {
+                        shared.lock().unwrap().rejected += rejected;
                     }
                 } else {
                     vm = VmState::default();
@@ -1130,20 +1229,52 @@ unregistersymbol(diet)
         assert_eq!(VarType::Byte.encode("200"), Some(vec![200]));
     }
 
+    /// A record as the community tables read it (Cai's in the supplied table):
+    /// growth 23 14 05 05 14, max HP and stats as bytes, HP u16, level, XP u32.
+    fn cai_record() -> Vec<u8> {
+        let mut r = vec![0u8; unit::LEN];
+        r[..5].copy_from_slice(&[35, 20, 5, 5, 20]);
+        r[unit::MAX_HP as usize] = 200;
+        for off in unit::STAT_OFFSETS {
+            r[off as usize] = 200;
+        }
+        r[unit::HP as usize..unit::HP as usize + 2].copy_from_slice(&99u16.to_le_bytes());
+        r[unit::LEVEL as usize] = 17;
+        r[0x2C..0x30].copy_from_slice(&1626u32.to_le_bytes());
+        r
+    }
+
     #[test]
     fn finds_unit_records() {
         let m = fake();
-        // growth 50 50 20 90 80, then max HP 30 and stats, HP 25, level 7, exp 42
-        let mut r = vec![0u8; unit::LEN];
-        r[..5].copy_from_slice(&[50, 50, 20, 90, 80]);
-        for (i, v) in [30u16, 12, 3, 10, 9, 6, 8, 4, 7].iter().enumerate() {
-            r[8 + 2 * i..10 + 2 * i].copy_from_slice(&v.to_le_bytes());
-        }
-        r[0x20..0x22].copy_from_slice(&25u16.to_le_bytes());
-        r[0x26] = 7;
-        r[0x2C] = 42;
-        m.write(HEAP_BASE + 0x800, &r);
-        assert_eq!(scan_units(&m), vec![HEAP_BASE + 0x800]);
+        // The tables' record for Cai sits at 0x14633BEB1CC: 4-byte aligned,
+        // not 8, which the old every-8 scan missed.
+        m.write(HEAP_BASE + 0x804, &cai_record());
+        assert_eq!(scan_units(&m), vec![HEAP_BASE + 0x804]);
+    }
+
+    #[test]
+    fn unit_cheats_hold_and_revive() {
+        let m = fake();
+        let at = HEAP_BASE + 0x900;
+        let mut dead = cai_record();
+        dead[unit::HP as usize..unit::HP as usize + 2].copy_from_slice(&0u16.to_le_bytes());
+        m.write(at, &dead);
+        assert!(looks_like_unit(&dead), "a unit at 0 HP is still a unit");
+        assert_eq!(scan_units(&m), vec![at]);
+
+        let mut rejected = 0;
+        let c = UnitCheats { infinite_hp: true, quick_level: true, max_stats: true };
+        apply_unit(&m, at, c, true, &mut rejected);
+        assert_eq!(rd(&m, at + unit::MAX_HP, 1), 200);
+        assert_eq!(rd(&m, at + unit::HP, 2), 200);
+        assert_eq!(rd(&m, at + unit::LEVEL, 1), 18);
+        assert_eq!(rejected, 0, "the fake accepts every write");
+
+        // Maxed out, the level stops at the cap rather than running away.
+        m.write(at + unit::LEVEL, &[unit::MAX_LEVEL]);
+        apply_unit(&m, at, c, true, &mut rejected);
+        assert_eq!(rd(&m, at + unit::LEVEL, 1), u64::from(unit::MAX_LEVEL));
     }
 
     #[test]
