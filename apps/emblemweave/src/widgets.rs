@@ -249,14 +249,15 @@ pub fn backdrop(painter: &egui::Painter, rect: Rect, p: &Palette) {
     let focus = Pos2::new(rect.left() + rect.width() * 0.40, rect.top());
     let reach = rect.width().max(rect.height()) * 0.9;
     if p.grid {
-        let step = 32.0;
+        // Wide enough, and faint enough, that text over the grid still reads.
+        let step = 44.0;
         let mut x = rect.left() - (rect.left() % step);
         while x < rect.right() {
             let mut y = rect.top();
             while y < rect.bottom() {
                 let d = ((Pos2::new(x, y) - focus).length() / reach).min(1.0);
                 // Neon grid lines in the scheme's highlight colour.
-                let a = (26.0 * (1.0 - d).powi(2)) as u8;
+                let a = (13.0 * (1.0 - d).powi(2)) as u8;
                 if a > 0 {
                     let line = Stroke::new(1.0_f32, alpha(p.electric, a));
                     painter.line_segment([Pos2::new(x, y), Pos2::new(x, y + step)], line);
@@ -269,7 +270,7 @@ pub fn backdrop(painter: &egui::Painter, rect: Rect, p: &Palette) {
     }
     // One wide ellipse of the accent from the top edge.
     let [r, g, b, _] = p.accent.to_array();
-    let peak = if p.grid { 40u8 } else { 26 };
+    let peak = if p.grid { 30u8 } else { 26 };
     let mut mesh = egui::Mesh::default();
     let (rings, segs) = (10u32, 40u32);
     mesh.colored_vertex(focus, Color32::from_rgba_unmultiplied(r, g, b, peak));
