@@ -60,8 +60,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             .on_disabled_hover_text("Build the game first: it is compiled from your dump once, on this PC.")
                             .clicked()
                         {
-                            let upscaling = app.config.graphics.upscaling.clone();
-                            match crate::engine::play(&upscaling) {
+                            match crate::engine::play(&app.config.graphics) {
                                 Ok(()) => app.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok),
                                 Err(e) => app.notify(e, Tone::Bad),
                             }

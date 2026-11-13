@@ -119,7 +119,8 @@ native code runs, as an option, and has since `ew-native` was added.
 | Diagnostics with search, demangled symbols and export | Implemented |
 | Language and profile settings | Implemented; consumed by the runtime |
 | Upscaling | Implemented: FSR 1.0, NVIDIA Image Scaling, FSR 3.1 and DLSS/DLAA are chosen on **Graphics** and written to the engine's `fefw.ini` (with the DLL folder when one is found) before every start, so the game itself runs them |
-| Other graphics and audio settings | Saved only; each page says what the runtime does today |
+| Resolution, display mode and frame-rate limit | Implemented: written to play mode's `controls.ini` (`[display] window_mode`, `fps_limit`, `width`/`height`, `render_width`/`render_height`) and `[fefw] output` in `fefw.ini` before every start |
+| Render scale, quality, shader precompiling, audio | Saved only; each page says what the runtime does today |
 | Command line: `--page`, `--boot-test` | Implemented |
 
 ## Measured boot path

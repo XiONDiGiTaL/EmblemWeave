@@ -41,20 +41,20 @@ fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
 
 pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Graphics", "Display and rendering options for the native renderer.");
+    widgets::page_header(ui, &p, "Graphics", "Display and rendering options, for the game's engine and for EmblemWeave's own renderer.");
     widgets::pending_note(
         ui,
         &p,
         "The game creates its device, memory, textures, shaders, swap chain and command buffers through the host NVN layer on your GPU, \
-         but draw commands are recorded and counted, not rendered yet. These settings are saved now and take effect when the renderer draws. Upscaling is the exception: it is written \
-         into the engine's fefw.ini before every start, so the game itself uses it.",
+         but draw commands are recorded and counted, not rendered yet. Resolution, display mode, frame-rate limit and upscaling are handed to the engine \
+         in its ini files before every start, so the game itself uses them; render scale, quality and shader precompiling wait for the renderer.",
     );
     let g = &mut app.config.graphics;
     widgets::section(ui, &p, "Display", |ui| {
-        widgets::setting_row(ui, &p, "Resolution", "Output resolution of the game window.", |ui| {
+        widgets::setting_row(ui, &p, "Resolution", "The picture's size and the window's, taken at the game's next start. Native display keeps the game's own console size.", |ui| {
             combo(ui, "res", &mut g.resolution, &["Native display", "1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"]);
         });
-        widgets::setting_row(ui, &p, "Display mode", "", |ui| {
+        widgets::setting_row(ui, &p, "Display mode", "Windowed, borderless or exclusive, from the game's next start.", |ui| {
             combo(ui, "mode", &mut g.display_mode, &["Windowed", "Borderless window", "Exclusive fullscreen"]);
         });
         widgets::setting_row(ui, &p, "Aspect ratio", "Wider ratios need the game's camera and UI adjusted, not only the output.", |ui| {
@@ -63,7 +63,7 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "VSync", "Synchronise presentation with the display.", |ui| {
             widgets::toggle(ui, &p, &mut g.vsync);
         });
-        widgets::setting_row(ui, &p, "Frame-rate limit", "The game's simulation keeps its own tick; this limits presentation only.", |ui| {
+        widgets::setting_row(ui, &p, "Frame-rate limit", "Caps presentation only: the game's simulation keeps its own tick. The engine reads it at the next start.", |ui| {
             let mut fps = g.frame_limit as f32;
             if widgets::Slider::new(&mut fps, 30.0..=240.0).suffix(" fps").show(ui, &p).changed() {
                 g.frame_limit = fps.round() as u32;

@@ -389,32 +389,95 @@ pub fn set_ini_key(text: &str, section: &str, key: &str, value: &str) -> String 
     out
 }
 
-/// Write the Graphics page's upscaler into the run folder's `fefw.ini`. The
-/// engine reads that file when it starts, so this is the step that turns the
-/// setting into an actual FSR, NIS or DLSS pass in the game.
-fn write_upscale(dir: &Path, upscaling: &str, sdk: &Sdk) -> Result<(), String> {
-    let path = dir.join("fefw.ini");
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+/// The engine's `[fefw] output` for a resolution label: the size the game
+/// renders its picture, UI and post effects at. "Native display" leaves that to
+/// the game, whose own config is `console` (docked 2560×1440, handheld 1080p).
+pub fn output_mode(label: &str) -> &'static str {
+    match label {
+        "1280 × 720" => "720p",
+        "1920 × 1080" => "1080p",
+        "2560 × 1440" => "1440p",
+        "3840 × 2160" => "2160p",
+        _ => "console",
+    }
+}
+
+/// The size a resolution label names, when it names one.
+pub fn resolution_size(label: &str) -> Option<(u32, u32)> {
+    match label {
+        "1280 × 720" => Some((1280, 720)),
+        "1920 × 1080" => Some((1920, 1080)),
+        "2560 × 1440" => Some((2560, 1440)),
+        "3840 × 2160" => Some((3840, 2160)),
+        _ => None,
+    }
+}
+
+/// The engine's `[display] window_mode` for a display-mode label.
+pub fn window_mode(label: &str) -> &'static str {
+    match label {
+        "Borderless window" => "borderless",
+        "Exclusive fullscreen" => "exclusive",
+        _ => "windowed",
+    }
+}
+
+/// The FSR 3.1 DLL the engine should load, whichever SDK layout is installed.
+fn fsr_dll(sdk: &Sdk) -> Option<PathBuf> {
+    let d = sdk.fsr3.as_ref()?;
+    ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"].iter().map(|f| d.join(f)).find(|p| p.is_file())
+}
+
+/// Write the Graphics settings the game can act on before every start.
+///
+/// The picture size and the upscaler go into `fefw.ini`: play mode merges that
+/// file's `[upscale]` keys over its own, and `[fefw] output` is the game's
+/// picture size. The window mode and the frame cap go into `controls.ini`,
+/// which holds play mode's `[display]` section.
+fn write_settings(dir: &Path, g: &crate::config::Graphics) -> Result<(), String> {
     let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
-    let mut text = set_ini_key(&text, "upscale", "mode", upscale_mode(upscaling));
+    let sdk = sdk();
+
+    let path = dir.join("fefw.ini");
+    let mut text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    text = set_ini_key(&text, "fefw", "output", output_mode(&g.resolution));
+    text = set_ini_key(&text, "upscale", "mode", upscale_mode(&g.upscaling));
     // Point the engine at the DLLs the Graphics page found. Its own defaults
     // only look beside the game and the launcher, so naming them keeps what the
     // page reports and what the game loads the same file.
-    if let Some(d) = &sdk.fsr3 {
-        let dll = ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"].iter().map(|f| d.join(f)).find(|p| p.is_file());
-        if let Some(dll) = dll {
-            text = set_ini_key(&text, "upscale", "fsr_dll", &fwd(&dll));
-        }
+    if let Some(dll) = fsr_dll(&sdk) {
+        text = set_ini_key(&text, "upscale", "fsr_dll", &fwd(&dll));
     }
     if let Some(d) = &sdk.dlss {
         text = set_ini_key(&text, "upscale", "dlss_dll", &fwd(d));
     }
+    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+
+    // The game writes controls.ini on its first start; a file made here is
+    // filled with the factory settings by play mode, which keeps these keys.
+    let path = dir.join("controls.ini");
+    let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| "[meta]\ndefaults_rev = 1\n".to_string());
+    text = set_ini_key(&text, "display", "window_mode", window_mode(&g.display_mode));
+    text = set_ini_key(&text, "display", "fps_limit", &g.frame_limit.to_string());
+    if let Some((w, h)) = resolution_size(&g.resolution) {
+        text = set_ini_key(&text, "display", "width", &w.to_string());
+        text = set_ini_key(&text, "display", "height", &h.to_string());
+        // The picture itself, so the game renders at the size the window shows.
+        text = set_ini_key(&text, "display", "render_width", &w.to_string());
+        text = set_ini_key(&text, "display", "render_height", &h.to_string());
+    }
+    // "Native display" leaves the window and its picture as they are: the
+    // engine's own defaults are the gold configuration, and nothing set in the
+    // game's F1 menu is overwritten by a choice the user did not make.
+    // The in-game F1 menu reads its own copy of the upscaler from this file, so
+    // it shows the choice the engine is running rather than an older one.
+    text = set_ini_key(&text, "upscale", "mode", upscale_mode(&g.upscaling));
     std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
-pub fn play(upscaling: &str) -> Result<(), String> {
+pub fn play(graphics: &crate::config::Graphics) -> Result<(), String> {
     let root = root().ok_or("the engine was not found")?;
     let dir = run_dir().ok_or("APPDATA is not set")?;
     let exe = game_exe(&root);
@@ -433,10 +496,10 @@ pub fn play(upscaling: &str) -> Result<(), String> {
     // the shader preload). Left alone every launch logs a FREEZE dump that is
     // not a freeze. 30 s still catches a real stall; a run started outside the
     // launcher gets the same value from the [diag] section of fefw.ini.
-    // The upscaler is the one Graphics setting the game can act on today: the
-    // engine runs FSR 1, NIS, FSR 3.1 and DLSS itself, from its own ini. A file
-    // that cannot be written must not stop the game from starting.
-    let _ = write_upscale(&dir, upscaling, &sdk());
+    // The picture size, window mode, frame cap and upscaler are the Graphics
+    // settings the game can act on today; it reads them from its own ini files
+    // at start. A file that cannot be written must not stop the game starting.
+    let _ = write_settings(&dir, graphics);
     Command::new(&exe)
         .current_dir(&dir)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
@@ -498,23 +561,64 @@ mod tests {
         // Values saved by an older build, and anything unknown, mean off.
         assert_eq!(upscale_mode("Bilinear"), "off");
         assert_eq!(upscale_mode(""), "off");
+        // The display settings the launcher names map to the engine's own.
+        assert_eq!(output_mode("1920 × 1080"), "1080p");
+        assert_eq!(output_mode("Native display"), "console");
+        assert_eq!(resolution_size("3840 × 2160"), Some((3840, 2160)));
+        assert_eq!(resolution_size("Native display"), None);
+        assert_eq!(window_mode("Exclusive fullscreen"), "exclusive");
+        assert_eq!(window_mode("Windowed"), "windowed");
     }
 
     #[test]
-    fn play_writes_the_chosen_upscaler_into_the_run_folders_ini() {
-        let dir = std::env::temp_dir().join(format!("ew-upscale-{}", std::process::id()));
+    fn play_writes_the_graphics_settings_into_the_run_folders_ini_files() {
+        let dir = std::env::temp_dir().join(format!("ew-graphics-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let ini = dir.join("fefw.ini");
-        std::fs::write(&ini, "[log]\npath = fefw.log\n[upscale]\nmode = off\n").unwrap();
-        write_upscale(&dir, "FSR 3.1", &Sdk::default()).unwrap();
-        let text = std::fs::read_to_string(&ini).unwrap();
+        let game = dir.join("fefw.ini");
+        std::fs::write(&game, "[log]\npath = fefw.log\n[fefw]\nfps60 = 1\n[upscale]\nmode = off\n").unwrap();
+        let controls = dir.join("controls.ini");
+        std::fs::write(&controls, "[meta]\ndefaults_rev = 1\n[display]\nwindow_mode = windowed\nfps_limit = 60\n").unwrap();
+
+        let g = crate::config::Graphics {
+            resolution: "2560 × 1440".into(),
+            display_mode: "Borderless window".into(),
+            frame_limit: 120,
+            upscaling: "FSR 3.1".into(),
+            ..crate::config::Graphics::default()
+        };
+        write_settings(&dir, &g).unwrap();
+
+        let text = std::fs::read_to_string(&game).unwrap();
+        assert!(text.contains("output = 1440p"));
         assert!(text.contains("mode = fsr3"));
-        assert!(text.contains("path = fefw.log"));
-        // Switching back turns it off again rather than adding a second key.
-        write_upscale(&dir, "Off", &Sdk::default()).unwrap();
-        let text = std::fs::read_to_string(&ini).unwrap();
+        assert!(text.contains("fps60 = 1"), "the rest of the file stays");
+
+        let text = std::fs::read_to_string(&controls).unwrap();
+        assert!(text.contains("window_mode = borderless"));
+        assert!(text.contains("fps_limit = 120"));
+        assert!(text.contains("width = 2560"));
+        assert!(text.contains("height = 1440"));
+        assert!(text.contains("render_width = 2560"), "the picture is that size too");
+        assert!(text.contains("render_height = 1440"));
+        assert!(text.contains("[meta]") && text.contains("defaults_rev = 1"), "the file's own sections stay");
+        assert!(text.contains("[upscale]\nmode = fsr3"), "the F1 menu shows the same choice");
+
+        // Back to the defaults: the game's own console size again, and the keys
+        // are replaced rather than repeated.
+        let g = crate::config::Graphics {
+            resolution: "Native display".into(),
+            upscaling: "Off".into(),
+            ..crate::config::Graphics::default()
+        };
+        write_settings(&dir, &g).unwrap();
+        let text = std::fs::read_to_string(&game).unwrap();
+        assert!(text.contains("output = console"));
         assert!(text.contains("mode = off"));
         assert_eq!(text.matches("mode =").count(), 1);
+        let text = std::fs::read_to_string(&controls).unwrap();
+        assert!(text.contains("render_width = 2560"), "Native display leaves the window's sizes alone");
+        assert!(text.contains("window_mode = borderless"), "the default mode is still written");
+        assert!(text.contains("fps_limit = 60"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

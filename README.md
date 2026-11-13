@@ -282,7 +282,7 @@ takes the chosen scheme's accent, glow and rim.
 | **In-game menu** | While the game runs, F10 (or Back + RB on a controller) opens EmblemWeave's menu on top of it: pause and resume, a screenshot of the game window (saved to Pictures\EmblemWeave), restart at the title screen, stop and return to the launcher, quick cheats, cheat codes and tables, display settings (window mode, picture size, frame rate counter) and the controls in use. |
 | **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). The same switches are on the launcher's Cheats page and the in-game menu's Quick tab (F10); search again after a map loads. |
 | **Recompilation** | Run the nine-stage pipeline (parse, decompress, decode, recover, analyse, emit C, compile, verify, prepare) with live progress. |
-| **Graphics, Audio, Controls** | **Graphics** picks the engine's upscaler (Off, FSR 1.0, FSR 3.1, NVIDIA Image Scaling, DLSS or DLAA) and writes it to `fefw.ini` before every start, with the folder the DLLs were found in beside the choice, or what is missing; the rest of the display options and all of audio are saved now and marked until EmblemWeave's own renderer and mixer are in place. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
+| **Graphics, Audio, Controls** | **Graphics** hands the engine what it can act on — the picture size, the window mode, the frame-rate cap and the upscaler (Off, FSR 1.0, FSR 3.1, NVIDIA Image Scaling, DLSS or DLAA) — by writing them into `fefw.ini` and `controls.ini` before every start, with the folder the upscaler DLLs were found in beside the choice, or what is missing; render scale, quality and shader precompiling are saved now and marked until EmblemWeave's own renderer is in place, as is all of audio. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
 | **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (XiØN's own palette, from xiondigital.net), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme, and every control takes its accent, its glow and its rim from it. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. |
 | **Game Log** | The game engine's log, followed live while the game runs: info, warnings and errors (each counted and filterable), search, copy, this run or the previous one, and **Pop out** to keep it in a window of its own. |
@@ -295,6 +295,13 @@ Press <kbd>Ctrl</kbd> + <kbd>1</kbd> to <kbd>9</kbd> to jump between pages. From
 The game runs from `%APPDATA%\EmblemWeave\play`, where the launcher writes its `fefw.ini`. RomFS mods go in that folder's `mods`
 folder, one folder per mod holding `romfs/` (the layout emulators use). Every engine option is described in
 `engine/fefw-recomp/runtime/docs/CONFIG.md`.
+
+### Display settings
+
+**Graphics** also carries the display options the game takes from its own files. **Resolution** sets the window and the
+picture the game renders (1280×720 to 3840×2160, or *Native display* so both follow the window), **Display mode** the
+window mode, and **Frame-rate limit** the presentation cap; they are written to `controls.ini` (and the picture size to
+`[fefw] output` in `fefw.ini`) before each start, so they apply the next time the game opens.
 
 ### Upscaling
 
