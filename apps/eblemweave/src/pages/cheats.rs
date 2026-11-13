@@ -103,7 +103,7 @@ fn copy_in(dir: &std::path::Path, from: &std::path::Path) -> Result<(), String> 
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Cheats", "Atmosphere cheat codes and Cheat Engine tables, applied to the game while it runs.");
+    widgets::page_header(ui, &p, "Cheats", "Quick per-unit cheats, Atmosphere cheat codes and Cheat Engine tables, applied to the game while it runs.");
     let Some(dir) = cheats::dir() else { return };
     let mut message: Option<(String, Tone)> = None;
     if !app.cheats_ui.loaded {
@@ -121,6 +121,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         None => widgets::status_line(ui, &p, Tone::Neutral, "Game not running", "Switch codes on here; they apply as soon as the game starts. Table values show while it runs."),
     }
     ui.add_space(theme::SPACE_S);
+
+    // ------------------------------------------------------- quick cheats
+    // The same switches the in-game menu's Quick tab has (F10); they need the
+    // game running to find its units, so they are also offered here rather
+    // than only behind the in-game menu.
+    quick(app, ui);
 
     // ------------------------------------------------------------ codes
     let mut enabled_changed = false;
@@ -432,6 +438,11 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
             RichText::new("Finds the units in the game's memory by the layout their records share (experimental: results may include units not on the map). Search once a map is loaded, and again on the next map.")
                 .size(12.5)
                 .color(p.muted),
+        );
+        ui.label(
+            RichText::new("Each unit has three switches: Infinite HP (HP held at max, even from 0), Quick level-up (one level every quarter second, to 40) and Max stats (max HP and every stat set to 200). The in-game menu's Quick tab (F10) has the same switches.")
+                .size(12.5)
+                .color(p.body),
         );
         ui.horizontal(|ui| {
             let busy = app.cheats_ui.searching.is_some();
