@@ -191,6 +191,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
          [fs]\nexefs = {}\nromfs = {}\nsave_dir = {}\nmods = mods\n\
          [nvn]\nshader_cache = {}\nbc7_cache = {}\n\
          [dlss]\nupscaler = auto\n\
+         [diag]\nwatchdog_seconds = 30\n\
          [fefw]\nfps60 = 1\n",
         fwd(&run.exefs),
         fwd(&run.romfs),
@@ -304,7 +305,18 @@ pub fn play() -> Result<(), String> {
     if crate::cheats::process::find(crate::cheats::GAME_EXE).is_none() {
         let _ = crate::exe_icon::brand(&exe);
     }
-    Command::new(&exe).current_dir(&dir).spawn().map(|_| ()).map_err(|e| format!("starting {}: {e}", exe.display()))
+    // The runtime's freeze watchdog counts idle time from the moment it starts,
+    // and a cold start on this PC takes longer than its 10 s default to reach the
+    // first presented frame (window, then the GPU device, then the swap chain and
+    // the shader preload). Left alone every launch logs a FREEZE dump that is
+    // not a freeze. 30 s still catches a real stall; a run started outside the
+    // launcher gets the same value from the [diag] section of fefw.ini.
+    Command::new(&exe)
+        .current_dir(&dir)
+        .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("starting {}: {e}", exe.display()))
 }
 
 #[cfg(test)]
@@ -321,5 +333,8 @@ mod tests {
         assert!(ini.contains("save_dir = C:/s"));
         assert!(ini.contains("shader_cache = C:/x/engine/fefw-recomp/work/shaders/spirv"));
         assert!(ini.contains("mods = mods"));
+        // A cold start takes over 10 s to reach the first frame here, so the
+        // watchdog's default would dump a freeze that never happened.
+        assert!(ini.contains("watchdog_seconds = 30"));
     }
 }
