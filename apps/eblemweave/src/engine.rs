@@ -88,7 +88,14 @@ pub fn candidates() -> Vec<PathBuf> {
         found.extend(start.ancestors().map(|a| a.join("engine").join("fefw-recomp")));
     }
     found.retain(|e| e.is_dir());
-    found.dedup();
+    // The executable's folder and the working folder are usually the same
+    // tree, and the remembered path can name it again: compare what the paths
+    // resolve to, so one checkout is listed once.
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|e| {
+        let key = std::fs::canonicalize(e).unwrap_or_else(|_| e.to_path_buf());
+        seen.insert(key.to_string_lossy().to_lowercase())
+    });
     found
 }
 

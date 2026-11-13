@@ -34,24 +34,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.add_space(theme::SPACE_S);
                 ui.label(RichText::new("Engines found").font(theme::semibold(12.0)).color(p.muted));
                 let current = crate::engine::root();
-                for e in engines {
+                let labels = engine_labels(&engines);
+                for (e, label) in engines.iter().zip(labels) {
                     let in_use = current.as_deref() == Some(e.as_path());
-                    let label = e
-                        .parent()
-                        .and_then(|parent| parent.file_name())
-                        .map(|n| format!("{}/fefw-recomp", n.to_string_lossy()))
-                        .unwrap_or_else(|| e.display().to_string());
+                    let built = crate::engine::game_exe(e).is_file();
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(label).font(theme::mono(11.0)).color(if in_use { p.accent_hi } else { p.body }))
                             .on_hover_text(e.display().to_string());
                         if in_use {
                             widgets::pill(ui, &p, "in use", Tone::Accent);
                         } else if widgets::button(ui, &p, "Use", true).clicked() {
-                            match crate::engine::use_engine(&e) {
+                            match crate::engine::use_engine(e) {
                                 Ok(()) => app.notify(format!("Using {}", e.display()), Tone::Ok),
                                 Err(err) => app.notify(err, Tone::Bad),
                             }
                         }
+                        ui.label(RichText::new(if built { "game built" } else { "not built yet" }).size(11.5).color(if built { p.muted } else { p.warn }));
                     });
                 }
             }
@@ -91,6 +89,39 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .color(p.body),
         );
     });
+}
+
+/// A short name for each checkout that tells them apart: the project folder
+/// the engine sits in, with one more folder for two that share a name. The
+/// full path is the hover text.
+fn engine_labels(paths: &[std::path::PathBuf]) -> Vec<String> {
+    fn name(p: &std::path::Path, depth: usize) -> String {
+        // Skip the checkout's own `fefw-recomp` and `engine` folders.
+        let parts: Vec<String> = p
+            .components()
+            .rev()
+            .skip(2)
+            .take(depth)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let joined = parts.into_iter().rev().collect::<Vec<_>>().join("/");
+        if joined.is_empty() {
+            p.display().to_string()
+        } else {
+            joined
+        }
+    }
+    let base: Vec<String> = paths.iter().map(|p| name(p, 1)).collect();
+    base.iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if base.iter().filter(|other| *other == b).count() > 1 {
+                name(&paths[i], 2)
+            } else {
+                b.clone()
+            }
+        })
+        .collect()
 }
 
 /// Checking GitHub, installing a release in place, and going back a version.
