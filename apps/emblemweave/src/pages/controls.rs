@@ -223,22 +223,30 @@ struct Spot {
 /// square and the small round button between them, and the shoulders on top.
 /// Bindings are matched by action name, so the map follows whatever the table
 /// holds rather than a copy of it.
+/// The positions are fractions of the drawing box, whose height is 0.716 of its
+/// width, so a vertical gap has to be about 1.4 times a horizontal one to look
+/// the same: the face buttons' diamond is laid out that way.
 const SPOTS: [Spot; 15] = [
-    Spot { action: "Confirm", caption: "Confirm", glyph: "A", at: (0.765, 0.435), r: 0.034, cap: (0.765, 0.508), pad: button::EAST, face: Face::Circle },
-    Spot { action: "Cancel", caption: "Cancel", glyph: "B", at: (0.846, 0.332), r: 0.030, cap: (0.846, 0.400), pad: button::SOUTH, face: Face::Circle },
-    Spot { action: "Menu", caption: "Menu", glyph: "X", at: (0.762, 0.243), r: 0.034, cap: (0.762, 0.176), pad: button::NORTH, face: Face::Circle },
-    Spot { action: "Unit details", caption: "Details", glyph: "Y", at: (0.668, 0.355), r: 0.036, cap: (0.645, 0.428), pad: button::WEST, face: Face::Circle },
-    Spot { action: "Previous unit", caption: "Previous", glyph: "L", at: (0.175, 0.062), r: 0.0, cap: (0.175, 0.112), pad: button::LEFT_SHOULDER, face: Face::Keycap },
-    Spot { action: "Next unit", caption: "Next", glyph: "R", at: (0.825, 0.062), r: 0.0, cap: (0.825, 0.112), pad: button::RIGHT_SHOULDER, face: Face::Keycap },
-    Spot { action: "Danger zone", caption: "Danger", glyph: "ZL", at: (0.075, 0.120), r: 0.0, cap: (0.075, 0.170), pad: 0, face: Face::Keycap },
-    Spot { action: "Fast forward", caption: "Fast fwd", glyph: "ZR", at: (0.925, 0.120), r: 0.0, cap: (0.925, 0.170), pad: 0, face: Face::Keycap },
-    Spot { action: "End turn", caption: "End turn", glyph: "+", at: (0.431, 0.342), r: 0.022, cap: (0.431, 0.400), pad: button::START, face: Face::Square },
-    Spot { action: "Map", caption: "Map", glyph: "\u{2212}", at: (0.377, 0.247), r: 0.019, cap: (0.377, 0.298), pad: button::BACK, face: Face::Circle },
-    Spot { action: "Cursor up", caption: "Up", glyph: "", at: (0.343, 0.398), r: 0.0, cap: (0.343, 0.398), pad: button::DPAD_UP, face: Face::Circle },
-    Spot { action: "Cursor down", caption: "Down", glyph: "", at: (0.343, 0.622), r: 0.0, cap: (0.343, 0.622), pad: button::DPAD_DOWN, face: Face::Circle },
-    Spot { action: "Cursor left", caption: "Left", glyph: "", at: (0.232, 0.505), r: 0.0, cap: (0.232, 0.505), pad: button::DPAD_LEFT, face: Face::Circle },
-    Spot { action: "Cursor right", caption: "Right", glyph: "", at: (0.458, 0.505), r: 0.0, cap: (0.458, 0.505), pad: button::DPAD_RIGHT, face: Face::Circle },
-    Spot { action: "Camera", caption: "Camera", glyph: "", at: (0.635, 0.668), r: 0.0, cap: (0.635, 0.668), pad: 0, face: Face::Circle },
+    // The face diamond, square: X on top, A below, Y left, B right, and each
+    // caption outside the cluster rather than under the button.
+    Spot { action: "Menu", caption: "Menu", glyph: "X", at: (0.715, 0.180), r: 0.034, cap: (0.715, 0.118), pad: button::NORTH, face: Face::Circle },
+    Spot { action: "Unit details", caption: "Details", glyph: "Y", at: (0.630, 0.280), r: 0.036, cap: (0.532, 0.280), pad: button::WEST, face: Face::Circle },
+    Spot { action: "Confirm", caption: "Confirm", glyph: "A", at: (0.800, 0.280), r: 0.034, cap: (0.798, 0.364), pad: button::EAST, face: Face::Circle },
+    Spot { action: "Cancel", caption: "Cancel", glyph: "B", at: (0.715, 0.380), r: 0.030, cap: (0.715, 0.448), pad: button::SOUTH, face: Face::Circle },
+    // The shoulders: all four on one line above the body, triggers outboard.
+    Spot { action: "Danger zone", caption: "Danger", glyph: "ZL", at: (0.070, 0.058), r: 0.0, cap: (0.070, 0.104), pad: 0, face: Face::Keycap },
+    Spot { action: "Previous unit", caption: "Previous", glyph: "L", at: (0.175, 0.058), r: 0.0, cap: (0.175, 0.108), pad: button::LEFT_SHOULDER, face: Face::Keycap },
+    Spot { action: "Next unit", caption: "Next", glyph: "R", at: (0.825, 0.058), r: 0.0, cap: (0.825, 0.108), pad: button::RIGHT_SHOULDER, face: Face::Keycap },
+    Spot { action: "Fast forward", caption: "Fast fwd", glyph: "ZR", at: (0.930, 0.058), r: 0.0, cap: (0.930, 0.104), pad: 0, face: Face::Keycap },
+    // The centre pair, above the valley between the two sticks.
+    Spot { action: "Map", caption: "Map", glyph: "\u{2212}", at: (0.455, 0.215), r: 0.019, cap: (0.455, 0.166), pad: button::BACK, face: Face::Circle },
+    Spot { action: "End turn", caption: "End turn", glyph: "+", at: (0.575, 0.215), r: 0.022, cap: (0.575, 0.164), pad: button::START, face: Face::Square },
+    // The D-pad, level with the right stick.
+    Spot { action: "Cursor up", caption: "Up", glyph: "", at: (0.310, 0.450), r: 0.0, cap: (0.310, 0.450), pad: button::DPAD_UP, face: Face::Circle },
+    Spot { action: "Cursor down", caption: "Down", glyph: "", at: (0.310, 0.700), r: 0.0, cap: (0.310, 0.700), pad: button::DPAD_DOWN, face: Face::Circle },
+    Spot { action: "Cursor left", caption: "Left", glyph: "", at: (0.196, 0.575), r: 0.0, cap: (0.196, 0.575), pad: button::DPAD_LEFT, face: Face::Circle },
+    Spot { action: "Cursor right", caption: "Right", glyph: "", at: (0.424, 0.575), r: 0.0, cap: (0.424, 0.575), pad: button::DPAD_RIGHT, face: Face::Circle },
+    Spot { action: "Camera", caption: "Camera", glyph: "", at: (0.700, 0.702), r: 0.0, cap: (0.700, 0.702), pad: 0, face: Face::Circle },
 ];
 
 /// The pad, drawn as a path from the reference outline so every scheme tints
@@ -277,13 +285,13 @@ fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::conf
     // The shapes the reference pad has but no action uses: two small buttons
     // beside the face buttons. (The reference's third, in the notch, sat on the
     // outline at this size, so the notch alone carries it.)
-    for (x, y, r) in [(0.623, 0.241, 0.022), (0.563, 0.346, 0.021)] {
+    for (x, y, r) in [(0.180, 0.705, 0.020), (0.822, 0.705, 0.020)] {
         painter.circle_stroke(at(x, y), r * rect.width(), egui::Stroke::new(1.5_f32, theme::alpha(p.accent, 90)));
     }
 
     // The two sticks: the reference's double rings, with the stick's position
     // shown inside while a pad is connected.
-    for (x, y, stick) in [(0.229, 0.342, live.map(|l| l.left)), (0.635, 0.540, live.map(|l| l.right))] {
+    for (x, y, stick) in [(0.235, 0.300, live.map(|l| l.left)), (0.700, 0.575, live.map(|l| l.right))] {
         let c = at(x, y);
         let r = rect.width() * 0.066;
         painter.circle_stroke(c, r, egui::Stroke::new(2.0_f32, theme::alpha(p.accent, 150)));
@@ -297,8 +305,8 @@ fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::conf
 
     // The D-pad is one cross, as the reference draws it. Each arm lights on
     // its own.
-    let cross = at(0.343, 0.505);
-    let half = egui::vec2(rect.width() * 0.071, rect.height() * 0.085);
+    let cross = at(0.310, 0.575);
+    let half = egui::vec2(rect.width() * 0.068, rect.height() * 0.094);
     let arm = rect.width() * 0.045;
     for (bit, dx, dy, size) in [
         (button::DPAD_UP, 0.0, -half.y * 0.5, egui::vec2(arm, half.y)),
