@@ -98,6 +98,40 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             .color(p.muted),
         );
     });
+
+    // The files the game actually reads, so a change the launcher has written
+    // for the next start is visibly waiting rather than silently absent.
+    if let Some(l) = crate::engine::live() {
+        let waiting = waiting(&g, &app.config.audio, &l);
+        widgets::section(ui, &p, "What the game will start with", |ui| {
+            widgets::kv(ui, &p, "Upscaler", crate::engine::upscale_label(&l.upscaling));
+            widgets::kv(
+                ui,
+                &p,
+                "Output",
+                &match l.output.as_str() {
+                    "console" => "console (the game's own size)".to_string(),
+                    "window" => "the window's size".to_string(),
+                    other => other.to_string(),
+                },
+            );
+            widgets::kv(ui, &p, "Window", &format!("{} × {} · {}", l.window.0, l.window.1, l.window_mode));
+            widgets::kv(ui, &p, "Picture", &format!("{} × {}", l.picture.0, l.picture.1));
+            widgets::kv(
+                ui,
+                &p,
+                "Frame limit",
+                &match l.fps_limit.as_str() {
+                    "0" => "unlimited".to_string(),
+                    "auto" => "the display's refresh".to_string(),
+                    other => other.to_string(),
+                },
+            );
+            widgets::kv(ui, &p, "VSync", if l.vsync { "on" } else { "off" });
+            widgets::kv(ui, &p, "Aspect", &l.aspect);
+            waiting_line(ui, &p, waiting);
+        });
+    }
 }
 
 pub fn audio(app: &mut App, ui: &mut egui::Ui) {
@@ -131,4 +165,55 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
             });
         }
     });
+
+    let master = a.master;
+    if let Some(l) = crate::engine::live() {
+        widgets::section(ui, &p, "What the game will start with", |ui| {
+            widgets::kv(ui, &p, "Master volume", &format!("{:.0} %", l.volume * 100.0));
+            if (master - l.volume).abs() > 0.005 {
+                ui.label(
+                    RichText::new("This page's master volume applies at the game's next start.").size(12.5).color(p.muted),
+                );
+            }
+        });
+    }
+}
+
+/// The settings this page has changed that the game's own files do not carry
+/// yet, either because the next start has not happened or because the F1 menu
+/// was used in between.
+fn waiting(g: &crate::config::Graphics, a: &crate::config::Audio, l: &crate::engine::Live) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if crate::engine::upscale_mode(&g.upscaling) != l.upscaling {
+        out.push("upscaling");
+    }
+    if crate::engine::output_mode(&g.resolution) != l.output {
+        out.push("resolution");
+    }
+    if crate::engine::window_mode(&g.display_mode) != l.window_mode {
+        out.push("display mode");
+    }
+    if g.vsync != l.vsync {
+        out.push("vsync");
+    }
+    if g.aspect != l.aspect {
+        out.push("aspect ratio");
+    }
+    if g.frame_limit.to_string() != l.fps_limit {
+        out.push("frame-rate limit");
+    }
+    if (a.master - l.volume).abs() > 0.005 {
+        out.push("master volume");
+    }
+    out
+}
+
+fn waiting_line(ui: &mut egui::Ui, p: &theme::Palette, waiting: Vec<&'static str>) {
+    let text = if waiting.is_empty() {
+        "The game's files match this page.".to_string()
+    } else {
+        format!("Waiting for the game's next start: {}.", waiting.join(", "))
+    };
+    ui.add_space(6.0);
+    ui.label(RichText::new(text).size(12.5).color(p.muted));
 }

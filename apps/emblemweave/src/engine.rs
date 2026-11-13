@@ -422,6 +422,104 @@ pub fn window_mode(label: &str) -> &'static str {
     }
 }
 
+/// The Graphics page's label for one of the engine's upscale modes.
+pub fn upscale_label(mode: &str) -> &'static str {
+    match mode {
+        "fsr1" | "spatial" => "FSR 1.0",
+        "fsr3" => "FSR 3.1",
+        "nis" => "NVIDIA Image Scaling",
+        "dlss" => "DLSS",
+        "dlaa" => "DLAA",
+        _ => "Off",
+    }
+}
+
+/// What the game's own ini files say it will start with. The launcher writes
+/// them before each start, and the game and its F1 menu write them too, so
+/// reading them back is the only way a page can show the truth rather than the
+/// wish.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Live {
+    /// `[fefw] output`, how the engine names the picture size.
+    pub output: String,
+    /// The effective `[upscale] mode`, after play mode's merge.
+    pub upscaling: String,
+    pub window_mode: String,
+    pub vsync: bool,
+    pub aspect: String,
+    /// A number, or `auto` for the display's refresh rate.
+    pub fps_limit: String,
+    pub window: (u32, u32),
+    /// The size the 3D picture is rendered at.
+    pub picture: (u32, u32),
+    pub volume: f32,
+}
+
+fn ini_map(path: &Path) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else { return out };
+    let mut section = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with(';') || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with('[') && t.ends_with(']') {
+            section = t[1..t.len() - 1].trim().to_ascii_lowercase();
+        } else if let Some((k, v)) = t.split_once('=') {
+            out.insert(format!("{section}.{}", k.trim().to_ascii_lowercase()), v.trim().to_string());
+        }
+    }
+    out
+}
+
+/// Read the two files in `dir`; `None` when neither of them is there yet.
+pub fn live_in(dir: &Path) -> Option<Live> {
+    let game = ini_map(&dir.join("fefw.ini"));
+    let controls = ini_map(&dir.join("controls.ini"));
+    if game.is_empty() && controls.is_empty() {
+        return None;
+    }
+    let get = |k: &str| controls.get(k).or_else(|| game.get(k)).cloned();
+    let num = |k: &str| get(k).and_then(|v| v.parse::<u32>().ok());
+    let window = (num("display.width").unwrap_or(0), num("display.height").unwrap_or(0));
+    // play_display.cpp's internal_size(): a fixed render size wins, else the
+    // window at render_scale (100 = the window's own size).
+    let scale = (num("display.render_scale").unwrap_or(100) as f32 / 100.0).clamp(0.25, 4.0);
+    let picture = match (num("display.render_width"), num("display.render_height")) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => ((window.0 as f32 * scale) as u32, (window.1 as f32 * scale) as u32),
+    };
+    Some(Live {
+        output: game.get("fefw.output").cloned().unwrap_or_else(|| "console".into()),
+        // merge_env(): fefw.ini's [upscale] wins over the F1 menu's own copy.
+        upscaling: game.get("upscale.mode").or_else(|| controls.get("upscale.mode")).cloned().unwrap_or_else(|| "off".into()),
+        window_mode: get("display.window_mode").unwrap_or_else(|| "windowed".into()),
+        vsync: matches!(get("display.vsync").as_deref(), Some("1") | Some("true") | Some("on")),
+        aspect: get("display.aspect").unwrap_or_else(|| "auto".into()),
+        fps_limit: get("display.fps_limit").unwrap_or_else(|| "auto".into()),
+        window,
+        picture,
+        volume: get("audio.volume").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+    })
+}
+
+/// The run folder's files, cached for a second so a page can ask every frame.
+pub fn live() -> Option<Live> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Option<Live>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, live)) = cache.as_ref() {
+        if at.elapsed() < Duration::from_secs(1) {
+            return live.clone();
+        }
+    }
+    let fresh = run_dir().and_then(|d| live_in(&d));
+    *cache = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
 /// The FSR 3.1 DLL the engine should load, whichever SDK layout is installed.
 fn fsr_dll(sdk: &Sdk) -> Option<PathBuf> {
     let d = sdk.fsr3.as_ref()?;
@@ -640,6 +738,49 @@ mod tests {
         assert!(text.contains("window_mode = borderless"), "the default mode is still written");
         assert!(text.contains("fps_limit = 60"));
         assert!(text.contains("volume = 1.00"), "the volume goes back up too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_game_files_are_read_back_the_way_the_engine_reads_them() {
+        let dir = std::env::temp_dir().join(format!("ew-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fefw.ini"), "[fefw]\nfps60 = 1\noutput = 1080p\n[upscale]\nmode = fsr3\n").unwrap();
+        std::fs::write(
+            dir.join("controls.ini"),
+            "# the game's file\n[meta]\ndefaults_rev = 1\n[display]\nwindow_mode = borderless\nvsync = 0\nfps_limit = 90\n\
+             width = 1920\nheight = 1080\nrender_width = 1440\nrender_height = 810\naspect = 21:9\n[upscale]\nmode = fsr1\n[audio]\nvolume = 0.4\n",
+        )
+        .unwrap();
+        let l = live_in(&dir).unwrap();
+        assert_eq!(l.output, "1080p");
+        // fefw.ini wins over the F1 menu's own copy, as merge_env does.
+        assert_eq!(l.upscaling, "fsr3");
+        assert_eq!(upscale_label(&l.upscaling), "FSR 3.1");
+        assert_eq!(l.window_mode, "borderless");
+        assert!(!l.vsync);
+        assert_eq!(l.aspect, "21:9");
+        assert_eq!(l.fps_limit, "90");
+        assert_eq!(l.window, (1920, 1080));
+        assert_eq!(l.picture, (1440, 810));
+        assert!((l.volume - 0.4).abs() < 1e-6);
+
+        // Without fefw.ini's key the file play mode reads decides, and a picture
+        // with no fixed size is the window at render_scale.
+        std::fs::write(dir.join("fefw.ini"), "[fefw]\noutput = console\n").unwrap();
+        std::fs::write(
+            dir.join("controls.ini"),
+            "[display]\nwindow_mode = windowed\nvsync = 1\nwidth = 1920\nheight = 1080\nrender_scale = 75\n[upscale]\nmode = nis\n",
+        )
+        .unwrap();
+        let l = live_in(&dir).unwrap();
+        assert_eq!(l.upscaling, "nis");
+        assert!(l.vsync);
+        assert_eq!(l.output, "console");
+        assert_eq!(l.picture, (1440, 810));
+
+        // Nothing there at all: no panel rather than a made-up one.
+        assert!(live_in(&dir.join("missing")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

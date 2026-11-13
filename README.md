@@ -306,6 +306,11 @@ presentation cap. They are written to `controls.ini` (and the picture size to `[
 each start, so they apply the next time the game opens. **Audio**'s **Master** volume goes to `[audio] volume` in the
 same file; **Music**, **Effects** and **Voice** are the game's own mix and have no key there yet.
 
+Both pages read the files back. A **What the game will start with** panel lists what the engine will actually do on
+the next start — upscaler, output, window and picture size, frame limit, vsync and aspect ratio on **Graphics**, the
+master volume on **Audio** — and names the settings still waiting for that start, so a value changed after the last run
+is never mistaken for one already in force.
+
 ### Upscaling
 
 The engine upscales the picture itself, and **Graphics > Upscaling** chooses how: **FSR 1.0** (AMD's spatial upscaler,
