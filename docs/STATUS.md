@@ -118,7 +118,8 @@ native code runs, as an option, and has since `ew-native` was added.
 | Boot test with live progress, cancellation and a full report | Implemented, run on the retail data |
 | Diagnostics with search, demangled symbols and export | Implemented |
 | Language and profile settings | Implemented; consumed by the runtime |
-| Graphics and audio settings | Saved only; each page says what the runtime does today |
+| Upscaling | Implemented: FSR 1.0, NVIDIA Image Scaling, FSR 3.1 and DLSS/DLAA are chosen on **Graphics** and written to the engine's `fefw.ini` (with the DLL folder when one is found) before every start, so the game itself runs them |
+| Other graphics and audio settings | Saved only; each page says what the runtime does today |
 | Command line: `--page`, `--boot-test` | Implemented |
 
 ## Measured boot path

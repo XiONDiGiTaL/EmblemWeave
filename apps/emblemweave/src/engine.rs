@@ -190,6 +190,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
          [log]\npath = fefw.log\n\
          [fs]\nexefs = {}\nromfs = {}\nsave_dir = {}\nmods = mods\n\
          [nvn]\nshader_cache = {}\nbc7_cache = {}\n\
+         [upscale]\nmode = off\n\
          [dlss]\nupscaler = auto\n\
          [diag]\nwatchdog_seconds = 30\n\
          [fefw]\nfps60 = 1\n",
@@ -290,9 +291,130 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     Ok(JobResult::Engine(dir))
 }
 
+/// The engine's `[upscale] mode` for a label on the Graphics page. The engine
+/// has its own names for the modes; this is where the two vocabularies meet.
+/// Anything it does not know (an older saved value, "Bilinear") means off.
+pub fn upscale_mode(label: &str) -> &'static str {
+    match label {
+        "FSR 1.0" => "fsr1",
+        "FSR 3.1" => "fsr3",
+        "NVIDIA Image Scaling" => "nis",
+        "DLSS" => "dlss",
+        "DLAA" => "dlaa",
+        _ => "off",
+    }
+}
+
+/// The SDK folders the engine looks for the upscaler DLLs in, and which of them
+/// are actually there. FSR 3.1 and DLSS cannot be shipped with the launcher, so
+/// the Graphics page says where to put them instead of pretending they work.
+#[derive(Debug, Default, Clone)]
+pub struct Sdk {
+    /// `upscalers\fsr3`: AMD's FidelityFX Vulkan DLLs.
+    pub fsr3: Option<PathBuf>,
+    /// `upscalers\streamline`: NVIDIA's Streamline DLLs.
+    pub dlss: Option<PathBuf>,
+}
+
+fn sdk_in(dirs: &[PathBuf], folder: &str, needed: &[&str], every: bool) -> Option<PathBuf> {
+    dirs.iter().map(|d| d.join("upscalers").join(folder)).find(|d| {
+        if every {
+            needed.iter().all(|f| d.join(f).is_file())
+        } else {
+            needed.iter().any(|f| d.join(f).is_file())
+        }
+    })
+}
+
+/// Where the engine will look: the run folder, the game's folder and the
+/// launcher's folder.
+pub fn sdk() -> Sdk {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = run_dir() {
+        dirs.push(d);
+    }
+    if let Some(r) = root() {
+        if let Some(d) = game_exe(&r).parent() {
+            dirs.push(d.to_path_buf());
+        }
+    }
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        dirs.push(d);
+    }
+    Sdk {
+        // The SDK 2.x loader, or the single v1.1.4 DLL: FSR 3.1 runs on either.
+        fsr3: sdk_in(&dirs, "fsr3", &["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"], false),
+        dlss: sdk_in(&dirs, "streamline", &["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll"], true),
+    }
+}
+
+/// Set one key of an ini in place, adding its section when the file has none.
+/// Comments, blank lines and every other key stay as they are.
+pub fn set_ini_key(text: &str, section: &str, key: &str, value: &str) -> String {
+    let section = section.to_ascii_lowercase();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut current = String::new();
+    let mut replaced = false;
+    for line in lines.iter_mut() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            current = t[1..t.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        if current == section {
+            if let Some((k, _)) = t.split_once('=') {
+                if k.trim().eq_ignore_ascii_case(key) {
+                    *line = format!("{key} = {value}");
+                    replaced = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !replaced {
+        let header = format!("[{section}]");
+        match lines.iter().position(|l| l.trim().eq_ignore_ascii_case(&header)) {
+            Some(i) => lines.insert(i + 1, format!("{key} = {value}")),
+            None => {
+                if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+                    lines.push(String::new());
+                }
+                lines.push(header);
+                lines.push(format!("{key} = {value}"));
+            }
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Write the Graphics page's upscaler into the run folder's `fefw.ini`. The
+/// engine reads that file when it starts, so this is the step that turns the
+/// setting into an actual FSR, NIS or DLSS pass in the game.
+fn write_upscale(dir: &Path, upscaling: &str, sdk: &Sdk) -> Result<(), String> {
+    let path = dir.join("fefw.ini");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
+    let mut text = set_ini_key(&text, "upscale", "mode", upscale_mode(upscaling));
+    // Point the engine at the DLLs the Graphics page found. Its own defaults
+    // only look beside the game and the launcher, so naming them keeps what the
+    // page reports and what the game loads the same file.
+    if let Some(d) = &sdk.fsr3 {
+        let dll = ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"].iter().map(|f| d.join(f)).find(|p| p.is_file());
+        if let Some(dll) = dll {
+            text = set_ini_key(&text, "upscale", "fsr_dll", &fwd(&dll));
+        }
+    }
+    if let Some(d) = &sdk.dlss {
+        text = set_ini_key(&text, "upscale", "dlss_dll", &fwd(d));
+    }
+    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
-pub fn play() -> Result<(), String> {
+pub fn play(upscaling: &str) -> Result<(), String> {
     let root = root().ok_or("the engine was not found")?;
     let dir = run_dir().ok_or("APPDATA is not set")?;
     let exe = game_exe(&root);
@@ -311,6 +433,10 @@ pub fn play() -> Result<(), String> {
     // the shader preload). Left alone every launch logs a FREEZE dump that is
     // not a freeze. 30 s still catches a real stall; a run started outside the
     // launcher gets the same value from the [diag] section of fefw.ini.
+    // The upscaler is the one Graphics setting the game can act on today: the
+    // engine runs FSR 1, NIS, FSR 3.1 and DLSS itself, from its own ini. A file
+    // that cannot be written must not stop the game from starting.
+    let _ = write_upscale(&dir, upscaling, &sdk());
     Command::new(&exe)
         .current_dir(&dir)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
@@ -336,5 +462,60 @@ mod tests {
         // A cold start takes over 10 s to reach the first frame here, so the
         // watchdog's default would dump a freeze that never happened.
         assert!(ini.contains("watchdog_seconds = 30"));
+        // The upscaler section is written up front; Play patches its mode.
+        assert!(ini.contains("[upscale]\nmode = off"));
     }
+
+    #[test]
+    fn the_upscaler_replaces_its_own_key_and_keeps_the_rest() {
+        let ini = ini_text(
+            Path::new(r"C:\x\engine\fefw-recomp"),
+            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s") },
+        );
+        let patched = set_ini_key(&ini, "upscale", "mode", "fsr3");
+        assert!(patched.contains("[upscale]\nmode = fsr3"));
+        assert!(!patched.contains("mode = off"));
+        assert_eq!(patched.matches("mode = fsr3").count(), 1);
+        // Every other section survives, including the keys after it.
+        assert!(patched.contains("upscaler = auto"));
+        assert!(patched.contains("watchdog_seconds = 30"));
+        // A file without the section gets one instead of losing the key.
+        let bare = set_ini_key("[log]\npath = fefw.log\n", "upscale", "mode", "fsr1");
+        assert!(bare.contains("[upscale]\nmode = fsr1"));
+        assert!(bare.contains("path = fefw.log"));
+        // A hand-edited ini keeps its shape: comments and other keys stay.
+        let edited = set_ini_key("; mine\n[upscale]\nsharpness = 0.5\n", "upscale", "mode", "nis");
+        assert!(edited.contains("; mine"));
+        assert!(edited.contains("sharpness = 0.5"));
+        assert!(edited.contains("mode = nis"));
+    }
+
+    #[test]
+    fn the_labels_name_the_engine_modes() {
+        assert_eq!(upscale_mode("FSR 3.1"), "fsr3");
+        assert_eq!(upscale_mode("NVIDIA Image Scaling"), "nis");
+        assert_eq!(upscale_mode("DLAA"), "dlaa");
+        // Values saved by an older build, and anything unknown, mean off.
+        assert_eq!(upscale_mode("Bilinear"), "off");
+        assert_eq!(upscale_mode(""), "off");
+    }
+
+    #[test]
+    fn play_writes_the_chosen_upscaler_into_the_run_folders_ini() {
+        let dir = std::env::temp_dir().join(format!("ew-upscale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("fefw.ini");
+        std::fs::write(&ini, "[log]\npath = fefw.log\n[upscale]\nmode = off\n").unwrap();
+        write_upscale(&dir, "FSR 3.1", &Sdk::default()).unwrap();
+        let text = std::fs::read_to_string(&ini).unwrap();
+        assert!(text.contains("mode = fsr3"));
+        assert!(text.contains("path = fefw.log"));
+        // Switching back turns it off again rather than adding a second key.
+        write_upscale(&dir, "Off", &Sdk::default()).unwrap();
+        let text = std::fs::read_to_string(&ini).unwrap();
+        assert!(text.contains("mode = off"));
+        assert_eq!(text.matches("mode =").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

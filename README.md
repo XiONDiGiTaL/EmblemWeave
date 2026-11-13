@@ -282,7 +282,7 @@ takes the chosen scheme's accent, glow and rim.
 | **In-game menu** | While the game runs, F10 (or Back + RB on a controller) opens EmblemWeave's menu on top of it: pause and resume, a screenshot of the game window (saved to Pictures\EmblemWeave), restart at the title screen, stop and return to the launcher, quick cheats, cheat codes and tables, display settings (window mode, picture size, frame rate counter) and the controls in use. |
 | **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). The same switches are on the launcher's Cheats page and the in-game menu's Quick tab (F10); search again after a map loads. |
 | **Recompilation** | Run the nine-stage pipeline (parse, decompress, decode, recover, analyse, emit C, compile, verify, prepare) with live progress. |
-| **Graphics, Audio, Controls** | Options for EmblemWeave's own runtime, saved now and marked until its renderer, mixer and input are in place. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
+| **Graphics, Audio, Controls** | **Graphics** picks the engine's upscaler (Off, FSR 1.0, FSR 3.1, NVIDIA Image Scaling, DLSS or DLAA) and writes it to `fefw.ini` before every start, with the folder the DLLs were found in beside the choice, or what is missing; the rest of the display options and all of audio are saved now and marked until EmblemWeave's own renderer and mixer are in place. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
 | **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (XiØN's own palette, from xiondigital.net), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme, and every control takes its accent, its glow and its rim from it. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. |
 | **Game Log** | The game engine's log, followed live while the game runs: info, warnings and errors (each counted and filterable), search, copy, this run or the previous one, and **Pop out** to keep it in a window of its own. |
@@ -295,6 +295,27 @@ Press <kbd>Ctrl</kbd> + <kbd>1</kbd> to <kbd>9</kbd> to jump between pages. From
 The game runs from `%APPDATA%\EmblemWeave\play`, where the launcher writes its `fefw.ini`. RomFS mods go in that folder's `mods`
 folder, one folder per mod holding `romfs/` (the layout emulators use). Every engine option is described in
 `engine/fefw-recomp/runtime/docs/CONFIG.md`.
+
+### Upscaling
+
+The engine upscales the picture itself, and **Graphics > Upscaling** chooses how: **FSR 1.0** (AMD's spatial upscaler,
+any GPU), **NVIDIA Image Scaling** (spatial, any GPU, up to 2× per side), **FSR 3.1** (AMD's temporal upscaler through the
+FidelityFX API) and **DLSS** / **DLAA** (NVIDIA's temporal upscaler through Streamline). The launcher writes the choice,
+and the folder it found the DLLs in, into the run folder's `fefw.ini` before it starts the game, so it applies at the
+game's next start.
+
+AMD's and NVIDIA's files cannot be shipped, so those two upscalers need you to add them, in the run folder:
+
+- **FSR 3.1**: `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from the FidelityFX SDK (v2.4.0,
+  Vulkan), in `%APPDATA%\EmblemWeave\play\upscalers\fsr3`.
+- **DLSS / DLAA**: `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll` and `nvngx_dlss.dll` from NVIDIA's
+  [Streamline SDK](https://github.com/NVIDIAGameWorks/Streamline) release `bin/x64`, in
+  `%APPDATA%\EmblemWeave\play\upscalers\streamline`.
+
+The Graphics page checks those folders and names the one it found, or what is missing. **FSR 4** is not offered: it runs
+through AMD's DirectX 12 FidelityFX runtime on RDNA 4 cards, and this engine presents through Vulkan, so there is no
+FSR 4 pass to call. **OptiScaler** works by swapping the upscaler a DirectX game already calls, and there is no DirectX
+device here for it to hook. FSR 3.1 is the newest upscaler the engine runs itself.
 
 ## How the recompilation works
 

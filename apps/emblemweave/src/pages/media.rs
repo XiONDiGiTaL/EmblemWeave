@@ -9,6 +9,28 @@ use crate::widgets;
 use crate::App;
 use eframe::egui::{self, RichText};
 
+/// Every upscaler the engine can run itself. `engine::upscale_mode` maps these
+/// labels to the modes in its ini.
+const UPSCALERS: &[&str] = &["Off", "FSR 1.0", "FSR 3.1", "NVIDIA Image Scaling", "DLSS", "DLAA"];
+
+/// What the selected upscaler needs, and whether it is there: FSR 3.1 and DLSS
+/// need DLLs AMD and NVIDIA do not let us ship.
+fn upscaler_help(current: &str, sdk: &crate::engine::Sdk) -> String {
+    match current {
+        "FSR 1.0" => "AMD's spatial upscaler: scales and sharpens on any GPU, with no motion vectors.".into(),
+        "FSR 3.1" => match &sdk.fsr3 {
+            Some(dir) => format!("AMD's temporal upscaler, using the FidelityFX DLLs in {}. Applies at the game's next start.", dir.display()),
+            None => "AMD's temporal upscaler. Put amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll in upscalers\\fsr3 next to the game; without them the engine logs why and leaves the picture unscaled.".into(),
+        },
+        "NVIDIA Image Scaling" => "NVIDIA's spatial upscaler: any GPU, up to 2x per side, FSR 1 beyond that.".into(),
+        "DLSS" | "DLAA" => match &sdk.dlss {
+            Some(dir) => format!("NVIDIA's temporal upscaler through Streamline, in {}. Applies at the game's next start.", dir.display()),
+            None => "NVIDIA's temporal upscaler. Needs NVIDIA's four Streamline DLLs in upscalers\\streamline next to the game, on an RTX GPU; without them the engine keeps its own upscaler.".into(),
+        },
+        _ => "The picture is scaled by the presentation path alone.".into(),
+    }
+}
+
 fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
     egui::ComboBox::from_id_salt(id).selected_text(value.clone()).width(200.0).show_ui(ui, |ui| {
         for o in options {
@@ -24,7 +46,8 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         ui,
         &p,
         "The game creates its device, memory, textures, shaders, swap chain and command buffers through the host NVN layer on your GPU, \
-         but draw commands are recorded and counted, not rendered yet. These settings are saved now and take effect when the renderer draws. None of them changes anything today.",
+         but draw commands are recorded and counted, not rendered yet. These settings are saved now and take effect when the renderer draws. Upscaling is the exception: it is written \
+         into the engine's fefw.ini before every start, so the game itself uses it.",
     );
     let g = &mut app.config.graphics;
     widgets::section(ui, &p, "Display", |ui| {
@@ -51,8 +74,9 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "Render scale", "Internal resolution relative to the output.", |ui| {
             widgets::Slider::new(&mut g.render_scale, 0.5..=2.0).fixed_decimals(2).suffix("×").show(ui, &p);
         });
-        widgets::setting_row(ui, &p, "Upscaling", "", |ui| {
-            combo(ui, "upscale", &mut g.upscaling, &["Off", "Bilinear", "FSR 1.0"]);
+        let help = upscaler_help(&g.upscaling, &crate::engine::sdk());
+        widgets::setting_row(ui, &p, "Upscaling", &help, |ui| {
+            combo(ui, "upscale", &mut g.upscaling, UPSCALERS);
         });
         widgets::setting_row(ui, &p, "Quality", "Original keeps the console's rendering exactly.", |ui| {
             combo(ui, "quality", &mut g.quality, &["Original", "Enhanced"]);
@@ -63,6 +87,16 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "Renderer", "", |ui| {
             ui.label(RichText::new("Vulkan").font(theme::semibold(14.0)).color(p.ink));
         });
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(
+                "FSR 4 needs AMD's DirectX 12 FidelityFX runtime and an RDNA 4 card, and OptiScaler swaps upscalers by \
+                 hooking DirectX; this renderer presents through Vulkan, so neither can drive it. FSR 3.1 is the newest \
+                 upscaler the engine runs itself.",
+            )
+            .size(12.5)
+            .color(p.muted),
+        );
     });
 }
 
