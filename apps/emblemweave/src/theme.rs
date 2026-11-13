@@ -127,7 +127,7 @@ impl Scheme {
 
     pub fn detail(self) -> &'static str {
         match self {
-            Scheme::Xion => "xiondigital.net: graphite surfaces, signature blue and a silver wordmark",
+            Scheme::Xion => "XiØN: graphite surfaces, signature blue and a silver wordmark",
             Scheme::Arcade => "Retro arcade: hot pink, arcade yellow and cyan on a violet cabinet, over a neon grid drawn behind every page",
             Scheme::Fe => "Tactical fantasy: metallic gold, white silver and royal blue",
             Scheme::Ember => "Forge fire: ember orange and molten gold over oxblood steel",
