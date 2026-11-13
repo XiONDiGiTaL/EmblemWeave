@@ -46,8 +46,8 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         ui,
         &p,
         "The game creates its device, memory, textures, shaders, swap chain and command buffers through the host NVN layer on your GPU, \
-         but draw commands are recorded and counted, not rendered yet. Resolution, display mode, frame-rate limit and upscaling are handed to the engine \
-         in its ini files before every start, so the game itself uses them; render scale, quality and shader precompiling wait for the renderer.",
+         but draw commands are recorded and counted, not rendered yet. Everything on this page except Quality and Precompile shaders is handed to the engine \
+         in its ini files before every start, so the game itself uses it.",
     );
     let g = &mut app.config.graphics;
     widgets::section(ui, &p, "Display", |ui| {
@@ -57,10 +57,10 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "Display mode", "Windowed, borderless or exclusive, from the game's next start.", |ui| {
             combo(ui, "mode", &mut g.display_mode, &["Windowed", "Borderless window", "Exclusive fullscreen"]);
         });
-        widgets::setting_row(ui, &p, "Aspect ratio", "Wider ratios need the game's camera and UI adjusted, not only the output.", |ui| {
+        widgets::setting_row(ui, &p, "Aspect ratio", "Wider ratios need the game's camera and UI adjusted, not only the output. Applies at the next start.", |ui| {
             combo(ui, "aspect", &mut g.aspect, &["16:9", "16:10", "21:9", "32:9"]);
         });
-        widgets::setting_row(ui, &p, "VSync", "Synchronise presentation with the display.", |ui| {
+        widgets::setting_row(ui, &p, "VSync", "Synchronise presentation with the display. Applies at the next start.", |ui| {
             widgets::toggle(ui, &p, &mut g.vsync);
         });
         widgets::setting_row(ui, &p, "Frame-rate limit", "Caps presentation only: the game's simulation keeps its own tick. The engine reads it at the next start.", |ui| {
@@ -71,7 +71,7 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         });
     });
     widgets::section(ui, &p, "Rendering", |ui| {
-        widgets::setting_row(ui, &p, "Render scale", "Internal resolution relative to the output.", |ui| {
+        widgets::setting_row(ui, &p, "Render scale", "Internal resolution relative to the output; the upscaler fills the rest. Applies at the next start.", |ui| {
             widgets::Slider::new(&mut g.render_scale, 0.5..=2.0).fixed_decimals(2).suffix("×").show(ui, &p);
         });
         let help = upscaler_help(&g.upscaling, &crate::engine::sdk());
@@ -106,7 +106,7 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
     widgets::pending_note(
         ui,
         &p,
-        "The game opens its audio renderer and runs on its 5 ms audio clock, but voices are not mixed to your speakers yet. These settings are saved now and apply when mixing lands.",
+        "The game opens its audio renderer and runs on its 5 ms audio clock, but voices are not mixed to your speakers yet. Master volume is written to the engine's controls.ini before every start; the three buses wait for mixing.",
     );
     let a = &mut app.config.audio;
     widgets::section(ui, &p, "Output", |ui| {
@@ -122,7 +122,8 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
     });
     widgets::section(ui, &p, "Mix", |ui| {
         for (label, value) in [("Master", &mut a.master), ("Music", &mut a.music), ("Effects", &mut a.effects), ("Voice", &mut a.voice)] {
-            widgets::setting_row(ui, &p, label, "", |ui| {
+            let help = if label == "Master" { "The volume play mode mixes at, from the game's next start." } else { "" };
+            widgets::setting_row(ui, &p, label, help, |ui| {
                 let mut pct = (*value * 100.0).round();
                 if widgets::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").show(ui, &p).changed() {
                     *value = pct / 100.0;

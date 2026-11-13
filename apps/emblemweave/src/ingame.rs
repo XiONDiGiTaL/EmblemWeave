@@ -508,7 +508,7 @@ fn session_bar(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette, ctx:
                 }
                 if session::stop(pid) {
                     std::thread::sleep(Duration::from_millis(600));
-                    match crate::engine::play(&app.config.graphics) {
+                    match crate::engine::play(&app.config.graphics, &app.config.audio) {
                         Ok(()) => app.notify("Restarting the game", Tone::Ok),
                         Err(e) => app.notify(e, Tone::Bad),
                     }

@@ -434,7 +434,7 @@ fn fsr_dll(sdk: &Sdk) -> Option<PathBuf> {
 /// file's `[upscale]` keys over its own, and `[fefw] output` is the game's
 /// picture size. The window mode and the frame cap go into `controls.ini`,
 /// which holds play mode's `[display]` section.
-fn write_settings(dir: &Path, g: &crate::config::Graphics) -> Result<(), String> {
+fn write_settings(dir: &Path, g: &crate::config::Graphics, a: &crate::config::Audio) -> Result<(), String> {
     let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
     let sdk = sdk();
 
@@ -458,17 +458,31 @@ fn write_settings(dir: &Path, g: &crate::config::Graphics) -> Result<(), String>
     let path = dir.join("controls.ini");
     let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| "[meta]\ndefaults_rev = 1\n".to_string());
     text = set_ini_key(&text, "display", "window_mode", window_mode(&g.display_mode));
+    text = set_ini_key(&text, "display", "vsync", if g.vsync { "1" } else { "0" });
+    text = set_ini_key(&text, "display", "aspect", &g.aspect);
     text = set_ini_key(&text, "display", "fps_limit", &g.frame_limit.to_string());
+    let scale = g.render_scale.clamp(0.5, 2.0);
+    let even = |v: f32| (((v.round() as i64) & !1).max(320)).to_string();
     if let Some((w, h)) = resolution_size(&g.resolution) {
         text = set_ini_key(&text, "display", "width", &w.to_string());
         text = set_ini_key(&text, "display", "height", &h.to_string());
-        // The picture itself, so the game renders at the size the window shows.
-        text = set_ini_key(&text, "display", "render_width", &w.to_string());
-        text = set_ini_key(&text, "display", "render_height", &h.to_string());
+        // The picture at the render scale the page shows: 1.00× is the chosen
+        // size, below it renders less and lets the upscaler fill the rest.
+        text = set_ini_key(&text, "display", "render_width", &even(w as f32 * scale));
+        text = set_ini_key(&text, "display", "render_height", &even(h as f32 * scale));
+    } else if (scale - 1.0).abs() > 0.001 {
+        // Native display with a render scale: the engine scales its own window
+        // sized picture, so no fixed size may pin it.
+        text = set_ini_key(&text, "display", "render_width", "0");
+        text = set_ini_key(&text, "display", "render_height", "0");
+        text = set_ini_key(&text, "display", "render_scale", &(scale * 100.0).round().to_string());
     }
-    // "Native display" leaves the window and its picture as they are: the
-    // engine's own defaults are the gold configuration, and nothing set in the
+    // "Native display" at 1.00× leaves the window and its picture as they are:
+    // the engine's defaults are the gold configuration, and nothing set in the
     // game's F1 menu is overwritten by a choice the user did not make.
+    // The audio section play mode reads; music, effects and voice are mixed by
+    // the game and have no key of their own.
+    text = set_ini_key(&text, "audio", "volume", &format!("{:.2}", a.master.clamp(0.0, 1.0)));
     // The in-game F1 menu reads its own copy of the upscaler from this file, so
     // it shows the choice the engine is running rather than an older one.
     text = set_ini_key(&text, "upscale", "mode", upscale_mode(&g.upscaling));
@@ -477,7 +491,7 @@ fn write_settings(dir: &Path, g: &crate::config::Graphics) -> Result<(), String>
 
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
-pub fn play(graphics: &crate::config::Graphics) -> Result<(), String> {
+pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) -> Result<(), String> {
     let root = root().ok_or("the engine was not found")?;
     let dir = run_dir().ok_or("APPDATA is not set")?;
     let exe = game_exe(&root);
@@ -499,7 +513,7 @@ pub fn play(graphics: &crate::config::Graphics) -> Result<(), String> {
     // The picture size, window mode, frame cap and upscaler are the Graphics
     // settings the game can act on today; it reads them from its own ini files
     // at start. A file that cannot be written must not stop the game starting.
-    let _ = write_settings(&dir, graphics);
+    let _ = write_settings(&dir, graphics, audio);
     Command::new(&exe)
         .current_dir(&dir)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
@@ -586,7 +600,8 @@ mod tests {
             upscaling: "FSR 3.1".into(),
             ..crate::config::Graphics::default()
         };
-        write_settings(&dir, &g).unwrap();
+        let a = crate::config::Audio { master: 0.4, ..crate::config::Audio::default() };
+        write_settings(&dir, &g, &a).unwrap();
 
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = 1440p"));
@@ -596,10 +611,13 @@ mod tests {
         let text = std::fs::read_to_string(&controls).unwrap();
         assert!(text.contains("window_mode = borderless"));
         assert!(text.contains("fps_limit = 120"));
+        assert!(text.contains("vsync = 1"));
+        assert!(text.contains("aspect = 16:9"));
         assert!(text.contains("width = 2560"));
         assert!(text.contains("height = 1440"));
-        assert!(text.contains("render_width = 2560"), "the picture is that size too");
+        assert!(text.contains("render_width = 2560"), "at 1.00x the picture is that size");
         assert!(text.contains("render_height = 1440"));
+        assert!(text.contains("[audio]\nvolume = 0.40"), "the master volume play mode mixes at");
         assert!(text.contains("[meta]") && text.contains("defaults_rev = 1"), "the file's own sections stay");
         assert!(text.contains("[upscale]\nmode = fsr3"), "the F1 menu shows the same choice");
 
@@ -608,18 +626,20 @@ mod tests {
         let g = crate::config::Graphics {
             resolution: "Native display".into(),
             upscaling: "Off".into(),
+            render_scale: 0.5,
             ..crate::config::Graphics::default()
         };
-        write_settings(&dir, &g).unwrap();
+        write_settings(&dir, &g, &crate::config::Audio::default()).unwrap();
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = console"));
         assert!(text.contains("mode = off"));
         assert_eq!(text.matches("mode =").count(), 1);
         let text = std::fs::read_to_string(&controls).unwrap();
-        assert!(text.contains("render_width = 2560"), "Native display leaves the window's sizes alone");
+        assert!(text.contains("render_width = 0"), "no fixed size pins the scaled picture");
+        assert!(text.contains("render_scale = 50"));
         assert!(text.contains("window_mode = borderless"), "the default mode is still written");
         assert!(text.contains("fps_limit = 60"));
+        assert!(text.contains("volume = 1.00"), "the volume goes back up too");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }
