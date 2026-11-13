@@ -1118,6 +1118,7 @@ name = "ew-gfx"
 version = "0.1.5"
 dependencies = [
  "ash",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

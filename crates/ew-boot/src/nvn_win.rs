@@ -120,9 +120,108 @@ fn window_acquire_texture(state: &mut State) -> HostResult {
     }
 }
 
+/// The window the game's frames are shown in, once one is asked for.
+#[derive(Default)]
+pub struct Display {
+    enabled: bool,
+    title: String,
+    #[cfg(windows)]
+    presenter: Option<ew_gfx::present::Presenter>,
+    /// Why the frames cannot be shown, kept so it is logged once.
+    problem: Option<String>,
+    pub frames: u64,
+}
+
+// The presenter owns a mapped Vulkan buffer, whose address is a raw pointer.
+// Only the run loop's thread presents, and the window is touched nowhere else,
+// so the state can carry it.
+unsafe impl Send for Display {}
+
+fn display<R>(state: &State, f: impl FnOnce(&mut Display) -> R) -> R {
+    state.host.ext.with::<Display, R>(f)
+}
+
+/// Show the game's frames in a window for the rest of the run. The window
+/// itself opens on the first present, when the frame's size is known.
+pub fn show_frames_in_a_window(state: &mut State, title: &str) {
+    display(state, |d| {
+        d.enabled = true;
+        d.title = title.to_string();
+    });
+}
+
+/// Put the frame the game just presented on screen, if a window is wanted.
+fn present_frame(state: &mut State, window: u64, index: u32) {
+    if !display(state, |d| d.enabled && d.problem.is_none()) {
+        return;
+    }
+    let Some(texture) = win(state, |x| x.windows.get(&window).and_then(|w| w.textures.get(index as usize).copied())) else {
+        return;
+    };
+    let (width, height, pixels) = match crate::nvn_tex::frame_bgra(state, texture) {
+        Ok(frame) => frame,
+        Err(e) => {
+            let first = display(state, |d| d.problem.replace(e.clone()).is_none());
+            if first {
+                state.host.log.push(format!("gfx: the game's frames cannot be shown: {e}"));
+            }
+            return;
+        }
+    };
+    #[cfg(windows)]
+    let shown = display(state, |d| {
+        use ew_gfx::present::{Frame, Presenter};
+        if d.presenter.is_none() {
+            match Presenter::open(&d.title, 1280, 720) {
+                Ok(p) => d.presenter = Some(p),
+                Err(e) => {
+                    d.problem = Some(e.clone());
+                    return Some(Err(e));
+                }
+            }
+        }
+        let p = d.presenter.as_mut()?;
+        Some(p.show(Frame { width, height, bgra: &pixels }))
+    });
+    #[cfg(not(windows))]
+    let shown: Option<Result<bool, String>> = {
+        let _ = (&pixels, width, height);
+        None
+    };
+    match shown {
+        None => {}
+        Some(Ok(true)) => {
+            let n = display(state, |d| {
+                d.frames += 1;
+                d.frames
+            });
+            if n == 1 {
+                state.host.log.push(format!("gfx: first frame on screen ({width}x{height})"));
+            }
+        }
+        Some(Ok(false)) => {
+            display(state, |d| {
+                d.enabled = false;
+                #[cfg(windows)]
+                {
+                    d.presenter = None;
+                }
+            });
+            state.host.log.push("gfx: the window was closed; frames are counted only from here".to_string());
+        }
+        Some(Err(e)) => {
+            let first = display(state, |d| d.problem.replace(e.clone()).is_none());
+            if first {
+                state.host.log.push(format!("gfx: the game's frames cannot be shown: {e}"));
+            }
+        }
+    }
+}
+
 /// `nvnQueuePresentTexture(NVNqueue*, NVNwindow*, int textureIndex)`.
 fn queue_present_texture(state: &mut State) -> HostResult {
     let (w, index) = (state.x[1], state.x[2] as u32);
+    present_frame(state, w, index);
     let (first, frames) = win(state, |x| {
         x.frames += 1;
         let first = x.windows.get_mut(&w).map(|win| {
@@ -221,7 +320,7 @@ pub fn register(s: &mut HostServices) {
         ("nvnWindowInitialize", window_initialize, "a swap chain over the game's textures"),
         ("nvnWindowFinalize", window_finalize, "forgets the window"),
         ("nvnWindowAcquireTexture", window_acquire_texture, "next texture in turn, sync signalled"),
-        ("nvnQueuePresentTexture", queue_present_texture, "frame recorded; shown once the renderer executes commands"),
+        ("nvnQueuePresentTexture", queue_present_texture, "the frame goes to the window when one is open"),
         ("nvnWindowGetPresentInterval", get_present_interval, "window state on the host"),
         ("nvnWindowSetPresentInterval", set_present_interval, "window state on the host"),
         ("nvnWindowGetAcquireTimeout", get_acquire_timeout, "window state on the host"),

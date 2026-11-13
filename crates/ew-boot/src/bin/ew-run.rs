@@ -42,6 +42,8 @@ struct Args {
     /// `--native <ew_native.dll>`: run the game's code from the library built
     /// by `ew-native` wherever it has it.
     native: Option<PathBuf>,
+    /// `--window [title]`: show the game's frames in a window.
+    window: Option<String>,
 }
 
 fn main() {
@@ -72,6 +74,7 @@ fn run() -> Result<()> {
         trace: 64,
         x0: 0,
         native: None,
+        window: None,
         json: None,
         verbose: false,
         all_calls: false,
@@ -80,7 +83,7 @@ fn run() -> Result<()> {
         imports: None,
     };
 
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--module" => args.module_dir = Some(PathBuf::from(value(&mut it, "--module")?)),
@@ -103,6 +106,14 @@ fn run() -> Result<()> {
             }
             "--romfs" => args.romfs = Some(PathBuf::from(value(&mut it, "--romfs")?)),
             "--native" => args.native = Some(PathBuf::from(value(&mut it, "--native")?)),
+            "--window" => {
+                // An optional title follows; anything else is the next flag.
+                let title = match it.peek() {
+                    Some(next) if !next.starts_with("--") => it.next().unwrap_or_default(),
+                    _ => "EmblemWeave".to_string(),
+                };
+                args.window = Some(title);
+            }
             "--lib" => args.libs.push(PathBuf::from(value(&mut it, "--lib")?)),
             "--save" => args.save = Some(PathBuf::from(value(&mut it, "--save")?)),
             "--nacp" => args.nacp = Some(PathBuf::from(value(&mut it, "--nacp")?)),
@@ -143,7 +154,9 @@ fn run() -> Result<()> {
                      \x20 --save DIR       writable save directory (default build/save)\n\
                      \x20 --nacp FILE      the title's control.nacp, for its display version\n\
                      \x20 --language CODE  system language reported to the game (default en-US)\n\
-                     \x20 --dump A:N       decode N instructions at hex address A and exit\n"
+                     \x20 --dump A:N       decode N instructions at hex address A and exit\n\
+                     \x20 --window [TITLE] show the game's frames in a window (opens on the\n\
+                     \x20                  first present)\n"
                 );
                 std::process::exit(0);
             }
@@ -240,6 +253,7 @@ fn run() -> Result<()> {
         settings.insert("language".to_string(), lang.clone());
     }
     let opts = BootOptions {
+        window: args.window.clone(),
         settings,
         snapshot_at: args.snapshot_at,
         snapshot_dir: args.snapshot_at.map(|_| args.snapshot_dir.clone().unwrap_or_else(|| PathBuf::from("build/snapshot"))),

@@ -48,7 +48,10 @@ renderer's voice release is the last known blocker), as the interpreter runs did
 The game draws with NVN. EmblemWeave already tracks NVN's devices, memory pools, textures, programs, state and command buffers
 (`nvn_*.rs`). Next:
 
-1. A Vulkan device and window (the `ew-gfx` crate) presenting the game's colour buffers.
+1. ~~A Vulkan device and window (the `ew-gfx` crate) presenting the game's colour buffers.~~ **Window and presentation are in.** `ew-gfx::present` owns a
+   Windows window, its Vulkan surface and swap chain; the NVN layer untiles the presented swap texture straight out of its block-linear storage (RGBA8,
+   BGRA8 and RGB10A2 so far) and uploads it on every present, scaled to the window. `ew-run --window` turns it on. What is on screen is still whatever
+   the game last left in that texture, because clears and draws are not executed yet: that is the next step, and the first frame that is the game's own.
 2. Textures: the Switch's block-linear layouts and its compressed formats, uploaded to Vulkan.
 3. Shaders: the game's Maxwell/Ampere shader binaries translated to SPIR-V. This is the largest single piece; fefw-recomp uses
    Ryujinx's translator (MIT) offline, and EmblemWeave can do the same as a build step before writing its own.

@@ -540,6 +540,59 @@ fn coherent(_state: &mut State) -> HostResult {
     HostResult::Returned(0)
 }
 
+/// One texel of the game's frame as BGRA8, or None for a format this cannot
+/// unpack out of the tiled storage yet.
+fn texel_bgra(format: u32, block: &[u8]) -> Option<[u8; 4]> {
+    Some(match format {
+        // RGBA8 and RGBX8 families, linear and sRGB: the storage is RGBA.
+        0x25..=0x28 | 0x37 | 0x38 => [block[2], block[1], block[0], block[3]],
+        // BGRA8 family.
+        0x9A | 0x9C => [block[0], block[1], block[2], block[3]],
+        // RGB10A2, 10 bits a channel: the window takes 8.
+        0x3D | 0x3E => {
+            let v = u32::from_le_bytes(block.get(..4)?.try_into().ok()?);
+            let channel = |shift: u32| (((v >> shift) & 0x3FF) >> 2) as u8;
+            [channel(20), channel(10), channel(0), (((v >> 30) & 0x3) * 85) as u8]
+        }
+        _ => return None,
+    })
+}
+
+/// A texture's first level and layer as BGRA8 rows, top row first.
+///
+/// The game's swap texture is block-linear in guest memory; the window needs
+/// plain rows, so every texel block is looked up through the same tiling the
+/// texture was built with.
+pub fn untile_bgra(mem: &[u8], base: u64, d: &TexDesc, lay: &Layout) -> Result<Vec<u8>, String> {
+    if lay.block.w != 1 || lay.block.h != 1 {
+        return Err(format!("a 0x{:x} swap texture is compressed, which the window cannot show yet", d.format));
+    }
+    let (w, h) = (d.width.max(1) as u64, d.height.max(1) as u64);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let at = base + lay.offset(0, 0, x, y, 0);
+            let from = at as usize;
+            let src = mem
+                .get(from..from + lay.block.bytes as usize)
+                .ok_or_else(|| format!("the swap texture's storage at 0x{at:x} is outside guest memory"))?;
+            let px = texel_bgra(d.format, src).ok_or_else(|| format!("a 0x{:x} swap texture cannot be shown yet", d.format))?;
+            let o = ((y * w + x) * 4) as usize;
+            out[o..o + 4].copy_from_slice(&px);
+        }
+    }
+    Ok(out)
+}
+
+/// `(width, height, BGRA8 pixels)` of a texture, for the window.
+pub fn frame_bgra(state: &State, texture: u64) -> Result<(u32, u32, Vec<u8>), String> {
+    let d = tex(state, |x| x.textures.get(&texture).cloned()).ok_or_else(|| format!("texture 0x{texture:x} was never initialized"))?;
+    let lay = layout(&d)?;
+    let base = storage_address(state, &d).ok_or_else(|| format!("texture 0x{texture:x} has no CPU-visible storage"))?;
+    let pixels = untile_bgra(&state.mem, base, &d, &lay)?;
+    Ok((d.width, d.height, pixels))
+}
+
 pub fn register(s: &mut HostServices) {
     s.register_prefix("nvn:nvnTextureViewSet", crate::nvn::record_state, "texture view state on the host");
     s.register_prefix("nvn:nvnTextureViewGet", view_get, "texture view state on the host");
@@ -652,5 +705,46 @@ mod tests {
     #[test]
     fn unknown_formats_are_refused() {
         assert!(storage_size(&d2(4, 4, 0x200)).is_err());
+    }
+
+    #[test]
+    fn a_tiled_frame_is_untiled_into_bgra_rows() {
+        let d = d2(8, 4, 0x25);
+        let l = layout(&d).unwrap();
+        let base = 0x100u64;
+        let mut mem = vec![0u8; base as usize + l.size() as usize];
+        // RGBA8 pixels, one distinct colour per texel.
+        for y in 0..4u32 {
+            for x in 0..8u32 {
+                let at = base + l.offset(0, 0, x as u64, y as u64, 0);
+                mem[at as usize..at as usize + 4].copy_from_slice(&[x as u8, y as u8, 0x40, 0xFF]);
+            }
+        }
+        let out = untile_bgra(&mem, base, &d, &l).unwrap();
+        assert_eq!(out.len(), 8 * 4 * 4);
+        for y in 0..4u32 {
+            for x in 0..8u32 {
+                let o = ((y * 8 + x) * 4) as usize;
+                assert_eq!(&out[o..o + 4], &[0x40, y as u8, x as u8, 0xFF], "texel ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn ten_bit_frames_lose_only_precision() {
+        // RGB10A2 with full red, half green, no blue, opaque.
+        let v = 1023u32 | (512u32 << 10) | (3u32 << 30);
+        let px = texel_bgra(0x3D, &v.to_le_bytes()).unwrap();
+        assert_eq!(px[2], 255);
+        assert!(px[1] > 120 && px[1] < 130);
+        assert_eq!((px[0], px[3]), (0, 255));
+    }
+
+    #[test]
+    fn a_compressed_texture_is_refused_by_name() {
+        let d = d2(256, 256, 0x41);
+        let l = layout(&d).unwrap();
+        let err = untile_bgra(&vec![0u8; 1 << 20], 0, &d, &l).unwrap_err();
+        assert!(err.contains("0x41"), "{err}");
     }
 }

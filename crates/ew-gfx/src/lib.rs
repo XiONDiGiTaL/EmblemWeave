@@ -14,6 +14,9 @@ use ash::vk;
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(windows)]
+pub mod present;
+
 /// What the game's NVN layer needs to know about the host device.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {

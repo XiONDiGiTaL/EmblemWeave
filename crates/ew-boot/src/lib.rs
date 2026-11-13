@@ -327,6 +327,10 @@ pub struct BootOptions {
     /// The game's code compiled ahead of time (`ew-native`): run natively
     /// wherever it has the block, interpreted everywhere else.
     pub native: Option<std::sync::Arc<native::Native>>,
+    /// A window title: the game's frames are shown in a window by that name
+    /// for the rest of the run. The window opens on the first present, when the
+    /// frame's size is known.
+    pub window: Option<String>,
     /// Other modules of the program (the title's `sdk`), loaded after the
     /// main image. Their exports satisfy the main module's imports that the
     /// host does not serve and whose names start with one of
@@ -362,6 +366,7 @@ impl Default for BootOptions {
             cancel: None,
             progress: None,
             native: None,
+            window: None,
             libraries: Vec::new(),
             init_libraries: false,
             watch: Vec::new(),
@@ -734,6 +739,11 @@ pub fn boot_with(
     state.host.alloc_next = heap_base;
     state.host.alloc_end = heap_base + opts.heap_bytes;
     state.host.program_size = image_end;
+    // A windowed run shows the game's frames as it presents them; a headless
+    // run counts them instead.
+    if let Some(title) = &opts.window {
+        nvn_win::show_frames_in_a_window(&mut state, title);
+    }
     state.host.dyn_base = unresolved_stub + 16;
     state.host.dyn_capacity = DYNAMIC_STUBS;
     state.host.romfs_root = opts.romfs.clone();
