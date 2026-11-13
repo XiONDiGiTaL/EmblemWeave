@@ -109,7 +109,7 @@ native code runs, as an option, and has since `ew-native` was added.
 
 | Area | State |
 | --- | --- |
-| Liquid-glass controls; schemes: the xiondigital.net palette exactly (XiØN), a retro arcade palette with a neon grid (Arcade), gold, silver and blue (FE); the logo render in a colourway per scheme | Implemented |
+| Liquid-glass controls; schemes: XiØN's own palette exactly (xiondigital.net), a retro arcade palette with a neon grid (Arcade), gold, silver and blue (FE); the logo render in a colourway per scheme | Implemented |
 | Navigation, theme system ([XiØN](https://github.com/XiONDiGiTaL), Emblem, Arcade), wordmark and crest | Implemented |
 | Persistent settings (atomic writes, recovery from a damaged file) | Implemented |
 | Game data detection and validation (plain dumps and NSP extractions) | Implemented, checked on the retail data |
