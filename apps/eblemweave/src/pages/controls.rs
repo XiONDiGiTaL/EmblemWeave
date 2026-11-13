@@ -194,59 +194,76 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     );
 }
 
+/// How a button is drawn: the pad's own round buttons, its square, and the
+/// shoulder buttons, which the pad outline has no shape for.
+#[derive(Clone, Copy, PartialEq)]
+enum Face {
+    Circle,
+    Square,
+    Keycap,
+}
+
 /// One binding's place on the pad: the action it belongs to, the caption drawn
-/// beside it, the button face drawn in a chip (empty for the stick and D-pad
-/// entries), where each sits in 0..1 of the map, and the pad button that
-/// lights it.
+/// beside it, the glyph in the button, where it sits in 0..1 of the map, its
+/// radius in 0..1 of the map's width, where its caption goes, the pad button
+/// that lights it, and how it is drawn.
 struct Spot {
     action: &'static str,
     caption: &'static str,
     glyph: &'static str,
     at: (f32, f32),
+    r: f32,
     cap: (f32, f32),
-    /// The XInput button for this spot; 0 for the sticks and triggers, which
-    /// have no button bit.
     pad: u16,
+    face: Face,
 }
 
-/// The game's pad, button by button. Bindings are matched by action name, so
-/// the map follows whatever the table holds rather than a copy of it.
+/// The game's pad, button by button, on the reference layout: the left stick
+/// and D-pad on the left, the face buttons and right stick on the right, the
+/// square and the small round button between them, and the shoulders on top.
+/// Bindings are matched by action name, so the map follows whatever the table
+/// holds rather than a copy of it.
 const SPOTS: [Spot; 15] = [
-    Spot { action: "Confirm", caption: "Confirm", glyph: "A", at: (0.705, 0.400), cap: (0.705, 0.442), pad: button::EAST },
-    Spot { action: "Cancel", caption: "Cancel", glyph: "B", at: (0.780, 0.335), cap: (0.780, 0.377), pad: button::SOUTH },
-    Spot { action: "Menu", caption: "Menu", glyph: "X", at: (0.630, 0.335), cap: (0.630, 0.377), pad: button::NORTH },
-    Spot { action: "Unit details", caption: "Details", glyph: "Y", at: (0.705, 0.278), cap: (0.705, 0.232), pad: button::WEST },
-    Spot { action: "Previous unit", caption: "Previous", glyph: "L", at: (0.190, 0.150), cap: (0.190, 0.192), pad: button::LEFT_SHOULDER },
-    Spot { action: "Next unit", caption: "Next", glyph: "R", at: (0.810, 0.150), cap: (0.810, 0.192), pad: button::RIGHT_SHOULDER },
-    Spot { action: "Danger zone", caption: "Danger", glyph: "ZL", at: (0.115, 0.062), cap: (0.115, 0.107), pad: 0 },
-    Spot { action: "Fast forward", caption: "Fast fwd", glyph: "ZR", at: (0.885, 0.062), cap: (0.885, 0.107), pad: 0 },
-    Spot { action: "End turn", caption: "End turn", glyph: "+", at: (0.565, 0.195), cap: (0.565, 0.237), pad: button::START },
-    Spot { action: "Map", caption: "Map", glyph: "\u{2212}", at: (0.435, 0.195), cap: (0.435, 0.237), pad: button::BACK },
-    Spot { action: "Cursor up", caption: "Up", glyph: "", at: (0.300, 0.215), cap: (0.300, 0.215), pad: button::DPAD_UP },
-    Spot { action: "Cursor down", caption: "Down", glyph: "", at: (0.300, 0.478), cap: (0.300, 0.478), pad: button::DPAD_DOWN },
-    Spot { action: "Cursor left", caption: "Left", glyph: "", at: (0.176, 0.350), cap: (0.176, 0.350), pad: button::DPAD_LEFT },
-    Spot { action: "Cursor right", caption: "Right", glyph: "", at: (0.424, 0.350), cap: (0.424, 0.350), pad: button::DPAD_RIGHT },
-    Spot { action: "Camera", caption: "Camera", glyph: "", at: (0.670, 0.655), cap: (0.670, 0.655), pad: 0 },
+    Spot { action: "Confirm", caption: "Confirm", glyph: "A", at: (0.765, 0.435), r: 0.034, cap: (0.765, 0.508), pad: button::EAST, face: Face::Circle },
+    Spot { action: "Cancel", caption: "Cancel", glyph: "B", at: (0.846, 0.332), r: 0.030, cap: (0.846, 0.400), pad: button::SOUTH, face: Face::Circle },
+    Spot { action: "Menu", caption: "Menu", glyph: "X", at: (0.762, 0.243), r: 0.034, cap: (0.762, 0.176), pad: button::NORTH, face: Face::Circle },
+    Spot { action: "Unit details", caption: "Details", glyph: "Y", at: (0.668, 0.355), r: 0.036, cap: (0.645, 0.428), pad: button::WEST, face: Face::Circle },
+    Spot { action: "Previous unit", caption: "Previous", glyph: "L", at: (0.175, 0.062), r: 0.0, cap: (0.175, 0.112), pad: button::LEFT_SHOULDER, face: Face::Keycap },
+    Spot { action: "Next unit", caption: "Next", glyph: "R", at: (0.825, 0.062), r: 0.0, cap: (0.825, 0.112), pad: button::RIGHT_SHOULDER, face: Face::Keycap },
+    Spot { action: "Danger zone", caption: "Danger", glyph: "ZL", at: (0.075, 0.120), r: 0.0, cap: (0.075, 0.170), pad: 0, face: Face::Keycap },
+    Spot { action: "Fast forward", caption: "Fast fwd", glyph: "ZR", at: (0.925, 0.120), r: 0.0, cap: (0.925, 0.170), pad: 0, face: Face::Keycap },
+    Spot { action: "End turn", caption: "End turn", glyph: "+", at: (0.431, 0.342), r: 0.022, cap: (0.431, 0.400), pad: button::START, face: Face::Square },
+    Spot { action: "Map", caption: "Map", glyph: "\u{2212}", at: (0.377, 0.247), r: 0.019, cap: (0.377, 0.298), pad: button::BACK, face: Face::Circle },
+    Spot { action: "Cursor up", caption: "Up", glyph: "", at: (0.343, 0.398), r: 0.0, cap: (0.343, 0.398), pad: button::DPAD_UP, face: Face::Circle },
+    Spot { action: "Cursor down", caption: "Down", glyph: "", at: (0.343, 0.622), r: 0.0, cap: (0.343, 0.622), pad: button::DPAD_DOWN, face: Face::Circle },
+    Spot { action: "Cursor left", caption: "Left", glyph: "", at: (0.232, 0.505), r: 0.0, cap: (0.232, 0.505), pad: button::DPAD_LEFT, face: Face::Circle },
+    Spot { action: "Cursor right", caption: "Right", glyph: "", at: (0.458, 0.505), r: 0.0, cap: (0.458, 0.505), pad: button::DPAD_RIGHT, face: Face::Circle },
+    Spot { action: "Camera", caption: "Camera", glyph: "", at: (0.635, 0.668), r: 0.0, cap: (0.635, 0.668), pad: 0, face: Face::Circle },
 ];
 
-/// The pad, drawn as a path so every scheme tints it without an asset: the
-/// outline takes the scheme's accent, the buttons its surfaces, and a pad that
-/// is connected lights each control as it is used.
+/// The pad, drawn as a path from the reference outline so every scheme tints
+/// it without an asset: the outline takes the scheme's accent, and a connected
+/// pad lights each control as it is used.
 fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::config::Binding], live: Option<pad::Live>) {
-    let width = ui.available_width().min(660.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 0.55), egui::Sense::hover());
+    let width = ui.available_width().min(520.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, width * 0.716), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let at = |x: f32, y: f32| egui::pos2(rect.left() + x * rect.width(), rect.top() + y * rect.height());
+    let line = |on: bool, rest: u8, lit: u8| theme::alpha(p.accent, if on { lit } else { rest });
 
-    // A pad's silhouette from a handful of anchors, smoothed so it scales
-    // cleanly at any width.
+    // The reference silhouette, clockwise from the notch at the top centre:
+    // two shoulders with a step, the body, the grips and the flat bottom.
     let anchors = [
-        (0.500, 0.150), (0.600, 0.138), (0.700, 0.128), (0.780, 0.132), (0.850, 0.165),
-        (0.900, 0.235), (0.930, 0.360), (0.930, 0.520), (0.910, 0.690), (0.875, 0.800),
-        (0.815, 0.870), (0.745, 0.865), (0.695, 0.800), (0.660, 0.760), (0.590, 0.740),
-        (0.500, 0.735), (0.410, 0.740), (0.340, 0.760), (0.305, 0.800), (0.255, 0.865),
-        (0.185, 0.870), (0.125, 0.800), (0.090, 0.690), (0.070, 0.520), (0.070, 0.360),
-        (0.100, 0.235), (0.150, 0.165), (0.220, 0.132), (0.300, 0.128), (0.400, 0.138),
+        (0.395, 0.092), (0.412, 0.103), (0.432, 0.092), (0.480, 0.076), (0.560, 0.074),
+        (0.635, 0.074), (0.700, 0.082), (0.737, 0.098), (0.744, 0.118), (0.800, 0.145),
+        (0.860, 0.185), (0.895, 0.215), (0.925, 0.300), (0.945, 0.400), (0.960, 0.520),
+        (0.965, 0.640), (0.955, 0.760), (0.930, 0.860), (0.890, 0.920), (0.840, 0.940),
+        (0.790, 0.920), (0.760, 0.860), (0.740, 0.790), (0.700, 0.745), (0.620, 0.735),
+        (0.520, 0.735), (0.420, 0.735), (0.340, 0.745), (0.300, 0.790), (0.280, 0.860),
+        (0.250, 0.920), (0.200, 0.940), (0.150, 0.920), (0.110, 0.860), (0.085, 0.760),
+        (0.075, 0.640), (0.080, 0.520), (0.095, 0.400), (0.115, 0.300), (0.145, 0.215),
+        (0.180, 0.185), (0.215, 0.145), (0.245, 0.118), (0.255, 0.098), (0.290, 0.082),
+        (0.350, 0.074), (0.383, 0.080),
     ];
     let points: Vec<egui::Pos2> = smooth_closed(&anchors).into_iter().map(|(x, y)| at(x, y)).collect();
     for (w, a) in [(9.0_f32, 14u8), (4.5_f32, 40)] {
@@ -254,32 +271,39 @@ fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::conf
     }
     painter.add(egui::Shape::closed_line(points, egui::epaint::PathStroke::new(2.0_f32, p.accent)));
 
-    // The D-pad is one cross rather than four chips, so up, down, left and
-    // right read as a single control. Each arm lights on its own.
-    let cross = at(0.300, 0.350);
-    let (half, arm) = (rect.width() * 0.050, rect.width() * 0.015);
-    for (bit, dx, dy, size) in [
-        (button::DPAD_UP, 0.0, -half * 0.5, egui::vec2(arm, half)),
-        (button::DPAD_DOWN, 0.0, half * 0.5, egui::vec2(arm, half)),
-        (button::DPAD_LEFT, -half * 0.5, 0.0, egui::vec2(half, arm)),
-        (button::DPAD_RIGHT, half * 0.5, 0.0, egui::vec2(half, arm)),
-    ] {
-        let on = live.is_some_and(|l| l.held(bit));
-        let colour = theme::alpha(p.accent, if on { 210 } else { 70 });
-        painter.rect_filled(egui::Rect::from_center_size(cross + egui::vec2(dx, dy), size), 3, colour);
+    // The shapes the reference pad has but no action uses: the small round
+    // button under the notch and two beside the face buttons.
+    for (x, y, r) in [(0.409, 0.099, 0.013), (0.623, 0.241, 0.022), (0.563, 0.346, 0.021)] {
+        painter.circle_stroke(at(x, y), r * rect.width(), egui::Stroke::new(1.5_f32, theme::alpha(p.accent, 90)));
     }
 
-    // The two sticks: outlines only, as the pad has them, with the stick's
-    // position shown inside while a pad is connected.
-    for (x, stick) in [(0.330, live.map(|l| l.left)), (0.670, live.map(|l| l.right))] {
-        let c = at(x, 0.575);
-        let r = rect.width() * 0.030;
-        painter.circle_stroke(c, r, egui::Stroke::new(1.5_f32, theme::alpha(p.accent, 130)));
+    // The two sticks: the reference's double rings, with the stick's position
+    // shown inside while a pad is connected.
+    for (x, y, stick) in [(0.229, 0.342, live.map(|l| l.left)), (0.635, 0.540, live.map(|l| l.right))] {
+        let c = at(x, y);
+        let r = rect.width() * 0.066;
+        painter.circle_stroke(c, r, egui::Stroke::new(2.0_f32, theme::alpha(p.accent, 150)));
+        painter.circle_stroke(c, rect.width() * 0.045, egui::Stroke::new(1.5_f32, theme::alpha(p.accent, 90)));
         if let Some((vx, vy)) = stick {
-            let dot = c + egui::vec2(vx * r * 0.72, -vy * r * 0.72);
+            let dot = c + egui::vec2(vx * r * 0.66, -vy * r * 0.66);
             let moved = vx.abs().max(vy.abs()) > 0.02;
-            painter.circle_filled(dot, r * 0.30, if moved { p.accent } else { theme::alpha(p.accent, 90) });
+            painter.circle_filled(dot, r * 0.26, if moved { p.accent } else { theme::alpha(p.accent, 90) });
         }
+    }
+
+    // The D-pad is one cross, as the reference draws it. Each arm lights on
+    // its own.
+    let cross = at(0.343, 0.505);
+    let half = egui::vec2(rect.width() * 0.071, rect.height() * 0.085);
+    let arm = rect.width() * 0.045;
+    for (bit, dx, dy, size) in [
+        (button::DPAD_UP, 0.0, -half.y * 0.5, egui::vec2(arm, half.y)),
+        (button::DPAD_DOWN, 0.0, half.y * 0.5, egui::vec2(arm, half.y)),
+        (button::DPAD_LEFT, -half.x * 0.5, 0.0, egui::vec2(half.x, arm)),
+        (button::DPAD_RIGHT, half.x * 0.5, 0.0, egui::vec2(half.x, arm)),
+    ] {
+        let on = live.is_some_and(|l| l.held(bit));
+        painter.rect_filled(egui::Rect::from_center_size(cross + egui::vec2(dx, dy), size), 3, line(on, 70, 210));
     }
 
     for (i, s) in SPOTS.iter().enumerate() {
@@ -291,26 +315,47 @@ fn controller_map(ui: &mut egui::Ui, p: &theme::Palette, bindings: &[crate::conf
             "Fast forward" => live.map_or(0.0, |l| l.rt),
             _ => 0.0,
         };
+        let on = bound.is_some();
+        let base = if on { 34.0 } else { 10.0 };
+        let fill = if held { (base + travel * 120.0).max(150.0) } else { base + travel * 120.0 } as u8;
+        let edge = if held { 220 } else if on { 170 } else { 55 };
+        let c = at(s.at.0, s.at.1);
+
         if s.glyph.is_empty() {
-            let colour = if held || travel > 0.1 { p.accent } else if bound.is_some() { p.body } else { theme::alpha(p.muted, 120) };
+            // The D-pad arms and the sticks carry no face of their own: their
+            // captions are the control's label.
+            let colour = if held { p.accent } else if bound.is_some() { p.body } else { theme::alpha(p.muted, 120) };
             painter.text(at(s.cap.0, s.cap.1), egui::Align2::CENTER_CENTER, s.caption, egui::FontId::new(10.0, egui::FontFamily::Proportional), colour);
             continue;
         }
-        let c = at(s.at.0, s.at.1);
-        let w = 22.0 + 6.0 * s.glyph.chars().count().saturating_sub(1) as f32;
-        let chip = egui::Rect::from_center_size(c, egui::vec2(w, 22.0));
-        let on = bound.is_some();
-        let base = if on { 34.0 } else { 10.0 };
-        let fill = (base + travel * 120.0) as u8;
-        let fill = if held { fill.max(150) } else { fill };
-        let edge = if held { 220 } else if on { 170 } else { 55 };
-        painter.rect_filled(chip, egui::CornerRadius::same(6), theme::alpha(p.accent, fill));
-        painter.rect_stroke(chip, egui::CornerRadius::same(6), egui::Stroke::new(1.0_f32, theme::alpha(p.accent, edge)), egui::StrokeKind::Inside);
+
+        let hit = match s.face {
+            Face::Circle => {
+                let r = s.r * rect.width();
+                painter.circle_filled(c, r, theme::alpha(p.accent, fill));
+                painter.circle_stroke(c, r, egui::Stroke::new(1.5_f32, theme::alpha(p.accent, edge)));
+                egui::Rect::from_center_size(c, egui::vec2(r, r) * 2.0)
+            }
+            Face::Square => {
+                let side = s.r * rect.width() * 2.0;
+                let sq = egui::Rect::from_center_size(c, egui::vec2(side, side));
+                painter.rect_filled(sq, egui::CornerRadius::same(3), theme::alpha(p.accent, fill));
+                painter.rect_stroke(sq, egui::CornerRadius::same(3), egui::Stroke::new(1.5_f32, theme::alpha(p.accent, edge)), egui::StrokeKind::Inside);
+                sq
+            }
+            Face::Keycap => {
+                let w = 22.0 + 6.0 * s.glyph.chars().count().saturating_sub(1) as f32;
+                let chip = egui::Rect::from_center_size(c, egui::vec2(w, 22.0));
+                painter.rect_filled(chip, egui::CornerRadius::same(6), theme::alpha(p.accent, fill));
+                painter.rect_stroke(chip, egui::CornerRadius::same(6), egui::Stroke::new(1.0_f32, theme::alpha(p.accent, edge)), egui::StrokeKind::Inside);
+                chip
+            }
+        };
         painter.text(c, egui::Align2::CENTER_CENTER, s.glyph, theme::semibold(11.0), if on { p.ink } else { theme::alpha(p.ink, 90) });
         let cap_colour = if held { p.accent } else if on { p.body } else { theme::alpha(p.muted, 120) };
         painter.text(at(s.cap.0, s.cap.1), egui::Align2::CENTER_CENTER, s.caption, egui::FontId::new(10.0, egui::FontFamily::Proportional), cap_colour);
         if let Some(b) = bound {
-            let hover = ui.interact(chip.expand(9.0), ui.id().with(("pad-spot", i)), egui::Sense::hover());
+            let hover = ui.interact(hit.expand(9.0), ui.id().with(("pad-spot", i)), egui::Sense::hover());
             hover.on_hover_text(format!("{}  ·  {}", b.action, b.pad));
         }
     }
