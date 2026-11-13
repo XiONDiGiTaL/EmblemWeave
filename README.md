@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>A native Windows recompilation of <em>Fire Emblem: Fortune's Weave</em>.</strong><br>
+  <strong>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>.<br>
+  Recompiled ahead of time, with integrated mod management and in-game enhancements.</strong><br>
   Built by <a href="https://github.com/XiONDiGiTaL">XiØN</a>.
 </p>
 
@@ -19,11 +20,11 @@
 
 ---
 
-EmblemWeave plays *Fire Emblem: Fortune's Weave* natively on Windows, from your
-own copy of the game, with no emulator. The game's machine code is recompiled
-ahead of time into native PC code, and the launcher brings everything around it
-together: building the game from your dump, save profiles and a save editor,
-mods from GameBanana, cheats, and an in-game menu.
+EmblemWeave is a feature-rich recompilation launcher for *Fire Emblem: Fortune's
+Weave*. It builds the game ahead of time from your own dump and plays it natively
+on Windows with no emulator, and it gathers everything around that into one
+application: integrated mod management, save profiles and a save editor, cheats,
+an in-game menu, and a recompilation pipeline you can watch run.
 
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
@@ -64,11 +65,13 @@ game code, no assets and no keys, and it only ever reads your files.
 
 ## What EmblemWeave does
 
-EmblemWeave plays *Fire Emblem: Fortune's Weave* natively on Windows, built from your own dump, with no emulator. Today the
+EmblemWeave is a launcher first and a recompiler underneath it. It finds and validates your dump, builds the game
+natively, keeps your saves and mods in order, and starts the game with its own in-game menu over it. It plays
+*Fire Emblem: Fortune's Weave* on Windows with no emulator. Today the
 game is built and run by the bundled baseline engine in `engine/` (GPL-3.0, with its own licence and notices in that
 folder): it translates the game's code to C++ and compiles it into `fefw.exe`, which draws with Vulkan, plays audio
-through XAudio2 and decodes the game's movies. The EmblemWeave launcher finds and checks your dump, drives that build,
-keeps your saves (including imports from Switch emulators), and starts the game.
+through XAudio2 and decodes the game's movies. The EmblemWeave launcher does the rest: it finds and checks your dump,
+drives that build, keeps your saves (including imports from Switch emulators), manages your mods, and starts the game.
 
 EmblemWeave also has its own recompiler and runtime in Rust, which is being completed to replace the baseline engine:
 
@@ -88,11 +91,11 @@ feature as working before it is.
 | | |
 | --- | --- |
 | **Play natively** | Build the game once from your own dump, then play it at 60 fps with sound and its cutscenes, windowed or full screen. |
-| **In-game menu** | F10 or Back + RB while playing: pause, screenshot, restart, stop and return, cheats and display settings. |
+| **In-game enhancements** | F10 or Back + RB while playing: pause, screenshot, restart, stop and return, cheats and display settings. |
 | **Saves** | Save profiles to switch between, imports from yuzu, suyu, sudachi, citron, eden and torzu, and a save editor (gold, renown, level, experience, stats, weapon masteries, items and spells). |
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
-| **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, six colour schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+| **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
 
 ## Development status
 
@@ -163,8 +166,10 @@ The screenshots are the launcher's own rendering, saved with `EmblemWeave.exe --
   game's swap texture untiled per frame and presented, independent of the
   baseline engine.
 - **A complete launcher** with game-data detection, save profiles and editing,
-  mods and cheats, an in-game menu, a staged recompilation pipeline, diagnostics
-  with search and export, and six colour schemes.
+  mod management and cheats, an in-game enhancements menu, a staged
+  recompilation pipeline, diagnostics with search and export, and six colour
+  schemes, all built from one set of liquid-glass controls that take their
+  colour and glow from the scheme.
 
 ## System requirements
 

@@ -82,6 +82,8 @@ pub struct Palette {
     pub electric: Color32,
     /// Deep accent for selection fills and pressed buttons.
     pub accent_deep: Color32,
+    /// Text on a primary fill: white, or near-black where the accent is light.
+    pub on_accent: Color32,
     /// Ambient glow, already translucent.
     pub glow: Color32,
     /// Restrained gold for brand details.
@@ -126,7 +128,7 @@ impl Scheme {
     pub fn detail(self) -> &'static str {
         match self {
             Scheme::Xion => "xiondigital.net: graphite surfaces, signature blue and a silver wordmark",
-            Scheme::Arcade => "Retro arcade: hot pink, arcade yellow and cyan on a violet cabinet",
+            Scheme::Arcade => "Retro arcade: hot pink, arcade yellow and cyan on a violet cabinet, over a neon grid drawn behind every page",
             Scheme::Fe => "Tactical fantasy: metallic gold, white silver and royal blue",
             Scheme::Ember => "Forge fire: ember orange and molten gold over oxblood steel",
             Scheme::Verdant => "Deep forest: emerald and pale gold over moss-black",
@@ -152,6 +154,7 @@ impl Scheme {
             accent_hi: rgb(0x79, 0xA8, 0xFF),
             electric: rgb(0x79, 0xA8, 0xFF),
             accent_deep: rgb(0x1A, 0x3D, 0x82),
+            on_accent: Color32::WHITE,
             glow: rgba(0x3F, 0x80, 0xFF, 40),
             gold: rgb(0xCF, 0xD4, 0xDC),
             logo: crate::logo::LOGO_XION,
@@ -180,6 +183,7 @@ impl Scheme {
                 accent_hi: rgb(0x29, 0xE3, 0xFF),
                 electric: rgb(0x29, 0xE3, 0xFF),
                 accent_deep: rgb(0x8A, 0x14, 0x56),
+                on_accent: Color32::WHITE,
                 glow: rgba(0xFF, 0x2E, 0x97, 48),
                 gold: rgb(0xFF, 0xD2, 0x3F),
                 logo: crate::logo::LOGO_ARCADE,
@@ -204,6 +208,7 @@ impl Scheme {
                 accent_hi: rgb(0xE9, 0xCD, 0x6B),
                 electric: rgb(0x5C, 0x8C, 0xFF),
                 accent_deep: rgb(0x1D, 0x48, 0xAF),
+                on_accent: Color32::WHITE,
                 glow: rgba(0x1D, 0x48, 0xAF, 64),
                 gold: rgb(0xC9, 0xA2, 0x27),
                 logo: crate::logo::LOGO_FE,
@@ -228,6 +233,7 @@ impl Scheme {
                 accent_hi: rgb(0xFD, 0xBA, 0x74),
                 electric: rgb(0xFB, 0x92, 0x3C),
                 accent_deep: rgb(0x9A, 0x3D, 0x0C),
+                on_accent: Color32::WHITE,
                 glow: rgba(0xF9, 0x73, 0x16, 48),
                 gold: rgb(0xF4, 0xC1, 0x5A),
                 logo: crate::logo::LOGO_EMBER,
@@ -252,6 +258,7 @@ impl Scheme {
                 accent_hi: rgb(0x6E, 0xE7, 0xB7),
                 electric: rgb(0x34, 0xD3, 0x99),
                 accent_deep: rgb(0x0A, 0x6B, 0x4B),
+                on_accent: Color32::WHITE,
                 glow: rgba(0x10, 0xB9, 0x81, 40),
                 gold: rgb(0xD9, 0xC5, 0x6A),
                 logo: crate::logo::LOGO_VERDANT,
@@ -276,6 +283,8 @@ impl Scheme {
                 accent_hi: rgb(0xA5, 0xE4, 0xFF),
                 electric: rgb(0x7D, 0xD3, 0xFC),
                 accent_deep: rgb(0x14, 0x62, 0x8F),
+                // Glacier blue is light: dark ink keeps a white-free button legible.
+                on_accent: rgb(0x04, 0x16, 0x24),
                 glow: rgba(0x38, 0xBD, 0xF8, 40),
                 gold: rgb(0xCF, 0xE3, 0xF2),
                 logo: crate::logo::LOGO_FROST,

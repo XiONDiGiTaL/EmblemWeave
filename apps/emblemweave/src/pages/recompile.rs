@@ -28,7 +28,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(theme::SPACE_M);
             ui.vertical(|ui| {
                 ui.label(RichText::new("Functions to recover").font(theme::semibold(13.0)).color(p.ink));
-                ui.add_enabled(!running, egui::Slider::new(&mut app.lift_limit, 500..=40_000).logarithmic(true));
+                let mut lift = app.lift_limit as f32;
+                if widgets::Slider::new(&mut lift, 500.0..=40_000.0).logarithmic(true).enabled(!running).show(ui, &p).changed() {
+                    app.lift_limit = lift.round() as usize;
+                }
             });
             if running {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

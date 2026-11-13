@@ -192,13 +192,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "Runtime", |ui| {
         widgets::setting_row(ui, &p, "Instruction budget", "A boot test stops after this many guest instructions.", |ui| {
-            let mut millions = (app.config.runtime.max_steps / 1_000_000) as u32;
-            if ui.add(egui::Slider::new(&mut millions, 1..=2000).suffix(" M").logarithmic(true)).changed() {
-                app.config.runtime.max_steps = millions as u64 * 1_000_000;
+            let mut millions = (app.config.runtime.max_steps / 1_000_000) as f32;
+            if widgets::Slider::new(&mut millions, 1.0..=2000.0).suffix(" M").logarithmic(true).show(ui, &p).changed() {
+                app.config.runtime.max_steps = millions.round() as u64 * 1_000_000;
             }
         });
         widgets::setting_row(ui, &p, "Guest heap", "Memory reserved for the game's heap. Committed by the OS only as used.", |ui| {
-            ui.add(egui::Slider::new(&mut app.config.runtime.heap_mib, 256..=8192).suffix(" MiB").logarithmic(true));
+            let mut heap = app.config.runtime.heap_mib as f32;
+            if widgets::Slider::new(&mut heap, 256.0..=8192.0).suffix(" MiB").logarithmic(true).show(ui, &p).changed() {
+                app.config.runtime.heap_mib = heap.round() as u64;
+            }
         });
     });
 }

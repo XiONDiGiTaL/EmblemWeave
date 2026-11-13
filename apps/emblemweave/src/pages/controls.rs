@@ -111,10 +111,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// A slider in whole percent, returning the new value when it moved.
-fn percent(ui: &mut egui::Ui, value: f32, range: std::ops::RangeInclusive<u32>) -> Option<u32> {
-    let mut pct = (value * 100.0).round() as u32;
-    let changed = ui.add(egui::Slider::new(&mut pct, range).suffix(" %")).changed();
-    changed.then_some(pct)
+fn percent(ui: &mut egui::Ui, p: &theme::Palette, value: f32, range: std::ops::RangeInclusive<u32>) -> Option<u32> {
+    let mut pct = (value * 100.0).round();
+    let changed = widgets::Slider::new(&mut pct, *range.start() as f32..=*range.end() as f32)
+        .suffix(" %")
+        .show(ui, p)
+        .changed();
+    changed.then_some(pct.round() as u32)
 }
 
 /// The four `[pad]` values the game reads, written into its `controls.ini` as
@@ -136,33 +139,33 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     let mut save: Option<(&'static str, f32)> = None;
 
     widgets::setting_row(ui, p, "Left stick dead zone", "Movement below this is ignored.", |ui| {
-        if let Some(pct) = percent(ui, t.left_deadzone, 0..=50) {
+        if let Some(pct) = percent(ui, p, t.left_deadzone, 0..=50) {
             t.left_deadzone = pct as f32 / 100.0;
             save = Some(("deadzone", t.left_deadzone));
         }
     });
     widgets::setting_row(ui, p, "Right stick dead zone", "Camera movement below this is ignored.", |ui| {
-        if let Some(pct) = percent(ui, t.right_deadzone, 0..=50) {
+        if let Some(pct) = percent(ui, p, t.right_deadzone, 0..=50) {
             t.right_deadzone = pct as f32 / 100.0;
             save = Some(("right_deadzone", t.right_deadzone));
         }
     });
     widgets::setting_row(ui, p, "Full tilt", "How far the stick must travel to count as fully pushed. Lower it for a worn pad that tops out early.", |ui| {
-        if let Some(pct) = percent(ui, t.stick_max, 50..=100) {
+        if let Some(pct) = percent(ui, p, t.stick_max, 50..=100) {
             t.stick_max = pct as f32 / 100.0;
             save = Some(("stick_max", t.stick_max));
         }
     });
     widgets::setting_row(ui, p, "Trigger threshold", "Trigger travel that counts as ZL or ZR pressed.", |ui| {
-        if let Some(pct) = percent(ui, t.trigger, 5..=100) {
+        if let Some(pct) = percent(ui, p, t.trigger, 5..=100) {
             t.trigger = pct as f32 / 100.0;
             save = Some(("trigger_threshold", t.trigger));
         }
     });
     widgets::setting_row(ui, p, "Vibration", "Kept by the launcher; the game's own rumble level is in its F1 menu.", |ui| {
-        let mut pct = (app.config.input.vibration * 100.0).round() as u32;
-        if ui.add(egui::Slider::new(&mut pct, 0..=100).suffix(" %")).changed() {
-            app.config.input.vibration = pct as f32 / 100.0;
+        let mut pct = (app.config.input.vibration * 100.0).round();
+        if widgets::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").show(ui, p).changed() {
+            app.config.input.vibration = pct / 100.0;
         }
     });
 

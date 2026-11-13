@@ -200,17 +200,21 @@ pub fn gradient_shape(rect: Rect, radius: f32, top: Color32, bottom: Color32) ->
 /// Every button in the launcher: one height, one type size, one pill radius.
 /// `primary` changes the fill, never the size, so a row of controls reads as a
 /// single family whatever each one does.
+/// Every button in the launcher: one height, one type size, one pill radius.
+/// The finish is liquid glass — a tinted body with a specular band across the
+/// top, a lit rim and a soft glow in the scheme's accent — so a button reads as
+/// the same physical material in every scheme, in that scheme's colour.
 fn button_core(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool, primary: bool) -> egui::Response {
     const HEIGHT: f32 = 32.0;
     let font = theme::semibold(13.0);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, p.ink);
-    let size = Vec2::new(galley.size().x + if primary { 36.0 } else { 26.0 }, HEIGHT);
+    let size = Vec2::new(galley.size().x + if primary { 38.0 } else { 28.0 }, HEIGHT);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (slot, response) = ui.allocate_exact_size(size, sense);
     if ui.is_rect_visible(slot) {
         let hover = ui.ctx().animate_bool(response.id.with("hover"), enabled && response.hovered());
         let pressed = enabled && response.is_pointer_button_down_on();
-        let rect = slot.translate(Vec2::new(0.0, -1.0 * hover + if pressed { 1.0 } else { 0.0 }));
+        let rect = slot.translate(Vec2::new(0.0, -hover + if pressed { 1.0 } else { 0.0 }));
         let radius = theme::RADIUS_PILL;
         let painter = ui.painter();
         if !enabled {
@@ -219,26 +223,158 @@ fn button_core(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool, primar
             painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, alpha(p.muted, 210));
             return response;
         }
+        // The glow: two faint rings of the accent under the body.
+        for (i, a) in [(1.0_f32, 14u8), (2.2, 8)] {
+            painter.rect_filled(rect.expand(i * (1.0 + hover)), CornerRadius::same(radius), alpha(p.accent, a));
+        }
         if primary {
-            let base = if pressed { p.accent_deep } else { lerp(p.accent, p.accent_hover, hover * 0.75) };
+            let base = if pressed { p.accent_deep } else { lerp(lerp(p.accent, p.accent_deep, 0.22), p.accent_hi, hover * 0.3) };
             painter.rect_filled(rect, CornerRadius::same(radius), base);
-            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, alpha(p.accent_hi, 170)), StrokeKind::Inside);
-            // One hairline of light along the top edge, not a glow.
-            let top = Rect::from_min_max(rect.min + Vec2::new(radius as f32 * 0.9, 1.0), Pos2::new(rect.max.x - radius as f32 * 0.9, rect.min.y + 1.7));
-            painter.rect_filled(top, CornerRadius::same(1), alpha(Color32::WHITE, (44.0 + 26.0 * hover) as u8));
+            // The body's own shading: light from the top, weight at the bottom.
+            gradient_fill(painter, Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.center().y)), radius as f32, alpha(Color32::WHITE, (34.0 + 26.0 * hover) as u8), Color32::TRANSPARENT);
+            gradient_fill(painter, Rect::from_min_max(Pos2::new(rect.min.x, rect.center().y), rect.max), radius as f32, Color32::TRANSPARENT, alpha(Color32::BLACK, 46));
+            // A specular hot spot across the upper third, as glass catches light:
+            // thin pills of falling opacity, which keep their edges clean at
+            // this size where a gradient mesh does not.
+            let inner = rect.shrink2(Vec2::new(radius as f32 * 0.9, 1.0));
+            for (dy, h, a) in [(0.5_f32, 2.5_f32, 54u8), (3.6, 3.0, 26), (7.0, 3.0, 10)] {
+                let strip = Rect::from_min_size(inner.min + Vec2::new(0.0, dy), Vec2::new(inner.width(), h));
+                painter.rect_filled(strip, CornerRadius::same((h * 0.5) as u8), alpha(Color32::WHITE, (a as f32 * (0.75 + 0.5 * hover)) as u8));
+            }
+            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, alpha(Color32::WHITE, 46)), StrokeKind::Inside);
+            painter.rect_stroke(rect.shrink(1.0), CornerRadius::same(radius - 1), Stroke::new(1.0_f32, alpha(p.accent_hi, 90)), StrokeKind::Inside);
         } else {
-            painter.rect_filled(rect, CornerRadius::same(radius), lerp(alpha(Color32::WHITE, 4), alpha(p.accent, 22), hover));
-            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, lerp(p.line_strong, alpha(p.accent, 130), hover)), StrokeKind::Inside);
+            let base = lerp(alpha(Color32::WHITE, 4), alpha(p.accent, 20), hover);
+            painter.rect_filled(rect, CornerRadius::same(radius), base);
+            gradient_fill(painter, Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.center().y + 2.0)), radius as f32, alpha(Color32::WHITE, (16.0 + 14.0 * hover) as u8), Color32::TRANSPARENT);
+            let inner = rect.shrink2(Vec2::new(radius as f32 * 0.9, 1.0));
+            for (dy, h, a) in [(0.5_f32, 2.0_f32, 26u8), (3.2, 2.5, 10)] {
+                let strip = Rect::from_min_size(inner.min + Vec2::new(0.0, dy), Vec2::new(inner.width(), h));
+                painter.rect_filled(strip, CornerRadius::same((h * 0.5) as u8), alpha(Color32::WHITE, a));
+            }
+            let rim = lerp(alpha(Color32::WHITE, 26), alpha(p.accent, 130), hover);
+            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, rim), StrokeKind::Inside);
         }
         if response.has_focus() {
-            ui.painter().rect_stroke(rect.expand(2.5), CornerRadius::same(radius), Stroke::new(1.5_f32, p.accent_hi), StrokeKind::Outside);
+            painter.rect_stroke(rect.expand(2.5), CornerRadius::same(radius), Stroke::new(1.5_f32, p.accent_hi), StrokeKind::Outside);
         }
-        let ink = if primary { Color32::WHITE } else { lerp(p.ink, Color32::WHITE, hover) };
-        ui.painter().galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, ink);
+        let ink = if primary { p.on_accent } else { lerp(p.ink, Color32::WHITE, hover) };
+        painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, ink);
     }
     if enabled {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
+        response
+    }
+}
+
+/// The one prominent action on a page.
+pub fn primary_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> egui::Response {
+    button_core(ui, p, text, enabled, true)
+}
+
+pub fn button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> egui::Response {
+    button_core(ui, p, text, enabled, false)
+}
+
+/// A slider in the launcher's own material: a glass track carrying a glowing
+/// fill in the scheme's accent, with the value in monospace beside it. Track,
+/// fill, handle and glow all come from the palette, so the control changes with
+/// the theme like every other one.
+pub struct Slider<'a> {
+    value: &'a mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &'static str,
+    decimals: usize,
+    log: bool,
+    on: bool,
+}
+
+impl<'a> Slider<'a> {
+    pub fn new(value: &'a mut f32, range: std::ops::RangeInclusive<f32>) -> Slider<'a> {
+        Slider { value, range, suffix: "", decimals: 0, log: false, on: true }
+    }
+    pub fn suffix(mut self, suffix: &'static str) -> Self {
+        self.suffix = suffix;
+        self
+    }
+    pub fn fixed_decimals(mut self, decimals: usize) -> Self {
+        self.decimals = decimals;
+        self
+    }
+    pub fn logarithmic(mut self, on: bool) -> Self {
+        self.log = on;
+        self
+    }
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.on = on;
+        self
+    }
+
+    pub fn show(self, ui: &mut egui::Ui, p: &Palette) -> egui::Response {
+        let (lo, hi) = (*self.range.start(), *self.range.end());
+        let span = (hi - lo).abs().max(f32::EPSILON);
+        // A logarithm needs a positive floor; anything else is linear.
+        let log = self.log && lo > 0.0;
+        let to_t = |v: f32| -> f32 {
+            let t = if log { (v.max(lo) / lo).ln() / (hi / lo).ln() } else { (v - lo) / span };
+            t.clamp(0.0, 1.0)
+        };
+        let from_t = |t: f32| -> f32 {
+            let t = t.clamp(0.0, 1.0);
+            if log { lo * (hi / lo).powf(t) } else { lo + span * t }
+        };
+        let text = format!("{:.*}{}", self.decimals, *self.value, self.suffix);
+        let font = theme::mono(11.5);
+        let galley = ui.painter().layout_no_wrap(text, font, p.ink);
+        let text_w = galley.size().x;
+        let width = ui.available_width().min(ui.spacing().slider_width + text_w + 12.0).max(150.0);
+        let sense = if self.on { Sense::click_and_drag() } else { Sense::hover() };
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(width, 22.0), sense);
+        let track = Rect::from_min_max(
+            Pos2::new(rect.left() + 2.0, rect.center().y - 3.5),
+            Pos2::new(rect.right() - text_w - 12.0, rect.center().y + 3.5),
+        );
+        let t = to_t(*self.value);
+        if self.on && (response.dragged() || response.clicked()) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let nt = ((pos.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
+                let v = from_t(nt);
+                if v != *self.value {
+                    *self.value = v;
+                    response.mark_changed();
+                }
+            }
+        }
+        let hover = ui.ctx().animate_bool(response.id.with("h"), self.on && (response.hovered() || response.dragged()));
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            // The glass track.
+            painter.rect_filled(track, CornerRadius::same(4), lerp(p.panel_hi, p.bg_deep, 0.35));
+            painter.rect_stroke(track, CornerRadius::same(4), Stroke::new(1.0_f32, alpha(p.accent, 50)), StrokeKind::Inside);
+            // The glowing fill, in the accent, with a halo either side of it.
+            let fill = Rect::from_min_max(track.min, Pos2::new(track.left() + track.width() * t, track.max.y));
+            if fill.width() > 1.0 {
+                for (i, a) in [(2.0_f32, 18u8), (4.0, 10)] {
+                    painter.rect_filled(fill.expand2(Vec2::new(0.0, i * (0.5 + hover))), CornerRadius::same(6), alpha(p.accent, a));
+                }
+                painter.rect_filled(fill, CornerRadius::same(4), p.accent);
+                gradient_fill(painter, Rect::from_min_max(fill.min, Pos2::new(fill.max.x, fill.center().y)), 4.0, alpha(Color32::WHITE, 70), Color32::TRANSPARENT);
+            }
+            // The handle: a glass bead with a lit rim and its own glow.
+            let hx = track.left() + track.width() * t;
+            let hr = 7.0 + hover;
+            if self.on {
+                painter.circle_filled(Pos2::new(hx, track.center().y), hr + 4.0, alpha(p.accent, (14.0 + 20.0 * hover) as u8));
+            }
+            painter.circle_filled(Pos2::new(hx, track.center().y), hr, if self.on { lerp(p.accent_hi, Color32::WHITE, 0.25) } else { p.muted });
+            painter.circle_stroke(Pos2::new(hx, track.center().y), hr, Stroke::new(1.0_f32, alpha(Color32::WHITE, 150)));
+            painter.circle_filled(Pos2::new(hx - hr * 0.3, track.center().y - hr * 0.3), hr * 0.32, alpha(Color32::WHITE, 130));
+            painter.galley_with_override_text_color(Pos2::new(rect.right() - text_w, rect.center().y - galley.size().y / 2.0), galley, if self.on { p.ink } else { p.muted });
+        }
+        if self.on {
+            response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
         response
     }
 }
@@ -303,15 +439,6 @@ fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_premultiplied(m(ar, br), m(ag, bg), m(ab, bb), m(aa, ba))
 }
 
-/// The one prominent action on a page.
-pub fn primary_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> egui::Response {
-    button_core(ui, p, text, enabled, true)
-}
-
-pub fn button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> egui::Response {
-    button_core(ui, p, text, enabled, false)
-}
-
 /// An animated on/off switch.
 pub fn toggle(ui: &mut egui::Ui, p: &Palette, on: &mut bool) -> egui::Response {
     let size = Vec2::new(40.0, 22.0);
@@ -331,8 +458,15 @@ pub fn toggle(ui: &mut egui::Ui, p: &Palette, on: &mut bool) -> egui::Response {
             Stroke::new(1.0_f32, if response.hovered() { p.accent_hi } else { p.line }),
             StrokeKind::Inside,
         );
+        // The same glass as the buttons: a lit strip across the track and a
+        // glint on the knob.
+        let strip = Rect::from_min_max(rect.min + Vec2::new(9.0, 2.0), Pos2::new(rect.max.x - 9.0, rect.min.y + 7.0));
+        painter.rect_filled(strip, CornerRadius::same(3), alpha(Color32::WHITE, 26));
         let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
-        painter.circle_filled(Pos2::new(x, rect.center().y), 8.0, if *on { Color32::WHITE } else { p.body });
+        let knob = Pos2::new(x, rect.center().y);
+        painter.circle_filled(knob, 8.0, if *on { Color32::WHITE } else { p.body });
+        painter.circle_filled(knob + Vec2::new(-2.2, -2.4), 2.6, alpha(Color32::WHITE, if *on { 90 } else { 40 }));
+        painter.circle_stroke(knob, 8.0, Stroke::new(1.0_f32, alpha(Color32::BLACK, 26)));
         if response.has_focus() {
             painter.rect_stroke(rect.expand(3.0), CornerRadius::same(13), Stroke::new(1.5_f32, p.electric), StrokeKind::Outside);
         }

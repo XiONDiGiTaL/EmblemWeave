@@ -41,12 +41,15 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             widgets::toggle(ui, &p, &mut g.vsync);
         });
         widgets::setting_row(ui, &p, "Frame-rate limit", "The game's simulation keeps its own tick; this limits presentation only.", |ui| {
-            ui.add(egui::Slider::new(&mut g.frame_limit, 30..=240).suffix(" fps"));
+            let mut fps = g.frame_limit as f32;
+            if widgets::Slider::new(&mut fps, 30.0..=240.0).suffix(" fps").show(ui, &p).changed() {
+                g.frame_limit = fps.round() as u32;
+            }
         });
     });
     widgets::section(ui, &p, "Rendering", |ui| {
         widgets::setting_row(ui, &p, "Render scale", "Internal resolution relative to the output.", |ui| {
-            ui.add(egui::Slider::new(&mut g.render_scale, 0.5..=2.0).fixed_decimals(2).suffix("×"));
+            widgets::Slider::new(&mut g.render_scale, 0.5..=2.0).fixed_decimals(2).suffix("×").show(ui, &p);
         });
         widgets::setting_row(ui, &p, "Upscaling", "", |ui| {
             combo(ui, "upscale", &mut g.upscaling, &["Off", "Bilinear", "FSR 1.0"]);
@@ -77,15 +80,18 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
             ui.label(RichText::new(&a.device).color(p.ink));
         });
         widgets::setting_row(ui, &p, "Buffer", "Larger buffers resist crackling; smaller ones reduce latency.", |ui| {
-            ui.add(egui::Slider::new(&mut a.buffer_ms, 10..=200).suffix(" ms"));
+            let mut ms = a.buffer_ms as f32;
+            if widgets::Slider::new(&mut ms, 10.0..=200.0).suffix(" ms").show(ui, &p).changed() {
+                a.buffer_ms = ms.round() as u32;
+            }
         });
     });
     widgets::section(ui, &p, "Mix", |ui| {
         for (label, value) in [("Master", &mut a.master), ("Music", &mut a.music), ("Effects", &mut a.effects), ("Voice", &mut a.voice)] {
             widgets::setting_row(ui, &p, label, "", |ui| {
-                let mut pct = (*value * 100.0).round() as u32;
-                if ui.add(egui::Slider::new(&mut pct, 0..=100).suffix(" %")).changed() {
-                    *value = pct as f32 / 100.0;
+                let mut pct = (*value * 100.0).round();
+                if widgets::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").show(ui, &p).changed() {
+                    *value = pct / 100.0;
                 }
             });
         }
