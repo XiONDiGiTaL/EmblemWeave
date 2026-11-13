@@ -161,46 +161,52 @@ pub fn status_line(ui: &mut egui::Ui, p: &Palette, tone: Tone, label: &str, deta
 
 /// Fill a rounded rectangle with a vertical gradient, as one mesh.
 pub fn gradient_fill(painter: &egui::Painter, rect: Rect, radius: f32, top: Color32, bottom: Color32) {
-    painter.extend(gradient_rows(rect, radius, top, bottom));
+    painter.add(gradient_shape(rect, radius, top, bottom));
 }
 
 /// [`gradient_fill`] as a shape, for painting behind content laid out later.
+/// [`gradient_fill`] as a shape, for painting behind content laid out later.
+///
+/// The mesh is built column by column: each column runs from the rectangle's top
+/// edge to its bottom edge at that x, shortened by the corner arc, with the
+/// colour going from `top` at the top edge to `bottom` at the bottom. The
+/// silhouette follows the corners exactly and the colour is interpolated across
+/// the whole height, so there is no banding and no seam between rows, and —
+/// unlike a triangle fan around the outline — no geometry that can leave the
+/// rectangle when a corner radius is large next to a short side.
 pub fn gradient_shape(rect: Rect, radius: f32, top: Color32, bottom: Color32) -> egui::Shape {
-    egui::Shape::Vec(gradient_rows(rect, radius, top, bottom))
-}
-
-/// A vertical gradient inside a rounded rectangle, painted as thin rows rather
-/// than as a mesh. Every row is a rounded rect of its own, inset by the corner's
-/// cut at that height, so a gradient can never paint outside its rectangle —
-/// whatever the size, the radius or the pixel density. A triangle-fan mesh can
-/// spill when a radius is large next to a short side, which is what threw pale
-/// wedges across the page around the buttons.
-fn gradient_rows(rect: Rect, radius: f32, top: Color32, bottom: Color32) -> Vec<egui::Shape> {
     let (w, h) = (rect.width().max(0.0), rect.height().max(0.0));
     if w < 0.5 || h < 0.5 {
-        return Vec::new();
+        return egui::Shape::Noop;
     }
     let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
-    let rows = (h.ceil() as usize).clamp(1, 96);
-    let step = h / rows as f32;
-    let mut out = Vec::with_capacity(rows);
-    for i in 0..rows {
-        let y0 = rect.top() + i as f32 * step;
-        let y1 = (y0 + step + 0.5).min(rect.bottom());
-        // The horizontal cut the corner takes at this row's nearest edge.
-        let d = (y0 - rect.top()).min((rect.bottom() - y1).max(0.0));
-        let inset = if d < r { r - (r * r - (r - d) * (r - d)).max(0.0).sqrt() } else { 0.0 };
-        let row = Rect::from_min_max(Pos2::new(rect.left() + inset, y0), Pos2::new(rect.right() - inset, y1));
-        let t = (((y0 + y1) * 0.5) - rect.top()) / h;
-        let corners = if inset > 0.5 { CornerRadius::same(inset.round().clamp(0.0, 255.0) as u8) } else { CornerRadius::ZERO };
-        out.push(egui::Shape::rect_filled(row, corners, lerp(top, bottom, t.clamp(0.0, 1.0))));
+    let cols = ((w / 3.0).ceil() as usize).clamp(8, 160);
+    let shade = |y: f32| lerp(top, bottom, ((y - rect.top()) / h).clamp(0.0, 1.0));
+    // Where the rectangle's edge sits at this x, after the corner arc.
+    let edge = |x: f32| -> (f32, f32) {
+        let dx = (x - rect.left()).min(rect.right() - x).max(0.0);
+        if r <= 0.5 || dx >= r {
+            (rect.top(), rect.bottom())
+        } else {
+            let dy = (r * r - (r - dx) * (r - dx)).max(0.0).sqrt();
+            (rect.top() + r - dy, rect.bottom() - r + dy)
+        }
+    };
+    let mut mesh = egui::Mesh::default();
+    for i in 0..=cols {
+        let x = rect.left() + w * i as f32 / cols as f32;
+        let (y0, y1) = edge(x);
+        mesh.colored_vertex(Pos2::new(x, y0), shade(y0));
+        mesh.colored_vertex(Pos2::new(x, y1), shade(y1));
     }
-    out
+    for i in 0..cols as u32 {
+        let a = i * 2;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 3, a + 2);
+    }
+    egui::Shape::mesh(mesh)
 }
 
-/// Every button in the launcher: one height, one type size, one pill radius.
-/// `primary` changes the fill, never the size, so a row of controls reads as a
-/// single family whatever each one does.
 /// Every button in the launcher: one height, one type size, one pill radius.
 /// The finish is liquid glass — a tinted body with a specular band across the
 /// top, a lit rim and a soft glow in the scheme's accent — so a button reads as
