@@ -20,6 +20,7 @@ mod pages;
 mod cheats;
 mod ingame;
 mod mods;
+mod pad;
 mod saves;
 mod savefile;
 mod theme;
@@ -79,6 +80,8 @@ pub struct App {
     pub saves_ui: pages::saves::Ui,
     pub mods_ui: pages::mods::Ui,
     pub cheats_ui: pages::cheats::Ui,
+    /// The game's `[pad]` settings as the Controls page last read them.
+    pub tuning: Option<pad::Tuning>,
     pub ingame: ingame::Ingame,
     pub log_ui: pages::log::Ui,
     /// `--tour`: walk through the features by itself, for recordings.
@@ -127,6 +130,7 @@ impl App {
             saves_ui: Default::default(),
             mods_ui: Default::default(),
             cheats_ui: Default::default(),
+            tuning: None,
             ingame: Default::default(),
             log_ui: Default::default(),
             tour: None,
