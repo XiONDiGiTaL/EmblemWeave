@@ -9,6 +9,7 @@
 
 <p align="center">
   <img alt="Release" src="https://img.shields.io/github/v/release/XiONDiGiTaL/EmblemWeave?label=release&color=3F80FF">
+  <a href="https://github.com/XiONDiGiTaL/EmblemWeave/releases"><img alt="Total downloads" src="https://img.shields.io/github/downloads/XiONDiGiTaL/EmblemWeave/total?label=downloads&color=3F80FF"></a>
   <img alt="Status: playable" src="https://img.shields.io/badge/status-playable-2EA043">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-121923">
   <img alt="Language: Rust" src="https://img.shields.io/badge/language-Rust-C9A227">
