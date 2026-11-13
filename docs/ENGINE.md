@@ -8,7 +8,12 @@ GPL-3.0 licence allows, and writes its own version.
 
 The order is set by what blocks playing, not by what is most visible.
 
-## 1. Native execution (in progress)
+This page is the engine's plan and is kept current with the code;
+[docs/STATUS.md](STATUS.md) records the project's state and the measurements taken on
+the game data. Native execution, below, is opt-in (`ew-run --native`), which is why the
+status page's older rows read as though the runtime only interpreted.
+
+## 1. Native execution (in the runtime, opt-in)
 
 The runtime ran the game's code on the reference interpreter, roughly a hundred times too slow to play. The game's code is now
 compiled ahead of time:

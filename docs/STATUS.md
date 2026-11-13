@@ -7,14 +7,24 @@ retail game, update 131072, runs at about 60 fps with sound, from the
 launcher's **Build the game** and **Play**. The rest of this page covers
 EmblemWeave's own Rust recompiler and runtime, a research path that now
 runs the game's frame loop past the autosave notice and the opening movie
-into its first map load, with draws counted rather than rendered.
+into its first map load, with draws counted rather than rendered and frames
+presented in a window rather than drawn into.
 
 A 25-minute headless run reaches 27.9 billion instructions and then stops
 where the game aborts: its pool of sound handles fills up, because the host
 audio renderer never reports a voice's wave buffers as played, so no handle is
 ever released. That is the next blocker.
 
-Last verified: 9 November 2026, retail `main` module of version 1.1.0, release build.
+Last verified: 9 November 2026, retail `main` module of version 1.1.0, release build. The
+state of the code itself (native dispatch behind `--native`, the window that presents
+frames) was re-read on 13 November 2026 without a run; every measurement here is still
+the 9-10 November one.
+
+This page is the summary: it records what was measured on the game data.
+[docs/ENGINE.md](ENGINE.md) is the engine's own plan and is kept current with the code.
+Where the two disagree, this page carries the measurement and ENGINE.md carries the
+detail. The row about native execution below had gone stale and is corrected here:
+native code runs, as an option, and has since `ew-native` was added.
 
 ## How to read the states
 
@@ -47,7 +57,7 @@ Last verified: 9 November 2026, retail `main` module of version 1.1.0, release b
 | Jump tables | Partial | 151 tables, 2,005 targets; 380 indirect edges are resolved at run time |
 | Emitted C | Verified | 400 functions identical to the interpreter (`verify_cfg.sh`) |
 | Interpreter against an independent CPU | Verified | `oracle_lockstep.py` against Unicorn: 30,000 consecutive instructions of the game's zstd decoder identical, register for register, after the fixes listed below |
-| Native execution of emitted C in the runtime | Blocked | the dispatcher still runs the reference interpreter |
+| Native execution of emitted C in the runtime | Implemented (opt-in) | `ew-native` lifts the whole module, emits it as C, compiles it in parallel and links `ew_native.dll`; `ew-run --native <dll>` dispatches into it at every function the library has, and `EW_NATIVE_CHECK=1` runs each native call beside the interpreter and reports the first difference. Measured on 10 November: the whole main module builds in about 16 minutes, and a billion boot instructions take 12 s native against 22 s interpreted. A run without `--native` still interprets |
 
 ### Runtime and host services
 
@@ -114,6 +124,10 @@ Last verified: 9 November 2026, retail `main` module of version 1.1.0, release b
 target\release\ew-run --module work\decoded\main --lib work\decoded\sdk --romfs <romfs> --max-steps 60000000000 --max-seconds 450 --press A@2500 --press A@3000 --press A@3500
 ```
 
+This is the interpreted run. Adding `--native build\native\ew_native.dll`
+runs the same path through the compiled code, and `--window` shows the frames
+that run presents.
+
 Over 15 billion guest instructions and more than 46,000 functions in 450
 seconds, with these host events in order (abridged):
 
@@ -168,10 +182,14 @@ fs: open Contents:/Map/Btl/..., Map/Com/Obj/..., Map/Tex/... (battle-map data)
 
 ## Known limitations
 
-1. **The dispatcher interprets.** The emitted C is verified but the runtime
-   still executes the reference interpreter (about 15 million guest
-   instructions per second in a release build). Wiring the dispatcher to the
-   compiled code is the main performance step.
+1. **Native code is opt-in, and host calls still leave it.** Without
+   `--native` the runtime executes the reference interpreter, about 15 million
+   guest instructions per second in a release build. With a library from
+   `ew-native` it dispatches into compiled code instead, but every host call a
+   native function makes returns through the full run loop, so hot loops that
+   call into the host (a shuffle calling the C library's random number generator
+   each iteration, say) still pay for it. Serving simple host calls from inside
+   native code is the remaining speed step.
 2. **Nothing is drawn.** Command buffers are recorded and their memory
    effects carried out, but draws, clears of render targets and texture copies
    are not executed on the GPU, and the game's shaders (compiled for the
@@ -196,12 +214,14 @@ fs: open Contents:/Map/Btl/..., Map/Com/Obj/..., Map/Tex/... (battle-map data)
    report played samples and consumed wave buffers. The game's sound handles
    are released only then, and today their pool runs out during the first map
    load. Exit criterion: the long run passes the map load without the abort.
-2. **Rendering.** Execute recorded clears and copies on Vulkan and present the
-   swap textures in a window: exit criterion, the game's first frame on screen.
-   Then shader translation from the console GPU's binaries, draws, and texture
-   decoding (block-linear, BC, ASTC).
-3. **Run the compiled code.** The interpreter runs about 8 million instructions
-   per second; dispatching into the native translation is the main speed step.
+2. **Rendering.** Execute the recorded clears and copies so the frame in the
+   window is the game's own. The window, its swap chain and the upload of the
+   presented swap texture are in (`ew-run --window`); what is missing is
+   executing the clears, texture copies and draws, which is the exit criterion:
+   the game's first frame on screen. Then shader translation from the console
+   GPU's binaries, and texture decoding (block-linear, BC, ASTC).
+3. **Host calls from native code**, so a native function that calls the host
+   does not return through the whole run loop (see limitation 1).
 4. **Audio mixing** to WASAPI, and voice state updates.
 5. **Movies**: VP9 decoding for `Movie/Product/*.webm` and the cut scenes.
 6. **Gameplay validation** from the first battle map on.
@@ -218,8 +238,18 @@ cargo test --workspace
 # decode the sdk module (LZ4) once
 target\release\ew-decode <exefs>\sdk work\decoded\sdk
 
-# run the game and print the stop report
+# run the game on the interpreter and print the stop report
 target\release\ew-run --module work\decoded\main --lib work\decoded\sdk --romfs <romfs> --nacp <control.nacp> --max-steps 2500000000
+
+# build the game's code into one native library (about 16 minutes for the whole module)
+target\release\ew-native --module work\decoded\main --out build\native
+
+# run that instead of the interpreter, checking every native call against it
+$env:EW_NATIVE_CHECK=1
+target\release\ew-run --module work\decoded\main --lib work\decoded\sdk --romfs <romfs> --nacp <control.nacp> --native build\native\ew_native.dll --max-steps 60000000000
+
+# show the frames the game presents in a window (they are not drawn yet)
+target\release\ew-run --module work\decoded\main --lib work\decoded\sdk --romfs <romfs> --window "EmblemWeave"
 
 # differential verification on your data
 bash tools/verify_cfg.sh
