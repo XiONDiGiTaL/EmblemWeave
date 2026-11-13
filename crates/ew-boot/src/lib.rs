@@ -775,7 +775,10 @@ pub fn boot_with(
     let code_ranges: Vec<(u64, u64)> = std::iter::once((0u64, main_text.len() as u64))
         .chain(placed.iter().map(|p| (p.base, p.base + p.module.text.len() as u64)))
         .collect();
-    let in_code = |pc: u64| pc % 4 == 0 && code_ranges.iter().any(|&(lo, hi)| pc >= lo && pc + 4 <= hi);
+    // A faulting branch can hand this a program counter near the top of the
+    // address space, so the four bytes it needs are subtracted rather than
+    // added: adding would overflow and wrap into a range that looks valid.
+    let in_code = |pc: u64| pc % 4 == 0 && code_ranges.iter().any(|&(lo, hi)| pc >= lo && hi.saturating_sub(pc) >= 4);
     let mut boundaries = scan::call_targets(main_text);
     for p in &placed {
         boundaries.extend(scan::call_targets(&p.module.text).into_iter().map(|t| t + p.base));
