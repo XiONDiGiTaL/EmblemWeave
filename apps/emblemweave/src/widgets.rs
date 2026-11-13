@@ -158,43 +158,44 @@ pub fn status_line(ui: &mut egui::Ui, p: &Palette, tone: Tone, label: &str, deta
 }
 
 /// The outline of a rounded rectangle, clockwise from the top left.
-fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
-    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
-    let corners = [
-        (Pos2::new(rect.left() + r, rect.top() + r), std::f32::consts::PI),
-        (Pos2::new(rect.right() - r, rect.top() + r), 1.5 * std::f32::consts::PI),
-        (Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
-        (Pos2::new(rect.left() + r, rect.bottom() - r), 0.5 * std::f32::consts::PI),
-    ];
-    let mut pts = Vec::with_capacity(4 * 9);
-    for (c, start) in corners {
-        for k in 0..=8 {
-            let a = start + k as f32 / 8.0 * std::f32::consts::FRAC_PI_2;
-            pts.push(c + Vec2::new(a.cos(), a.sin()) * r);
-        }
-    }
-    pts
-}
 
 /// Fill a rounded rectangle with a vertical gradient, as one mesh.
 pub fn gradient_fill(painter: &egui::Painter, rect: Rect, radius: f32, top: Color32, bottom: Color32) {
-    painter.add(gradient_shape(rect, radius, top, bottom));
+    painter.extend(gradient_rows(rect, radius, top, bottom));
 }
 
 /// [`gradient_fill`] as a shape, for painting behind content laid out later.
 pub fn gradient_shape(rect: Rect, radius: f32, top: Color32, bottom: Color32) -> egui::Shape {
-    let outline = rounded_outline(rect, radius);
-    let shade = |y: f32| lerp(top, bottom, ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0));
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(rect.center(), shade(rect.center().y));
-    for q in &outline {
-        mesh.colored_vertex(*q, shade(q.y));
+    egui::Shape::Vec(gradient_rows(rect, radius, top, bottom))
+}
+
+/// A vertical gradient inside a rounded rectangle, painted as thin rows rather
+/// than as a mesh. Every row is a rounded rect of its own, inset by the corner's
+/// cut at that height, so a gradient can never paint outside its rectangle —
+/// whatever the size, the radius or the pixel density. A triangle-fan mesh can
+/// spill when a radius is large next to a short side, which is what threw pale
+/// wedges across the page around the buttons.
+fn gradient_rows(rect: Rect, radius: f32, top: Color32, bottom: Color32) -> Vec<egui::Shape> {
+    let (w, h) = (rect.width().max(0.0), rect.height().max(0.0));
+    if w < 0.5 || h < 0.5 {
+        return Vec::new();
     }
-    let n = outline.len() as u32;
-    for i in 0..n {
-        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
+    let rows = (h.ceil() as usize).clamp(1, 96);
+    let step = h / rows as f32;
+    let mut out = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let y0 = rect.top() + i as f32 * step;
+        let y1 = (y0 + step + 0.5).min(rect.bottom());
+        // The horizontal cut the corner takes at this row's nearest edge.
+        let d = (y0 - rect.top()).min((rect.bottom() - y1).max(0.0));
+        let inset = if d < r { r - (r * r - (r - d) * (r - d)).max(0.0).sqrt() } else { 0.0 };
+        let row = Rect::from_min_max(Pos2::new(rect.left() + inset, y0), Pos2::new(rect.right() - inset, y1));
+        let t = (((y0 + y1) * 0.5) - rect.top()) / h;
+        let corners = if inset > 0.5 { CornerRadius::same(inset.round().clamp(0.0, 255.0) as u8) } else { CornerRadius::ZERO };
+        out.push(egui::Shape::rect_filled(row, corners, lerp(top, bottom, t.clamp(0.0, 1.0))));
     }
-    egui::Shape::mesh(mesh)
+    out
 }
 
 /// Every button in the launcher: one height, one type size, one pill radius.

@@ -29,10 +29,11 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current status: playable through the baseline engine.** The published release is **0.1.4**; the tree here is
-> **0.1.5 in development**, and no new release is cut until the runtime work below is ready. Build the game once
+> **Current status: released as 0.1.5, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. EmblemWeave's own Rust runtime is being completed to take over running the game: it
+> opening movie and cutscenes. 0.1.5 is the launcher's refined shell: one liquid-glass control material in every
+> scheme, a layout that scales from 1440×900 down to 1120×720, and sliders of the launcher's own. EmblemWeave's own
+> Rust runtime is being completed to take over running the game: it
 > now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
 > swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
 > game's own geometry; see [Development status](#development-status) and [docs/ENGINE.md](docs/ENGINE.md).
@@ -49,6 +50,7 @@ game code, no assets and no keys, and it only ever reads your files.
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.5](#whats-new-in-015)
 - [Development status](#development-status)
 - [Screenshots](#screenshots)
 - [Key capabilities](#key-capabilities)
@@ -96,6 +98,28 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.5
+
+- **A refined shell.** Every button is now one material: a liquid-glass body in the scheme's
+  accent under a strip of specular light, a white and accent rim and a soft glow underneath,
+  with the same shell at low opacity for secondary actions. Every button is 32 points tall
+  with one type size and one pill radius, so the formerly oversized hero **Play** now matches
+  the buttons beside it.
+- **Sliders of the launcher's own.** A glass track, a glowing accent fill and a glass-bead
+  handle with its own halo, with the value in monospace beside it. They replace the stock
+  sliders on **Graphics**, **Audio**, **Game Setup**, **Recompilation** and **Controls**, and
+  they take the colour and glow of the scheme like everything else.
+- **A layout that scales.** 1440×900 by default, 1120×720 at the smallest. The page column is
+  capped and centred, the status column steps aside below 1240 wide, the rail fits all
+  thirteen pages at the minimum height, and the lists inside pages grow with the window
+  instead of sitting in fixed boxes.
+- **Six schemes, lit the same way.** Frost's primary button carries dark ink on its glacier
+  cyan so it reads at a glance, Arcade's neon grid is quieter and named on **Appearance**, and
+  buttons, sliders, switches and card rims all take each scheme's palette.
+- **Under the hood.** The runtime's command buffer now carries out the texture clears and
+  texture-to-texture copies that write render targets and swap textures, and the baseline
+  engine is built against libvpx 1.16.0 for the title's VP9/VP8 codecs.
 
 ## Development status
 
@@ -238,9 +262,15 @@ python -m pip install zbic
 
 The rail groups the pages: **Play** (Overview, Game Setup), **Library** (Saves, Mods, Cheats), **Runtime**
 (Recompilation, Graphics, Audio, Controls) and **System** (Appearance, Diagnostics, Game Log, About). The strip along
-the top names the page you are on and the launcher's own frame rate; the strip along the bottom carries the current
-job's progress or the readiness line, and the version. On **Overview**, the column on the right shows where the game
-data, the recompiler and the runtime stand, and what the launcher has just done.
+the top carries the wordmark, the page you are on, and the version with the build revision; the strip along the bottom
+carries the current job's progress or the readiness line, and the last thing the launcher did. On **Overview**, the
+column on the right shows where the game data, the recompiler and the runtime stand, and what the launcher has just done.
+
+The launcher opens at 1440×900 and works down to 1120×720. The page column stops at a fixed measure and is centred, so
+a wide window does not stretch the text; below 1240 wide the status column steps aside so the page keeps its width; the
+rail fits all thirteen pages at the smallest height; and the lists inside pages grow and shrink with the window. Every
+button is the same size, and every control — buttons, sliders, switches, cards — is one liquid-glass material that
+takes the chosen scheme's accent, glow and rim.
 
 | Page | Purpose |
 | --- | --- |
@@ -253,7 +283,7 @@ data, the recompiler and the runtime stand, and what the launcher has just done.
 | **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). The same switches are on the launcher's Cheats page and the in-game menu's Quick tab (F10); search again after a map loads. |
 | **Recompilation** | Run the nine-stage pipeline (parse, decompress, decode, recover, analyse, emit C, compile, verify, prepare) with live progress. |
 | **Graphics, Audio, Controls** | Options for EmblemWeave's own runtime, saved now and marked until its renderer, mixer and input are in place. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
-| **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (the xiondigital.net palette), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme. |
+| **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (the xiondigital.net palette), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme, and every control takes its accent, its glow and its rim from it. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. |
 | **Game Log** | The game engine's log, followed live while the game runs: info, warnings and errors (each counted and filterable), search, copy, this run or the previous one, and **Pop out** to keep it in a window of its own. |
 | **About** | Version, build revision, what each runtime is, credits and legal information. |

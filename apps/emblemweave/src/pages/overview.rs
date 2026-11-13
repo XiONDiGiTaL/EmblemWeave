@@ -37,7 +37,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 logo::show_lockup(ui, &p, 244.0_f32.min(ui.available_width() * 0.38));
                 ui.add_space(theme::SPACE_L);
                 ui.vertical(|ui| {
-                    ui.set_max_width(ui.available_width());
                     ui.add_space(theme::SPACE_M);
                     let (name, version) = app.game.title.clone().unwrap_or_else(|| (TITLE_NAME.to_string(), String::new()));
                     ui.label(RichText::new(name).font(theme::display(26.0)).color(p.ink));
@@ -215,7 +214,7 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
         ui.label(RichText::new("Save").color(p.muted));
         egui::ComboBox::from_id_salt("quick-profile")
             .selected_text(if profiles.is_empty() { "current save" } else { "load a profile…" })
-            .width(170.0)
+            .width(150.0)
             .show_ui(ui, |ui| {
                 if profiles.is_empty() {
                     ui.label("No profiles yet: keep one on the Saves page.");
@@ -226,7 +225,10 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
                     }
                 }
             });
-        if widgets::button(ui, p, "Edit saves", true).clicked() {
+        if widgets::button(ui, p, "Saves", true)
+            .on_hover_text("Open the Saves page: profiles, the slots in this save and the editor")
+            .clicked()
+        {
             app.page = crate::pages::Page::Saves;
         }
         if widgets::button(ui, p, &format!("Mods ({mods_on} on)"), true).clicked() {
