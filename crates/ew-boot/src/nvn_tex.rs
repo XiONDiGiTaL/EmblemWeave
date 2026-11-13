@@ -584,6 +584,181 @@ pub fn untile_bgra(mem: &[u8], base: u64, d: &TexDesc, lay: &Layout) -> Result<V
     Ok(out)
 }
 
+/// A texel region as NVNcopyRegion carries it: an offset then a size, in
+/// texels (`x, y, z, width, height, depth`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Region {
+    pub x: u64,
+    pub y: u64,
+    pub z: u64,
+    pub w: u64,
+    pub h: u64,
+    pub d: u64,
+}
+
+/// Read an NVNcopyRegion (six little-endian 32-bit fields).
+pub fn region(bytes: &[u8]) -> Option<Region> {
+    if bytes.len() < 24 {
+        return None;
+    }
+    let f = |i: usize| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()).max(0) as u64;
+    Some(Region { x: f(0), y: f(1), z: f(2), w: f(3), h: f(4), d: f(5).max(1) })
+}
+
+/// The level and first layer a texture view names; no view is level 0, layer 0.
+fn view_target(state: &State, view: u64) -> (usize, u64) {
+    if view == 0 {
+        return (0, 0);
+    }
+    state.host.ext.with::<crate::nvn::Nvn, _>(|n| {
+        let get = |setter: &str| n.state.get(&view).and_then(|m| m.get(setter)).map(|a| a[0] & 0xFFFF_FFFF).unwrap_or(0);
+        (get("nvnTextureViewSetLevels") as usize, get("nvnTextureViewSetLayers"))
+    })
+}
+
+/// The bytes a clear value gives every texel block of `format`.
+///
+/// NVNclearColorValue is four floats for `ClearColor`, four integers for
+/// `ClearColori` and four unsigned integers for `ClearColorui`; `as_float`
+/// says which of the three the command was. Formats this does not know are
+/// refused by name rather than cleared with the wrong bytes.
+fn clear_block(format: u32, value: &[u8], as_float: bool) -> Option<Vec<u8>> {
+    if value.len() < 16 {
+        return None;
+    }
+    let word = |i: usize| u32::from_le_bytes(value[i * 4..i * 4 + 4].try_into().unwrap());
+    let float = |i: usize| f32::from_bits(word(i));
+    // Each channel as the 8 bits an 8-bit format stores.
+    let channel = |i: usize| -> u8 {
+        if as_float {
+            (float(i).clamp(0.0, 1.0) * 255.0).round() as u8
+        } else {
+            word(i).min(255) as u8
+        }
+    };
+    Some(match format {
+        // RGBA8 and RGBX8, linear and sRGB.
+        0x25..=0x28 | 0x37 | 0x38 => vec![channel(0), channel(1), channel(2), channel(3)],
+        // BGRA8.
+        0x9A | 0x9C => vec![channel(2), channel(1), channel(0), channel(3)],
+        // RGB10A2: 10 bits a colour channel, 2 for alpha.
+        0x3D | 0x3E => {
+            let ten = |i: usize| -> u32 {
+                if as_float {
+                    (float(i).clamp(0.0, 1.0) * 1023.0).round() as u32
+                } else {
+                    word(i).min(1023)
+                }
+            };
+            let alpha = if as_float { (float(3).clamp(0.0, 1.0) * 3.0).round() as u32 } else { word(3).min(3) };
+            let packed = ten(0) | (ten(1) << 10) | (ten(2) << 20) | (alpha << 30);
+            packed.to_le_bytes().to_vec()
+        }
+        _ => return None,
+    })
+}
+
+/// Where each block of `region` sits, for a texture at `level`/`layer`.
+fn region_blocks(
+    lay: &Layout,
+    level: usize,
+    layer: u64,
+    is3d: bool,
+    tex_w: u32,
+    tex_h: u32,
+    r: Region,
+) -> Result<Vec<(u64, u64)>, String> {
+    let blk = lay.block;
+    let blocks_w = (tex_w.max(1) as u64).div_ceil(blk.w as u64);
+    let blocks_h = (tex_h.max(1) as u64).div_ceil(blk.h as u64);
+    let (bx0, by0) = (r.x / blk.w as u64, r.y / blk.h as u64);
+    let (bw, bh) = (r.w.div_ceil(blk.w as u64), r.h.div_ceil(blk.h as u64));
+    if bx0 + bw > blocks_w || by0 + bh > blocks_h {
+        return Err(format!("region {}x{} at {},{} runs outside a {tex_w}x{tex_h} texture", r.w, r.h, r.x, r.y));
+    }
+    let mut out = Vec::with_capacity((bw * bh * r.d) as usize);
+    for k in 0..r.d {
+        // A 3D texture slices along z; an array texture walks layers.
+        let (this_layer, slice) = if is3d { (layer, r.z + k) } else { (layer + r.z + k, 0) };
+        for j in 0..bh {
+            for i in 0..bw {
+                out.push((lay.offset(level, this_layer, bx0 + i, by0 + j, slice), i + j * bw + k * bw * bh));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Fill a region of a texture's tiled storage with a clear value.
+pub fn clear_texture(state: &mut State, texture: u64, view: u64, region_bytes: &[u8], value: &[u8], as_float: bool) -> Result<(), String> {
+    let d = tex(state, |x| x.textures.get(&texture).cloned()).ok_or_else(|| format!("clearing texture 0x{texture:x}, which was never initialized"))?;
+    let lay = layout(&d)?;
+    let base = storage_address(state, &d).ok_or_else(|| format!("texture 0x{texture:x} has no CPU-visible storage"))?;
+    let r = region(region_bytes).ok_or("a clear needs a 24-byte region")?;
+    let texel = clear_block(d.format, value, as_float)
+        .ok_or_else(|| format!("clearing a 0x{:x} texture is not modelled", d.format))?;
+    let (level, layer) = view_target(state, view);
+    let blocks = region_blocks(&lay, level, layer, d.target == TARGET_3D, d.width, d.height, r)?;
+    let bytes = texel.len();
+    for (off, _) in blocks {
+        let at = (base + off) as usize;
+        let end = at + bytes;
+        let slot = state.mem.get_mut(at..end).ok_or_else(|| format!("clearing 0x{at:x} outside guest memory"))?;
+        slot.copy_from_slice(&texel);
+    }
+    Ok(())
+}
+
+/// Copy a region of one texture into a region of another, block by block.
+pub fn copy_texture(
+    state: &mut State,
+    dst: u64,
+    dst_view: u64,
+    dst_region: &[u8],
+    src: u64,
+    src_view: u64,
+    src_region: &[u8],
+) -> Result<(), String> {
+    let d = tex(state, |x| x.textures.get(&dst).cloned()).ok_or_else(|| format!("copying into texture 0x{dst:x}, which was never initialized"))?;
+    let s = tex(state, |x| x.textures.get(&src).cloned()).ok_or_else(|| format!("copying from texture 0x{src:x}, which was never initialized"))?;
+    let dl = layout(&d)?;
+    let sl = layout(&s)?;
+    if dl.block.bytes != sl.block.bytes || dl.block.w != sl.block.w || dl.block.h != sl.block.h {
+        return Err(format!(
+            "a 0x{:x} texture cannot be copied block for block into a 0x{:x} one",
+            s.format, d.format
+        ));
+    }
+    let dbase = storage_address(state, &d).ok_or_else(|| format!("texture 0x{dst:x} has no CPU-visible storage"))?;
+    let sbase = storage_address(state, &s).ok_or_else(|| format!("texture 0x{src:x} has no CPU-visible storage"))?;
+    let dr = region(dst_region).ok_or("a copy needs a 24-byte destination region")?;
+    let sr = region(src_region).ok_or("a copy needs a 24-byte source region")?;
+    if (dr.w, dr.h, dr.d) != (sr.w, sr.h, sr.d) {
+        return Err(format!(
+            "the copy's regions differ: {}x{}x{} into {}x{}x{}",
+            sr.w, sr.h, sr.d, dr.w, dr.h, dr.d
+        ));
+    }
+    let (dlv, dly) = view_target(state, dst_view);
+    let (slv, sly) = view_target(state, src_view);
+    let dblocks = region_blocks(&dl, dlv, dly, d.target == TARGET_3D, d.width, d.height, dr)?;
+    let sblocks = region_blocks(&sl, slv, sly, s.target == TARGET_3D, s.width, s.height, sr)?;
+    let bytes = dl.block.bytes as usize;
+    for ((doff, index), (soff, src_index)) in dblocks.into_iter().zip(sblocks) {
+        if index != src_index {
+            return Err("the copy's blocks do not line up".into());
+        }
+        let from = (sbase + soff) as usize;
+        let to = (dbase + doff) as usize;
+        if from + bytes > state.mem.len() || to + bytes > state.mem.len() {
+            return Err(format!("copying 0x{from:x} to 0x{to:x} is outside guest memory"));
+        }
+        let chunk = state.mem[from..from + bytes].to_vec();
+        state.mem[to..to + bytes].copy_from_slice(&chunk);
+    }
+    Ok(())
+}
+
 /// `(width, height, BGRA8 pixels)` of a texture, for the window.
 pub fn frame_bgra(state: &State, texture: u64) -> Result<(u32, u32, Vec<u8>), String> {
     let d = tex(state, |x| x.textures.get(&texture).cloned()).ok_or_else(|| format!("texture 0x{texture:x} was never initialized"))?;
@@ -738,6 +913,43 @@ mod tests {
         assert_eq!(px[2], 255);
         assert!(px[1] > 120 && px[1] < 130);
         assert_eq!((px[0], px[3]), (0, 255));
+    }
+
+    fn clear_value(r: f32, g: f32, b: f32, a: f32) -> Vec<u8> {
+        [r, g, b, a].iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_clear_becomes_texels_in_the_format_s_order() {
+        assert_eq!(clear_block(0x25, &clear_value(1.0, 0.0, 0.0, 1.0), true).unwrap(), vec![255, 0, 0, 255]);
+        // BGRA stores blue first.
+        assert_eq!(clear_block(0x9A, &clear_value(1.0, 0.0, 0.0, 1.0), true).unwrap(), vec![0, 0, 255, 255]);
+        // Out-of-range floats clamp rather than wrap.
+        assert_eq!(clear_block(0x25, &clear_value(2.0, -1.0, 0.5, 1.0), true).unwrap(), vec![255, 0, 128, 255]);
+        // RGB10A2 packs ten bits a channel, the alpha on top.
+        let packed = clear_block(0x3D, &clear_value(1.0, 0.0, 0.0, 1.0), true).unwrap();
+        assert_eq!(u32::from_le_bytes(packed[..4].try_into().unwrap()), 0x3FF | (3 << 30));
+        // A format with no clear is refused, not filled with wrong bytes.
+        assert!(clear_block(0x41, &clear_value(0.0, 0.0, 0.0, 1.0), true).is_none());
+    }
+
+    #[test]
+    fn a_region_names_distinct_blocks_inside_the_tiling() {
+        let d = d2(8, 8, 0x25);
+        let l = layout(&d).unwrap();
+        let r = Region { x: 2, y: 2, z: 0, w: 4, h: 4, d: 1 };
+        let blocks = region_blocks(&l, 0, 0, false, d.width, d.height, r).unwrap();
+        assert_eq!(blocks.len(), 16);
+        let mut seen = std::collections::HashSet::new();
+        for (off, _) in &blocks {
+            assert!(*off + 4 <= l.size());
+            assert!(seen.insert(*off));
+        }
+        // Two rows down is 16 bytes further in this small texture (8 px rows padded to 64).
+        assert_eq!(l.offset(0, 0, 2, 2, 0) + 4, l.offset(0, 0, 3, 2, 0));
+        // A region past the edge is refused.
+        let past = Region { x: 6, y: 6, z: 0, w: 4, h: 4, d: 1 };
+        assert!(region_blocks(&l, 0, 0, false, d.width, d.height, past).is_err());
     }
 
     #[test]

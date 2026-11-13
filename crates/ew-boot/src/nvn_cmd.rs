@@ -9,8 +9,9 @@
 //!
 //! `QueueSubmitCommands` executes the commands in order. Commands whose effect
 //! is on memory the game can read back (buffer copies and clears, uniform
-//! updates, reports, fences, events) are carried out on guest memory here.
-//! Drawing, clearing render targets and texture copies are counted and kept
+//! updates, reports, fences, events) are carried out on guest memory here, and
+//! so are the texel copies and clears that write a render target or a swap
+//! texture, straight through the texture's tiling. Drawing is counted and kept
 //! for the renderer; nothing is drawn yet, and the run report says so.
 
 use crate::hle::{read_bytes, write_bytes, HostResult, HostServices};
@@ -323,6 +324,23 @@ fn execute(state: &mut State, cmd: &Cmd, depth: u32) -> Result<(), HostResult> {
                 write_bytes(state, d, &rep)?;
             }
         }
+        "ClearTexture" | "ClearTexturei" | "ClearTextureui" => {
+            // (cb, texture, view, region, value): the clear value is four
+            // floats for ClearTexture and four integers for the `i` forms.
+            let (texture, view) = (x[0], x[1]);
+            let region = cmd.data.first().map(|d| d.as_slice()).unwrap_or(&[]);
+            let value = cmd.data.get(1).map(|d| d.as_slice()).unwrap_or(&[]);
+            crate::nvn_tex::clear_texture(state, texture, view, region, value, short == "ClearTexture")
+                .map_err(HostResult::Unavailable)?;
+        }
+        "CopyTextureToTexture" => {
+            // (cb, dst, dstView, dstRegion, src, srcView, srcRegion)
+            let (dst, dst_view) = (x[0], x[1]);
+            let (src, src_view) = (x[3], x[4]);
+            let d = cmd.data.first().map(|v| v.as_slice()).unwrap_or(&[]);
+            let s = cmd.data.get(1).map(|v| v.as_slice()).unwrap_or(&[]);
+            crate::nvn_tex::copy_texture(state, dst, dst_view, d, src, src_view, s).map_err(HostResult::Unavailable)?;
+        }
         "SignalEvent" => {
             // (cb, event, mode, location, flags, value)
             crate::nvn_prog::signal(state, x[0], x[1] & 0xFFFF_FFFF, x[4] as u32)?;
@@ -390,7 +408,7 @@ pub fn register(s: &mut HostServices) {
         ("nvnCommandBufferEndRecording", end_recording, "returns a handle to the host command list"),
         ("nvnCommandBufferIsRecording", is_recording, "whether recording is open"),
         ("nvnDeviceFinalizeCommandHandle", finalize_command_handle, "drops the host command list"),
-        ("nvnQueueSubmitCommands", queue_submit_commands, "executes memory effects; draws are counted, not rendered"),
+        ("nvnQueueSubmitCommands", queue_submit_commands, "executes memory and texel effects; draws are counted, not rendered"),
     ];
     for (name, handler, claim) in table {
         s.register(&format!("nvn:{name}"), *handler, claim);
