@@ -27,6 +27,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             widgets::kv(ui, &p, "Revision", env!("EW_GIT_REV"));
             widgets::kv(ui, &p, "Target", &format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
             widgets::kv(ui, &p, "Profile", if cfg!(debug_assertions) { "debug" } else { "release" });
+            widgets::kv(ui, &p, "Runtime", "EmblemWeave (in development)");
+            widgets::kv(ui, &p, "Baseline", "fefw-recomp, for play today");
             ui.add_space(theme::SPACE_S);
             ui.hyperlink_to("github.com/XiONDiGiTaL/EmblemWeave", "https://github.com/XiONDiGiTaL/EmblemWeave");
             ui.hyperlink_to("xiondigital.net", "https://xiondigital.net/arcade/");
@@ -34,6 +36,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         widgets::section(&mut cols[1], &p, "Credits", |ui| {
             for (who, what) in [
                 ("XiØN", "design, engineering and the EmblemWeave identity"),
+                ("Goldoire", "fefw-recomp as a baseline engine, and everyone who contributed to that project"),
                 ("Ryujinx", "shader translation, whose shader code the build uses (MIT)"),
                 ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
                 ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),
