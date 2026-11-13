@@ -846,7 +846,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "eblemweave"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "eframe",
@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "ew-boot"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "ew-format",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "ew-format"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "lz4_flex",
@@ -1115,14 +1115,14 @@ dependencies = [
 
 [[package]]
 name = "ew-gfx"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "ash",
 ]
 
 [[package]]
 name = "ew-lift"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "ew-format",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "ew-runtime"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "ew-format",
