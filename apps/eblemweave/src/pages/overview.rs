@@ -69,7 +69,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         let label = if ready { "Rebuild" } else { "Build the game" };
                         let can_build = app.game.exefs.is_some() && app.game.romfs.is_some() && !building;
                         if widgets::button(ui, &p, label, can_build)
-                            .on_hover_text("Compiles the game from your dump with the engine (engine/fefw-recomp) and translates its shaders. The first build takes a while; later ones only redo what changed.")
+                            .on_hover_text("Compiles the game from your dump and translates its shaders. The first build takes a while; later ones only redo what changed.")
                             .clicked()
                         {
                             app.start(JobKind::Engine);

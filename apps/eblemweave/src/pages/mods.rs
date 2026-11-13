@@ -169,7 +169,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             &p,
             Tone::Warn,
             &format!("{} shared file{}", shared.len(), if shared.len() == 1 { "" } else { "s" }),
-            "The engine lays mods down in name order, so for these files the last mod wins. Switch one off to decide it yourself.",
+            "The game loads its mods in name order, so for these files the last mod wins. Switch one off to decide it yourself.",
         );
         ui.add_space(theme::SPACE_S);
         egui::ScrollArea::vertical().id_salt("conflicts").max_height(240.0).show(ui, |ui| {

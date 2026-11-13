@@ -100,7 +100,7 @@ pub fn diagnostics_text() -> String {
         std::env::consts::ARCH
     );
     if let Some(root) = crate::engine::root() {
-        s.push_str(&format!("engine: {}\n", root.display()));
+        s.push_str(&format!("game files: {}\n", root.display()));
     }
     if let Some(play) = crate::engine::run_dir() {
         s.push_str(&format!("play folder: {}\n", play.display()));

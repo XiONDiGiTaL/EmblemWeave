@@ -206,7 +206,7 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
                 Tab::Display => display(app, ui, &p),
                 Tab::Controls => controls(ui, &p),
                 Tab::States => {
-                    widgets::status_line(ui, &p, Tone::Neutral, "Not available yet", "The engine the game runs on today has no save states. They are planned for EmblemWeave's own engine, which holds the whole game state in one place.");
+                    widgets::status_line(ui, &p, Tone::Neutral, "Not available yet", "Save states need the whole game state in one place. They are planned for EmblemWeave's own runtime, and are not available in this build.");
                 }
             });
         });
@@ -261,10 +261,10 @@ fn display(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
 
 fn controls(ui: &mut egui::Ui, p: &crate::theme::Palette) {
     widgets::section(ui, p, "Controls", |ui| {
-        ui.label("Keyboard and controller buttons can be rebound in the game's own settings: press F1 in the game, then Controls. The launcher's Controls page holds EmblemWeave's bindings for its own engine.");
+        ui.label("Keyboard and controller buttons can be rebound in the game's own settings: press F1 in the game, then Controls. The launcher's Controls page holds EmblemWeave's own bindings.");
         ui.add_space(6.0);
         egui::Grid::new("default-keys").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
-            for (k, what) in [("F10, or Back + RB", "this menu"), ("F1", "the game engine's settings"), ("F2", "frame rate counter"), ("Alt+Enter", "window / full screen")] {
+            for (k, what) in [("F10, or Back + RB", "this menu"), ("F1", "the game's own settings"), ("F2", "frame rate counter"), ("Alt+Enter", "window / full screen")] {
                 ui.label(RichText::new(k).font(theme::mono(13.0)).color(p.ink));
                 ui.label(what);
                 ui.end_row();

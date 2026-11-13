@@ -27,32 +27,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             widgets::kv(ui, &p, "Revision", env!("EW_GIT_REV"));
             widgets::kv(ui, &p, "Target", &format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
             widgets::kv(ui, &p, "Profile", if cfg!(debug_assertions) { "debug" } else { "release" });
-            // Another compatible engine checkout would be listed here; with
-            // one there is nothing to choose.
-            let engines = crate::engine::candidates();
-            if engines.len() > 1 {
-                ui.add_space(theme::SPACE_S);
-                ui.label(RichText::new("Engines found").font(theme::semibold(12.0)).color(p.muted));
-                let current = crate::engine::root();
-                let labels = engine_labels(&engines);
-                for (e, label) in engines.iter().zip(labels) {
-                    let in_use = current.as_deref() == Some(e.as_path());
-                    let built = crate::engine::game_exe(e).is_file();
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(label).font(theme::mono(11.0)).color(if in_use { p.accent_hi } else { p.body }))
-                            .on_hover_text(e.display().to_string());
-                        if in_use {
-                            widgets::pill(ui, &p, "in use", Tone::Accent);
-                        } else if widgets::button(ui, &p, "Use", true).clicked() {
-                            match crate::engine::use_engine(e) {
-                                Ok(()) => app.notify(format!("Using {}", e.display()), Tone::Ok),
-                                Err(err) => app.notify(err, Tone::Bad),
-                            }
-                        }
-                        ui.label(RichText::new(if built { "game built" } else { "not built yet" }).size(11.5).color(if built { p.muted } else { p.warn }));
-                    });
-                }
-            }
             ui.add_space(theme::SPACE_S);
             ui.hyperlink_to("github.com/XiONDiGiTaL/EmblemWeave", "https://github.com/XiONDiGiTaL/EmblemWeave");
             ui.hyperlink_to("xiondigital.net", "https://xiondigital.net/arcade/");
@@ -60,7 +34,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         widgets::section(&mut cols[1], &p, "Credits", |ui| {
             for (who, what) in [
                 ("XiØN", "design, engineering and the EmblemWeave identity"),
-                ("Ryujinx", "the shader translator the bundled engine builds on (MIT)"),
+                ("Ryujinx", "shader translation, whose shader code the build uses (MIT)"),
                 ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
                 ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),
                 ("GameBanana", "hosts the community mods the Mods page installs; each belongs to its author"),
@@ -89,39 +63,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .color(p.body),
         );
     });
-}
-
-/// A short name for each checkout that tells them apart: the project folder
-/// the engine sits in, with one more folder for two that share a name. The
-/// full path is the hover text.
-fn engine_labels(paths: &[std::path::PathBuf]) -> Vec<String> {
-    fn name(p: &std::path::Path, depth: usize) -> String {
-        // Skip the checkout's own `fefw-recomp` and `engine` folders.
-        let parts: Vec<String> = p
-            .components()
-            .rev()
-            .skip(2)
-            .take(depth)
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        let joined = parts.into_iter().rev().collect::<Vec<_>>().join("/");
-        if joined.is_empty() {
-            p.display().to_string()
-        } else {
-            joined
-        }
-    }
-    let base: Vec<String> = paths.iter().map(|p| name(p, 1)).collect();
-    base.iter()
-        .enumerate()
-        .map(|(i, b)| {
-            if base.iter().filter(|other| *other == b).count() > 1 {
-                name(&paths[i], 2)
-            } else {
-                b.clone()
-            }
-        })
-        .collect()
 }
 
 /// Checking GitHub, installing a release in place, and going back a version.

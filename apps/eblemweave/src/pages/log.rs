@@ -185,7 +185,7 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
     let f = s.search.to_lowercase();
     let rows: Vec<usize> = s.lines.iter().enumerate().filter(|(_, l)| shown(l, s.show_info, s.show_warn, s.show_error, &f)).map(|(i, _)| i).collect();
     if s.lines.is_empty() {
-        ui.label(RichText::new("The log is empty. It fills in while the game runs (it is written by the game engine to fefw.log in the run folder).").color(p.muted));
+        ui.label(RichText::new("The log is empty. It fills in while the game runs (the game writes fefw.log in its run folder).").color(p.muted));
         return;
     }
     let row_h = 17.0;
@@ -216,7 +216,7 @@ fn shown(l: &Line, info: bool, warn: bool, error: bool, f: &str) -> bool {
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Game Log", "What the game engine reports while the game runs: warnings, errors and everything else.");
+    widgets::page_header(ui, &p, "Game Log", "What the game reports while it runs: warnings, errors and everything else.");
     if app.log_ui.popped {
         widgets::section(ui, &p, "", |ui| {
             widgets::status_line(ui, &p, Tone::Neutral, "Popped out", "The log is in its own window.");

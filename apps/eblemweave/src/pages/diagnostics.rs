@@ -78,7 +78,7 @@ fn snapshots(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
                     None => app.notify("There are no settings files to copy yet", Tone::Warn),
                 }
             }
-            ui.label(RichText::new(format!("{}, newest first, kept from before the launcher changes an engine file.", list.len())).size(12.5).color(p.muted));
+            ui.label(RichText::new(format!("{}, newest first, taken before the launcher changes a game setting.", list.len())).size(12.5).color(p.muted));
         });
         if list.is_empty() {
             ui.label(RichText::new("None yet.").size(12.5).color(p.muted));
