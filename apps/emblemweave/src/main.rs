@@ -86,6 +86,9 @@ pub struct App {
     saved: String,
     last_save_check: Instant,
     pub page: Page,
+    /// The page the central scroll area was last laid out for, so a page opens
+    /// at the top instead of inheriting the scroll position of the last one.
+    page_seen: Option<Page>,
     pub game: GameData,
     pub jobs: Vec<Job>,
     pub last_boot: Option<(ew_boot::BootReport, u128)>,
@@ -143,6 +146,7 @@ impl App {
             saved,
             last_save_check: Instant::now(),
             page: Page::Overview,
+            page_seen: None,
             game: GameData::default(),
             jobs: Vec::new(),
             last_boot: None,
@@ -810,7 +814,15 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 0, bottom: 0 }))
             .show(ctx, |ui| {
                 crate::widgets::backdrop(ui.painter(), ui.max_rect().expand2(egui::vec2(28.0, 0.0)), &p);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let fresh_page = self.page_seen != Some(self.page);
+                self.page_seen = Some(self.page);
+                let mut page_area = egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .id_salt(("page-scroll", self.page.label()));
+                if fresh_page {
+                    page_area = page_area.vertical_scroll_offset(0.0);
+                }
+                page_area.show(ui, |ui| {
                     // The page column stops growing at CONTENT_MAX and is
                     // centred in whatever is left, so a wide window gives the
                     // same measure of text rather than a stretched page.
