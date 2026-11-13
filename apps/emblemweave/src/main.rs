@@ -140,6 +140,12 @@ impl App {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .map(|_| ());
+        // The game's taskbar icon comes from fefw.exe, which a build or the
+        // engine can replace: make it ours again at every start, off the render
+        // thread because the executable is rewritten on disk.
+        std::thread::spawn(|| {
+            let _ = crate::engine::brand_game();
+        });
         let mut app = App {
             applied: config.theme,
             config,

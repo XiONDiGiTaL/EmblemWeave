@@ -246,6 +246,9 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // 5. fefw.exe.
     ctx.start(4);
     run(ctx, &root, "pwsh", &["-NoProfile", "-File", "game-build\\scripts\\build_fefw.ps1"])?;
+    // The build writes the engine's own icon into fefw.exe; Windows draws the
+    // taskbar button from that resource, so ours goes in before anything runs it.
+    let _ = brand_game();
     ctx.end(4, StageStatus::Done, "fefw.exe built");
 
     // 6. Shader translator.
@@ -453,11 +456,13 @@ pub struct Live {
     /// The size the 3D picture is rendered at.
     pub picture: (u32, u32),
     pub volume: f32,
+    /// Every key the two files carry, by `section.key` (fefw.ini wins where
+    /// both have one, as play mode's merge does).
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
-fn ini_map(path: &Path) -> std::collections::HashMap<String, String> {
+fn ini_parse(text: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    let Ok(text) = std::fs::read_to_string(path) else { return out };
     let mut section = String::new();
     for line in text.lines() {
         let t = line.trim();
@@ -471,6 +476,10 @@ fn ini_map(path: &Path) -> std::collections::HashMap<String, String> {
         }
     }
     out
+}
+
+fn ini_map(path: &Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path).map(|t| ini_parse(&t)).unwrap_or_default()
 }
 
 /// Read the two files in `dir`; `None` when neither of them is there yet.
@@ -490,6 +499,8 @@ pub fn live_in(dir: &Path) -> Option<Live> {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
         _ => ((window.0 as f32 * scale) as u32, (window.1 as f32 * scale) as u32),
     };
+    let mut values: std::collections::BTreeMap<String, String> = controls.clone().into_iter().collect();
+    values.extend(game.clone());
     Some(Live {
         output: game.get("fefw.output").cloned().unwrap_or_else(|| "console".into()),
         // merge_env(): fefw.ini's [upscale] wins over the F1 menu's own copy.
@@ -501,6 +512,7 @@ pub fn live_in(dir: &Path) -> Option<Live> {
         window,
         picture,
         volume: get("audio.volume").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+        values,
     })
 }
 
@@ -520,71 +532,152 @@ pub fn live() -> Option<Live> {
     fresh
 }
 
+/// Give the built game EmblemWeave's taskbar icon.
+///
+/// Windows draws a program's taskbar button from the icon stored in its .exe,
+/// and every build writes the engine's own into fefw.exe. This runs at start,
+/// after a build and before every start, so the game is never seen with the
+/// engine's purple icon unless a copy is running and cannot be rewritten.
+#[cfg(windows)]
+pub fn brand_game() -> Result<bool, String> {
+    let root = root().ok_or("the engine was not found")?;
+    let exe = game_exe(&root);
+    if !exe.is_file() || crate::cheats::process::find(crate::cheats::GAME_EXE).is_some() {
+        return Ok(false);
+    }
+    crate::exe_icon::brand(&exe)
+}
+
+#[cfg(not(windows))]
+pub fn brand_game() -> Result<bool, String> {
+    Ok(false)
+}
+
 /// The FSR 3.1 DLL the engine should load, whichever SDK layout is installed.
 fn fsr_dll(sdk: &Sdk) -> Option<PathBuf> {
     let d = sdk.fsr3.as_ref()?;
     ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"].iter().map(|f| d.join(f)).find(|p| p.is_file())
 }
 
-/// Write the Graphics settings the game can act on before every start.
-///
-/// The picture size and the upscaler go into `fefw.ini`: play mode merges that
-/// file's `[upscale]` keys over its own, and `[fefw] output` is the game's
-/// picture size. The window mode and the frame cap go into `controls.ini`,
-/// which holds play mode's `[display]` section.
-fn write_settings(dir: &Path, g: &crate::config::Graphics, a: &crate::config::Audio) -> Result<(), String> {
-    let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
-    let sdk = sdk();
+type Values = std::collections::BTreeMap<String, String>;
 
-    let path = dir.join("fefw.ini");
-    let mut text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    text = set_ini_key(&text, "fefw", "output", output_mode(&g.resolution));
-    text = set_ini_key(&text, "upscale", "mode", upscale_mode(&g.upscaling));
-    // Point the engine at the DLLs the Graphics page found. Its own defaults
-    // only look beside the game and the launcher, so naming them keeps what the
-    // page reports and what the game loads the same file.
-    if let Some(dll) = fsr_dll(&sdk) {
-        text = set_ini_key(&text, "upscale", "fsr_dll", &fwd(&dll));
-    }
-    if let Some(d) = &sdk.dlss {
-        text = set_ini_key(&text, "upscale", "dlss_dll", &fwd(d));
-    }
-    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+/// The values the launcher last put into the game's files. A start writes only
+/// what differs from them, so a setting changed in the game's own F1 menu stays
+/// as it was instead of being reset by the next launch.
+pub fn applied_values() -> Values {
+    crate::config::Config::dir()
+        .map(|d| d.join("applied.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
 
-    // The game writes controls.ini on its first start; a file made here is
-    // filled with the factory settings by play mode, which keeps these keys.
-    let path = dir.join("controls.ini");
-    let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| "[meta]\ndefaults_rev = 1\n".to_string());
-    text = set_ini_key(&text, "display", "window_mode", window_mode(&g.display_mode));
-    text = set_ini_key(&text, "display", "vsync", if g.vsync { "1" } else { "0" });
-    text = set_ini_key(&text, "display", "aspect", &g.aspect);
-    text = set_ini_key(&text, "display", "fps_limit", &g.frame_limit.to_string());
+fn save_applied(v: &Values) {
+    if let Some(p) = crate::config::Config::dir().map(|d| d.join("applied.json")) {
+        if let Ok(t) = serde_json::to_string_pretty(v) {
+            let _ = std::fs::write(p, t);
+        }
+    }
+}
+
+/// Every value the Graphics and Audio pages own, by `section.key`. The upscaler
+/// lives in both of the game's files, so it is written to both.
+pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> Values {
+    let mut d = Values::new();
+    d.insert("fefw.output".into(), output_mode(&g.resolution).into());
+    d.insert("upscale.mode".into(), upscale_mode(&g.upscaling).into());
+    d.insert("display.window_mode".into(), window_mode(&g.display_mode).into());
+    d.insert("display.vsync".into(), if g.vsync { "1" } else { "0" }.into());
+    d.insert("display.aspect".into(), g.aspect.clone());
+    d.insert("display.fps_limit".into(), g.frame_limit.to_string());
     let scale = g.render_scale.clamp(0.5, 2.0);
     let even = |v: f32| (((v.round() as i64) & !1).max(320)).to_string();
     if let Some((w, h)) = resolution_size(&g.resolution) {
-        text = set_ini_key(&text, "display", "width", &w.to_string());
-        text = set_ini_key(&text, "display", "height", &h.to_string());
+        d.insert("display.width".into(), w.to_string());
+        d.insert("display.height".into(), h.to_string());
         // The picture at the render scale the page shows: 1.00× is the chosen
         // size, below it renders less and lets the upscaler fill the rest.
-        text = set_ini_key(&text, "display", "render_width", &even(w as f32 * scale));
-        text = set_ini_key(&text, "display", "render_height", &even(h as f32 * scale));
+        d.insert("display.render_width".into(), even(w as f32 * scale));
+        d.insert("display.render_height".into(), even(h as f32 * scale));
     } else if (scale - 1.0).abs() > 0.001 {
         // Native display with a render scale: the engine scales its own window
         // sized picture, so no fixed size may pin it.
-        text = set_ini_key(&text, "display", "render_width", "0");
-        text = set_ini_key(&text, "display", "render_height", "0");
-        text = set_ini_key(&text, "display", "render_scale", &(scale * 100.0).round().to_string());
+        d.insert("display.render_width".into(), "0".into());
+        d.insert("display.render_height".into(), "0".into());
+        d.insert("display.render_scale".into(), (scale * 100.0).round().to_string());
     }
-    // "Native display" at 1.00× leaves the window and its picture as they are:
-    // the engine's defaults are the gold configuration, and nothing set in the
-    // game's F1 menu is overwritten by a choice the user did not make.
-    // The audio section play mode reads; music, effects and voice are mixed by
-    // the game and have no key of their own.
-    text = set_ini_key(&text, "audio", "volume", &format!("{:.2}", a.master.clamp(0.0, 1.0)));
-    // The in-game F1 menu reads its own copy of the upscaler from this file, so
-    // it shows the choice the engine is running rather than an older one.
-    text = set_ini_key(&text, "upscale", "mode", upscale_mode(&g.upscaling));
-    std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+    // Point the engine at the DLLs the Graphics page found. Its own defaults
+    // only look beside the game and the launcher, so naming them keeps what the
+    // page reports and what the game loads the same file.
+    let sdk = sdk();
+    let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
+    if let Some(dll) = fsr_dll(&sdk) {
+        d.insert("upscale.fsr_dll".into(), fwd(&dll));
+    }
+    if let Some(dir) = &sdk.dlss {
+        d.insert("upscale.dlss_dll".into(), fwd(dir));
+    }
+    d.insert("audio.volume".into(), format!("{:.2}", a.master.clamp(0.0, 1.0)));
+    d
+}
+
+/// Write the Graphics and Audio values the game can act on, but only the ones
+/// that changed since the launcher last wrote them.
+///
+/// The picture size and the upscaler go into `fefw.ini`: play mode merges that
+/// file's `[upscale]` keys over its own, and `[fefw] output` is the game's
+/// picture size. The window mode, aspect, vsync, frame cap, render size and
+/// volume go into `controls.ini`, which holds play mode's `[display]` and
+/// `[audio]` sections. A key the game's own menu has changed since the last
+/// write is left alone: the player made that choice in the game.
+fn write_settings(
+    dir: &Path,
+    g: &crate::config::Graphics,
+    a: &crate::config::Audio,
+    applied: &mut Values,
+) -> Result<bool, String> {
+    let fefw_path = dir.join("fefw.ini");
+    let mut fefw = std::fs::read_to_string(&fefw_path).map_err(|e| format!("reading {}: {e}", fefw_path.display()))?;
+    // The game writes controls.ini on its first start; a file made here is
+    // filled with the factory settings by play mode, which keeps these keys.
+    let ctl_path = dir.join("controls.ini");
+    let mut ctl = std::fs::read_to_string(&ctl_path).unwrap_or_else(|_| "[meta]\ndefaults_rev = 1\n".to_string());
+    let on_disk = (ini_parse(&fefw), ini_parse(&ctl));
+
+    let mut touched = false;
+    for (id, value) in desired_values(g, a) {
+        let (section, key) = id.split_once('.').unwrap_or(("", ""));
+        let (in_fefw, in_ctl) = match section {
+            "fefw" => (true, false),
+            "display" | "audio" => (false, true),
+            _ => (true, true),
+        };
+        let current = if in_fefw { on_disk.0.get(&id) } else { on_disk.1.get(&id) };
+        if current.is_some_and(|v| v == &value) {
+            // The file already says what the page wants.
+            applied.insert(id, value);
+            continue;
+        }
+        // Present but different, and still the value the launcher wrote: the
+        // game's F1 menu changed it since, and that choice stands.
+        if current.is_some() && applied.get(&id) == Some(&value) {
+            continue;
+        }
+        if in_fefw {
+            fefw = set_ini_key(&fefw, section, key, &value);
+        }
+        if in_ctl {
+            ctl = set_ini_key(&ctl, section, key, &value);
+        }
+        applied.insert(id, value);
+        touched = true;
+    }
+    if !touched {
+        return Ok(false);
+    }
+    std::fs::write(&fefw_path, fefw).map_err(|e| format!("writing {}: {e}", fefw_path.display()))?;
+    std::fs::write(&ctl_path, ctl).map_err(|e| format!("writing {}: {e}", ctl_path.display()))?;
+    Ok(true)
 }
 
 /// Start the game from the run folder. It runs on its own; the launcher
@@ -598,10 +691,7 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     }
     // The taskbar shows the icon inside the .exe: make it EmblemWeave's.
     // Not while a copy is running (Windows cannot update a running program).
-    #[cfg(windows)]
-    if crate::cheats::process::find(crate::cheats::GAME_EXE).is_none() {
-        let _ = crate::exe_icon::brand(&exe);
-    }
+    let _ = brand_game();
     // The runtime's freeze watchdog counts idle time from the moment it starts,
     // and a cold start on this PC takes longer than its 10 s default to reach the
     // first presented frame (window, then the GPU device, then the swap chain and
@@ -611,7 +701,10 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     // The picture size, window mode, frame cap and upscaler are the Graphics
     // settings the game can act on today; it reads them from its own ini files
     // at start. A file that cannot be written must not stop the game starting.
-    let _ = write_settings(&dir, graphics, audio);
+    let mut applied = applied_values();
+    if write_settings(&dir, graphics, audio, &mut applied).is_ok() {
+        save_applied(&applied);
+    }
     Command::new(&exe)
         .current_dir(&dir)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
@@ -699,7 +792,8 @@ mod tests {
             ..crate::config::Graphics::default()
         };
         let a = crate::config::Audio { master: 0.4, ..crate::config::Audio::default() };
-        write_settings(&dir, &g, &a).unwrap();
+        let mut applied = Values::new();
+        assert!(write_settings(&dir, &g, &a, &mut applied).unwrap(), "the first start writes");
 
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = 1440p"));
@@ -727,7 +821,10 @@ mod tests {
             render_scale: 0.5,
             ..crate::config::Graphics::default()
         };
-        write_settings(&dir, &g, &crate::config::Audio::default()).unwrap();
+        assert!(
+            write_settings(&dir, &g, &crate::config::Audio::default(), &mut applied).unwrap(),
+            "a changed setting is written"
+        );
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = console"));
         assert!(text.contains("mode = off"));
@@ -738,6 +835,18 @@ mod tests {
         assert!(text.contains("window_mode = borderless"), "the default mode is still written");
         assert!(text.contains("fps_limit = 60"));
         assert!(text.contains("volume = 1.00"), "the volume goes back up too");
+
+        // A second start with nothing changed touches no file, so a setting the
+        // game's own menu changed in between survives it.
+        let original = std::fs::read_to_string(&controls).unwrap();
+        let patched = original.replace("window_mode = borderless", "window_mode = exclusive");
+        std::fs::write(&controls, &patched).unwrap();
+        assert!(
+            !write_settings(&dir, &g, &crate::config::Audio::default(), &mut applied).unwrap(),
+            "nothing to write"
+        );
+        let text = std::fs::read_to_string(&controls).unwrap();
+        assert_eq!(text, patched, "the F1 menu's choice stands");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

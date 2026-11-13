@@ -102,7 +102,8 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     // The files the game actually reads, so a change the launcher has written
     // for the next start is visibly waiting rather than silently absent.
     if let Some(l) = crate::engine::live() {
-        let waiting = waiting(&g, &app.config.audio, &l);
+        let desired = crate::engine::desired_values(&g, &app.config.audio);
+        let (pending, kept) = waiting(&desired, &l.values);
         widgets::section(ui, &p, "What the game will start with", |ui| {
             widgets::kv(ui, &p, "Upscaler", crate::engine::upscale_label(&l.upscaling));
             widgets::kv(
@@ -129,7 +130,7 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             );
             widgets::kv(ui, &p, "VSync", if l.vsync { "on" } else { "off" });
             widgets::kv(ui, &p, "Aspect", &l.aspect);
-            waiting_line(ui, &p, waiting);
+            waiting_line(ui, &p, pending, kept);
         });
     }
 }
@@ -166,54 +167,80 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
         }
     });
 
-    let master = a.master;
     if let Some(l) = crate::engine::live() {
+        // Only the volume is this page's business; the rest of the panel lives
+        // on Graphics.
+        let desired: std::collections::BTreeMap<String, String> =
+            [("audio.volume".to_string(), format!("{:.2}", a.master.clamp(0.0, 1.0)))].into_iter().collect();
+        let (pending, kept) = waiting(&desired, &l.values);
         widgets::section(ui, &p, "What the game will start with", |ui| {
             widgets::kv(ui, &p, "Master volume", &format!("{:.0} %", l.volume * 100.0));
-            if (master - l.volume).abs() > 0.005 {
-                ui.label(
-                    RichText::new("This page's master volume applies at the game's next start.").size(12.5).color(p.muted),
-                );
-            }
+            waiting_line(ui, &p, pending, kept);
         });
     }
 }
 
-/// The settings this page has changed that the game's own files do not carry
-/// yet, either because the next start has not happened or because the F1 menu
-/// was used in between.
-fn waiting(g: &crate::config::Graphics, a: &crate::config::Audio, l: &crate::engine::Live) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    if crate::engine::upscale_mode(&g.upscaling) != l.upscaling {
-        out.push("upscaling");
+/// Which of `desired`'s settings are still waiting for the launcher to write
+/// them, and which the game's own menu has changed since — those the launcher
+/// now leaves alone.
+fn waiting(
+    desired: &std::collections::BTreeMap<String, String>,
+    on_file: &std::collections::BTreeMap<String, String>,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    let applied = crate::engine::applied_values();
+    let mut pending = Vec::new();
+    let mut kept = Vec::new();
+    for (id, value) in desired {
+        let label = match id.as_str() {
+            "upscale.mode" => "upscaling",
+            "fefw.output" | "display.width" | "display.height" => "resolution",
+            "display.window_mode" => "display mode",
+            "display.vsync" => "vsync",
+            "display.aspect" => "aspect ratio",
+            "display.fps_limit" => "frame-rate limit",
+            "display.render_width" | "display.render_height" | "display.render_scale" => "render scale",
+            "audio.volume" => "master volume",
+            // The DLL paths are found, not chosen.
+            _ => continue,
+        };
+        if matches!(on_file.get(id), Some(v) if v == value) {
+            continue;   // the file already says this
+        }
+        if applied.get(id) == Some(value) {
+            if matches!(on_file.get(id), Some(v) if v != value) {
+                kept.push(label);
+            }
+        } else {
+            pending.push(label);
+        }
     }
-    if crate::engine::output_mode(&g.resolution) != l.output {
-        out.push("resolution");
-    }
-    if crate::engine::window_mode(&g.display_mode) != l.window_mode {
-        out.push("display mode");
-    }
-    if g.vsync != l.vsync {
-        out.push("vsync");
-    }
-    if g.aspect != l.aspect {
-        out.push("aspect ratio");
-    }
-    if g.frame_limit.to_string() != l.fps_limit {
-        out.push("frame-rate limit");
-    }
-    if (a.master - l.volume).abs() > 0.005 {
-        out.push("master volume");
-    }
-    out
+    pending.sort_unstable();
+    pending.dedup();
+    kept.sort_unstable();
+    kept.dedup();
+    (pending, kept)
 }
 
-fn waiting_line(ui: &mut egui::Ui, p: &theme::Palette, waiting: Vec<&'static str>) {
-    let text = if waiting.is_empty() {
-        "The game's files match this page.".to_string()
-    } else {
-        format!("Waiting for the game's next start: {}.", waiting.join(", "))
-    };
+fn waiting_line(ui: &mut egui::Ui, p: &theme::Palette, pending: Vec<&'static str>, kept: Vec<&'static str>) {
     ui.add_space(6.0);
-    ui.label(RichText::new(text).size(12.5).color(p.muted));
+    if pending.is_empty() && kept.is_empty() {
+        ui.label(RichText::new("The game's files match this page.").size(12.5).color(p.muted));
+    }
+    if !pending.is_empty() {
+        ui.label(
+            RichText::new(format!("Waiting for the game's next start: {}.", pending.join(", ")))
+                .size(12.5)
+                .color(p.muted),
+        );
+    }
+    if !kept.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "Changed in the game's own menu, so the launcher leaves it alone: {}.",
+                kept.join(", ")
+            ))
+            .size(12.5)
+            .color(p.muted),
+        );
+    }
 }
