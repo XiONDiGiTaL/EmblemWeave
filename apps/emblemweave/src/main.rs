@@ -821,6 +821,14 @@ impl eframe::App for App {
             theme::apply(ctx, self.config.theme);
         }
         self.poll_jobs();
+        // A launch that drew nothing says so here, while the window is still
+        // on screen and the player can act on it.
+        while let Some(said) = crate::engine::take_play_alert() {
+            self.notify(said, Tone::Bad);
+        }
+        if crate::engine::play_watch_active() {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
         // The game's F1 menu is the other place its display and audio settings
         // are changed: take those back so the pages show what it will use.
         if crate::engine::adopt(&mut self.config.graphics, &mut self.config.audio) {

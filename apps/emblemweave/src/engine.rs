@@ -360,7 +360,17 @@ fn reason_from(lines: &[String]) -> String {
 
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     let mut cmd = Command::new(program);
-    cmd.args(args).envs(envs.iter().copied()).current_dir(cwd).env("PATH", tool_path()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args)
+        .envs(envs.iter().copied())
+        .current_dir(cwd)
+        .env("PATH", tool_path())
+        // `-ExecutionPolicy Bypass` covers the script this call starts, not a
+        // `pwsh` that script starts in turn: PowerShell children read this
+        // preference from the environment, so the whole chain runs.
+        .env("PSExecutionPolicyPreference", "Bypass")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1216,6 +1226,135 @@ fn write_settings(
     Ok(true)
 }
 
+// One line the launcher shows after a launch that did not draw anything. The
+// engine's own log is written by another process, so a watcher thread fills
+// this and the app drains it once per frame.
+static PLAY_ALERT: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+fn alerts() -> &'static std::sync::Mutex<Vec<String>> {
+    PLAY_ALERT.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The next launch finding, if the watcher made one.
+pub fn take_play_alert() -> Option<String> {
+    let mut a = alerts().lock().unwrap_or_else(|e| e.into_inner());
+    if a.is_empty() {
+        None
+    } else {
+        Some(a.remove(0))
+    }
+}
+
+fn alert(text: String) {
+    alerts().lock().unwrap_or_else(|e| e.into_inner()).push(text);
+}
+
+static WATCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a launch is still being watched, so the window keeps repainting
+/// until its finding arrives.
+pub fn play_watch_active() -> bool {
+    WATCHING.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+struct WatchGuard;
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        WATCHING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// What the engine logged after `from` bytes. A log that got shorter was
+/// started over, so it is read whole.
+fn new_log_text(path: &Path, from: &mut u64) -> String {
+    let Ok(meta) = std::fs::metadata(path) else { return String::new() };
+    if meta.len() < *from {
+        *from = 0;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
+    use std::io::{Read, Seek, SeekFrom};
+    if file.seek(SeekFrom::Start(*from)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if file.take(meta.len().saturating_sub(*from).min(1 << 20)).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    *from += buf.len() as u64;
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// The frame rate the engine reports once a second while it presents, and the
+/// GPU it named at start. Both are logged by the engine itself.
+fn presented_fps(text: &str) -> Option<f32> {
+    // Only the renderer's per-second line carries "present pass": other lines
+    // mention a frame rate too ("gameplay at 60 fps"), and a run that never
+    // drew must not look like one that did.
+    text.lines().filter(|l| l.contains("present pass")).find_map(|l| {
+        let rest = l.split("fps ").nth(1)?;
+        rest.split(',').next()?.trim().parse::<f32>().ok()
+    })
+}
+
+fn gpu_name(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let rest = l.split("using GPU ").nth(1)?;
+        let name = rest.split(": ").nth(1)?;
+        // "Name (discrete, Vulkan …, 12.0 GiB)" and "Name (default rule)":
+        // the name alone is what a player recognises.
+        Some(name.split(" (").next()?.trim().to_string())
+    })
+}
+
+/// The last lines that look like a failure, for a message that says why.
+fn last_error(log: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    text.lines()
+        .filter(|l| l.contains("error") || l.contains("ERR") || l.contains("failed") || l.contains("vulkan"))
+        .next_back()
+        .map(|l| l.trim().to_string())
+}
+
+/// Watch a launch until it draws or gives up. The engine logs "fps N, …" only
+/// when a frame is presented, so a window that stays black while the sound
+/// plays is exactly a run with no such line: it is named here instead of
+/// leaving the player with nothing to report but "black screen".
+fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
+    WATCHING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let _done = WatchGuard;
+        let started = std::time::Instant::now();
+        let mut offset = from;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Ok(Some(status)) = child.try_wait() {
+                if !status.success() {
+                    let why = last_error(&log).map(|e| format!(" Last line: {e}")).unwrap_or_default();
+                    alert(format!(
+                        "The game exited after {} s without finishing (code {:?}).{why} The Game Log has everything it printed.",
+                        started.elapsed().as_secs(),
+                        status.code()
+                    ));
+                }
+                return;
+            }
+            let text = new_log_text(&log, &mut offset);
+            if presented_fps(&text).is_some() {
+                return; // it draws: nothing to report
+            }
+            if started.elapsed().as_secs() >= 90 {
+                let gpu = gpu_name(&std::fs::read_to_string(&log).unwrap_or_default()).unwrap_or_else(|| "the graphics card it picked".into());
+                alert(format!(
+                    "The game has been running for 90 s and has not presented a single frame: the window looks black while the sound plays. \
+It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card's Vulkan driver, and if it stays black send the Game Log."
+                ));
+                return;
+            }
+        }
+    });
+}
+
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
 pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) -> Result<(), String> {
@@ -1241,12 +1380,18 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     if write_settings(&dir, graphics, audio, &mut applied).is_ok() {
         save_applied(&applied);
     }
-    Command::new(&exe)
+    let log = dir.join("fefw.log");
+    let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let child = Command::new(&exe)
         .current_dir(&dir)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
+        // One line per second while frames are presented: the evidence the
+        // watcher needs to tell a slow start from a black window.
+        .env("NXRT_GFX_LOG_FPS", "1")
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("starting {}: {e}", exe.display()))
+        .map_err(|e| format!("starting {}: {e}", exe.display()))?;
+    watch_first_frame(child, log, from);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1362,6 +1507,23 @@ mod tests {
         assert_eq!(resolution_size("Native display"), None);
         assert_eq!(window_mode("Exclusive fullscreen"), "exclusive");
         assert_eq!(window_mode("Windowed"), "windowed");
+    }
+
+    #[test]
+    fn the_engine_log_says_whether_a_frame_was_presented() {
+        // The line the renderer writes once a second, and the one it writes
+        // when it picks a card. Both are read, not invented.
+        let text = "I gfx: using GPU 0: NVIDIA GeForce RTX 4070 (discrete, Vulkan 1.3.280, driver 0x1234, 12.0 GiB)\n\
+I gfx: fps 59.9, present pass GPU 1.204 ms avg\n\
+I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 10 s\n";
+        assert_eq!(super::presented_fps(text), Some(59.9));
+        assert_eq!(super::gpu_name(text).as_deref(), Some("NVIDIA GeForce RTX 4070"));
+        // A start-up line that names a frame rate is not evidence of a frame.
+        assert_eq!(
+            super::presented_fps("I gfx: using GPU 0: a card\nI fefw: gameplay at 60 fps ([fefw] fps60 = 1)\n"),
+            None,
+            "a run that never presented has no present line"
+        );
     }
 
     #[test]
