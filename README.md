@@ -60,6 +60,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.9](#whats-new-in-019)
 - [What's new in 0.1.8](#whats-new-in-018)
 - [What's new in 0.1.7](#whats-new-in-017)
 - [What's new in 0.1.6](#whats-new-in-016)
@@ -112,6 +113,21 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.9
+
+- **The sidebar agrees with the card.** A finished build showed "Setup incomplete" in the status column while the
+  Overview card under it said "Ready to play", because the two asked different questions. Once the game is built the
+  sidebar says "Ready to play" too, and Play, Rebuild and the status bar all follow the same answer.
+- **"Needs attention" says what needs it.** The Game data card reported a warning over a line of version numbers,
+  which left you guessing. It now shows the check that is not satisfied, with the version line under it, and hovering
+  the Game data row in the status column lists every open check. The three cards share one height, so a card with
+  more to say no longer makes the row ragged.
+- **Build logs are quiet.** Every build printed `'vswhere.exe' is not recognized` even on a machine with Visual Studio
+  installed, because Visual Studio's own `vcvars64.bat` looks for vswhere by name and the installer folder was not on
+  the PATH the launcher hands the build. Both environment scripts put that folder on PATH first, and the launcher
+  passes the `vcvars64.bat` its preflight already found, so the recompile and `fefw.exe` steps now build without the
+  warning.
 
 ## What's new in 0.1.8
 
