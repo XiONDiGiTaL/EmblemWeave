@@ -530,7 +530,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         // `<bit>`, and nothing in the message says that is what it means.
         if e.contains("'bit' file not found") {
             return Err(format!(
-                "the C++ library of the Visual Studio in use has no `<bit>` header, and the engine needs Visual Studio 2022 (17) or newer.\n\nInstall the current tools with:\n{VS_INSTALL}\n\nthen press Build the game again."
+                "the C++ standard library the build is using has no `<bit>` header. That means the Visual Studio C++ tools in use are older than 2022, or the C++ workload's libraries are missing from the install.\n\nInstall the current tools with:\n{VS_INSTALL}\n\nthen press Build the game again."
             ));
         }
         // A cache left by an older CMake or compiler cannot be reused, and CMake
