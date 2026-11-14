@@ -1,0 +1,21 @@
+Ryujinx shader translator: implement the Maxwell PIXLD instruction (SPIR-V built-in SampleId).
+PIXLD.MY_INDEX returns the index of the sample the fragment shader invocation runs for; the NVN compiler puts it
+in the epilogue of almost every pixel shader (33,361 of 33,744 pixel blocks of Metroid Prime Remastered). Ryujinx
+logged "Pixld is not implemented" and left the destination register unwritten, which in SPIR-V is an undefined value.
+Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is not multisampled), the other modes
+(COVMASK, COVERED, OFFSET, CENTROID_OFFSET) write 0 and log. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a
+copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
+--- a/CodeGen/Spirv/IoMap.cs
++++ b/CodeGen/Spirv/IoMap.cs
+@@ -32,9 +32,11 @@
+                 IoVariable.PointSize => (BuiltIn.PointSize, AggregateType.FP32),
+                 IoVariable.Position => (BuiltIn.Position, AggregateType.Vector4 | AggregateType.FP32),
+                 IoVariable.PrimitiveId => (BuiltIn.PrimitiveId, AggregateType.S32),
++                IoVariable.SampleId => (BuiltIn.SampleId, AggregateType.S32),
+                 IoVariable.SubgroupEqMask => (BuiltIn.SubgroupEqMask, AggregateType.Vector4 | AggregateType.U32),
+                 IoVariable.SubgroupGeMask => (BuiltIn.SubgroupGeMask, AggregateType.Vector4 | AggregateType.U32),
+                 IoVariable.SubgroupGtMask => (BuiltIn.SubgroupGtMask, AggregateType.Vector4 | AggregateType.U32),
++                IoVariable.SubgroupSize => (BuiltIn.SubgroupSize, AggregateType.U32),
+                 IoVariable.SubgroupLaneId => (BuiltIn.SubgroupLocalInvocationId, AggregateType.U32),
+                 IoVariable.SubgroupLeMask => (BuiltIn.SubgroupLeMask, AggregateType.Vector4 | AggregateType.U32),
+                 IoVariable.SubgroupLtMask => (BuiltIn.SubgroupLtMask, AggregateType.Vector4 | AggregateType.U32),

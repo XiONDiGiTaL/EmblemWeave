@@ -1,0 +1,18 @@
+Ryujinx shader translator: no BindlessToArray on Vulkan. It turns a handle read from a constant buffer at a variable offset
+into an array of QueryTextureArrayLengthFromBuffer textures indexed by offset / 8 and clamped to that length, but an NVN2
+uniform block's size is not known offline (Fire Emblem Fortune's Weave reads handles at c[0xe][idx * 8 + 0x340], past any
+fixed guess). Those handles go to the pool lookup instead (ampere-bindless-pool.patch). Applied at build time by
+translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The Ryujinx code in the context lines is MIT.
+--- a/Translation/Optimizations/Optimizer.cs
++++ b/Translation/Optimizations/Optimizer.cs
+@@ -28,10 +28,6 @@
+                 if (context.TargetApi == TargetApi.OpenGL)
+                 {
+                     BindlessToArray.RunPassOgl(context.Blocks[blkIndex], context.ResourceManager);
+-                }
+-                else
+-                {
+-                    BindlessToArray.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
+                 }
+ 
+                 BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);

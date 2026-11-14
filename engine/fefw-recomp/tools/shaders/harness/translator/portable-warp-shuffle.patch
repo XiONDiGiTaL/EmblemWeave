@@ -1,0 +1,116 @@
+NVIDIA SHFL clamp and five-bit operands; safe invalid source (MIT upstream context).
+--- a/Translation/HelperFunctionManager.cs
++++ b/Translation/HelperFunctionManager.cs
+@@ -247,7 +247,7 @@
+             EmitterContext context = new();
+ 
+             Operand value = Argument(0);
+-            Operand index = Argument(1);
++            Operand index = context.BitwiseAnd(Argument(1), Const(31));
+             Operand mask = Argument(2);
+ 
+             Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
+@@ -259,7 +259,7 @@
+ 
+             context.Copy(Argument(3), valid);
+ 
+-            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, srcThreadId, subgroupSize));
++            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, GenerateSafeShuffleSource(context, srcThreadId, valid, subgroupSize), subgroupSize));
+ 
+             context.Return(context.ConditionalSelect(valid, result, value));
+ 
+@@ -271,7 +271,7 @@
+             EmitterContext context = new();
+ 
+             Operand value = Argument(0);
+-            Operand index = Argument(1);
++            Operand index = context.BitwiseAnd(Argument(1), Const(31));
+             Operand mask = Argument(2);
+ 
+             Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
+@@ -284,7 +284,7 @@
+ 
+             context.Copy(Argument(3), valid);
+ 
+-            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, srcThreadId, subgroupSize));
++            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, GenerateSafeShuffleSource(context, srcThreadId, valid, subgroupSize), subgroupSize));
+ 
+             context.Return(context.ConditionalSelect(valid, result, value));
+ 
+@@ -296,18 +296,20 @@
+             EmitterContext context = new();
+ 
+             Operand value = Argument(0);
+-            Operand index = Argument(1);
++            Operand index = context.BitwiseAnd(Argument(1), Const(31));
+             Operand mask = Argument(2);
+ 
+             Operand segMask = context.BitwiseAnd(context.ShiftRightU32(mask, Const(8)), Const(0x1f));
+             Operand laneId = GenerateLoadSubgroupLaneId(context, subgroupSize);
+             Operand minThreadId = context.BitwiseAnd(laneId, segMask);
++            Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
++            Operand bound = context.BitwiseOr(minThreadId, context.BitwiseAnd(clamp, context.BitwiseNot(segMask)));
+             Operand srcThreadId = context.ISubtract(laneId, index);
+-            Operand valid = context.ICompareGreaterOrEqual(srcThreadId, minThreadId);
++            Operand valid = context.ICompareGreaterOrEqual(srcThreadId, bound);
+ 
+             context.Copy(Argument(3), valid);
+ 
+-            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, srcThreadId, subgroupSize));
++            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, GenerateSafeShuffleSource(context, srcThreadId, valid, subgroupSize), subgroupSize));
+ 
+             context.Return(context.ConditionalSelect(valid, result, value));
+ 
+@@ -319,7 +321,7 @@
+             EmitterContext context = new();
+ 
+             Operand value = Argument(0);
+-            Operand index = Argument(1);
++            Operand index = context.BitwiseAnd(Argument(1), Const(31));
+             Operand mask = Argument(2);
+ 
+             Operand clamp = context.BitwiseAnd(mask, Const(0x1f));
+@@ -332,13 +334,23 @@
+ 
+             context.Copy(Argument(3), valid);
+ 
+-            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, srcThreadId, subgroupSize));
++            Operand result = context.Shuffle(value, GenerateSubgroupShuffleIndex(context, GenerateSafeShuffleSource(context, srcThreadId, valid, subgroupSize), subgroupSize));
+ 
+             context.Return(context.ConditionalSelect(valid, result, value));
+ 
+             return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "ShuffleXor", true, 3, 1);
+         }
+ 
++        private static Operand IsNativeWarp(EmitterContext context) =>
++            context.ICompareLessOrEqualUnsigned(context.Load(StorageKind.Input, IoVariable.SubgroupSize), Const(32));
++
++        private static Operand GenerateSafeShuffleSource(EmitterContext context, Operand source, Operand valid, int subgroupSize)
++        {
++            // Keep the original native-32 path; avoid out-of-subgroup reads otherwise.
++            Operand safe = context.ConditionalSelect(valid, source, GenerateLoadSubgroupLaneId(context, subgroupSize));
++            return context.ConditionalSelect(IsNativeWarp(context), source, safe);
++        }
++
+         private static Operand GenerateLoadSubgroupLaneId(EmitterContext context, int subgroupSize)
+         {
+             if (subgroupSize <= 32)
+@@ -346,7 +358,8 @@
+                 return context.Load(StorageKind.Input, IoVariable.SubgroupLaneId);
+             }
+ 
+-            return context.BitwiseAnd(context.Load(StorageKind.Input, IoVariable.SubgroupLaneId), Const(0x1f));
++            Operand lane = context.Load(StorageKind.Input, IoVariable.SubgroupLaneId);
++            return context.ConditionalSelect(IsNativeWarp(context), lane, context.BitwiseAnd(lane, Const(0x1f)));
+         }
+ 
+         private static Operand GenerateSubgroupShuffleIndex(EmitterContext context, Operand srcThreadId, int subgroupSize)
+@@ -357,7 +370,7 @@
+             }
+ 
+             return context.BitwiseOr(
+-                context.BitwiseAnd(context.Load(StorageKind.Input, IoVariable.SubgroupLaneId), Const(0x60)),
++                context.ConditionalSelect(IsNativeWarp(context), Const(0), context.BitwiseAnd(context.Load(StorageKind.Input, IoVariable.SubgroupLaneId), Const(~31))),
+                 srcThreadId);
+         }
+ 

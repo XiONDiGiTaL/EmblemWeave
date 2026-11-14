@@ -1,0 +1,48 @@
+Portable NVIDIA warp lowering (MIT upstream context).
+--- a/Instructions/InstEmitWarp.cs
++++ b/Instructions/InstEmitWarp.cs
+@@ -67,6 +67,10 @@
+             }
+         }
+ 
++        // A uniform built-in, folded by drivers for their native subgroup size.
++        private static Operand IsNativeWarp(EmitterContext context) =>
++            context.ICompareLessOrEqualUnsigned(context.Load(StorageKind.Input, IoVariable.SubgroupSize), Const(32));
++
+         private static Operand EmitVote(EmitterContext context, VoteMode voteMode, Operand pred)
+         {
+             int subgroupSize = context.TranslatorContext.GpuAccessor.QueryHostSubgroupSize();
+@@ -92,13 +96,23 @@
+ 
+             Operand AllTrue() => context.ICompareEqual(ballotMask, EmitBallot(context, Const(IrConsts.True)));
+ 
+-            return voteMode switch
++            Operand emulated = voteMode switch
+             {
+                 VoteMode.All => AllTrue(),
+                 VoteMode.Any => context.ICompareNotEqual(ballotMask, Const(0)),
+                 VoteMode.Eq => context.BitwiseOr(AllTrue(), context.ICompareEqual(ballotMask, Const(0))),
+                 _ => null,
+             };
++            Operand native = voteMode switch
++            {
++                VoteMode.All => context.VoteAll(pred),
++                VoteMode.Any => context.VoteAny(pred),
++                VoteMode.Eq => context.VoteAllEqual(pred),
++                _ => null,
++            };
++            return context.ConditionalSelect(
++                IsNativeWarp(context),
++                native, emulated);
+         }
+ 
+         private static Operand EmitBallot(EmitterContext context, Operand pred)
+@@ -124,7 +138,7 @@
+                 // TODO: Add support for vector destination and do that with a single operation.
+ 
+                 Operand laneId = context.Load(StorageKind.Input, IoVariable.SubgroupLaneId);
+-                Operand element = context.ShiftRightU32(laneId, Const(5));
++                Operand element = context.ConditionalSelect(IsNativeWarp(context), Const(0), context.ShiftRightU32(laneId, Const(5)));
+ 
+                 Operand res = context.Ballot(pred, 0);
+                 res = context.ConditionalSelect(

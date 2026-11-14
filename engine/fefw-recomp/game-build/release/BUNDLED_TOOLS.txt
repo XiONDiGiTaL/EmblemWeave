@@ -1,0 +1,10 @@
+Tools bundled for the first-run build. None of them contains game code or data.
+- Zig (tools/build/zig): MIT (LICENSE.zig.MIT.txt). The clang, lld, libc++, libunwind and compiler-rt inside it are LLVM projects,
+  Apache-2.0 WITH LLVM-exception. mingw-w64 headers and CRT sources carry their own notices in tools/build/zig/lib/libc.
+- Python embeddable package (tools/python): PSF License (LICENSE.Python.PSF.txt).
+- Python packages in tools/python/Lib/site-packages: capstone (BSD-3-Clause), lz4 (BSD-3-Clause), zstandard (BSD-3-Clause),
+  zbic (GPLv2, https://github.com/kinnay/zbic); their licences are in the *.dist-info folders.
+- nxrecomp lifter (tools/build/recomp): GPL-3.0-or-later (tools/build/recomp/LICENSE).
+- spirv_harness (tools/spirv_harness): built on Ryujinx's shader translator (MIT, LICENSE.Ryujinx.MIT.txt) and the .NET runtime (MIT).
+- DejaVu Sans (fonts/): Bitstream Vera / DejaVu licence.
+No NVIDIA or AMD binaries are included. FSR 3 DLLs can be added by the player (Settings).

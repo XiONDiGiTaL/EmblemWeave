@@ -1,0 +1,30 @@
+Ryujinx shader translator: implement the Maxwell PIXLD instruction (SampleRateShading capability and ClipDistance[7]).
+PIXLD.MY_INDEX returns the index of the sample the fragment shader invocation runs for; the NVN compiler puts it
+in the epilogue of almost every pixel shader (33,361 of 33,744 pixel blocks of Metroid Prime Remastered). Ryujinx
+logged "Pixld is not implemented" and left the destination register unwritten, which in SPIR-V is an undefined value.
+Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is not multisampled), the other modes
+(COVMASK, COVERED, OFFSET, CENTROID_OFFSET) write 0 and log. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a
+copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
+--- a/CodeGen/Spirv/Declarations.cs
++++ b/CodeGen/Spirv/Declarations.cs
+@@ -451,7 +451,7 @@
+         {
+             SpvInstruction vec4FloatType = context.TypeVector(context.TypeFP32(), 4);
+             SpvInstruction floatType = context.TypeFP32();
+-            SpvInstruction array8FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), 8));
++            SpvInstruction array8FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), 7));
+             SpvInstruction array1FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), 1));
+ 
+             SpvInstruction perVertexStructType = context.TypeStruct(true, vec4FloatType, floatType, array8FloatType, array1FloatType);
+@@ -508,6 +508,11 @@
+                 (builtIn, varType) = IoMap.GetSpirvBuiltIn(ioVariable);
+                 isBuiltIn = true;
+ 
++                if (ioVariable == IoVariable.SampleId)
++                {
++                    context.AddCapability(Capability.SampleRateShading);
++                }
++
+                 if (varType == AggregateType.Invalid)
+                 {
+                     throw new InvalidOperationException($"Unknown variable {ioVariable}.");

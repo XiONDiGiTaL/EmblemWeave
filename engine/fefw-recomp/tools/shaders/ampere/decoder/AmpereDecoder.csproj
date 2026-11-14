@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Ampere (SM86) 128-bit SASS decoder: SassInst.cs is the shared model, SassDecoder decodes, SassText prints nvdisasm-style text.
+       Decode rules: inverted from Mesa NAK sm70_encode.rs (MIT, see ../../licenses/LICENSE.mesa-nak.MIT) plus fields probed with
+       nvdisasm (ampere/probe). tool/ is the sassdecode console (verify against the oracle, dump). -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>AmpereDecoder</AssemblyName>
+    <RootNamespace>Nx.Shaders.Ampere</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tool/**" />
+  </ItemGroup>
+
+</Project>

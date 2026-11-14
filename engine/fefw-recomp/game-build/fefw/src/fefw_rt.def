@@ -1,0 +1,21 @@
+; fefw_rt.dll exports (release package): the entry fefw.exe calls (fefw_rt_api.h) and every function recomp's ctx.h marks as
+; runtime-provided, which the lifted game code compiled on the player's PC imports from here.
+LIBRARY fefw_rt
+EXPORTS
+    fefw_rt_main
+    call_indirect
+    host_import
+    guest_trap
+    guest_unimpl
+    guest_svc
+    guest_mrs
+    guest_msr
+    nx_site_inline
+    nx_site_midhook
+    nx_hook_entry
+    stx_diag
+    nx_catch_call
+    ; the flat function table the lifted code reads at indirect call sites (recomp cxx.h, NX_INLINE_INDIRECT; runtime core/dispatch.cpp)
+    nx_fn_flat DATA
+    nx_fn_flat_n DATA
+    nx_fn_flat_host DATA

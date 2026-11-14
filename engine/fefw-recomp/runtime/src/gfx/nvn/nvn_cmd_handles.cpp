@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// NVNcommandHandle table and the command-memory lifetime rule. On the console a handle is valid until the game records over
+// the command memory the list used (or frees the memory pool). The back end keeps the same rule with an estimate of the
+// memory a list uses (nvn_cmd_lifecycle in api_cmdbuf.cpp): a list is dropped when a newer list occupies an overlapping
+// range of command memory or when its pool is finalized. Finalizing the command buffer does not end its lists: the command
+// words are in the game's memory, not the buffer object's. Animal Crossing initializes a command buffer per worker job each
+// frame, records one list, finalizes the buffer and only then has the frame's primary list call that handle. Only a list
+// without a region in the game's command memory goes with its buffer: one in its buffer's overflow ring (api_cmdbuf.cpp: the
+// memory the out-of-memory callback would have handed over), which nothing could overlap once the buffer is gone, or one
+// without a region at all. There is no count limit: the game calls some lists (character draw lists, the map) long after
+// recording them. nvnDeviceFinalizeCommandHandle drops a handle at once (Pokopia finalizes the previous one at each
+// BeginRecording).
+// The rule is taken from SuperMarioWonderRecomp docs/nvn/DEBUG.md #26, DEBUG-2 #90, #91 (MIT); the code is new.
+#include <atomic>
+#include <map>
+#include <mutex>
+#include <unordered_map>
+
+#include "nxrt/gauge.h"
+#include "nvn_cmd.h"
+
+namespace nxrt::nvn::be {
+namespace {
+
+struct Entry {
+    Ref<CmdList> list;
+    uint64_t start = 0, end = 0;
+};
+
+std::mutex g_mu;
+std::unordered_map<uint64_t, Entry> g_handles;
+std::map<uint64_t, uint64_t> g_regions;      // start -> handle (regions never overlap among live lists)
+std::atomic<uint64_t> g_next{0x1000};
+std::atomic<uint64_t> g_missing{0};
+std::atomic<int64_t> g_finalized{0};
+
+// Not in the game's command memory: no region, or a region in an overflow ring.
+bool unbacked(const Entry& e) { return e.end <= e.start || is_overflow_addr(e.start); }
+
+void drop_locked(uint64_t handle) {
+    auto it = g_handles.find(handle);
+    if (it == g_handles.end()) return;
+    if (it->second.end > it->second.start) {
+        auto r = g_regions.find(it->second.start);
+        if (r != g_regions.end() && r->second == handle) g_regions.erase(r);
+    }
+    g_handles.erase(it);   // the list lives on if a replay or another list still holds it
+}
+
+// Gauges (nxrt/gauge.h). The callbacks take g_mu; they are removed before g_mu and the tables are destroyed.
+struct HandleGauges {
+    HandleGauges() {
+        nxrt::gauge_register("nvn.handles", [] {
+            std::lock_guard<std::mutex> lk(g_mu);
+            return static_cast<int64_t>(g_handles.size());
+        });
+        nxrt::gauge_register("nvn.handle_regions", [] {
+            std::lock_guard<std::mutex> lk(g_mu);
+            return static_cast<int64_t>(g_regions.size());
+        });
+        // live handles whose list is not in the game's command memory (overflow ring or no region); bounded by the rings
+        nxrt::gauge_register("nvn.handles_unbacked", [] {
+            std::lock_guard<std::mutex> lk(g_mu);
+            int64_t n = 0;
+            for (const auto& [h, e] : g_handles) n += unbacked(e) ? 1 : 0;
+            return n;
+        });
+        // nvnDeviceFinalizeCommandHandle calls so far (cumulative)
+        nxrt::gauge_register("nvn.handles_finalized", [] { return g_finalized.load(std::memory_order_relaxed); });
+    }
+    ~HandleGauges() {
+        nxrt::gauge_unregister("nvn.handles");
+        nxrt::gauge_unregister("nvn.handle_regions");
+        nxrt::gauge_unregister("nvn.handles_unbacked");
+        nxrt::gauge_unregister("nvn.handles_finalized");
+    }
+};
+HandleGauges g_handle_gauges;
+
+}  // namespace
+
+uint64_t handle_register(Ref<CmdList> list) {
+    const uint64_t h = g_next.fetch_add(8);
+    list->handle = h;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (list->mem_end > list->mem_start) {
+        // drop every older list whose region overlaps this one
+        auto it = g_regions.lower_bound(list->mem_start);
+        if (it != g_regions.begin()) {
+            auto prev = std::prev(it);
+            auto e = g_handles.find(prev->second);
+            if (e != g_handles.end() && e->second.end > list->mem_start) it = prev;
+        }
+        std::vector<uint64_t> drop;
+        for (; it != g_regions.end() && it->first < list->mem_end; ++it) drop.push_back(it->second);
+        for (uint64_t d : drop) drop_locked(d);
+        g_regions[list->mem_start] = h;
+    }
+    Entry e;
+    e.start = list->mem_start;
+    e.end = list->mem_end;
+    e.list = std::move(list);
+    g_handles.emplace(h, std::move(e));
+    return h;
+}
+
+Ref<CmdList> handle_lookup(uint64_t handle) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    auto it = g_handles.find(handle);
+    if (it == g_handles.end()) {
+        g_missing.fetch_add(1);
+        return {};
+    }
+    it->second.list->calls.fetch_add(1);
+    return it->second.list;
+}
+
+void handle_release(uint64_t handle) {
+    g_finalized.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(g_mu);
+    drop_locked(handle);
+}
+
+void handle_release_unbacked(uint64_t handle) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    auto it = g_handles.find(handle);
+    if (it != g_handles.end() && unbacked(it->second)) drop_locked(handle);
+}
+
+void handles_release_pool(const MemoryPool* pool) {
+    if (!pool || !pool->base) return;
+    const uint64_t lo = pool->gpu_base, hi = pool->gpu_base + pool->size;
+    std::lock_guard<std::mutex> lk(g_mu);
+    std::vector<uint64_t> drop;
+    for (auto& [h, e] : g_handles)
+        if (e.end > e.start && e.start >= lo && e.start < hi) drop.push_back(h);
+    for (uint64_t h : drop) drop_locked(h);
+}
+
+const char* op_name(Op op) {
+    static const char* const kNames[] = {
+    "Nop",
+    "BindProgram",
+    "BindBuffers",
+    "BindTextures",
+    "BindImages",
+    "BindVertexAttribs",
+    "BindVertexStreams",
+    "BindBlend",
+    "BindColor",
+    "BindChannelMask",
+    "BindDepthStencil",
+    "BindPolygon",
+    "BindMultisample",
+    "SetTexturePool",
+    "SetSamplerPool",
+    "SetViewports",
+    "SetScissors",
+    "SetDepthRanges",
+    "SetDepthBounds",
+    "SetStencil",
+    "SetBlendColor",
+    "SetPointSize",
+    "SetLineWidth",
+    "SetPolygonOffsetClamp",
+    "SetAlphaRef",
+    "SetSampleMask",
+    "SetRasterizerDiscard",
+    "SetDepthClamp",
+    "SetPrimitiveRestart",
+    "SetPatchSize",
+    "SetTessLevels",
+    "SetRenderEnable",
+    "SetRenderTargets",
+    "SetCoverageModulationTable",
+    "SetConservativeRaster",
+    "DrawArrays",
+    "DrawElements",
+    "DrawIndirect",
+    "DrawTexture",
+    "ClearColor",
+    "ClearDepthStencil",
+    "ClearTexture",
+    "ClearBuffer",
+    "CopyBufferToBuffer",
+    "CopyBufferToTexture",
+    "CopyTextureToBuffer",
+    "CopyTextureToTexture",
+    "Downsample",
+    "UpdateUniformBuffer",
+    "Dispatch",
+    "DispatchIndirect",
+    "ReportCounter",
+    "ReportValue",
+    "ResetCounter",
+    "Barrier",
+    "FenceSync",
+    "WaitSync",
+    "SignalEvent",
+    "WaitEvent",
+    "CallCommands",
+    "DiscardColor",
+    "DiscardDepthStencil",
+    "ResolveDepth",
+    "BeginXfb",
+    "EndXfb",
+    "PauseXfb",
+    "ResumeXfb",
+    "DrawXfb",
+    "PushDebugGroup",
+    "PopDebugGroup",
+    "EvaluateDlss",
+    "PushConstants"};
+    const size_t i = static_cast<size_t>(op);
+    return i < sizeof(kNames) / sizeof(kNames[0]) ? kNames[i] : "?";
+}
+
+size_t handles_live() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_handles.size();
+}
+
+uint64_t handles_missing() { return g_missing.load(); }
+
+}  // namespace nxrt::nvn::be

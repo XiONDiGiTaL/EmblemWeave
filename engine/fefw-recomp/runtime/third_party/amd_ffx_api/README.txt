@@ -1,0 +1,3 @@
+AMD FidelityFX / FSR SDK v2.4.0 API headers (ffx_api.h, ffx_api_types.h, ffx_api_loader.h, vk/ffx_api_vk.h, upscalers/include/ffx_upscale.h), MIT licence (LICENSE.txt; the SDK's Kits/FidelityFX/docs/license.md lists these files and the Vulkan signed DLLs under MIT).
+Source: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK tag v2.4.0 (2026-10-28), paths Kits/FidelityFX/api/include and Kits/FidelityFX/upscalers/include. Unmodified; the directory layout is kept because ffx_upscale.h includes ../../api/include/ffx_api.h.
+The runtime loads the prebuilt Vulkan DLLs at run time (amd_fidelityfx_loader_vk.dll + amd_fidelityfx_upscaler_vk.dll from Kits/FidelityFX/signedbin, or the v1.1.4 amd_fidelityfx_vk.dll); nothing is linked.

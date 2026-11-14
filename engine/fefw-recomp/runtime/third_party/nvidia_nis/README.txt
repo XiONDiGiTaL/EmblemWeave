@@ -1,0 +1,1 @@
+NVIDIA Image Scaling SDK v1.0.3 (NIS_Scaler.h, NIS_Config.h), MIT licence, source https://github.com/NVIDIAGameWorks/NVIDIAImageScaling tag v1.0.3 (commit 35e13ba316c98eeecf16f37eae70ce88019911f6). Unmodified; scripts/gen_nis_shaders.py rewrites the texture macros of a temporary copy when it compiles the shader.

@@ -1,0 +1,4 @@
+* text=auto
+*.elf binary
+*.so binary
+*.bin binary

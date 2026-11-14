@@ -1,0 +1,29 @@
+Ryujinx shader translator: bindless texture handles that bindless elimination cannot pin to one constant-buffer word go
+through the texture and sampler pools (GenerateBindlessAccess: texture index = handle & 0xfffff, sampler index =
+handle >> 20), whatever produced the handle. Upstream allows that only for handles read from shader inputs or storage
+buffers (a performance choice for an emulator); NVN2 shaders also index arrays of handles in uniform blocks
+("LDC R37, c[0xe][R43+0x340]; TEX.SCR.B ..."), and the pool lookup is what the hardware does with any handle. Applied at
+build time by translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The Ryujinx code in the context
+lines is MIT.
+--- a/Translation/Optimizations/BindlessElimination.cs
++++ b/Translation/Optimizations/BindlessElimination.cs
+@@ -150,18 +150,7 @@
+                 return true;
+             }
+ 
+-            if (bindlessHandle.AsgOp is not Operation handleOp ||
+-                handleOp.Inst != Instruction.Load ||
+-                (handleOp.StorageKind != StorageKind.Input && handleOp.StorageKind != StorageKind.StorageBuffer))
+-            {
+-                // Right now, we only allow bindless access when the handle comes from a shader input or storage buffer.
+-                // This is an artificial limitation to prevent it from being used in cases where it
+-                // would have a large performance impact of loading all textures in the pool.
+-                // It might be removed in the future, if we can mitigate the performance impact.
+-
+-                return false;
+-            }
+-
++            // Ampere front end: any handle may index the pools (see the patch header).
+             return true;
+         }
+ 

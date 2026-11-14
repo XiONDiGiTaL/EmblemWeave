@@ -1,0 +1,21 @@
+Ryujinx shader translator: when a global address is the sum of two constant-buffer values, GlobalToStorage preferred the
+second one, so "c[1][0x20] + c[0][0x40]" (an offset from the shader's constant data plus the storage descriptor) became a
+storage buffer bound from c[1]. A c[0] (driver reserved) addend is now preferred over one from another bank. The Ryujinx
+code in the context lines is MIT.
+--- a/Translation/Optimizations/GlobalToStorage.cs	2026-10-29 05:10:51.674910200 -0500
++++ b/Translation/Optimizations/GlobalToStorage.cs	2026-10-29 05:10:51.776837200 -0500
+@@ -1046,6 +1046,14 @@
+             // because constant buffer are always encoded as the second operand,
+             // so the second operand will always be the one from the last instruction.
+ 
++            // NVN keeps the storage buffer descriptors in c[0] only: an addend from another bank (an offset in the shader's
++            // constant data, c[1]) is never the base, even when it is the second operand.
++            if (src1.Type == OperandType.ConstantBuffer && src1.GetCbufSlot() == DriverReservedCb &&
++                !(src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))
++            {
++                return GetBaseAddressCbWithOffset(src1, src2, constOffset);
++            }
++
+             if (src1.Type != OperandType.ConstantBuffer ||
+                 (src1.Type == OperandType.ConstantBuffer && src2.Type == OperandType.ConstantBuffer) ||
+                 (src2.Type == OperandType.ConstantBuffer && src2.GetCbufSlot() == DriverReservedCb))

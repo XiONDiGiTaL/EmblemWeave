@@ -1,5 +1,6 @@
-//! The game engine: fefw-recomp (Goldoire, GPL-3.0), included as the git
-//! submodule `engine/fefw-recomp`.
+//! The game engine: fefw-recomp (Goldoire and its contributors, GPL-3.0),
+//! included in this repository at `engine/fefw-recomp` so a clone needs no
+//! submodule fetch. See docs/UPSTREAM.md.
 //!
 //! The launcher builds the game with the engine's own steps (its
 //! `docs/BUILDING.md`), from the user's dump, and runs it:
@@ -278,7 +279,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
 
 /// The build job's work: every step in order.
 pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, String> {
-    let root = root().ok_or("the engine (engine/fefw-recomp) was not found; run `git submodule update --init`")?;
+    let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
     let missing = missing_tools();
     if !missing.is_empty() {
         let lines: Vec<String> = missing.iter().map(|m| format!("{m} (`{}`)", install_hint(m))).collect();
