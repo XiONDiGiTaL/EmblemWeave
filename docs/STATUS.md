@@ -56,7 +56,7 @@ native code runs, as an option, and has since `ew-native` was added.
 | AArch64 decode coverage | Verified | **99.97%** of 6,714,569 real words; 2,165 unsupported, 172,019 padding |
 | System registers, `svc`, `ldpsw` | Implemented | `mrs`/`msr` (thread pointers, counter, FPCR/FPSR, cache geometry) and supervisor calls in the decoder, interpreter and C emitter |
 | Integer, bitfield, multiply-high, `extr`, CRC-32 | Verified | interpreter, emitter and oracle agree |
-| Scalar floating point | Verified | |
+| Scalar floating point | Verified | arithmetic, conversions, `fcvt`, `frint` and `fmadd` in interpreter and emitted C; `FPCR.RMode`, `FPCR.FZ` and `FPCR.DN` change every one of them (unit tests for each mode, and a campaign run where `+inf` rounding moves `1 + 2^-53` to the next double in both paths). Vector operations and FPSR's cumulative flags are not covered |
 | Advanced SIMD | Verified | copies, three-same, two-reg, shifts, long/narrow, by-element, permutes, `ext`, `tbl`/`tbx`, reductions, immediates, structure loads/stores; 400 encodings × 6 edge-case states, every register identical (`verify_simd.sh`); 5,000 encodings × 6 states passed before the logic fixes, which do not touch the vector unit |
 | Atomics, exclusives, `cas`, acquire/release | Implemented | LSE read-modify-write, `ldxr`/`stxr` with a monitor, `cas`/`casp`, `ldar`/`stlr` |
 | Control-flow recovery | Verified | 304,909 blocks, 3,620 complete functions in a 4,000-function pass |

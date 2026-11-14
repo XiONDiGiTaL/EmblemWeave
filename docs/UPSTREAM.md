@@ -91,10 +91,11 @@ Two of its notes are worth keeping, and neither is a file to copy:
 
 - `simd.h` lowers AArch64 FP/AdvSIMD to portable C with hardware-exact semantics (first signalling NaN quietened then
   the first quiet NaN, `FPCR.DN` default NaN, `FPCR.FZ` flushing, `FPCR.RMode` for arithmetic and conversions, the ARM
-  estimate tables), and says plainly what it does not model (FPSR cumulative bits and QC, FP16 arithmetic). Our
-  `ew-lift` interpreter decodes scalar FP and keeps `FPCR`/`FPSR` as written rather than applying those modes, so a
-  function that changes rounding or flush mode can diverge from the console. The header is the reference to reach for
-  if that ever matters.
+  estimate tables), and says plainly what it does not model (FPSR cumulative bits and QC, FP16 arithmetic). It prompted
+  the same work here: `ew-lift` now applies `FPCR.RMode`, `FPCR.FZ` and `FPCR.DN` to every scalar operation in both the
+  interpreter and the emitted C, so a function that changes a mode no longer diverges from the console. Vector
+  operations (`simd.rs`) and FPSR's cumulative flags are still outside that, and the engine's own C++ recompiler keeps
+  the equivalent gap recorded in `recomp/docs/GAPS.md`.
 - Cheats that patch the main module's *code*. Their generator compiles the patched instructions beside the originals
   and picks at run time, because a recompiled game no longer runs the bytes a cheat rewrites. Our `cheats.rs` states
   the limitation instead. It is the one feature in their port that our cheats page cannot do.

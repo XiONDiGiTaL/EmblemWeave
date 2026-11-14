@@ -390,6 +390,13 @@ impl State {
         self.vwrite(r, 8, v.to_bits());
     }
 
+    /// The FPCR settings that change a result. Every scalar floating point
+    /// operation reads them, so a guest that switches rounding or flush mode is
+    /// modelled instead of always running round-to-nearest with denormals.
+    fn fp_env(&self) -> FpEnv {
+        FpEnv::from_fpcr(self.fpcr)
+    }
+
     /// FP compare writes NZCV with the architectural encoding: unordered sets
     /// C and V, equal sets Z and C, less than sets N and greater sets C.
     fn set_fp_flags(&mut self, a: f64, b: f64) {
@@ -951,14 +958,15 @@ impl State {
                 self.vwrite(rd, bytes, v);
             }
             Op::FpBinary { rd, rn, rm, op, is64 } => {
+                let env = self.fp_env();
                 let v = if is64 {
                     let a = self.dread(rn);
                     let b = self.dread(rm);
-                    fp_binary64(op, a, b)
+                    fp_binary64(op, a, b, env)
                 } else {
                     let a = self.sread(rn);
                     let b = self.sread(rm);
-                    fp_binary32(op, a, b) as f64
+                    fp_binary32(op, a, b, env) as f64
                 };
                 if is64 {
                     self.dwrite(rd, v);
@@ -969,47 +977,52 @@ impl State {
             Op::FpUnary { rd, rn, op, is64 } => {
                 // fcvt is the one case where the destination is not the source
                 // width, so it cannot go through the same-width helpers.
+                let env = self.fp_env();
                 if op == FpUnop::Cvt {
                     if is64 {
-                        let v = self.dread(rn);
-                        self.swrite(rd, v as f32);
+                        // Double to single: the one conversion FPCR rounds.
+                        let v = round_f32(env, env.in64(self.dread(rn)));
+                        self.swrite(rd, v);
                     } else {
-                        let v = self.sread(rn);
-                        self.dwrite(rd, v as f64);
+                        let v = env.in32(self.sread(rn));
+                        self.dwrite(rd, if v.is_nan() { env.nan64(v as f64) } else { v as f64 });
                     }
                 } else if is64 {
-                    let v = fp_unary64(op, self.dread(rn));
+                    let v = fp_unary64(op, self.dread(rn), env);
                     self.dwrite(rd, v);
                 } else {
-                    let v = fp_unary32(op, self.sread(rn));
+                    let v = fp_unary32(op, self.sread(rn), env);
                     self.swrite(rd, v);
                 }
             }
             Op::FpCompare { rn, rm, is64, signal: _ } => {
+                let env = self.fp_env();
                 if is64 {
-                    let (a, b) = (self.dread(rn), self.dread(rm));
+                    let (a, b) = (env.in64(self.dread(rn)), env.in64(self.dread(rm)));
                     self.set_fp_flags(a, b);
                 } else {
-                    let (a, b) = (self.sread(rn), self.sread(rm));
+                    let (a, b) = (env.in32(self.sread(rn)), env.in32(self.sread(rm)));
                     self.set_fp_flags(a as f64, b as f64);
                 }
             }
             Op::FpCompareZero { rn, is64, signal: _ } => {
+                let env = self.fp_env();
                 if is64 {
-                    let a = self.dread(rn);
+                    let a = env.in64(self.dread(rn));
                     self.set_fp_flags(a, 0.0);
                 } else {
-                    let a = self.sread(rn);
+                    let a = env.in32(self.sread(rn));
                     self.set_fp_flags(a as f64, 0.0);
                 }
             }
             Op::FpCondCompare { rn, rm, cond, nzcv, is64 } => {
                 if self.cond_holds(cond) {
+                    let env = self.fp_env();
                     if is64 {
-                        let (a, b) = (self.dread(rn), self.dread(rm));
+                        let (a, b) = (env.in64(self.dread(rn)), env.in64(self.dread(rm)));
                         self.set_fp_flags(a, b);
                     } else {
-                        let (a, b) = (self.sread(rn), self.sread(rm));
+                        let (a, b) = (env.in32(self.sread(rn)), env.in32(self.sread(rm)));
                         self.set_fp_flags(a as f64, b as f64);
                     }
                 } else {
@@ -1027,39 +1040,59 @@ impl State {
                 }
             }
             Op::FpRoundFp { rd, rn, round, is64 } => {
+                // frintn / frinta / frintp / frintm / frintz name their own
+                // rounding, so FPCR only contributes flush-to-zero and the
+                // default NaN here. (frintx and frinti, which do follow the
+                // mode, are not decoded: they set the inexact flag as well.)
+                let env = self.fp_env();
                 if is64 {
-                    let v = fp_round_to_integral(self.dread(rn), round);
+                    let v = finish64(env, fp_round_to_integral(env.in64(self.dread(rn)), round), 0.0);
                     self.dwrite(rd, v);
                 } else {
-                    let v = fp_round_to_integral(self.sread(rn) as f64, round);
-                    self.swrite(rd, v as f32);
+                    let v = round_f32(env, fp_round_to_integral(env.in32(self.sread(rn)) as f64, round));
+                    self.swrite(rd, v);
                 }
             }
             Op::FpToInt { rd, rn, round, unsigned, src_is64, dest_is64 } => {
-                let v = if src_is64 { self.dread(rn) } else { self.sread(rn) as f64 };
+                let env = self.fp_env();
+                let v = if src_is64 {
+                    env.in64(self.dread(rn))
+                } else {
+                    env.in32(self.sread(rn)) as f64
+                };
                 let r = fp_to_int(v, round, unsigned, dest_is64);
                 self.write(rd, false, r);
             }
             Op::IntToFp { rd, rn, unsigned, src_is64, dest_is64 } => {
+                let env = self.fp_env();
                 let raw = self.read(rn, false);
-                let v = int_to_fp(raw, unsigned, src_is64);
                 if dest_is64 {
-                    self.dwrite(rd, v);
+                    self.dwrite(rd, int_to_fp64(raw, unsigned, src_is64, env));
                 } else {
-                    self.swrite(rd, v as f32);
+                    self.swrite(rd, int_to_fp32(raw, unsigned, src_is64, env));
                 }
             }
             Op::IntToFpFixed { rd, rn, unsigned, src_is64, dest_is64, fbits } => {
+                // The scale is a power of two, so it is exact: round once, at the
+                // destination width, from the integer's nearest double. A 64-bit
+                // integer beyond 2^53 has already lost its low bits there, which
+                // is the one place this is narrower than the hardware.
+                let env = self.fp_env();
                 let raw = self.read(rn, false);
-                let v = int_to_fp(raw, unsigned, src_is64) / 2f64.powi(fbits as i32);
+                let scaled = int_to_fp(raw, unsigned, src_is64) / 2f64.powi(fbits as i32);
                 if dest_is64 {
-                    self.dwrite(rd, v);
+                    self.dwrite(rd, finish64(env, scaled, 0.0));
                 } else {
-                    self.swrite(rd, v as f32);
+                    self.swrite(rd, round_f32(env, scaled));
                 }
             }
             Op::FpToIntFixed { rd, rn, unsigned, src_is64, dest_is64, fbits } => {
-                let v = if src_is64 { self.dread(rn) } else { self.sread(rn) as f64 };
+                let env = self.fp_env();
+                let v = if src_is64 {
+                    env.in64(self.dread(rn))
+                } else {
+                    env.in32(self.sread(rn)) as f64
+                };
                 let r = fp_to_int(v * 2f64.powi(fbits as i32), FpRound::Zero, unsigned, dest_is64);
                 self.write(rd, false, r);
             }
@@ -1072,16 +1105,29 @@ impl State {
                 }
             }
             Op::FpMulAdd { rd, rn, rm, ra, negate_product, negate_addend, is64 } => {
+                let env = self.fp_env();
                 if is64 {
-                    let product = self.dread(rn) * self.dread(rm);
-                    let product = if negate_product { -product } else { product };
-                    let addend = if negate_addend { -self.dread(ra) } else { self.dread(ra) };
-                    self.dwrite(rd, product + addend);
+                    let a = env.in64(self.dread(rn));
+                    let b = env.in64(self.dread(rm));
+                    let c = env.in64(self.dread(ra));
+                    let (a, c) = (if negate_product { -a } else { a }, if negate_addend { -c } else { c });
+                    // One rounding, as the instruction does, plus the exact
+                    // residual a directed mode needs to step the right way.
+                    let r = a.mul_add(b, c);
+                    let product = a * b;
+                    let product_err = a.mul_add(b, -product);
+                    let (sum, sum_err) = two_sum(product, c);
+                    let (diff, diff_err) = two_sum(sum, -r);
+                    self.dwrite(rd, finish64(env, r, diff + diff_err + sum_err + product_err));
                 } else {
-                    let product = self.sread(rn) * self.sread(rm);
-                    let product = if negate_product { -product } else { product };
-                    let addend = if negate_addend { -self.sread(ra) } else { self.sread(ra) };
-                    self.swrite(rd, product + addend);
+                    let a = env.in32(self.sread(rn)) as f64;
+                    let b = env.in32(self.sread(rm)) as f64;
+                    let c = env.in32(self.sread(ra)) as f64;
+                    let (a, c) = (if negate_product { -a } else { a }, if negate_addend { -c } else { c });
+                    // Both operand products are exact in double, and one rounding
+                    // to single after a correctly rounded double result cannot move
+                    // the answer: 53 bits is twice 24 plus more than two.
+                    self.swrite(rd, round_f32(env, a.mul_add(b, c)));
                 }
             }
             Op::Extr { rd, rn, rm, lsb, is64 } => {
@@ -1184,6 +1230,232 @@ impl State {
     }
 }
 
+/// FPCR's rounding mode, the two bits at 23:22.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FpRMode {
+    Nearest,
+    PlusInf,
+    MinusInf,
+    Zero,
+}
+
+/// The parts of FPCR that change a result: the rounding mode, flush-to-zero
+/// (bit 26) and default NaN (bit 25). FPSR stays as written: the cumulative
+/// exception bits and QC are not modelled.
+#[derive(Clone, Copy, Debug)]
+pub struct FpEnv {
+    pub round: FpRMode,
+    pub flush: bool,
+    pub default_nan: bool,
+}
+
+const DEFAULT_NAN32: u32 = 0x7FC0_0000;
+const DEFAULT_NAN64: u64 = 0x7FF8_0000_0000_0000;
+
+impl FpEnv {
+    fn from_fpcr(fpcr: u64) -> FpEnv {
+        FpEnv {
+            round: match (fpcr >> 22) & 3 {
+                1 => FpRMode::PlusInf,
+                2 => FpRMode::MinusInf,
+                3 => FpRMode::Zero,
+                _ => FpRMode::Nearest,
+            },
+            flush: fpcr & (1 << 26) != 0,
+            default_nan: fpcr & (1 << 25) != 0,
+        }
+    }
+
+    /// Flush-to-zero on an operand: a denormal is read as a zero of the same sign.
+    fn in32(self, v: f32) -> f32 {
+        if self.flush && v != 0.0 && v.abs() < f32::MIN_POSITIVE {
+            0.0f32.copysign(v)
+        } else {
+            v
+        }
+    }
+
+    fn in64(self, v: f64) -> f64 {
+        if self.flush && v != 0.0 && v.abs() < f64::MIN_POSITIVE {
+            0.0f64.copysign(v)
+        } else {
+            v
+        }
+    }
+
+    /// Default NaN mode: every NaN the unit produces is the canonical quiet NaN,
+    /// whatever payload or sign the operands carried.
+    fn nan32(self, v: f32) -> f32 {
+        if self.default_nan && v.is_nan() {
+            f32::from_bits(DEFAULT_NAN32)
+        } else {
+            v
+        }
+    }
+
+    fn nan64(self, v: f64) -> f64 {
+        if self.default_nan && v.is_nan() {
+            f64::from_bits(DEFAULT_NAN64)
+        } else {
+            v
+        }
+    }
+}
+
+fn next_up32(v: f32) -> f32 {
+    if !v.is_finite() {
+        return v;
+    }
+    if v == 0.0 {
+        return f32::from_bits(1);
+    }
+    let b = v.to_bits();
+    f32::from_bits(if v > 0.0 { b + 1 } else { b - 1 })
+}
+
+fn next_down32(v: f32) -> f32 {
+    if !v.is_finite() {
+        return v;
+    }
+    if v == 0.0 {
+        return f32::from_bits(0x8000_0001);
+    }
+    let b = v.to_bits();
+    f32::from_bits(if v > 0.0 { b - 1 } else { b + 1 })
+}
+
+fn next_up64(v: f64) -> f64 {
+    if !v.is_finite() {
+        return v;
+    }
+    if v == 0.0 {
+        return f64::from_bits(1);
+    }
+    let b = v.to_bits();
+    f64::from_bits(if v > 0.0 { b + 1 } else { b - 1 })
+}
+
+fn next_down64(v: f64) -> f64 {
+    if !v.is_finite() {
+        return v;
+    }
+    if v == 0.0 {
+        return f64::from_bits(0x8000_0000_0000_0001);
+    }
+    let b = v.to_bits();
+    f64::from_bits(if v > 0.0 { b - 1 } else { b + 1 })
+}
+
+fn toward_zero32(v: f32) -> f32 {
+    if v > 0.0 {
+        next_down32(v)
+    } else {
+        next_up32(v)
+    }
+}
+
+fn toward_zero64(v: f64) -> f64 {
+    if v > 0.0 {
+        next_down64(v)
+    } else {
+        next_up64(v)
+    }
+}
+
+/// Round a value that is exact in double to single precision in the requested
+/// mode, then flush a tiny result. Every double result of a single precision
+/// add, subtract, multiply, square root or divide is exact enough for this: the
+/// widest of them needs 50 bits, and double carries 53.
+fn round_f32(env: FpEnv, exact: f64) -> f32 {
+    let near = exact as f32;
+    if exact.is_nan() {
+        return env.nan32(near);
+    }
+    let r = if near as f64 == exact {
+        near
+    } else {
+        let below = (near as f64) < exact;
+        match env.round {
+            FpRMode::Nearest => near,
+            FpRMode::PlusInf => {
+                if below {
+                    next_up32(near)
+                } else {
+                    near
+                }
+            }
+            FpRMode::MinusInf => {
+                if below {
+                    near
+                } else {
+                    next_down32(near)
+                }
+            }
+            FpRMode::Zero => {
+                if (near > 0.0 && !below) || (near < 0.0 && below) {
+                    toward_zero32(near)
+                } else {
+                    near
+                }
+            }
+        }
+    };
+    if env.flush && r != 0.0 && r.is_finite() && r.abs() < f32::MIN_POSITIVE {
+        0.0f32.copysign(r)
+    } else {
+        r
+    }
+}
+
+/// Round an already correctly rounded double, given the exact value's residual
+/// `exact - v`, to the requested mode and flush a tiny result. A directed mode
+/// steps one ulp when the exact value lies past the nearest one.
+fn finish64(env: FpEnv, v: f64, residual: f64) -> f64 {
+    if v.is_nan() {
+        return env.nan64(v);
+    }
+    let r = if residual.is_finite() && residual != 0.0 {
+        match env.round {
+            FpRMode::Nearest => v,
+            FpRMode::PlusInf => {
+                if residual > 0.0 {
+                    next_up64(v)
+                } else {
+                    v
+                }
+            }
+            FpRMode::MinusInf => {
+                if residual < 0.0 {
+                    next_down64(v)
+                } else {
+                    v
+                }
+            }
+            FpRMode::Zero => {
+                if (v > 0.0 && residual < 0.0) || (v < 0.0 && residual > 0.0) {
+                    toward_zero64(v)
+                } else {
+                    v
+                }
+            }
+        }
+    } else {
+        v
+    };
+    if env.flush && r != 0.0 && r.is_finite() && r.abs() < f64::MIN_POSITIVE {
+        0.0f64.copysign(r)
+    } else {
+        r
+    }
+}
+
+/// The error free sum: `s + e` is exactly `a + b`.
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
 /// IEEE maximum with the architectural NaN rule: a single NaN operand loses to
 /// the number, and the two signed zeros compare equal but keep a fixed sign.
 fn fp_max(a: f64, b: f64) -> f64 {
@@ -1226,56 +1498,202 @@ fn fp_min(a: f64, b: f64) -> f64 {
     }
 }
 
-fn fp_binary64(op: FpBinop, a: f64, b: f64) -> f64 {
+fn fp_binary64(op: FpBinop, a: f64, b: f64, env: FpEnv) -> f64 {
+    let (a, b) = (env.in64(a), env.in64(b));
     match op {
-        FpBinop::Mul => a * b,
-        FpBinop::Div => a / b,
-        FpBinop::Add => a + b,
-        FpBinop::Sub => a - b,
-        FpBinop::NegMul => -(a * b),
-        FpBinop::Max | FpBinop::MaxNm => fp_max(a, b),
-        FpBinop::Min | FpBinop::MinNm => fp_min(a, b),
+        FpBinop::Add => {
+            let (s, e) = two_sum(a, b);
+            finish64(env, s, e)
+        }
+        FpBinop::Sub => {
+            let (s, e) = two_sum(a, -b);
+            finish64(env, s, e)
+        }
+        FpBinop::Mul => {
+            let p = a * b;
+            finish64(env, p, a.mul_add(b, -p))
+        }
+        FpBinop::Div => {
+            let q = a / b;
+            // The remainder a - q*b is the quotient's error times b, so its sign
+            // only matches (exact - q) when b is positive.
+            let r = (-q).mul_add(b, a);
+            finish64(env, q, if b < 0.0 { -r } else { r })
+        }
+        FpBinop::NegMul => {
+            let p = a * b;
+            finish64(env, -p, -a.mul_add(b, -p))
+        }
+        // max and min select an operand rather than compute one, so only the
+        // default NaN mode can change the result.
+        FpBinop::Max | FpBinop::MaxNm => env.nan64(fp_max(a, b)),
+        FpBinop::Min | FpBinop::MinNm => env.nan64(fp_min(a, b)),
     }
 }
 
-fn fp_binary32(op: FpBinop, a: f32, b: f32) -> f32 {
+fn fp_binary32(op: FpBinop, a: f32, b: f32, env: FpEnv) -> f32 {
+    let (a, b) = (env.in32(a), env.in32(b));
+    let (x, y) = (a as f64, b as f64);
     match op {
-        FpBinop::Mul => a * b,
-        FpBinop::Div => a / b,
-        FpBinop::Add => a + b,
-        FpBinop::Sub => a - b,
-        FpBinop::NegMul => -(a * b),
-        FpBinop::Max | FpBinop::MaxNm => fp_max(a as f64, b as f64) as f32,
-        FpBinop::Min | FpBinop::MinNm => fp_min(a as f64, b as f64) as f32,
+        FpBinop::Add => round_f32(env, x + y),
+        FpBinop::Sub => round_f32(env, x - y),
+        FpBinop::Mul => round_f32(env, x * y),
+        FpBinop::Div => round_f32(env, x / y),
+        FpBinop::NegMul => round_f32(env, -(x * y)),
+        FpBinop::Max | FpBinop::MaxNm => env.nan32(fp_max(x, y) as f32),
+        FpBinop::Min | FpBinop::MinNm => env.nan32(fp_min(x, y) as f32),
     }
 }
 
-fn fp_unary64(op: FpUnop, v: f64) -> f64 {
+fn fp_unary64(op: FpUnop, v: f64, env: FpEnv) -> f64 {
+    let v = env.in64(v);
     match op {
-        FpUnop::Neg => -v,
-        FpUnop::Abs => v.abs(),
-        FpUnop::Sqrt => v.sqrt(),
-        FpUnop::RoundN | FpUnop::RoundX | FpUnop::RoundI => v.round_ties_even(),
-        FpUnop::RoundA => v.round(),
-        FpUnop::RoundP => v.ceil(),
-        FpUnop::RoundM => v.floor(),
-        FpUnop::RoundZ => v.trunc(),
+        FpUnop::Neg => env.nan64(-v),
+        FpUnop::Abs => env.nan64(v.abs()),
+        FpUnop::Sqrt => {
+            let s = v.sqrt();
+            // s*s - v is the square's error, which is about twice s times the
+            // root's error; the sign of the root's own error is the opposite.
+            let e = s.mul_add(s, -v);
+            finish64(env, s, -e / (2.0 * s))
+        }
+        FpUnop::RoundN => finish64(env, v.round_ties_even(), 0.0),
+        // frintx and frinti take their rounding from FPCR.
+        FpUnop::RoundX | FpUnop::RoundI => {
+            finish64(env, fp_round_to_integral(v, round_from_env(env)), 0.0)
+        }
+        FpUnop::RoundA => finish64(env, v.round(), 0.0),
+        FpUnop::RoundP => finish64(env, v.ceil(), 0.0),
+        FpUnop::RoundM => finish64(env, v.floor(), 0.0),
+        FpUnop::RoundZ => finish64(env, v.trunc(), 0.0),
         // Handled by the caller, which has to change the register width.
         FpUnop::Cvt => v,
     }
 }
 
-fn fp_unary32(op: FpUnop, v: f32) -> f32 {
+fn fp_unary32(op: FpUnop, v: f32, env: FpEnv) -> f32 {
+    let v = env.in32(v);
+    let wide = v as f64;
     match op {
-        FpUnop::Neg => -v,
-        FpUnop::Abs => v.abs(),
-        FpUnop::Sqrt => v.sqrt(),
-        FpUnop::RoundN | FpUnop::RoundX | FpUnop::RoundI => v.round_ties_even(),
-        FpUnop::RoundA => v.round(),
-        FpUnop::RoundP => v.ceil(),
-        FpUnop::RoundM => v.floor(),
-        FpUnop::RoundZ => v.trunc(),
+        FpUnop::Neg => env.nan32(-v),
+        FpUnop::Abs => env.nan32(v.abs()),
+        FpUnop::Sqrt => {
+            let s = (v as f64).sqrt();
+            round_f32(env, s)
+        }
+        FpUnop::RoundN => round_f32(env, wide.round_ties_even()),
+        FpUnop::RoundX | FpUnop::RoundI => {
+            round_f32(env, fp_round_to_integral(wide, round_from_env(env)))
+        }
+        FpUnop::RoundA => round_f32(env, wide.round()),
+        FpUnop::RoundP => round_f32(env, wide.ceil()),
+        FpUnop::RoundM => round_f32(env, wide.floor()),
+        FpUnop::RoundZ => round_f32(env, wide.trunc()),
         FpUnop::Cvt => v,
+    }
+}
+
+fn round_from_env(env: FpEnv) -> FpRound {
+    match env.round {
+        FpRMode::Nearest => FpRound::NearestEven,
+        FpRMode::PlusInf => FpRound::PlusInf,
+        FpRMode::MinusInf => FpRound::MinusInf,
+        FpRMode::Zero => FpRound::Zero,
+    }
+}
+
+/// The integer as a 128-bit value, which holds every 64-bit source exactly.
+fn exact_int(raw: u64, unsigned: bool, src_is64: bool) -> i128 {
+    match (unsigned, src_is64) {
+        (true, true) => raw as i128,
+        (true, false) => (raw as u32) as i128,
+        (false, true) => (raw as i64) as i128,
+        (false, false) => ((raw as u32) as i32) as i128,
+    }
+}
+
+fn int_to_fp32(raw: u64, unsigned: bool, src_is64: bool, env: FpEnv) -> f32 {
+    // The nearest double is within half an ulp of double, far inside half an ulp
+    // of single, so rounding it again gives the nearest single. A directed mode
+    // still has to step when the integer lies past a value it hits exactly, which
+    // is the case for integers above 2^53 the double rounded away from.
+    let exact = exact_int(raw, unsigned, src_is64);
+    let v = int_to_fp(raw, unsigned, src_is64);
+    let near = round_f32(FpEnv { round: FpRMode::Nearest, ..env }, v);
+    if env.round == FpRMode::Nearest {
+        return near;
+    }
+    let back = v as i128;
+    let above = exact > back;
+    let below = exact < back;
+    let n = near as f64;
+    let stepped = match env.round {
+        FpRMode::Nearest => near,
+        FpRMode::PlusInf => {
+            if n < v || (n == v && above) {
+                next_up32(near)
+            } else {
+                near
+            }
+        }
+        FpRMode::MinusInf => {
+            if n > v || (n == v && below) {
+                next_down32(near)
+            } else {
+                near
+            }
+        }
+        FpRMode::Zero => {
+            let past = (near > 0.0 && (n > v || (n == v && below)))
+                || (near < 0.0 && (n < v || (n == v && above)));
+            if past {
+                toward_zero32(near)
+            } else {
+                near
+            }
+        }
+    };
+    if env.flush && stepped != 0.0 && stepped.is_finite() && stepped.abs() < f32::MIN_POSITIVE {
+        0.0f32.copysign(stepped)
+    } else {
+        stepped
+    }
+}
+
+fn int_to_fp64(raw: u64, unsigned: bool, src_is64: bool, env: FpEnv) -> f64 {
+    let v = int_to_fp(raw, unsigned, src_is64);
+    if env.round == FpRMode::Nearest {
+        return v;
+    }
+    let exact = exact_int(raw, unsigned, src_is64);
+    let back = v as i128;
+    if back == exact {
+        return v;
+    }
+    let below = back < exact;
+    match env.round {
+        FpRMode::Nearest => v,
+        FpRMode::PlusInf => {
+            if below {
+                next_up64(v)
+            } else {
+                v
+            }
+        }
+        FpRMode::MinusInf => {
+            if below {
+                v
+            } else {
+                next_down64(v)
+            }
+        }
+        FpRMode::Zero => {
+            if (v > 0.0 && !below) || (v < 0.0 && below) {
+                toward_zero64(v)
+            } else {
+                v
+            }
+        }
     }
 }
 
@@ -1736,6 +2154,160 @@ mod tests {
         let load = decode(0xF940_0423, 0);
         s.step(&load).unwrap();
         assert_eq!(s.x[3], s.x[2]);
+    }
+
+    fn env(round: FpRMode) -> FpEnv {
+        FpEnv { round, flush: false, default_nan: false }
+    }
+
+    #[test]
+    fn fpcr_rounding_modes_change_double_arithmetic() {
+        // 1 + 2^-53 needs 54 bits, so nearest keeps 1.0 and only the upward mode
+        // steps to the next double.
+        let half_ulp = f64::from_bits(970u64 << 52);
+        assert_eq!(fp_binary64(FpBinop::Add, 1.0, half_ulp, env(FpRMode::Nearest)), 1.0);
+        assert_eq!(
+            fp_binary64(FpBinop::Add, 1.0, half_ulp, env(FpRMode::PlusInf)),
+            1.0 + f64::EPSILON
+        );
+        assert_eq!(fp_binary64(FpBinop::Add, 1.0, half_ulp, env(FpRMode::MinusInf)), 1.0);
+        assert_eq!(fp_binary64(FpBinop::Add, 1.0, half_ulp, env(FpRMode::Zero)), 1.0);
+        // The mirror case on the negative side: -1 - 2^-53 only moves down.
+        assert_eq!(
+            fp_binary64(FpBinop::Sub, -1.0, half_ulp, env(FpRMode::MinusInf)),
+            -1.0 - f64::EPSILON
+        );
+        assert_eq!(fp_binary64(FpBinop::Sub, -1.0, half_ulp, env(FpRMode::PlusInf)), -1.0);
+        // A quotient whose nearest value sits above the exact one is cut by the
+        // two modes that round downward.
+        let tenth = 1.0f64 / 10.0;
+        assert_eq!(
+            fp_binary64(FpBinop::Div, 1.0, 10.0, env(FpRMode::Zero)),
+            f64::from_bits(tenth.to_bits() - 1)
+        );
+        assert_eq!(
+            fp_binary64(FpBinop::Div, 1.0, 10.0, env(FpRMode::MinusInf)),
+            f64::from_bits(tenth.to_bits() - 1)
+        );
+        assert_eq!(fp_binary64(FpBinop::Div, 1.0, 10.0, env(FpRMode::PlusInf)), tenth);
+        // A product and a square root follow the same rule.
+        let third = 1.0f64 / 3.0;
+        assert_eq!(
+            fp_binary64(FpBinop::Mul, third, 3.0, env(FpRMode::Zero)),
+            f64::from_bits((third * 3.0).to_bits() - 1)
+        );
+        assert_eq!(
+            fp_unary64(FpUnop::Sqrt, 2.0, env(FpRMode::Zero)),
+            f64::from_bits(2.0f64.sqrt().to_bits() - 1)
+        );
+    }
+
+    #[test]
+    fn fpcr_rounding_modes_change_single_arithmetic() {
+        let half_ulp = f32::from_bits(103u32 << 23); // 2^-24
+        assert_eq!(fp_binary32(FpBinop::Add, 1.0, half_ulp, env(FpRMode::Nearest)), 1.0);
+        assert_eq!(
+            fp_binary32(FpBinop::Add, 1.0, half_ulp, env(FpRMode::PlusInf)),
+            1.0 + f32::EPSILON
+        );
+        assert_eq!(fp_binary32(FpBinop::Add, 1.0, half_ulp, env(FpRMode::Zero)), 1.0);
+        let tenth = 1.0f32 / 10.0;
+        assert_eq!(
+            fp_binary32(FpBinop::Div, 1.0, 10.0, env(FpRMode::MinusInf)),
+            f32::from_bits(tenth.to_bits() - 1)
+        );
+        assert_eq!(fp_binary32(FpBinop::Div, 1.0, 10.0, env(FpRMode::PlusInf)), tenth);
+        // fcvt d0, s1 style widening is exact; fcvt s0, d1 narrows in the mode.
+        let third = 1.0f64 / 3.0;
+        assert_eq!(
+            round_f32(env(FpRMode::Zero), third),
+            f32::from_bits((third as f32).to_bits() - 1),
+            "fcvt narrows in the mode too"
+        );
+    }
+
+    #[test]
+    fn default_nan_mode_canonicalises_every_nan() {
+        let on = FpEnv { round: FpRMode::Nearest, flush: false, default_nan: true };
+        let off = FpEnv { default_nan: false, ..on };
+        let quiet = f64::from_bits(0xFFF8_0000_0000_1234);
+        assert_eq!(fp_binary64(FpBinop::Add, quiet, quiet, on).to_bits(), DEFAULT_NAN64);
+        assert_eq!(fp_binary64(FpBinop::Div, 0.0, 0.0, on).to_bits(), DEFAULT_NAN64);
+        assert_eq!(fp_unary64(FpUnop::Sqrt, -1.0, on).to_bits(), DEFAULT_NAN64);
+        assert_eq!(fp_binary32(FpBinop::Mul, f32::NAN, 0.0, on).to_bits(), DEFAULT_NAN32);
+        // Without the mode the payload survives, which is how the two differ.
+        assert!(fp_binary64(FpBinop::Add, quiet, quiet, off).is_nan());
+        assert_ne!(fp_binary64(FpBinop::Add, quiet, quiet, off).to_bits(), DEFAULT_NAN64);
+    }
+
+    #[test]
+    fn flush_to_zero_mode_removes_denormals() {
+        let on = FpEnv { round: FpRMode::Nearest, flush: true, default_nan: false };
+        let off = FpEnv { flush: false, ..on };
+        let sub = f64::from_bits(1);
+        assert_eq!(fp_binary64(FpBinop::Add, sub, 0.0, on), 0.0);
+        assert_eq!(fp_binary64(FpBinop::Add, sub, 0.0, off), sub);
+        // A tiny result flushes with its sign, and a tiny operand reads as zero.
+        let tiny = f64::MIN_POSITIVE / 2.0;
+        assert_eq!(fp_binary64(FpBinop::Mul, tiny, 1.0, on), 0.0);
+        assert!(fp_binary64(FpBinop::Mul, -tiny, 1.0, on).is_sign_negative());
+        // The single precision side flushes at its own threshold.
+        let sub32 = f32::from_bits(1);
+        assert_eq!(fp_binary32(FpBinop::Add, sub32, 0.0, on), 0.0);
+        assert_eq!(fp_binary32(FpBinop::Add, sub32, 0.0, off), sub32);
+    }
+
+    #[test]
+    fn integer_and_precision_conversions_round_in_the_mode() {
+        // 2^64 - 1 has no exact double: upward takes 2^64, downward stays below.
+        let up = int_to_fp64(u64::MAX, true, true, env(FpRMode::PlusInf));
+        assert_eq!(up, 18446744073709551616.0);
+        let down = int_to_fp64(u64::MAX, true, true, env(FpRMode::MinusInf));
+        assert_eq!(down, 18446744073709549568.0);
+        assert_eq!(int_to_fp64(u64::MAX, true, true, env(FpRMode::Zero)), down);
+        // A signed value rounds toward zero the same way.
+        let raw = i64::MAX as u64;
+        let down = int_to_fp64(raw, false, true, env(FpRMode::Zero));
+        assert!(down < i64::MAX as f64);
+        assert_eq!(int_to_fp64(raw, false, true, env(FpRMode::PlusInf)), i64::MAX as f64);
+        // Single precision goes through the same mode.
+        assert_eq!(
+            int_to_fp32(u64::MAX, true, true, env(FpRMode::Zero)),
+            f32::from_bits((u64::MAX as f32).to_bits() - 1)
+        );
+    }
+
+    #[test]
+    fn an_fpcr_write_reaches_the_next_instruction() {
+        let mut s = State::patterned();
+        s.x[0] = 1 << 22; // FPCR.RMode = 01, toward +inf
+        // msr fpcr, x0
+        s.step(&decode(0xD51B_4400, 0)).unwrap();
+        assert_eq!(s.fpcr, 1 << 22);
+        s.dwrite(1, 1.0);
+        s.dwrite(2, f64::from_bits(970u64 << 52));
+        // fadd d0, d1, d2
+        s.step(&decode(0x1E62_2820, 0)).unwrap();
+        assert_eq!(s.dread(0), 1.0 + f64::EPSILON);
+
+        // Back to the architectural default: the same add rounds to 1.0.
+        s.x[0] = 0;
+        s.step(&decode(0xD51B_4400, 0)).unwrap();
+        s.step(&decode(0x1E62_2820, 0)).unwrap();
+        assert_eq!(s.dread(0), 1.0);
+    }
+
+    #[test]
+    fn a_compare_flushes_denormal_operands_when_asked() {
+        let mut s = State::patterned();
+        s.dwrite(1, f64::from_bits(1));
+        s.dwrite(2, 0.0);
+        // fcmp d1, d2: without the mode the denormal is greater than zero.
+        s.step(&decode(0x1E62_2020, 0)).unwrap();
+        assert_eq!(s.nzcv, 0b0010, "greater than");
+        s.fpcr = 1 << 26;
+        s.step(&decode(0x1E62_2020, 0)).unwrap();
+        assert_eq!(s.nzcv, 0b0110, "equal, because the operand flushed to zero");
     }
 
     #[test]
