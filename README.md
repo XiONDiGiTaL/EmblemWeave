@@ -37,10 +37,10 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.5, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.6, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.5 is the launcher's refined shell: one liquid-glass control material in every
-> scheme, a layout that scales from 1440×900 down to 1120×720, and sliders of the launcher's own. EmblemWeave's own
+> opening movie and cutscenes. 0.1.6 is the release the issue reports asked for: the lifted C now compiles, the
+> decoder ships inside the launcher, and a missing build tool is named with the command that installs it. EmblemWeave's own
 > Rust runtime is being completed to take over running the game: it
 > now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
 > swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
@@ -58,6 +58,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.6](#whats-new-in-016)
 - [What's new in 0.1.5](#whats-new-in-015)
 - [Development status](#development-status)
 - [Screenshots](#screenshots)
@@ -107,6 +108,29 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.6
+
+- **The native build finishes.** The emitter could write the same C label twice in one function when a branch
+  landed in the middle of a block, and clang rejects a file like that outright: on real game text nearly every
+  shard was refused. Every label is unique now, and a full lift of the retail module compiles cleanly with clang 23.
+- **Decoding works from the download.** The ZBIC bridge used to be looked up beside the executable, which a release
+  zip does not contain. It is compiled into the launcher and written to the work folder when it runs; the only
+  requirement left is Python with the `zbic` package, and the message says the install line.
+- **Building the game says what it needs.** Visual Studio's C++ tools are part of the check now — the engine's
+  scripts call `vcvars64.bat`, and without it the build died with a bare exit code twenty minutes in. Every missing
+  tool is named with its install command, a failed step quotes its own last output lines, and a recompile that
+  writes no libraries is reported where it happens.
+- **A report that explains itself.** **Diagnostics > Export report** now ends with the build-tool status and the
+  tail of the newest log, so a failure arrives with its reason attached.
+- **The dump is checked against the tested build.** Game Setup hashes your ExeFS modules against the manifest from
+  the preserved fefw-recomp 0.2.0 package and says whether this is update 131072 (all seven hashes agree) or a
+  different build, which still recompiles but is not the tested one.
+- **The engine is part of the repository.** With upstream removed, the submodule pointed at nothing. The engine is
+  committed here in full, so a clone builds with no fetch step, and it carries EmblemWeave's own work: zstd-packed
+  `.nup` entries served from a decompression cache, alongside Goldoire's baseline.
+- **Credits.** Obersteinn preserved the final fefw-recomp 0.2.0 release; [docs/UPSTREAM.md](docs/UPSTREAM.md)
+  records the handover and exactly what was kept.
 
 ## What's new in 0.1.5
 
