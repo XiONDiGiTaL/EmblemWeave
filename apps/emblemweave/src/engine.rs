@@ -222,6 +222,25 @@ pub fn start_install() -> Result<PathBuf, String> {
     Ok(script)
 }
 
+/// The CMake version this PC has, as (major, minor). The engine's projects ask
+/// for 3.25; an older one stops with "CMake Generate step failed. Build files
+/// cannot be regenerated correctly", which says nothing about the cause.
+pub fn cmake_version() -> Option<(u32, u32)> {
+    let mut cmd = Command::new("cmake");
+    cmd.arg("--version").stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.lines().next()?.split_whitespace().nth(2)?.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 /// What to install for a tool the build did not find: an error that only says
 /// something is missing sends the user to a search engine (or to the issue
 /// tracker, as it did).
@@ -245,6 +264,24 @@ fn run(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str]) -> Result<(), String
     run_env(ctx, cwd, program, args, &[])
 }
 
+/// The line of a failed run that explains it. Build tools end with a summary
+/// ("CMake Generate step failed. Build files cannot be regenerated correctly")
+/// that hides the error several lines above it.
+fn reason_from(lines: &[String]) -> String {
+    // "-- Configuring incomplete, errors occurred!" mentions errors without
+    // being one, so a plain substring search finds the wrong line.
+    let is_error = |l: &&String| {
+        let t = l.trim();
+        let lower = t.to_lowercase();
+        !t.starts_with("--")
+            && (lower.starts_with("error") || lower.contains("cmake error") || lower.contains("error:") || lower.contains(": error"))
+    };
+    match lines.iter().find(is_error) {
+        Some(err) => err.clone(),
+        None => lines.iter().rev().take(2).cloned().collect::<Vec<_>>().join(" | "),
+    }
+}
+
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args).envs(envs.iter().copied()).current_dir(cwd).env("PATH", tool_path()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -266,7 +303,7 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
                 ctx.log(line.clone());
                 if let Ok(mut t) = tail.lock() {
                     t.push_back(line);
-                    while t.len() > 4 {
+                    while t.len() > 400 {
                         t.pop_front();
                     }
                 }
@@ -278,7 +315,7 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
             ctx.log(line.clone());
             if let Ok(mut t) = tail.lock() {
                 t.push_back(line);
-                while t.len() > 4 {
+                while t.len() > 400 {
                     t.pop_front();
                 }
             }
@@ -298,7 +335,14 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
     if status.success() {
         Ok(())
     } else {
-        let said = tail.lock().map(|t| t.iter().filter(|l| !l.trim().is_empty()).cloned().collect::<Vec<_>>().join(" | ")).unwrap_or_default();
+        // The reason, not the last line: build tools end a failed run with a
+        // summary ("Build files cannot be regenerated correctly") that hides the
+        // error several lines above it.
+        let lines: Vec<String> = tail
+            .lock()
+            .map(|t| t.iter().filter(|l| !l.trim().is_empty()).cloned().collect())
+            .unwrap_or_default();
+        let said = reason_from(&lines);
         let name = args.first().copied().unwrap_or("");
         if said.is_empty() {
             Err(format!("{program} {name} failed ({status}); the log has the output"))
@@ -347,6 +391,15 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         let lines: Vec<String> = missing.iter().map(|m| format!("{m} (`{}`)", install_hint(m))).collect();
         return Err(format!("the game build needs tools this PC does not have: {}. Each one is a single install command; see docs/TROUBLESHOOTING.md", lines.join(", ")));
     }
+    // CMake is present but may be too old for the engine's projects, which is
+    // reported by CMake itself as a generate failure with no reason attached.
+    if let Some((major, minor)) = cmake_version() {
+        if (major, minor) < (3, 25) {
+            return Err(format!(
+                "CMake {major}.{minor} is too old: the engine's projects need 3.25 or newer, and an older one stops with \"CMake Generate step failed\" instead of naming the version. Update it with `winget install Kitware.CMake` (or `winget upgrade Kitware.CMake`), restart the launcher, then press Build the game again."
+            ));
+        }
+    }
     let python = root.join("tools").join(".venv").join("Scripts").join("python.exe");
     let py = python.display().to_string();
 
@@ -369,7 +422,22 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // 3. Game code: ninja rebuilds only what changed.
     ctx.start(2);
     let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(8).to_string();
-    run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &[("NX_JOBS", &jobs)])?;
+    let built = run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &[("NX_JOBS", &jobs)]);
+    if let Err(e) = built {
+        // A cache left by an older CMake or compiler cannot be reused, and CMake
+        // answers with "Build files cannot be regenerated correctly" instead of
+        // saying that. Clear it and configure once more before giving up, so an
+        // earlier failed attempt does not condemn every one after it.
+        let build = root.join("work").join("build").join("fefw");
+        let stale = e.to_lowercase().contains("cache") || e.contains("CMake Generate step failed") || e.contains("regenerated");
+        if !stale {
+            return Err(e);
+        }
+        ctx.log("the build folder holds a cache CMake cannot reuse; clearing it and configuring again");
+        let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
+        let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
+        run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &[("NX_JOBS", &jobs)])?;
+    }
     // A step that reports success without writing its libraries leaves the
     // next one failing over a missing `fefw_main.lib`, which says nothing
     // about why. Name the real problem here instead.
@@ -993,6 +1061,30 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reason_is_the_error_and_not_the_summary_after_it() {
+        let lines: Vec<String> = [
+            "-- Configuring incomplete, errors occurred!",
+            "CMake Error at CMakeLists.txt:3 (cmake_minimum_required):",
+            "  CMake 3.25 or higher is required. You are running version 3.20.5",
+            "CMake Generate step failed. Build files cannot be regenerated correctly.",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let said = reason_from(&lines);
+        assert!(said.contains("CMake Error at CMakeLists.txt"), "{said}");
+    }
+
+    #[test]
+    fn a_run_without_the_word_error_keeps_its_last_lines() {
+        let lines: Vec<String> = ["ninja: build stopped: subcommand failed.", "Done building project"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(reason_from(&lines), "Done building project | ninja: build stopped: subcommand failed.");
+    }
 
     #[test]
     fn the_installer_script_installs_every_missing_tool() {
