@@ -10,6 +10,7 @@ pub mod exefs;
 pub mod nso;
 pub mod nsp;
 pub mod nup;
+pub mod nx;
 pub mod romfs;
 
 pub use exefs::{ExeFs, ModuleEntry, NpdmInfo};
