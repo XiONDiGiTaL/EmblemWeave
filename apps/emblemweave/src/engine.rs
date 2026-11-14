@@ -693,6 +693,24 @@ fn adopt_from(
     if let Some(v) = take_back(desired, applied, on_file, "display.vsync") {
         changed |= put(&mut g.vsync, matches!(v, "1" | "true" | "on" | "yes"));
     }
+    // The files carry the render size in pixels while the page shows a ratio, so
+    // the window (`display.width`) is the reference: a fixed resolution's size or
+    // the console's own one. `render_scale` is the engine's percent for the case
+    // where it sizes the picture from its window.
+    let render_keys = ["display.render_width", "display.render_height"];
+    if !render_keys.iter().any(|id| applied.get(*id) != desired.get(*id)) {
+        let number = |id: &str| on_file.get(id).and_then(|v| v.trim().parse::<f32>().ok());
+        let scale_now = match (number("display.render_width"), number("display.width")) {
+            (Some(render), Some(width)) if render > 0.0 && width > 0.0 => Some(render / width),
+            _ => number("display.render_scale").map(|percent| percent / 100.0),
+        };
+        if let Some(scale) = scale_now {
+            let scale = (scale * 100.0).round() / 100.0;
+            if (0.5..=2.0).contains(&scale) {
+                changed |= put(&mut g.render_scale, scale);
+            }
+        }
+    }
     if let Some(v) = take_back(desired, applied, on_file, "display.fps_limit") {
         if let Ok(fps) = v.parse::<u32>() {
             if (30..=240).contains(&fps) {
@@ -967,6 +985,18 @@ mod tests {
         assert!((adopt_au.master - 0.35).abs() < 0.001);
         let second = desired_values(&adopt_g, &adopt_au);
         assert!(!adopt_from(&mut adopt_g, &mut adopt_au, &second, &second, &file), "nothing left to take");
+
+        // The render size is pixels in the file: a window of 1920 wide rendering
+        // 1440 comes back as 0.75x.
+        let mut rg = crate::config::Graphics { resolution: "1920 \u{00d7} 1080".into(), ..crate::config::Graphics::default() };
+        let mut ra = crate::config::Audio::default();
+        let asked = desired_values(&rg, &ra);
+        let mut file = asked.clone();
+        file.insert("display.width".into(), "1920".into());
+        file.insert("display.render_width".into(), "1440".into());
+        file.insert("display.render_height".into(), "810".into());
+        assert!(adopt_from(&mut rg, &mut ra, &asked, &asked, &file));
+        assert!((rg.render_scale - 0.75).abs() < 0.001, "{}", rg.render_scale);
 
         // A page setting changed here and not yet written outranks the file.
         let mut pending = crate::config::Graphics::default();
