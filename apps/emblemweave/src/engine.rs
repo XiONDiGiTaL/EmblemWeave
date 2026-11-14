@@ -483,7 +483,30 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         Some(vc) => vec![("NX_VCVARS", vc)],
         None => Vec::new(),
     };
-    run_env(ctx, &root, "pwsh", &["-NoProfile", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs)?;
+    let fefw = || run_env(ctx, &root, "pwsh", &["-NoProfile", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
+    if let Err(e) = fefw() {
+        // The runtime fetches its graphics dependencies into the build folder, and
+        // a fetch that was interrupted leaves the source folder half written. CMake
+        // then fails on a file that is not there, or says the patch no longer
+        // matches the pinned source, and it never repairs itself: the download
+        // stamps are still in place. Throw the fetched sources away and fetch once
+        // more before giving up. What was downloaded is kept in %LOCALAPPDATA%\nxrt
+        // \deps, so this costs an unpack, not a download.
+        // The message names the CMake file that tripped, not the missing source,
+        // so the check has to look for the patch check and the imgui file too.
+        let half = e.contains("_deps")
+            || e.contains("imgui_checked.cmake")
+            || e.contains("failure patch no longer matches pinned source");
+        if !half {
+            return Err(e);
+        }
+        ctx.log("a fetched dependency is incomplete; clearing it and fetching again");
+        let builds = root.join("game-build").join("fefw").join("build");
+        for config in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
+            let _ = std::fs::remove_dir_all(config.path().join("_deps"));
+        }
+        fefw()?;
+    }
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
     let _ = brand_game();
