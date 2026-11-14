@@ -12,6 +12,11 @@ use eframe::egui::{self, RichText};
 pub fn readiness(app: &App) -> (&'static str, Tone) {
     if app.running(JobKind::Boot).is_some() {
         ("Runtime running", Tone::Accent)
+    } else if crate::engine::ready() {
+        // The built game is the strongest thing the user can do, and it is what
+        // the Overview card says; without this the sidebar still read "Setup
+        // incomplete" over a card that read "Ready to play".
+        ("Ready to play", Tone::Accent)
     } else if app.game.bootable_inputs() {
         ("Boot test available", Tone::Accent)
     } else if app.game.exefs.is_some() {
