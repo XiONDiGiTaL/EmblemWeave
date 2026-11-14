@@ -989,6 +989,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "sha2",
  "windows-sys 0.59.0",
  "winresource",
 ]

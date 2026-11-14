@@ -22,6 +22,7 @@ eframe = "0.31"
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ruzstd.workspace = true
+sha2.workspace = true
 roxmltree = "0.20"
 
 [build-dependencies]

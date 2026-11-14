@@ -11,6 +11,21 @@
 use crate::config::{Config, Paths};
 use std::path::{Path, PathBuf};
 
+/// The build of the game the engine was tested against. The list of module
+/// hashes comes from the fefw-recomp 0.2.0 release package (`tools/build/`),
+/// which Obersteinn preserved after its author stepped away; see
+/// `docs/UPSTREAM.md`.
+const KNOWN_DUMP: &str = include_str!("../data/dump_hashes.json");
+
+/// The supported-dump manifest: the ExeFS modules the engine was tested with.
+#[derive(Debug, serde::Deserialize)]
+struct KnownDump {
+    program_id: String,
+    version: String,
+    main_build_id: String,
+    sha256: std::collections::BTreeMap<String, String>,
+}
+
 /// The module the game's code lives in.
 pub const MAIN_MODULE: &str = "main";
 /// The title this launcher is built for.
@@ -121,6 +136,58 @@ fn find_named(root: &Path, name: &str, want_dir: bool, depth: usize) -> Option<P
         }
     }
     None
+}
+
+/// Split an ExeFS into modules that match the manifest, modules that differ
+/// and modules it does not have, each by name.
+fn compare_dump(dir: &Path, known: &KnownDump) -> (Vec<String>, Vec<String>, Vec<String>) {
+    use sha2::Digest as _;
+    let (mut same, mut differ, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    for (name, want) in &known.sha256 {
+        match std::fs::read(dir.join(name)) {
+            Ok(bytes) => {
+                let got = format!("{:x}", sha2::Sha256::digest(&bytes));
+                if &got == want {
+                    same.push(name.clone());
+                } else {
+                    differ.push(name.clone());
+                }
+            }
+            Err(_) => missing.push(name.clone()),
+        }
+    }
+    (same, differ, missing)
+}
+
+/// Say whether the user's ExeFS is the build the engine was tested against.
+fn check_known_dump(g: &mut GameData, dir: &Path) {
+    let Ok(known) = serde_json::from_str::<KnownDump>(KNOWN_DUMP) else { return };
+    let (same, differ, missing) = compare_dump(dir, &known);
+    let build = &known.main_build_id[..known.main_build_id.len().min(12)];
+    if differ.is_empty() && missing.is_empty() && !same.is_empty() {
+        g.checks.push(Check::new(
+            Severity::Ok,
+            "Game build",
+            format!("matches the dump the engine was tested with ({} {}): all {} module hashes agree", known.version, build, same.len()),
+        ));
+    } else if !differ.is_empty() {
+        g.checks.push(Check::new(
+            Severity::Warn,
+            "Game build",
+            format!(
+                "a different build of the game ({} differs): the engine was tested with {} {} (main {build}), so this may work but is not the tested build",
+                differ.join(", "),
+                known.version,
+                known.program_id
+            ),
+        ));
+    } else if !missing.is_empty() {
+        g.checks.push(Check::new(
+            Severity::Info,
+            "Game build",
+            format!("could not compare with the tested build: {} not found", missing.join(", ")),
+        ));
+    }
 }
 
 fn file_len(p: &Path) -> Option<u64> {
@@ -412,6 +479,11 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
         },
     }
 
+    // Is this the build the engine was tested against?
+    if let Some(dir) = g.exefs.clone() {
+        check_known_dump(&mut g, &dir);
+    }
+
     // RomFS.
     match &g.romfs {
         None => g.checks.push(Check::new(Severity::Error, "RomFS", "not found; the game cannot load its assets without it")),
@@ -493,6 +565,31 @@ mod tests {
         assert_eq!(g.romfs.as_deref(), Some(root.join("dump").join("romfs").as_path()));
         assert_eq!(g.romfs_entries, 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tells_a_matching_dump_from_a_different_one() {
+        use sha2::Digest as _;
+        let dir = std::env::temp_dir().join(format!("ew-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main"), b"module bytes").unwrap();
+        std::fs::write(dir.join("sdk"), b"other bytes").unwrap();
+        let mut sha256 = std::collections::BTreeMap::new();
+        sha256.insert("main".to_string(), format!("{:x}", sha2::Sha256::digest(b"module bytes")));
+        sha256.insert("sdk".to_string(), format!("{:x}", sha2::Sha256::digest(b"expected sdk")));
+        sha256.insert("rtld".to_string(), "00".repeat(32));
+        let known = KnownDump {
+            program_id: "04007EF01F8AE000".into(),
+            version: "update 131072".into(),
+            main_build_id: "db93b0125f4850601d61c3edde012f8eb2ecfe77".into(),
+            sha256,
+        };
+        let (same, differ, missing) = compare_dump(&dir, &known);
+        assert_eq!(same, vec!["main".to_string()]);
+        assert_eq!(differ, vec!["sdk".to_string()]);
+        assert_eq!(missing, vec!["rtld".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// On a real dump: `EW_NUP=<file.nup> cargo test -p emblemweave -- --ignored`.

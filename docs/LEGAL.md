@@ -22,8 +22,10 @@ The supplied `.nup` package is encrypted retail content. This project consumed a
 ## Licence
 
 EmblemWeave is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`). It was MIT-licensed until
-9 November 2026; it moved to the GPL so that code from [fefw-recomp](https://github.com/Goldoire/fefw-recomp) (GPL-3.0) can be
-adapted into it. Adapted files keep fefw-recomp's attribution, and [THIRD_PARTY.md](THIRD_PARTY.md) lists them.
+9 November 2026; it moved to the GPL so that code from fefw-recomp (GPL-3.0, by Goldoire and its contributors) can be
+adapted into it. That project's repository has since been removed; its final release was preserved by Obersteinn, and
+[UPSTREAM.md](UPSTREAM.md) records what EmblemWeave keeps from it. Adapted files keep fefw-recomp's attribution, and
+[THIRD_PARTY.md](THIRD_PARTY.md) lists them.
 
 ## Third-party software
 

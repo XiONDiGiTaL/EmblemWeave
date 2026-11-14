@@ -13,6 +13,8 @@
 
 # Local settings and generated scan reports
 *.json
+# The tested-build manifest is data the launcher ships, not a report.
+!apps/emblemweave/data/dump_hashes.json
 
 # Launch videos made with /brag (they contain game footage: keep them local)
 brag-output*/

@@ -29,6 +29,14 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
+The engine underneath is **fefw-recomp** by
+[Goldoire](https://github.com/Goldoire/fefw-recomp) and its contributors. Its
+author stepped away in November 2026 and the repository was removed;
+**Obersteinn** preserved the final 0.2.0 release with its build tools, so the
+reference build and its tested-dump manifest are still available. EmblemWeave
+carries that engine forward as the launcher around it, and
+[docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
+
 > **Current status: released as 0.1.5, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
 > opening movie and cutscenes. 0.1.5 is the launcher's refined shell: one liquid-glass control material in every
@@ -239,6 +247,12 @@ then does the rest:
 
 The `.nup` is only ever read.
 
+**Which build your copy is.** Game Setup also hashes your ExeFS modules against
+the manifest the engine was tested with, taken from the preserved fefw-recomp
+0.2.0 package: update 131072, `main` build `db93b0125f48…`. If all seven hashes
+agree the check says so; a different build is reported as such, and still
+recompiles, since the pipeline works from your own modules.
+
 An **`.nsp` package** works too, when it is a plaintext repack: NSP Box writes
 those without keys, as unsigned program, control and meta NCAs. Pick it with
 **Choose package…** as well. EmblemWeave unpacks it itself — once — into
@@ -431,7 +445,7 @@ crates/ew-lift/      decoder, recompiler and reference interpreter
 crates/ew-boot/      runtime: image, startup, scheduler, host services
 crates/ew-gfx/       host Vulkan device and the presenter
 crates/ew-runtime/   guest memory and service registry
-docs/                status, architecture, feasibility, legal
+docs/                status, architecture, feasibility, legal, upstream
 engine/fefw-recomp/  the baseline engine (GPL-3.0, its own licence and notices)
 tools/               decoding helper and verification scripts
 ```
@@ -451,7 +465,8 @@ your machine and must not be redistributed. See [docs/LEGAL.md](docs/LEGAL.md).
 ## Credits
 
 - **[XiØN](https://github.com/XiONDiGiTaL)**: Design
-- [Goldoire](https://github.com/Goldoire/fefw-recomp): fefw-recomp as a baseline engine and all others who have contributed to that project.
+- [Goldoire](https://github.com/Goldoire/fefw-recomp): fefw-recomp, the baseline engine, and everyone who contributed to that project. Its repository is no longer online; EmblemWeave continues from the snapshot in `engine/`
+- **Obersteinn**: preserved the final fefw-recomp 0.2.0 release and its files after the original repository was removed, keeping the reference build, its build tools and its tested-dump manifest available ([docs/UPSTREAM.md](docs/UPSTREAM.md))
 - [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) (MIT): shader translation, whose shader code the build uses
 - [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause) and [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause): the host video decoders the baseline build links
 - [roxmltree](https://github.com/RazrFalcon/roxmltree) (MIT / Apache-2.0) reads Cheat Engine tables; [windows-sys](https://github.com/microsoft/windows-rs) (MIT / Apache-2.0) reaches the game's memory and the controller

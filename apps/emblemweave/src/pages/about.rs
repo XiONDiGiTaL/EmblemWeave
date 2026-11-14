@@ -36,7 +36,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         widgets::section(&mut cols[1], &p, "Credits", |ui| {
             for (who, what) in [
                 ("XiØN", "design, engineering and the EmblemWeave identity"),
-                ("Goldoire", "fefw-recomp as a baseline engine, and everyone who contributed to that project"),
+                ("Goldoire", "fefw-recomp, the baseline engine, and everyone who contributed to that project"),
+                ("Obersteinn", "preserving the final fefw-recomp 0.2.0 release after its repository was removed"),
                 ("Ryujinx", "shader translation, whose shader code the build uses (MIT)"),
                 ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
                 ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),

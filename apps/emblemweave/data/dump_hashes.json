@@ -1,0 +1,16 @@
+{
+  "title": "Fire Emblem: Fortune's Weave",
+  "program_id": "04007EF01F8AE000",
+  "version": "update 131072",
+  "main_build_id": "db93b0125f4850601d61c3edde012f8eb2ecfe77",
+  "sha256": {
+    "main": "616e7d906936ea4c2d908d0553cf69779e60242d769c40722267ee8bcb98e79a",
+    "sdk": "70ba2342fc223f28fdd032611a4e430242669b36af94c631667164bc1cfdfdd3",
+    "subsdk0": "fcec218a2b1a8b35e39bcaf4e09ee820cf5932bdb61e046ca4ab3031d20a9e36",
+    "subsdk1": "e84b123613b8072ec4b74d711ac6f59d46330a45ecf14c33286db72eb8a68cdd",
+    "subsdk2": "6114f662568bd980ccc4e869adbc4e4dfae4b837ca9f6d96d4e67cb435d1e149",
+    "rtld": "376589bd64cc13d737de855f6c40cdecd5a4f57b366f4b90cec31342835d9b30",
+    "main.npdm": "82c588db879e28895474813f060698cf8dc09f2d61393211d9f20aa03b342554"
+  },
+  "main_plain_sha256": "980c9be010166d7c79428bb2d373dbbd1c6ebfe47a206710bcf8b6d60d2a3736"
+}
