@@ -54,3 +54,17 @@ is redistributed here, and the archive itself contains no game data.
 
 Both are credited in the [README](../README.md#credits) and on the launcher's
 About page.
+
+## The 0.2.0 package, audited
+
+The archive was compared against this tree file by file. Every build-tool file it carries is present here already: its
+`tools/build/recomp` (41 files) is a subset of our `recomp/` (135), its `sdk/` pieces (`fefw.ico`, `fefw.manifest`,
+`fefw.rc`, `fefw_rt_api.h`, `fefw_stub.cpp`) live in `game-build/fefw`, `dump_hashes.json` is in
+`apps/emblemweave/data`, and the runtime font it ships (`fonts/DejaVuSans.ttf`) is already committed at
+`runtime/assets/fonts/`. `fefw_fma.c` and `fefw_rt.lib` are products of its release-only `FEFW_RT_DLL` build, which this
+project does not use. So nothing from the package is missing here.
+
+One delta is worth recording: the package's `recomp/games/fefw/main.sites` is the only file whose contents differ from
+ours, and it has three extra lines that point at two features our runtime does not implement yet, a real-time map cursor
+step (`cursor_real_time`) and a stat radar chart. Copying the sites without the hooks would do nothing, so they are left
+for whoever ports those two features.

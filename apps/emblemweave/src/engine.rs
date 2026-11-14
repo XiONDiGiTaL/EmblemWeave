@@ -468,12 +468,15 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     }
     ctx.end(2, StageStatus::Done, format!("six modules compiled ({jobs} jobs)"));
 
-    // 4. Texture transcoders.
+    // 4. Texture transcoders. `-ExecutionPolicy Bypass` is not optional: on a PC
+    // whose policy is RemoteSigned or AllSigned, PowerShell refuses to load
+    // these unsigned scripts and the step fails with a SecurityError instead of
+    // running, which is what issue 2's second report shows.
     ctx.start(3);
     if has_files(&root.join("tools").join("textures").join("third_party")) {
         ctx.end(3, StageStatus::Skipped, "already fetched");
     } else {
-        run(ctx, &root, "pwsh", &["-NoProfile", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"])?;
+        run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"])?;
         ctx.end(3, StageStatus::Done, "astc-encoder and bc7enc_rdo fetched");
     }
 
@@ -483,7 +486,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         Some(vc) => vec![("NX_VCVARS", vc)],
         None => Vec::new(),
     };
-    let fefw = || run_env(ctx, &root, "pwsh", &["-NoProfile", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
+    let fefw = || run_env(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
     if let Err(e) = fefw() {
         // The runtime fetches its graphics dependencies into the build folder, and
         // a fetch that was interrupted leaves the source folder half written. CMake
@@ -523,7 +526,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             run(ctx, &root, "git", &["clone", "--filter=blob:none", "--no-checkout", RYUBING_URL, "work\\refs\\ryubing"])?;
         }
         run(ctx, &root, "git", &["-C", "work\\refs\\ryubing", "checkout", RYUBING_REV])?;
-        run(ctx, &root, "pwsh", &["-NoProfile", "-File", "tools\\shaders\\scripts\\setup_ryujinx.ps1", "-Ryubing", "work\\refs\\ryubing"])?;
+        run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\shaders\\scripts\\setup_ryujinx.ps1", "-Ryubing", "work\\refs\\ryubing"])?;
         run(ctx, &root, "dotnet", &["build", "tools\\shaders\\harness\\SpirvHarness.csproj", "-c", "Release"])?;
         ctx.end(5, StageStatus::Done, "spirv_harness built");
     }
