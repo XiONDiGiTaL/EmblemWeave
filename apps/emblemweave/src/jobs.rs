@@ -62,6 +62,9 @@ pub struct Progress {
     pub result: Option<JobResult>,
     /// The file this job's log is written to, when one could be opened.
     pub log_file: Option<PathBuf>,
+    /// Bytes copied and bytes to copy, while a package is being unpacked.
+    pub copied: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +205,16 @@ impl Ctx {
             p.log.push(line);
         });
     }
+    /// Report a byte count without a log line: unpacking copies a quarter of
+    /// a million files, and the log records stages, not every block.
+    pub fn bytes(&self, done: u64, total: u64) {
+        self.with(|p| {
+            p.copied = done;
+            p.total = total;
+            p.message =
+                format!("Unpacking the package: {} of {} copied", crate::fmt_size(done), crate::fmt_size(total));
+        });
+    }
     pub fn start(&self, i: usize) {
         self.with(|p| {
             if let Some(s) = p.stages.get_mut(i) {
@@ -297,7 +310,8 @@ pub fn detect(config: &Config) -> Job {
     let paths = config.paths.clone();
     spawn(JobKind::Detect, &["Locate and validate game data"], move |ctx| {
         ctx.start(0);
-        let g = gamedata::detect(&paths);
+        let c = ctx.clone();
+        let g = gamedata::detect_with(&paths, &mut |done, total| c.bytes(done, total));
         ctx.end(0, StageStatus::Done, format!("{} checks", g.checks.len()));
         Ok(JobResult::Detected(Box::new(g)))
     })

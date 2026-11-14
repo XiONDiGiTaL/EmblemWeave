@@ -231,59 +231,64 @@ impl Nsp {
     }
 
     /// Copy the ExeFS, the RomFS and the control metadata into `dest`, where the
-    /// launcher reads them like an NSP extraction.
-    pub fn dump(&self, dest: &Path) -> Result<Dumped> {
+    /// launcher reads them like an NSP extraction. `progress` is told how many
+    /// bytes have been copied and how many there are to copy, about every
+    /// 16 MiB and once more when the last byte lands.
+    pub fn dump(&self, dest: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<Dumped> {
         let program = self.program()?;
         let mut f = File::open(&self.path)?;
+        let exefs = program.exefs(&mut f)?;
+        ensure!(!exefs.is_empty(), "{} holds no ExeFS", self.path.display());
+        let romfs = program.romfs(&mut f)?;
+        // control.nacp names the title and its display version: it sits in the
+        // control NCA's RomFS, in the layout the launcher already reads.
+        let nacp = match self.control()? {
+            Some(control) => control.romfs(&mut f)?.into_iter().find(|e| e.path.eq_ignore_ascii_case("control.nacp")),
+            None => None,
+        };
+
         let exefs_dir = dest.join("exefs");
         let romfs_dir = dest.join("romfs");
+        let nacp_to = dest.join("data").join("control").join("control.nacp");
         std::fs::create_dir_all(&exefs_dir)?;
         std::fs::create_dir_all(&romfs_dir)?;
 
-        let exefs = program.exefs(&mut f)?;
-        ensure!(!exefs.is_empty(), "{} holds no ExeFS", self.path.display());
+        let total = exefs.iter().map(|e| e.size).sum::<u64>()
+            + romfs.iter().map(|e| e.size).sum::<u64>()
+            + nacp.as_ref().map(|e| e.size).unwrap_or(0);
+        progress(0, total);
+        let mut copied = 0u64;
+        let mut reported = 0u64;
+        let mut put = |f: &mut File, e: &Extent, to: &Path, copied: &mut u64, reported: &mut u64| -> Result<()> {
+            safe_path(&e.path)?;
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            copy_range(f, e.offset, e.size, to)?;
+            *copied += e.size;
+            if *copied - *reported >= (16 << 20) || *copied == total {
+                *reported = *copied;
+                progress(*copied, total);
+            }
+            Ok(())
+        };
+
         for e in &exefs {
-            ensure!(!e.path.contains("..") && !e.path.starts_with('/'), "{} names an unsafe path", self.path.display());
-            let to = exefs_dir.join(e.path.replace('\\', "/"));
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            copy_range(&mut f, e.offset, e.size, &to)?;
+            put(&mut f, e, &exefs_dir.join(e.path.replace('\\', "/")), &mut copied, &mut reported)?;
         }
-
-        let romfs = program.romfs(&mut f)?;
-        let mut romfs_bytes = 0u64;
         for e in &romfs {
-            ensure!(!e.path.contains("..") && !e.path.starts_with('/'), "{} names an unsafe path", self.path.display());
-            let to = romfs_dir.join(e.path.replace('\\', "/"));
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            copy_range(&mut f, e.offset, e.size, &to)?;
-            romfs_bytes += e.size;
+            put(&mut f, e, &romfs_dir.join(e.path.replace('\\', "/")), &mut copied, &mut reported)?;
         }
-
-        // control.nacp names the title and its display version: it lives in the
-        // control NCA's RomFS, in the layout the launcher already reads.
         let mut control_nacp = None;
-        if let Some(control) = self.control()? {
-            for e in control.romfs(&mut f)? {
-                if e.path.eq_ignore_ascii_case("control.nacp") {
-                    let to = dest.join("data").join("control").join("control.nacp");
-                    if let Some(parent) = to.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    copy_range(&mut f, e.offset, e.size, &to)?;
-                    control_nacp = Some(to);
-                    break;
-                }
-            }
+        if let Some(e) = &nacp {
+            put(&mut f, e, &nacp_to, &mut copied, &mut reported)?;
+            control_nacp = Some(nacp_to);
         }
 
         Ok(Dumped {
             exefs: exefs.len(),
             romfs: romfs.len(),
-            romfs_bytes,
+            romfs_bytes: romfs.iter().map(|e| e.size).sum(),
             exefs_dir,
             romfs_dir,
             control_nacp,
@@ -505,6 +510,12 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// A path from inside the package must stay inside the unpack folder.
+fn safe_path(name: &str) -> Result<()> {
+    ensure!(!name.contains("..") && !name.starts_with('/') && !name.starts_with('\\'), "{name} names an unsafe path");
+    Ok(())
 }
 
 /// Copy `size` bytes at `from` into a new file at `to`.

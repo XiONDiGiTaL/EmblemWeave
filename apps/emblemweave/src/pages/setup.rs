@@ -78,10 +78,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if widgets::button(ui, &p, "Detect again", app.running(JobKind::Detect).is_none()).clicked() {
                 rescan = true;
             }
-            if app.running(JobKind::Detect).is_some() {
-                ui.spinner();
+            if let Some(job) = app.running(JobKind::Detect) {
+                let (copied, total) = job.snapshot(|pr| (pr.copied, pr.total));
+                if total == 0 {
+                    ui.spinner();
+                } else {
+                    ui.label(
+                        RichText::new(format!("{} of {}", crate::fmt_size(copied), crate::fmt_size(total)))
+                            .size(12.5)
+                            .color(p.body),
+                    );
+                }
             }
         });
+        // A package is unpacked before anything else can be checked: show how
+        // far that has got and how much of it is left.
+        if let Some(job) = app.running(JobKind::Detect) {
+            let (copied, total, message) = job.snapshot(|pr| (pr.copied, pr.total, pr.message.clone()));
+            if total > 0 {
+                ui.add_space(theme::SPACE_XS);
+                widgets::progress_bar(ui, &p, Some(copied as f32 / total.max(1) as f32));
+                ui.label(RichText::new(message).size(12.5).color(p.body));
+                ui.add_space(theme::SPACE_XS);
+            }
+        }
         egui::CollapsingHeader::new(RichText::new("Individual locations").color(p.body)).show(ui, |ui| {
             ui.label(RichText::new("Leave empty to detect from the game folder.").size(12.5).color(p.muted));
             rescan |= path_row(ui, &p, "ExeFS", &mut app.config.paths.exefs, "folder containing main, sdk, main.npdm", Pick::Folder);

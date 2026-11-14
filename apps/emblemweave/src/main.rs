@@ -746,6 +746,16 @@ impl App {
     }
 }
 
+/// A byte count for people: megabytes below a gigabyte, else gigabytes.
+pub fn fmt_size(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes as f64 >= 1024.0 * MB {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * MB))
+    } else {
+        format!("{:.0} MB", bytes as f64 / MB)
+    }
+}
+
 pub fn fmt_count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();

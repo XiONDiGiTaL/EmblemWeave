@@ -197,7 +197,7 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
 /// Open a `.nsp` package: unpack its ExeFS, RomFS and control metadata once
 /// into the launcher's work folder, then use that folder like a dump. Returns
 /// the ExeFS folder and keeps the dump counts for the checks.
-fn use_nsp(g: &mut GameData, path: &Path) -> Option<PathBuf> {
+fn use_nsp(g: &mut GameData, path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Option<PathBuf> {
     let nsp = match ew_format::nsp::Nsp::open(path) {
         Ok(n) => n,
         Err(e) => {
@@ -238,7 +238,7 @@ fn use_nsp(g: &mut GameData, path: &Path) -> Option<PathBuf> {
                 format!("unpacking {} into {}, which takes a while the first time", path.display(), dir.display()),
             ));
             let _ = std::fs::remove_dir_all(&dir);
-            let dumped = match nsp.dump(&dir) {
+            let dumped = match nsp.dump(&dir, progress) {
                 Ok(d) => d,
                 Err(e) => {
                     g.checks.push(Check::new(Severity::Error, "Game file", format!("unpacking {}: {e:#}", path.display())));
@@ -283,15 +283,16 @@ fn modified_stamp(path: &Path) -> u128 {
         .unwrap_or(0)
 }
 
-/// Locate and validate everything. Explicit paths win over detection.
-pub fn detect(paths: &Paths) -> GameData {
+/// [`detect`], reporting how many bytes of a package have been unpacked and
+/// how many there are, while there is a package to unpack.
+pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64)) -> GameData {
     let mut g = GameData::default();
     let root = non_empty(&paths.game_root);
 
     // A .nsp package is unpacked once, then used like a dump.
     if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nsp::Nsp::is_nsp(r)) {
         let r = r.clone();
-        if let Some(exefs) = use_nsp(&mut g, &r) {
+        if let Some(exefs) = use_nsp(&mut g, &r, progress) {
             g.exefs = non_empty(&paths.exefs).or(Some(exefs));
         }
         return finish(g, paths);
@@ -458,7 +459,7 @@ mod tests {
         std::fs::create_dir_all(root.join("dump").join("data").join("control")).unwrap();
         std::fs::write(root.join("dump").join("romfs").join("Fs.bin.zst"), b"x").unwrap();
         let paths = Paths { game_root: root.to_string_lossy().into(), ..Default::default() };
-        let g = detect(&paths);
+        let g = detect_with(&paths, &mut |_, _| {});
         assert_eq!(g.exefs.as_deref(), Some(root.join("dump").join("exefs").as_path()));
         assert_eq!(g.romfs.as_deref(), Some(root.join("dump").join("romfs").as_path()));
         assert_eq!(g.romfs_entries, 1);
@@ -470,7 +471,7 @@ mod tests {
     #[ignore]
     fn detects_a_nup_dump() {
         let path = std::env::var("EW_NUP").expect("EW_NUP");
-        let g = detect(&Paths { game_root: path.clone(), ..Default::default() });
+        let g = detect_with(&Paths { game_root: path.clone(), ..Default::default() }, &mut |_, _| {});
         for c in &g.checks {
             eprintln!("{:?} {}: {}", c.severity, c.label, c.detail);
         }
@@ -486,7 +487,7 @@ mod tests {
     #[ignore]
     fn detects_an_nsp_package() {
         let path = std::env::var("EW_NSP").expect("EW_NSP");
-        let g = detect(&Paths { game_root: path.clone(), ..Default::default() });
+        let g = detect_with(&Paths { game_root: path.clone(), ..Default::default() }, &mut |_, _| {});
         for c in &g.checks {
             eprintln!("{:?} {}: {}", c.severity, c.label, c.detail);
         }
@@ -500,7 +501,7 @@ mod tests {
     #[test]
     fn a_missing_folder_is_an_error_not_a_panic() {
         let paths = Paths { game_root: "Z:/definitely/not/here".into(), ..Default::default() };
-        let g = detect(&paths);
+        let g = detect_with(&paths, &mut |_, _| {});
         assert_eq!(g.worst(), Severity::Error);
     }
 }
