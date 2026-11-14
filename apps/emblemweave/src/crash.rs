@@ -110,8 +110,16 @@ pub fn diagnostics_text() -> String {
         s.push_str(&r.join("\n"));
         s.push('\n');
     }
-    // What the build needs and what this PC has: the first thing to check when
-    // "Building the game" stops with an exit code.
+    s.push_str(&environment_text());
+    s
+}
+
+/// What the build needs, what this PC has, and the tail of the newest log: the
+/// first things to look at when "Building the game" stops with an exit code.
+/// Shared by the crash bundle and the report the Diagnostics page writes, so
+/// both arrive with the same evidence.
+pub fn environment_text() -> String {
+    let mut s = String::new();
     s.push_str("\n== build tools ==\n");
     let missing = crate::engine::missing_tools();
     if missing.is_empty() {
