@@ -37,12 +37,13 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.8, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.10, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.7 put a button on **Overview** that installs whatever build tools are missing,
-> Visual Studio included; 0.1.8 makes the launcher say why a build step failed and checks CMake's version before
-> the build starts, so a failed configure arrives with its cause. 0.1.6 fixed the build itself, so the lifted C
-> compiles and the decoder ships inside the launcher. EmblemWeave's own
+> opening movie and cutscenes. 0.1.10 fixes the build failures behind most of the reports so far: PowerShell's
+> execution policy no longer refuses the build's own scripts, a broken C compiler is caught on the first shard
+> instead of rejecting 118, a failed step names the program it could not find, and a launch that never draws says
+> so instead of showing a black window. It also reads `.nx` archives directly and adds the Sharpening control.
+> EmblemWeave's own
 > Rust runtime is being completed to take over running the game: it
 > now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
 > swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
@@ -60,6 +61,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.10](#whats-new-in-0110)
 - [What's new in 0.1.9](#whats-new-in-019)
 - [What's new in 0.1.8](#whats-new-in-018)
 - [What's new in 0.1.7](#whats-new-in-017)
@@ -113,6 +115,31 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.10
+
+- **The build runs under any PowerShell execution policy.** 0.1.9 started its own build scripts with `-NoProfile`
+  only, so a machine that allows signed scripts alone refused `fetch_third_party.ps1` before anything was built —
+  the `… is not digitally signed` error in several reports. Every script now runs with `-ExecutionPolicy Bypass`,
+  and the same preference is handed to any PowerShell a script starts in turn. Your machine's policy is untouched.
+- **A broken C compiler is caught on one shard, not 118.** The recompile stage compiles one real shard with the
+  exact flags the batch uses and stops with the compiler's own first error line if it fails, instead of reporting
+  "117 of 118 rejected". Every failure names the log file, and a settings folder that cannot be written falls back
+  to the temp folder, so a failed build always leaves something to read.
+- **A launch that never draws says so.** The launcher watches each start with the engine's own per-second present
+  line: a game that exits early is reported with its exit code and last error line, and a run that plays sound for
+  90 seconds without presenting a frame is reported with the graphics card it picked. FSR 3.1 and DLSS are only
+  requested when their DLLs are actually present, which was a silent black picture on its own.
+- **A missing tool is named.** A ninja step that calls a program that is not installed ended with `operable program
+  or batch file.`, because cmd wraps `'X' is not recognized` onto two lines and the window kept the wrong one. It
+  now reads "the build called `X`, which is not installed or not on PATH".
+- **`.nx` archives are read directly.** Point Game Setup at the file: ExeFS is copied once and the RomFS is served
+  out of the archive in place, with NXFormat credited for the format and its conformance fixtures.
+- **Sharpening.** Graphics has a Sharpening control (Default, Sharp, Soft, Off) matching the engine's own steps,
+  and the float mixer in the recompiler now applies FPCR rounding mode, flush-to-zero and default-NaN the way the
+  console does.
+- **A half-fetched dependency repairs itself.** An interrupted graphics-dependency fetch used to leave CMake
+  failing on a file that was never written; the launcher now clears the fetched sources and fetches once more.
 
 ## What's new in 0.1.9
 
