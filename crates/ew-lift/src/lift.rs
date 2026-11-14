@@ -1673,6 +1673,12 @@ pub fn emit_module(module: &str, funcs: &[LiftedFunction]) -> String {
         }
         out.push_str("        default: return 1; /* pc left this function */\n        }\n");
 
+        // Blocks of one function can overlap (a branch into the middle of
+        // another block adds that address as a block of its own), and a label
+        // may be written once per function. The first copy keeps the plain
+        // name the switch and jump tables jump to; later copies get a suffix
+        // so the translation unit still compiles.
+        let mut labels: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
         for b in &f.blocks {
             // Each stretch of a block up to a call, and from a call's return
             // to the next, gets a label and charges its instructions to the
@@ -1683,8 +1689,15 @@ pub fn emit_module(module: &str, funcs: &[LiftedFunction]) -> String {
             for (i, insn) in b.insns.iter().enumerate() {
                 if i == seg_start {
                     let n = b.insns[i..].iter().position(|x| is_call(&x.op)).map_or(b.insns.len() - i, |k| k + 1);
+                    let seen = labels.entry(insn.addr).or_insert(0usize);
+                    let label = if *seen == 0 {
+                        format!("L_{:x}", insn.addr)
+                    } else {
+                        format!("L_{:x}__{}", insn.addr, seen)
+                    };
+                    *seen += 1;
                     out.push_str(&format!(
-                        "    L_{a:x}:\n    if ((cpu->budget -= {n}) < 0) {{ cpu->budget += {n}; cpu->pc = 0x{a:x}ULL; cpu->svc = -2; return 1; }}\n",
+                        "    {label}:\n    if ((cpu->budget -= {n}) < 0) {{ cpu->budget += {n}; cpu->pc = 0x{a:x}ULL; cpu->svc = -2; return 1; }}\n",
                         a = insn.addr
                     ));
                 }
@@ -2160,4 +2173,59 @@ fn emit_exclusive(a: u64, op: &Op) -> String {
         _ => {}
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::{Block, Insn, LiftedFunction};
+
+    fn nop(addr: u64) -> Insn {
+        Insn { addr, word: 0xd503201f, op: Op::Nop }
+    }
+
+    fn block(addr: u64) -> Block {
+        Block { addr, insns: vec![nop(addr)], edges: Vec::new(), jump_table: None, terminated: true }
+    }
+
+    fn function(blocks: Vec<Block>) -> LiftedFunction {
+        LiftedFunction {
+            addr: blocks[0].addr,
+            blocks,
+            complete: true,
+            unsupported: 0,
+            has_memory: false,
+            has_calls: false,
+            jump_tables: 0,
+            jump_table_targets: 0,
+            unresolved_edges: 0,
+            indirect_calls: 0,
+            unterminated_blocks: 0,
+            budget_exhausted: false,
+        }
+    }
+
+    #[test]
+    fn overlapping_blocks_do_not_repeat_a_label() {
+        // A branch into the middle of a block adds that address as a block of
+        // its own, so two blocks of one function can start at the same address.
+        // C allows each label once per function: the second copy needs a name.
+        let c = emit_module("app", &[function(vec![block(0x1000), block(0x1000)])]);
+        assert_eq!(c.matches("    L_1000:\n").count(), 1, "{c}");
+        assert_eq!(c.matches("    L_1000__1:\n").count(), 1, "{c}");
+    }
+
+    #[test]
+    fn every_label_of_a_function_is_unique() {
+        let c = emit_module("app", &[function(vec![block(0x1000), block(0x1000), block(0x1004)])]);
+        let mut seen = std::collections::HashSet::new();
+        for line in c.lines() {
+            let t = line.trim();
+            if let Some(name) = t.strip_suffix(':') {
+                if name.starts_with("L_") {
+                    assert!(seen.insert(name.to_string()), "label {name} appears twice:\n{c}");
+                }
+            }
+        }
+    }
 }
