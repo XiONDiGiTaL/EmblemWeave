@@ -37,11 +37,12 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.7, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.8, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.7 adds the one thing the issue reports kept coming back to: when build tools are
-> missing, **Overview** has a button that installs them, Visual Studio included, in one go. 0.1.6 fixed the build itself,
-> so the lifted C compiles and the decoder ships inside the launcher. EmblemWeave's own
+> opening movie and cutscenes. 0.1.7 put a button on **Overview** that installs whatever build tools are missing,
+> Visual Studio included; 0.1.8 makes the launcher say why a build step failed and checks CMake's version before
+> the build starts, so a failed configure arrives with its cause. 0.1.6 fixed the build itself, so the lifted C
+> compiles and the decoder ships inside the launcher. EmblemWeave's own
 > Rust runtime is being completed to take over running the game: it
 > now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
 > swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
@@ -59,6 +60,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.8](#whats-new-in-018)
 - [What's new in 0.1.7](#whats-new-in-017)
 - [What's new in 0.1.6](#whats-new-in-016)
 - [What's new in 0.1.5](#whats-new-in-015)
@@ -110,6 +112,19 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.8
+
+- **A failed step says why.** Build tools end a failed run with a summary, like `CMake Generate step failed.
+  Build files cannot be regenerated correctly`, while the line that names the cause sits above it. Step output
+  is now kept as a window rather than the last few lines, and the failure message and the exported report carry
+  the first line that is an error, so the cause arrives with the summary.
+- **CMake is checked before the build.** The engine's projects need CMake 3.25 or newer, and an older one fails
+  as a generate error without mentioning its version. The launcher now reads the version first and says plainly
+  that it is too old, with the command that updates it.
+- **A stale build folder fixes itself.** A CMake cache left by an earlier attempt, or by a different compiler,
+  cannot be reused and turns every later build into the same failure. The launcher clears that cache and
+  configures once more before giving up.
 
 ## What's new in 0.1.7
 
