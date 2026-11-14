@@ -17,7 +17,7 @@ What EmblemWeave needs, and what the launcher means when it stops.
 
 **Game Setup > Choose .nup…** takes the package as it is: the ExeFS is copied out once (it is small) and the RomFS is read in place, so nothing has to be unpacked into a folder first. The engine serves reads and module loads straight from the package.
 
-One condition comes with that: the package's files must be **stored**, not zstd-compressed, because the game reads them at offsets it chooses. A compressed package is refused with the message above and breaks at the first frame; a stored one boots like an extracted folder. The launcher now says which case a package is in at detection, before anything is built or run.
+A package may store its files as they are or pack each one as a zstd frame. Stored files are read at whatever offset the game asks for, straight from the package. A compressed file cannot be, so it is decompressed once, the first time the game reads it, and kept in the cache at `%LOCALAPPDATA%\EmblemWeave\\nup-cache`; later reads come from there. The cache holds as much as the compressed files add up to (the Game Setup check says how much), the first start is slower by the decompression, and the folder can be deleted when the game is not running.
 
 ## Where the evidence is
 
@@ -36,7 +36,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 | ``ExeFS: no `main` module in this ExeFS`` | The folder is an ExeFS but not this game's | Pick the update's ExeFS if the base one has no `main` |
 | `RomFS: not found; the game cannot load its assets without it` | No `romfs` folder | Extract the RomFS beside the ExeFS |
 | `RomFS: Fs.bin.zst (the content index the game loads first) is missing` | A partial extraction | Extract the RomFS again, complete |
-| `N of M files in this .nup are zstd-compressed; …` | The package is served in place, so its files must be stored: a zstd frame has no offset to read into, and the game breaks before its first frame | Repack without compression (`nup pack` without the zstandard module writes stored files), or use an extracted `exefs` and `romfs` folder |
+| `N of M files are zstd-compressed: each is decompressed once into …` | The package keeps some files compressed; the engine decompresses each into its cache the first time the game reads it | Nothing to fix: the first start is slower and the cache takes the space named. Delete `%LOCALAPPDATA%\EmblemWeave\\nup-cache` to reclaim it |
 | `Decoded module: segment sizes do not match the module header; decode again` | The decoded copy is stale or truncated | **Game Setup > Decode again** |
 
 **Decoding** (Task: `decode`):

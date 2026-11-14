@@ -167,18 +167,21 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
             }
         }
     }
-    // The game reads the package in place: a file stored as a zstd frame has no
-    // offset to read into, so the runtime refuses the whole package and the game
-    // breaks before its first frame. Say that here, where the fix is readable.
+    // The engine decompresses a zstd entry into its cache the first time the game
+    // reads it, so the package runs as it is; say what that cache will take.
     let listed: Vec<u32> = nup.walk(pkg.exefs).into_iter().chain(nup.walk(pkg.romfs)).map(|(_, i)| i).collect();
-    let packed = listed.iter().filter(|i| nup.files[**i as usize].compressed).count();
-    if packed > 0 {
+    let packed: Vec<&ew_format::nup::FileEntry> =
+        listed.iter().map(|i| &nup.files[*i as usize]).filter(|f| f.compressed).collect();
+    if !packed.is_empty() {
+        let bytes: u64 = packed.iter().map(|f| f.size).sum();
         g.checks.push(Check::new(
-            Severity::Error,
+            Severity::Warn,
             "Game file",
             format!(
-                "{packed} of {} files in this .nup are zstd-compressed; the game reads the package in place and needs stored files. Repack it without compression (`nup pack` with the zstandard module unavailable writes stored files), or point the launcher at an extracted exefs and romfs folder instead",
-                listed.len()
+                "{} of {} files are zstd-compressed: each is decompressed once into %LOCALAPPDATA%\\EmblemWeave\\nup-cache (about {:.1} GB), so the first start is slower and needs that space",
+                packed.len(),
+                listed.len(),
+                bytes as f64 / (1024.0 * 1024.0 * 1024.0)
             ),
         ));
     }
