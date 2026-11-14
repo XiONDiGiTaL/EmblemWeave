@@ -275,9 +275,11 @@ impl App {
         });
         for (kind, progress) in finished {
             let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
+            if p.log_file.is_some() {
+                self.last_job_log_path = p.log_file.clone();
+            }
             if kind != JobKind::Detect {
                 self.last_job_log = std::mem::take(&mut p.log);
-                self.last_job_log_path = p.log_file.clone();
             }
             if let Some(err) = p.failed.take() {
                 drop(p);
