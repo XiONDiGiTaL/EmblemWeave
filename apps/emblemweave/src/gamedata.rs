@@ -88,6 +88,26 @@ pub struct GameData {
     pub checks: Vec<Check>,
 }
 
+/// The Game data card holds three lines of a reason, about thirty characters each
+/// at the card's width, so a message is cut at 84 characters with an ellipsis; a
+/// long path then cannot push that card past its neighbours.
+const CARD_LINE: usize = 84;
+
+/// `text`, cut to `max` characters at a word boundary and marked with an ellipsis.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    if let Some(space) = cut.rfind(' ') {
+        if cut.len() - space < 12 {
+            cut.truncate(space);
+        }
+    }
+    cut.push('…');
+    cut
+}
+
 impl GameData {
     /// Everything the runtime needs to attempt a boot is present and valid.
     pub fn bootable_inputs(&self) -> bool {
@@ -102,13 +122,17 @@ impl GameData {
     }
 
     /// One line naming what is not right, for a status card: the first reason,
-    /// and how many more there are when there is more than one.
+    /// and how many more there are when there is more than one. Longer messages
+    /// are clipped to the space the card has; the tooltip and the page that owns
+    /// the check still show every word.
     pub fn attention_line(&self) -> Option<String> {
         let open = self.attention();
         let first = open.first()?;
-        Some(match open.len() - 1 {
-            0 => format!("{}: {}", first.label, first.detail),
-            more => format!("{}: {} (+{more} more)", first.label, first.detail),
+        let more = open.len() - 1;
+        let head = clip(&format!("{}: {}", first.label, first.detail), CARD_LINE);
+        Some(match more {
+            0 => head,
+            more => format!("{head} (+{more} more)"),
         })
     }
 
@@ -257,7 +281,7 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
             match nup.read(*i).map_err(|e| format!("{e:#}")).and_then(|b| std::fs::write(dir.join(name), b).map_err(|e| e.to_string())) {
                 Ok(()) => {}
                 Err(e) => {
-                    g.checks.push(Check::new(Severity::Error, "ExeFS", format!("copying {name} out of the .nup: {e}")));
+                    g.checks.push(Check::new(Severity::Error, "ExeFS", format!("copying {name}: {e}")));
                     return None;
                 }
             }
@@ -366,7 +390,7 @@ fn use_nsp(
             };
             let counts = (dumped.exefs, dumped.romfs, dumped.romfs_bytes);
             if std::fs::write(&marker, format!("{stamp}\n{} {} {}\n", counts.0, counts.1, counts.2)).is_err() {
-                g.checks.push(Check::new(Severity::Warn, "Game file", format!("could not record the unpack in {}", marker.display())));
+                g.checks.push(Check::new(Severity::Warn, "Game file", format!("unpack not recorded in {}", marker.display())));
             }
             counts
         }
@@ -486,7 +510,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
 
     // ExeFS contents.
     match &g.exefs {
-        None => g.checks.push(Check::new(Severity::Error, "ExeFS", "not found; choose the folder that contains your extracted exefs")),
+        None => g.checks.push(Check::new(Severity::Error, "ExeFS", "not found; choose the folder with your extracted exefs")),
         Some(dir) => match ew_format::ExeFs::scan_dir(dir) {
             Ok(exefs) => {
                 if let Ok(Some(npdm)) = exefs.read_npdm() {
@@ -513,7 +537,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
 
     // RomFS.
     match &g.romfs {
-        None => g.checks.push(Check::new(Severity::Error, "RomFS", "not found; the game cannot load its assets without it")),
+        None => g.checks.push(Check::new(Severity::Error, "RomFS", "not found; the game cannot load its assets")),
         Some(_) if g.nup.is_some() => g.checks.push(Check::new(
             Severity::Ok,
             "RomFS",
@@ -526,7 +550,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
             } else if dir.join("Fs.bin.zst").is_file() {
                 g.checks.push(Check::new(Severity::Ok, "RomFS", format!("{} top-level entries, content index present", g.romfs_entries)));
             } else {
-                g.checks.push(Check::new(Severity::Warn, "RomFS", "Fs.bin.zst (the content index the game loads first) is missing"));
+                g.checks.push(Check::new(Severity::Warn, "RomFS", "Fs.bin.zst (the content index) is missing"));
             }
         }
     }
@@ -562,13 +586,13 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
         } else if main.is_none() {
             Check::new(Severity::Warn, "Decoded module", "present, but there is no ExeFS to check it against")
         } else {
-            Check::new(Severity::Error, "Decoded module", "segment sizes do not match the module header; decode again")
+            Check::new(Severity::Error, "Decoded module", "segment sizes do not match its header; decode again")
         });
     } else {
         g.checks.push(Check::new(
             Severity::Warn,
             "Decoded module",
-            "not decoded yet; the main module is ZBIC-compressed and must be decoded once",
+            "not decoded yet; decode the ZBIC-compressed main module once",
         ));
     }
     g
@@ -703,5 +727,18 @@ mod tests {
         g.checks.push(Check::new(Severity::Ok, "ExeFS", "seven modules"));
         assert_eq!(g.attention_line(), None);
         assert_eq!(g.attention_text(), None);
+    }
+
+    #[test]
+    fn a_long_reason_is_clipped_to_the_card_line() {
+        let mut g = GameData::default();
+        let path = format!("C:\\Users\\someone\\AppData\\Roaming\\EmblemWeave\\{}", "work\\".repeat(20));
+        g.checks.push(Check::new(Severity::Warn, "Game file", format!("unpack not recorded in {path}")));
+        let line = g.attention_line().unwrap();
+        assert!(line.chars().count() <= CARD_LINE, "{} chars: {line}", line.chars().count());
+        assert!(line.ends_with('…'), "{line}");
+        // The tooltip keeps the whole message, clipping is only for the card.
+        assert!(g.attention_text().unwrap().contains("work\\work\\work\\"));
+        assert_eq!(clip("short", CARD_LINE), "short");
     }
 }
