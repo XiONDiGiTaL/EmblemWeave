@@ -109,30 +109,73 @@ pub fn tool_path() -> String {
 /// The Visual Studio C++ tools. Every engine script calls `vcvars64.bat`,
 /// found through vswhere; without it the whole build dies with a bare exit
 /// code, which is what made it look like the launcher's fault.
-fn vc_tools() -> Option<PathBuf> {
-    let known = Path::new(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat");
-    if known.is_file() {
-        return Some(known.to_path_buf());
-    }
+/// The newest Visual Studio C++ tools on this PC and its major version (17 = 2022, 18 = 2026). With `min_major` set, vswhere only
+/// reports an install that new or newer, so an old one can tell the user why it cannot be used instead of failing on a header.
+fn vc_install(min_major: Option<u32>) -> Option<(PathBuf, u32)> {
     let base = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
     let vswhere = Path::new(&base).join("Microsoft Visual Studio").join("Installer").join("vswhere.exe");
-    if !vswhere.is_file() {
+    let mut extra: Vec<String> = Vec::new();
+    if let Some(m) = min_major {
+        extra.push("-version".into());
+        extra.push(format!("[{m}.0,)"));
+    }
+    let query = |property: &str| -> Option<String> {
+        if !vswhere.is_file() {
+            return None;
+        }
+        let mut cmd = Command::new(&vswhere);
+        cmd.args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"]);
+        cmd.args(&extra);
+        cmd.args(["-property", property]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_string();
+        (!text.is_empty()).then_some(text)
+    };
+    let path = query("installationPath");
+    if let Some(path) = path {
+        let major = query("installationVersion").as_deref().and_then(vs_major).unwrap_or(0);
+        let bat = PathBuf::from(path).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
+        return bat.is_file().then_some((bat, major));
+    }
+    if vswhere.is_file() {
         return None;
     }
-    let mut cmd = Command::new(&vswhere);
-    cmd.args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    // No vswhere at all: the default folders are the only guess left.
+    for (dir, major) in [
+        (r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools", 17u32),
+        (r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools", 18u32),
+    ] {
+        if min_major.is_some_and(|m| major < m) {
+            continue;
+        }
+        let bat = Path::new(dir).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
+        if bat.is_file() {
+            return Some((bat, major));
+        }
     }
-    let out = cmd.output().ok()?;
-    let path = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_string();
-    if path.is_empty() {
-        return None;
-    }
-    let bat = PathBuf::from(path).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
-    bat.is_file().then_some(bat)
+    None
+}
+
+/// The major version out of an `installationVersion` such as `17.9.34728.123`.
+fn vs_major(version: &str) -> Option<u32> {
+    version.split('.').next()?.parse().ok()
+}
+
+/// The Visual Studio build needs: 2022 (17) or newer. An older one has no `<bit>` header in its C++ library, and the engine's
+/// `cxx.h` asks for it, so the build died with "fatal error: 'bit' file not found" on a PC whose tools were all reported present
+/// (issue 11).
+fn vc_tools() -> Option<PathBuf> {
+    vc_install(Some(17)).map(|(bat, _)| bat)
+}
+
+/// The newest C++ tools whatever their version, so a too-old install can be named rather than reported as absent.
+pub fn vc_tools_any() -> Option<(PathBuf, u32)> {
+    vc_install(None)
 }
 
 /// The highest .NET SDK major version installed, from `dotnet --list-sdks`.
@@ -419,6 +462,15 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
 /// The build job's work: every step in order.
 pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, String> {
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
+    // An old Visual Studio passes every file-existence check and then dies on a C++20 header. Name the install and the version
+    // that is needed, instead of "missing tools" or a header name the user cannot act on.
+    if vc_tools().is_none() {
+        if let Some((_, major)) = vc_tools_any() {
+            return Err(format!(
+                "the newest Visual Studio C++ tools on this PC are version {major}, and the engine needs Visual Studio 2022 (17) or newer. An older C++ library has no `<bit>` header, which is the `cxx.h: 'bit' file not found` error the build stops on.\n\nInstall the current tools with:\n{VS_INSTALL}\n\nthen press Build the game again."
+            ));
+        }
+    }
     let missing = missing_tools();
     if !missing.is_empty() {
         let lines: Vec<String> = missing.iter().map(|m| format!("{m} (`{}`)", install_hint(m))).collect();
@@ -462,7 +514,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let vc_env: Option<String> = vc_tools().map(|p| p.display().to_string());
     ctx.log(format!(
         "visual studio: {}",
-        vc_env.clone().unwrap_or_else(|| "not found; the engine's scripts will look for it themselves".into())
+        match (&vc_env, vc_tools_any()) {
+            (Some(path), Some((_, major))) => format!("{path} (tools version {major})"),
+            (Some(path), None) => path.clone(),
+            _ => "not found; the engine's scripts will look for it themselves".into(),
+        }
     ));
     let mut envs: Vec<(&str, &str)> = vec![("NX_JOBS", &jobs)];
     if let Some(vc) = &vc_env {
@@ -470,6 +526,13 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     }
     let built = run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs);
     if let Err(e) = built {
+        // The same old-toolset case, when it slips past the version check: the C++ library of an older Visual Studio has no
+        // `<bit>`, and nothing in the message says that is what it means.
+        if e.contains("'bit' file not found") {
+            return Err(format!(
+                "the C++ library of the Visual Studio in use has no `<bit>` header, and the engine needs Visual Studio 2022 (17) or newer.\n\nInstall the current tools with:\n{VS_INSTALL}\n\nthen press Build the game again."
+            ));
+        }
         // A cache left by an older CMake or compiler cannot be reused, and CMake
         // answers with "Build files cannot be regenerated correctly" instead of
         // saying that. Clear it and configure once more before giving up, so an
@@ -1259,6 +1322,13 @@ mod tests {
         assert_eq!(resolution_size("Native display"), None);
         assert_eq!(window_mode("Exclusive fullscreen"), "exclusive");
         assert_eq!(window_mode("Windowed"), "windowed");
+    }
+
+    #[test]
+    fn a_visual_studio_version_is_read_by_its_major_number() {
+        assert_eq!(super::vs_major("17.9.34728.123"), Some(17));
+        assert_eq!(super::vs_major("18.0.0"), Some(18));
+        assert_eq!(super::vs_major(""), None);
     }
 
     #[test]

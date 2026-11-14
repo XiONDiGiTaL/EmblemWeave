@@ -121,6 +121,11 @@ pub fn diagnostics_text() -> String {
 pub fn environment_text() -> String {
     let mut s = String::new();
     s.push_str("\n== build tools ==\n");
+    // The versions matter as much as the presence: a Visual Studio too old for C++20 or a .NET runtime without a matching SDK
+    // both pass a file-existence check and then fail the build (issues 10 and 11).
+    let vs = crate::engine::vc_tools_any().map(|(_, major)| format!("Visual Studio tools {major}")).unwrap_or_else(|| "no Visual Studio C++ tools found".into());
+    let dotnet = crate::engine::dotnet_sdk_major().map(|m| format!(".NET SDK {m}")).unwrap_or_else(|| "no .NET SDK".into());
+    s.push_str(&format!("found: {vs}, {dotnet}\n"));
     let missing = crate::engine::missing_tools();
     if missing.is_empty() {
         s.push_str("all found\n");
