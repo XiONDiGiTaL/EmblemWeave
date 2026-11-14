@@ -99,3 +99,39 @@ Two of its notes are worth keeping, and neither is a file to copy:
 - Cheats that patch the main module's *code*. Their generator compiles the patched instructions beside the originals
   and picks at run time, because a recompiled game no longer runs the bytes a cheat rewrites. Our `cheats.rs` states
   the limitation instead. It is the one feature in their port that our cheats page cannot do.
+
+## The Engage PC Recomp, inspected
+
+`E:\Quiver Launcher\Apps\FireEmblemEngage-EngagePCRecomp` is *Engage PC Recomp* 0.1.0-alpha.6 at
+`5e0ce98f120bd669cb79d3b365d0da1d6d54145b`, MIT (Valiantsin Dzerakh), built on TotK Recomp (also MIT). Unlike the FE3H
+install this one ships its sources: a Python recompiler (`recomp/`, 4,951 lines), a C runtime (`runtime/`, 152 files),
+the setup and launcher GUIs, the tools, and a bundled Python, LLVM and Ninja. Nothing from it is redistributed here; it
+is MIT, which the GPL recompiler may take from the way it already takes from smo-recomp and SuperMarioWonderRecomp.
+
+Three mechanisms are worth knowing about:
+
+- **Patches with a run-time switch.** `recomp/patches.py` reads a patch table whose lines are `set <name> <env>
+  <default>`, `build <module> <hash>`, `site <set> <module> <addr> <orig> <new>...` and `spin ...`. A patched site is
+  lifted twice and the generated C runs `if (rt_patch_on[set]) { replacement } else { original }`, so a code patch is
+  switched from the menu instead of being fixed at generation time. Runtime-owned values live in a reserved 4 KiB page
+  after the module image (`@page:x<n>` encodes `adrp` to it). Our `load_sites` has `patch <addr> <orig> <new>`, which is
+  compile-time only, and so is the only feature in it we cannot express.
+- **Spin-wait detection.** `tools/spin_waits.py` (adapted from nxnative, MIT, Copyright (c) 2026 seedds) proves a loop
+  cannot leave by itself — only loads, register and flag arithmetic, direct branches and barriers on every path back,
+  nothing live at the head written — and names its back-edges. Those are lifted as `rt_spin_gate(c, head); goto head`,
+  which slows the poll and hands the virtual core to a waiting thread. Our kernel already blocks in
+  `kernel/busy_mutex.cpp`, but we have no static detector to find loops that burn a core without one.
+- **Static jump-table resolution.** `recomp/jumptables.py` (1,345 lines) walks back from the `br` over its block and
+  predecessor blocks, evaluates paths symbolically, and iterates tables and function-wide facts to a common fixpoint; it
+  handles a dispatch block placed elsewhere (`b.ls`), `ccmp` chains and table bases hoisted out of loops. Our
+  `nxrecomp/jumptables.py` (287 lines, adapted from SuperMarioWonderRecomp) covers clang's compressed tables and
+  table-relative `ldrsw` tables, and falls back to a dispatch over the function otherwise. That fallback is why our
+  STATUS still calls jump tables partial.
+
+What we already have that they also needed: the same site kinds minus the run-time switch (`patch`, `inline`,
+`midhook`, `entryhook`, `dynimm`, `noinline`, `jtable`), C++ exception lifting, a config file, an audio mixer with
+reverb, ASTC decoding, FSR shaders and an extractor that unpacks `.nsp`.
+
+One experiment did not transfer: their `tools/spin_waits.py` run against our own ExeFS stops in `recomp/nso.py` with an
+LZ4 block error on the first module it opens, so their readers cover their module set rather than ours. The tools are
+Engage-specific; the three designs above are not.
