@@ -421,6 +421,10 @@ FidelityFX API) and **DLSS** / **DLAA** (NVIDIA's temporal upscaler through Stre
 and the folder it found the DLLs in, into the run folder's `fefw.ini` before it starts the game, so it applies at the
 game's next start.
 
+**Graphics > Sharpening** sets how crisp the final picture is: **Off**, **Low**, **Default** (the engine's own 0.8) or
+**High**. It is the engine's `[upscale] sharpness`, it applies live rather than at the next start, and the game's own
+F1 menu sees the same value.
+
 AMD's and NVIDIA's files cannot be shipped, so those two upscalers need you to add them, in the run folder:
 
 - **FSR 3.1**: `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from the FidelityFX SDK (v2.4.0,

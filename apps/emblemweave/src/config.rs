@@ -67,6 +67,9 @@ pub struct Graphics {
     pub aspect: String,
     pub render_scale: f32,
     pub upscaling: String,
+    /// How crisp the final picture is: the engine's `[upscale] sharpness`, in
+    /// the four steps the game's own menu scene understands.
+    pub sharpening: String,
     pub quality: String,
     pub shader_precompile: bool,
 }
@@ -81,6 +84,7 @@ impl Default for Graphics {
             aspect: "16:9".into(),
             render_scale: 1.0,
             upscaling: "Off".into(),
+            sharpening: "Default".into(),
             quality: "Original".into(),
             shader_precompile: true,
         }

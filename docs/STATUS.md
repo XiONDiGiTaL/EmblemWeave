@@ -121,7 +121,7 @@ native code runs, as an option, and has since `ew-native` was added.
 | Boot test with live progress, cancellation and a full report | Implemented, run on the retail data |
 | Diagnostics with search, demangled symbols and export | Implemented |
 | Language and profile settings | Implemented; consumed by the runtime |
-| Upscaling | Implemented: FSR 1.0, NVIDIA Image Scaling, FSR 3.1 and DLSS/DLAA are chosen on **Graphics** and written to the engine's `fefw.ini` (with the DLL folder when one is found) before every start, so the game itself runs them |
+| Upscaling | Implemented: FSR 1.0, NVIDIA Image Scaling, FSR 3.1 and DLSS/DLAA are chosen on **Graphics** and written to the engine's `fefw.ini` (with the DLL folder when one is found) before every start, so the game itself runs them. **Sharpening** (Off / Low / Default / High) writes the engine's `[upscale] sharpness`, which applies live |
 | Display settings | Implemented: resolution, render scale, window mode, vsync, aspect ratio and frame-rate limit are written to play mode's `controls.ini` (`[display] window_mode`, `vsync`, `aspect`, `fps_limit`, `width`/`height`, `render_width`/`render_height`, `render_scale`) and the picture size to `[fefw] output` in `fefw.ini` before every start |
 | Audio master volume | Implemented: written to `[audio] volume` in the same file; music, effects and voice wait for the mixer |
 | Settings only when changed | Implemented: a start writes only values that differ from the ones it wrote last (kept in `%APPDATA%\EmblemWeave\applied.json`), so settings changed in the game's F1 menu are not reset by the next launch |

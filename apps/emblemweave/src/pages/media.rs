@@ -13,6 +13,9 @@ use eframe::egui::{self, RichText};
 /// labels to the modes in its ini.
 const UPSCALERS: &[&str] = &["Off", "FSR 1.0", "FSR 3.1", "NVIDIA Image Scaling", "DLSS", "DLAA"];
 
+/// The engine's `[upscale] sharpness` steps: Off, Low, its own 0.8, and 1.0.
+const SHARPENING: &[&str] = &["Off", "Low", "Default", "High"];
+
 /// What the selected upscaler needs, and whether it is there: FSR 3.1 and DLSS
 /// need DLLs AMD and NVIDIA do not let us ship.
 fn upscaler_help(current: &str, sdk: &crate::engine::Sdk) -> String {
@@ -78,6 +81,15 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "Upscaling", &help, |ui| {
             combo(ui, "upscale", &mut g.upscaling, UPSCALERS);
         });
+        widgets::setting_row(
+            ui,
+            &p,
+            "Sharpening",
+            "How crisp the final picture is. Default is the engine's own 0.8; High suits output above the render size, where the upscaler softens edges.",
+            |ui| {
+                combo(ui, "sharpening", &mut g.sharpening, SHARPENING);
+            },
+        );
         widgets::setting_row(ui, &p, "Quality", "Original keeps the console's rendering exactly.", |ui| {
             combo(ui, "quality", &mut g.quality, &["Original", "Enhanced"]);
         });

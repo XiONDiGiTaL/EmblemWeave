@@ -797,6 +797,32 @@ pub fn window_mode(label: &str) -> &'static str {
     }
 }
 
+/// The engine's `[upscale] sharpness` (0 to 1, applied live) for a label on the Graphics page. The four steps are the ones the
+/// game's own menu offers: FSR 1, NIS and FSR 3's RCAS all sharpen, and 0.8 is the engine's own default.
+pub fn sharpen_value(label: &str) -> &'static str {
+    match label {
+        "Off" => "0",
+        "Low" => "0.45",
+        "High" => "1",
+        _ => "0.8",
+    }
+}
+
+/// The page's label for a sharpness the game's own menu set: the nearest step, so a hand-edited value still shows something
+/// sensible.
+fn sharpen_label(value: &str) -> Option<&'static str> {
+    let n: f32 = value.trim().parse().ok()?;
+    Some(if n <= 0.01 {
+        "Off"
+    } else if n < 0.6 {
+        "Low"
+    } else if n < 0.95 {
+        "Default"
+    } else {
+        "High"
+    })
+}
+
 /// The Graphics page's label for one of the engine's upscale modes.
 pub fn upscale_label(mode: &str) -> &'static str {
     match mode {
@@ -958,6 +984,7 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     let mut d = Values::new();
     d.insert("fefw.output".into(), output_mode(&g.resolution).into());
     d.insert("upscale.mode".into(), upscale_mode(&g.upscaling).into());
+    d.insert("upscale.sharpness".into(), sharpen_value(&g.sharpening).into());
     d.insert("display.window_mode".into(), window_mode(&g.display_mode).into());
     d.insert("display.vsync".into(), if g.vsync { "1" } else { "0" }.into());
     d.insert("display.aspect".into(), g.aspect.clone());
@@ -1044,6 +1071,11 @@ fn adopt_from(
     let mut changed = false;
     if let Some(v) = take_back(desired, applied, on_file, "upscale.mode") {
         changed |= put(&mut g.upscaling, upscale_label(v).to_string());
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "upscale.sharpness") {
+        if let Some(label) = sharpen_label(v) {
+            changed |= put(&mut g.sharpening, label.to_string());
+        }
     }
     if let Some(v) = take_back(desired, applied, on_file, "fefw.output") {
         if let Some(label) = output_label(v) {
@@ -1325,6 +1357,26 @@ mod tests {
     }
 
     #[test]
+    fn sharpening_uses_the_engines_four_steps() {
+        assert_eq!(super::sharpen_value("Off"), "0");
+        assert_eq!(super::sharpen_value("Low"), "0.45");
+        assert_eq!(super::sharpen_value("Default"), "0.8");
+        assert_eq!(super::sharpen_value("High"), "1");
+        assert_eq!(super::sharpen_label("0"), Some("Off"));
+        assert_eq!(super::sharpen_label("0.45"), Some("Low"));
+        assert_eq!(super::sharpen_label("0.8"), Some("Default"));
+        assert_eq!(super::sharpen_label("1"), Some("High"));
+    }
+
+    #[test]
+    fn the_sharpening_on_the_page_reaches_the_ini() {
+        let mut g = crate::config::Graphics::default();
+        g.sharpening = "High".into();
+        let d = super::desired_values(&g, &crate::config::Audio::default());
+        assert_eq!(d.get("upscale.sharpness").map(String::as_str), Some("1"));
+    }
+
+    #[test]
     fn a_visual_studio_version_is_read_by_its_major_number() {
         assert_eq!(super::vs_major("17.9.34728.123"), Some(17));
         assert_eq!(super::vs_major("18.0.0"), Some(18));
@@ -1363,6 +1415,7 @@ mod tests {
         assert!(text.contains("output = 1440p"));
         assert!(text.contains("mode = fsr3"));
         assert!(text.contains("fps60 = 1"), "the rest of the file stays");
+        assert!(text.contains("sharpness = 0.8"), "the sharpening the page shows");
 
         let text = std::fs::read_to_string(&controls).unwrap();
         assert!(text.contains("window_mode = borderless"));
@@ -1375,7 +1428,11 @@ mod tests {
         assert!(text.contains("render_height = 1440"));
         assert!(text.contains("[audio]\nvolume = 0.40"), "the master volume play mode mixes at");
         assert!(text.contains("[meta]") && text.contains("defaults_rev = 1"), "the file's own sections stay");
-        assert!(text.contains("[upscale]\nmode = fsr3"), "the F1 menu shows the same choice");
+        // The sharpening sits in the same section, so look for the keys rather than for the section header followed by one of
+        // them: either order in the section is fine, a missing key is not.
+        let upscale = text.split("[upscale]").nth(1).unwrap_or_default();
+        assert!(upscale.lines().any(|l| l.trim() == "mode = fsr3"), "the F1 menu shows the same choice");
+        assert!(upscale.lines().any(|l| l.trim() == "sharpness = 0.8"), "and the same sharpening");
 
         // Back to the defaults: the game's own console size again, and the keys
         // are replaced rather than repeated.
