@@ -55,6 +55,8 @@ impl SegmentCheck {
 pub struct GameData {
     /// The `.nup` dump, when the game data is one.
     pub nup: Option<PathBuf>,
+    /// The `.nsp` package, when the game data is one.
+    pub nsp: Option<PathBuf>,
     /// The program id, from the `.nup` or `control.nacp`; it names the save
     /// folder in an emulator.
     pub title_id: Option<u64>,
@@ -192,10 +194,108 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Open a `.nsp` package: unpack its ExeFS, RomFS and control metadata once
+/// into the launcher's work folder, then use that folder like a dump. Returns
+/// the ExeFS folder and keeps the dump counts for the checks.
+fn use_nsp(g: &mut GameData, path: &Path) -> Option<PathBuf> {
+    let nsp = match ew_format::nsp::Nsp::open(path) {
+        Ok(n) => n,
+        Err(e) => {
+            g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
+            return None;
+        }
+    };
+    let program = match nsp.program() {
+        Ok(p) => p,
+        Err(e) => {
+            g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
+            return None;
+        }
+    };
+    g.checks.push(Check::new(Severity::Ok, "Game file", nsp.summary().unwrap_or_else(|e| format!(".nsp, {e:#}"))));
+
+    // The dump is keyed by the package's title and size, and re-done when the
+    // package changes, so pointing at a new build never reuses stale files.
+    let stamp = format!("{}-{}", nsp.size, modified_stamp(path));
+    let dir = Config::work_dir()?.join("nsp").join(format!("{:016X}-{}", program.title_id, nsp.size));
+    let marker = dir.join("dump.txt");
+    let cached = std::fs::read_to_string(&marker).ok().and_then(|t| {
+        let mut lines = t.lines();
+        let same = lines.next() == Some(stamp.as_str());
+        let counts = lines.next().and_then(|l| {
+            let mut parts = l.split_whitespace();
+            Some((parts.next()?.parse::<usize>().ok()?, parts.next()?.parse::<usize>().ok()?, parts.next()?.parse::<u64>().ok()?))
+        });
+        same.then_some(counts).flatten()
+    });
+
+    let (exefs_files, romfs_files, romfs_bytes) = match cached {
+        Some(c) => c,
+        None => {
+            g.checks.push(Check::new(
+                Severity::Info,
+                "Game file",
+                format!("unpacking {} into {}, which takes a while the first time", path.display(), dir.display()),
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let dumped = match nsp.dump(&dir) {
+                Ok(d) => d,
+                Err(e) => {
+                    g.checks.push(Check::new(Severity::Error, "Game file", format!("unpacking {}: {e:#}", path.display())));
+                    return None;
+                }
+            };
+            let counts = (dumped.exefs, dumped.romfs, dumped.romfs_bytes);
+            if std::fs::write(&marker, format!("{stamp}\n{} {} {}\n", counts.0, counts.1, counts.2)).is_err() {
+                g.checks.push(Check::new(Severity::Warn, "Game file", format!("could not record the unpack in {}", marker.display())));
+            }
+            counts
+        }
+    };
+    if romfs_files > 0 {
+        g.checks.push(Check::new(
+            Severity::Warn,
+            "Game file",
+            format!(
+                "unpacked below {}: {exefs_files} ExeFS files and {romfs_files} RomFS files ({:.1} GB), so the package is read once and the copy is what the game and the recompiler use; delete that folder to reclaim the space",
+                dir.display(),
+                romfs_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            ),
+        ));
+    }
+    if let Some(nacp) = dir.join("data").join("control").join("control.nacp").is_file().then(|| dir.join("data").join("control").join("control.nacp")) {
+        g.nacp = Some(nacp);
+    }
+    g.title_id = Some(program.title_id);
+    g.romfs = Some(dir.join("romfs"));
+    g.nsp = Some(path.to_path_buf());
+    g.romfs_entries = std::fs::read_dir(dir.join("romfs")).map(|rd| rd.count()).unwrap_or(0);
+    Some(dir.join("exefs"))
+}
+
+/// A file's modification time as nanoseconds, for the unpack marker.
+fn modified_stamp(path: &Path) -> u128 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 /// Locate and validate everything. Explicit paths win over detection.
 pub fn detect(paths: &Paths) -> GameData {
     let mut g = GameData::default();
     let root = non_empty(&paths.game_root);
+
+    // A .nsp package is unpacked once, then used like a dump.
+    if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nsp::Nsp::is_nsp(r)) {
+        let r = r.clone();
+        if let Some(exefs) = use_nsp(&mut g, &r) {
+            g.exefs = non_empty(&paths.exefs).or(Some(exefs));
+        }
+        return finish(g, paths);
+    }
 
     // A .nup dump supplies everything itself.
     if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nup::Nup::is_nup(r)) {
@@ -379,6 +479,22 @@ mod tests {
         assert!(g.exefs.as_ref().is_some_and(|e| e.join("main").is_file() && e.join("sdk").is_file()));
         assert_eq!(g.title.as_ref().map(|t| t.0.as_str()), Some(TITLE_NAME));
         assert!(g.romfs_entries > 0);
+    }
+
+    /// On a real package: `EW_NSP=<game.nsp> cargo test -p emblemweave -- --ignored`.
+    #[test]
+    #[ignore]
+    fn detects_an_nsp_package() {
+        let path = std::env::var("EW_NSP").expect("EW_NSP");
+        let g = detect(&Paths { game_root: path.clone(), ..Default::default() });
+        for c in &g.checks {
+            eprintln!("{:?} {}: {}", c.severity, c.label, c.detail);
+        }
+        assert_eq!(g.nsp.as_deref(), Some(std::path::Path::new(&path)));
+        assert!(g.exefs.as_ref().is_some_and(|e| e.join("main").is_file() && e.join("sdk").is_file()));
+        assert!(g.romfs.as_ref().is_some_and(|r| r.is_dir()));
+        assert!(g.romfs_entries > 0);
+        assert_eq!(g.title_id, Some(0x04007EF01F8AE000));
     }
 
     #[test]

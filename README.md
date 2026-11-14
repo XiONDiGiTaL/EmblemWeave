@@ -228,7 +228,7 @@ build output go to `%APPDATA%\EmblemWeave\work`, and save data to
 ## Preparing your game data
 
 The simplest way is a **`.nup` dump** of your own copy of the game. On the
-**Game Setup** page, choose **Choose .nup…** and select the file. EmblemWeave
+**Game Setup** page, choose **Choose package…** and select the file. EmblemWeave
 then does the rest:
 
 - it checks the container's table of contents and every file it reads against
@@ -238,6 +238,14 @@ then does the rest:
   extracted, and it takes the title and version from the dump's own metadata.
 
 The `.nup` is only ever read.
+
+An **`.nsp` package** works too, when it is a plaintext repack: NSP Box writes
+those without keys, as unsigned program, control and meta NCAs. Pick it with
+**Choose package…** as well. EmblemWeave unpacks it itself — once — into
+`%APPDATA%\EmblemWeave\work\nsp`, then uses that folder like an extracted dump,
+so the game boots from it and the recompiler reads it. The unpack is repeated
+only when the package's size or modification time changes, and the folder can be
+deleted to reclaim the space.
 
 You can also use an extracted copy. EmblemWeave then needs:
 
@@ -249,8 +257,8 @@ You can also use an extracted copy. EmblemWeave then needs:
 
 Choose the containing folder with **Folder…** on Game Setup. Plain dumps and NSP
 extractions are both detected automatically, and every location can be set
-individually. NSP files themselves are not read: a store NSP is encrypted, and
-EmblemWeave does not handle console keys.
+individually. A retail NSP stays encrypted with the console's own keys, which
+EmblemWeave neither has nor asks for, so only plaintext repacks are unpacked.
 
 The game's `main` module is compressed with ZBIC, a Zstandard variant. Decode it
 once with **Decode main module** on Game Setup. This currently uses a small

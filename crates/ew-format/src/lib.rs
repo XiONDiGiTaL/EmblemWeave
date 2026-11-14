@@ -8,6 +8,7 @@
 
 pub mod exefs;
 pub mod nso;
+pub mod nsp;
 pub mod nup;
 pub mod romfs;
 

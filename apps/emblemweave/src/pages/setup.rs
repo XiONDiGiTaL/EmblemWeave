@@ -28,7 +28,7 @@ const LANGUAGES: [(&str, &str); 12] = [
 enum Pick {
     Folder,
     Nacp,
-    /// The game data: a `.nup` dump, or a folder.
+    /// The game data: a `.nup` dump, an `.nsp` package, or a folder.
     Dump,
 }
 
@@ -39,8 +39,10 @@ fn path_row(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &mut Stri
         let w = ui.available_width() - if pick == Pick::Dump { 236.0 } else { 110.0 };
         changed |= ui.add(egui::TextEdit::singleline(value).desired_width(w).hint_text(hint).font(theme::mono(12.5))).lost_focus();
         let mut picked = None;
-        if pick == Pick::Dump && widgets::button(ui, p, "Choose .nup…", true).clicked() {
-            picked = rfd::FileDialog::new().add_filter("Game dump (.nup)", &["nup"]).pick_file();
+        if pick == Pick::Dump && widgets::button(ui, p, "Choose package…", true).clicked() {
+            picked = rfd::FileDialog::new()
+                .add_filter("Game package (.nup, .nsp)", &["nup", "nsp"])
+                .pick_file();
         }
         let browse = if pick == Pick::Dump { "Folder…" } else { "Browse…" };
         if widgets::button(ui, p, browse, true).clicked() {
@@ -60,7 +62,7 @@ fn path_row(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &mut Stri
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Game Setup", "Point EmblemWeave at your own copy of the game: a .nup dump as it is, or an extracted folder. Nothing here modifies your files.");
+    widgets::page_header(ui, &p, "Game Setup", "Point EmblemWeave at your own copy of the game: a .nup dump or a .nsp package as it is, or an extracted folder. Nothing here modifies your files.");
 
     let mut rescan = false;
     widgets::section(ui, &p, "Game data", |ui| {
@@ -69,7 +71,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             &p,
             "Game data",
             &mut app.config.paths.game_root,
-            r"your .nup dump, or a folder with exefs and romfs",
+            r"your .nup dump, .nsp package, or a folder with exefs and romfs",
             Pick::Dump,
         );
         ui.horizontal(|ui| {

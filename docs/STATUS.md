@@ -47,6 +47,7 @@ native code runs, as an option, and has since `ew-native` was added.
 | --- | --- | --- |
 | NSO0 parsing, LZ4 segments | Verified | segment boundaries land on end of file for every LZ4 module |
 | `.nup` game containers | Verified | table of contents and every file checked against SHA-256; the ExeFS copied out byte-identical to an extracted dump; the RomFS served in place to `nn::fs` (the same 122 opens and stop as from a folder) |
+| `.nsp` game packages | Verified | plaintext NCAs read and unpacked by the recompiler itself: the real 29.2 GB package yields the same 7 ExeFS files and the same 252,686 RomFS files as the `.nup` of the same build, and `main` is the same size in both |
 | ZBIC segments (`main`) | Implemented (bridge) | `tools/zbic_extract.py`; decoded sizes match the header |
 | Conditional select, `fmov` immediates | Verified | two decoder bugs fixed in this milestone: `csinv`/`cinv`/`csetm` ran as `csneg`, and `fmov` with an immediate of 0x30-0x3f decoded as a register move; both found from wrong values in the game's own code (a CRC-32 one too high, a clobbered `this`) and pinned by decode tests |
 | Barriers and cache maintenance | Implemented | `dsb`, `dmb`, `isb`, `clrex`, `dc cvac/civac/cvau`, `ic ivau` are no-ops on one coherent host memory; `dc zva` still stops the run |
