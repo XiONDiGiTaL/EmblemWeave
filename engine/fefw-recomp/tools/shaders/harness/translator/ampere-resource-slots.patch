@@ -1,0 +1,20 @@
+Ryujinx shader translator: room for NVN2's constant banks and storage buffers.
+Ampere's constant bank field is 5 bits and NVN2 uses banks past Maxwell's 18: Fire Emblem Fortune's Weave's fragment
+shaders read their push constants from c[0x18] (238 of 4,096 blocks), which overran the 18-entry slot map. The storage
+buffer map grows to 32 as well (an NVN2 compute shader can reach 9 uniform blocks as storage plus 8 storage buffers; others
+saw a kernel with 17 pointers). The harness's StaticGpuAccessor gives the new slots their own binding ranges. Applied at
+build time by translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The Ryujinx code in the context
+lines is MIT.
+--- a/Translation/ResourceManager.cs
++++ b/Translation/ResourceManager.cs
+@@ -65,8 +65,8 @@
+             _stage = stage;
+             _stagePrefix = GetShaderStagePrefix(stage);
+ 
+-            _cbSlotToBindingMap = new SetBindingPair[18];
+-            _sbSlotToBindingMap = new SetBindingPair[16];
++            _cbSlotToBindingMap = new SetBindingPair[32];
++            _sbSlotToBindingMap = new SetBindingPair[32];
+             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
+             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
+ 

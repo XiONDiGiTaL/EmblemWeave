@@ -1,0 +1,7 @@
+<Project>
+  <!-- Build products go to tools/shaders/build (git-ignored), never next to the sources. One obj directory per project. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../build/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../build/bin/</BaseOutputPath>
+  </PropertyGroup>
+</Project>

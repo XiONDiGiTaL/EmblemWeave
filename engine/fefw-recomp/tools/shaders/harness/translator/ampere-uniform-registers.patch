@@ -1,0 +1,18 @@
+Ryujinx shader translator: room for the Ampere uniform registers in SSA.
+The Ampere front end (tools/shaders/ampere/frontend) keeps UR0-62 and UP0-6 as Flag registers 4..67 and 68..75; SSA sizes
+its per-register tables with RegisterConsts.TotalCount, which only counted the 4 Maxwell flags. Applied at build time by
+translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The Ryujinx code in the context lines is MIT.
+--- a/Decoders/RegisterConsts.cs
++++ b/Decoders/RegisterConsts.cs
+@@ -5,7 +5,10 @@
+         public const int GprsCount = 255;
+         public const int PredsCount = 7;
+         public const int FlagsCount = 4;
+-        public const int TotalCount = GprsCount + PredsCount + FlagsCount;
++        // Ampere front end: uniform registers UR0-63 and UP0-7 are kept as extra Flag registers (index 4..67, 68..75).
++        public const int UniformGprsCount = 64;
++        public const int UniformPredsCount = 8;
++        public const int TotalCount = GprsCount + PredsCount + FlagsCount + UniformGprsCount + UniformPredsCount;
+ 
+         public const int RegisterZeroIndex = GprsCount;
+         public const int PredicateTrueIndex = PredsCount;

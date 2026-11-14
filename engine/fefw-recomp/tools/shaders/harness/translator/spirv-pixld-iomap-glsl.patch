@@ -1,0 +1,21 @@
+Ryujinx shader translator: implement the Maxwell PIXLD instruction (GLSL gl_SampleID).
+PIXLD.MY_INDEX returns the index of the sample the fragment shader invocation runs for; the NVN compiler puts it
+in the epilogue of almost every pixel shader (33,361 of 33,744 pixel blocks of Metroid Prime Remastered). Ryujinx
+logged "Pixld is not implemented" and left the destination register unwritten, which in SPIR-V is an undefined value.
+Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is not multisampled), the other modes
+(COVMASK, COVERED, OFFSET, CENTROID_OFFSET) write 0 and log. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a
+copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
+--- a/CodeGen/Glsl/Instructions/IoMap.cs
++++ b/CodeGen/Glsl/Instructions/IoMap.cs
+@@ -41,9 +41,11 @@
+                 IoVariable.PointSize => ("gl_PointSize", AggregateType.FP32),
+                 IoVariable.Position => ("gl_Position", AggregateType.Vector4 | AggregateType.FP32),
+                 IoVariable.PrimitiveId => GetPrimitiveIdVariableName(definitions.Stage, isOutput),
++                IoVariable.SampleId => ("gl_SampleID", AggregateType.S32),
+                 IoVariable.SubgroupEqMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Eq"),
+                 IoVariable.SubgroupGeMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Ge"),
+                 IoVariable.SubgroupGtMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Gt"),
++                IoVariable.SubgroupSize => ("gl_SubgroupSize", AggregateType.U32),
+                 IoVariable.SubgroupLaneId => GetSubgroupInvocationIdVariableName(hostCapabilities.SupportsShaderBallot),
+                 IoVariable.SubgroupLeMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Le"),
+                 IoVariable.SubgroupLtMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Lt"),

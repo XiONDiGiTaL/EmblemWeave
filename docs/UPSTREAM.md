@@ -18,12 +18,15 @@ That archive is the only copy of the 0.2.0 package we know of.
 
 ## What we keep and use
 
-- **The engine snapshot** in `engine/fefw-recomp`: the last upstream commit we
-  had (`501f7c0`, 9 November 2026) plus EmblemWeave's own engine commits, such as
-  serving zstd-packed `.nup` entries from a decompressed cache. Because upstream
-  is gone, `git submodule update --init` cannot fetch it: a clone that already
-  holds the submodule keeps it, and the pinned commit is recorded in this
-  repository's history.
+- **The engine** in `engine/fefw-recomp`: the last upstream commit we had
+  (`501f7c0`, 9 November 2026) plus EmblemWeave's own changes, such as serving
+  zstd-packed `.nup` entries from a decompressed cache. It is committed here as
+  ordinary files rather than as a submodule, since a submodule would point at a
+  repository that no longer exists: a fresh clone is complete and needs no fetch
+  step, and the vendored tree keeps its own `.gitignore` so game data and build
+  output stay out. The copy carries the files, not the upstream commit history,
+  which went with the repository; `git log` of EmblemWeave records when and why
+  it was brought in.
 - **`apps/emblemweave/data/dump_hashes.json`**, copied unchanged from the 0.2.0
   package's `tools/build/dump_hashes.json`. Game Setup hashes the user's ExeFS
   modules against it and reports whether they are the build the engine was tested

@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Resources for fefw.exe: the app icon (res/fefw.ico, drawn by launcher/icon/make_icon.py) and the manifest (UTF-8 code page, long
+// paths, asInvoker).
+#include <winres.h>
+
+IDI_APP ICON "fefw.ico"
+1 24 "fefw.manifest"

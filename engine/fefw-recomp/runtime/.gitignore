@@ -1,0 +1,14 @@
+build/
+out/
+*.log
+*.log.prev
+*_crash.txt
+*_freeze.txt
+tt_test_out/
+/*.png
+bc7_cache/
+shader_cache/
+pipeline_cache.bin
+pipeline_keys.bin
+__pycache__/
+

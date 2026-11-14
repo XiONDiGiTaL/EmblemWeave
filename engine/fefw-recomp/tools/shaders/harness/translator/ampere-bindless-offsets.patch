@@ -1,0 +1,182 @@
+Ryujinx shader translator: texture offset emulation (InsertConstOffsets) for pool-indexed textures. GenerateBindlessAccess
+gives such a texture operation two leading sources (texture index, then sampler index) and a separate sampler binding; the
+emulation counted one leading source and built its textureQueryLod / textureSize / texture operations without the sampler,
+so a bindless sample with a non-constant offset threw (Fire Emblem Fortune's Weave: 69 fragment blocks with TEX.SCR.B.AOFFI).
+The derived operations now keep the sampler binding and index. Applied at build time by
+translator/Ryujinx.Graphics.Shader.csproj to a copy under the build folder. The Ryujinx code in the context lines is MIT.
+--- a/Translation/Transforms/TexturePass.cs
++++ b/Translation/Transforms/TexturePass.cs
+@@ -344,6 +344,11 @@
+                 copyCount++;
+             }
+ 
++            // Ampere front end: a pool-indexed texture (separate sampler) has the sampler index as a second leading source.
++            int samplerSources = texOp.SamplerBinding >= 0 ? 1 : 0;
++
++            copyCount += samplerSources;
++
+             Operand[] lodSources = new Operand[copyCount + coordsCount];
+ 
+             for (int index = 0; index < lodSources.Length; index++)
+@@ -416,7 +421,7 @@
+                 sources[dstIndex++] = texOp.GetSource(srcIndex++);
+             }
+ 
+-            int coordsIndex = isBindless || isIndexed ? 1 : 0;
++            int coordsIndex = (isBindless || isIndexed ? 1 : 0) + samplerSources;
+ 
+             int componentIndex = texOp.Index;
+ 
+@@ -428,6 +433,7 @@
+             }
+ 
+             Operand bindlessHandle = isBindless || isIndexed ? sources[0] : null;
++            Operand samplerIndex = samplerSources != 0 ? sources[1] : null;
+ 
+             LinkedListNode<INode> oldNode = node;
+ 
+@@ -437,7 +443,7 @@
+ 
+                 sources.CopyTo(newSources, 0);
+ 
+-                Operand[] texSizes = InsertTextureBaseSize(node, texOp, bindlessHandle, coordsCount);
++                Operand[] texSizes = InsertTextureBaseSize(node, texOp, bindlessHandle, coordsCount, samplerIndex);
+ 
+                 int destIndex = 0;
+ 
+@@ -480,7 +486,7 @@
+                         [dests[destIndex++]],
+                         newSources);
+ 
+-                    node = node.List.AddBefore(node, newTexOp);
++                    node = node.List.AddBefore(node, WithSampler(newTexOp, texOp));
+                 }
+             }
+             else
+@@ -501,8 +507,8 @@
+                 else
+                 {
+                     Operand[] texSizes = isGather
+-                        ? InsertTextureBaseSize(node, texOp, bindlessHandle, coordsCount)
+-                        : InsertTextureLod(node, texOp, lodSources, bindlessHandle, coordsCount, stage);
++                        ? InsertTextureBaseSize(node, texOp, bindlessHandle, coordsCount, samplerIndex)
++                        : InsertTextureLod(node, texOp, lodSources, bindlessHandle, coordsCount, stage, samplerIndex);
+ 
+                     for (int index = 0; index < coordsCount; index++)
+                     {
+@@ -537,7 +543,7 @@
+                     dests,
+                     sources);
+ 
+-                node = node.List.AddBefore(node, newTexOp);
++                node = node.List.AddBefore(node, WithSampler(newTexOp, texOp));
+             }
+ 
+             node.List.Remove(oldNode);
+@@ -548,13 +554,25 @@
+             }
+ 
+             return node;
++        }
++
++        // Ampere front end: operations made from a pool-indexed texture keep its separate sampler (binding, and index source).
++        private static TextureOperation WithSampler(TextureOperation op, TextureOperation from)
++        {
++            if (from.SamplerBinding >= 0)
++            {
++                op.TurnIntoArray(new SetBindingPair(from.Set, from.Binding), new SetBindingPair(from.SamplerSet, from.SamplerBinding));
++            }
++
++            return op;
+         }
+ 
+         private static Operand[] InsertTextureBaseSize(
+             LinkedListNode<INode> node,
+             TextureOperation texOp,
+             Operand bindlessHandle,
+-            int coordsCount)
++            int coordsCount,
++            Operand samplerIndex = null)
+         {
+             Operand[] texSizes = new Operand[coordsCount];
+ 
+@@ -566,14 +584,14 @@
+ 
+                 if (bindlessHandle != null)
+                 {
+-                    texSizeSources = [bindlessHandle, Const(0)];
++                    texSizeSources = samplerIndex != null ? [bindlessHandle, samplerIndex, Const(0)] : [bindlessHandle, Const(0)];
+                 }
+                 else
+                 {
+                     texSizeSources = [Const(0)];
+                 }
+ 
+-                node.List.AddBefore(node, new TextureOperation(
++                node.List.AddBefore(node, WithSampler(new TextureOperation(
+                     Instruction.TextureQuerySize,
+                     texOp.Type,
+                     texOp.Format,
+@@ -582,7 +600,7 @@
+                     texOp.Binding,
+                     index,
+                     [texSizes[index]],
+-                    texSizeSources));
++                    texSizeSources), texOp));
+             }
+ 
+             return texSizes;
+@@ -594,7 +612,8 @@
+             Operand[] lodSources,
+             Operand bindlessHandle,
+             int coordsCount,
+-            ShaderStage stage)
++            ShaderStage stage,
++            Operand samplerIndex = null)
+         {
+             Operand[] texSizes = new Operand[coordsCount];
+ 
+@@ -604,7 +623,7 @@
+             {
+                 lod = Local();
+ 
+-                node.List.AddBefore(node, new TextureOperation(
++                node.List.AddBefore(node, WithSampler(new TextureOperation(
+                     Instruction.Lod,
+                     texOp.Type,
+                     texOp.Format,
+@@ -613,7 +632,7 @@
+                     texOp.Binding,
+                     0,
+                     [lod],
+-                    lodSources));
++                    lodSources), texOp));
+             }
+             else
+             {
+@@ -628,14 +647,14 @@
+ 
+                 if (bindlessHandle != null)
+                 {
+-                    texSizeSources = [bindlessHandle, GenerateF2i(node, lod)];
++                    texSizeSources = samplerIndex != null ? [bindlessHandle, samplerIndex, GenerateF2i(node, lod)] : [bindlessHandle, GenerateF2i(node, lod)];
+                 }
+                 else
+                 {
+                     texSizeSources = [GenerateF2i(node, lod)];
+                 }
+ 
+-                node.List.AddBefore(node, new TextureOperation(
++                node.List.AddBefore(node, WithSampler(new TextureOperation(
+                     Instruction.TextureQuerySize,
+                     texOp.Type,
+                     texOp.Format,
+@@ -644,7 +663,7 @@
+                     texOp.Binding,
+                     index,
+                     [texSizes[index]],
+-                    texSizeSources));
++                    texSizeSources), texOp));
+             }
+ 
+             return texSizes;

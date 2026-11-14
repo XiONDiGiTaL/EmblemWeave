@@ -1,0 +1,57 @@
+# hook sites of main (build DB93B0125F4850601D61C3EDDE012F8EB2ECFE77)
+# frame rate (runtime games/fefw/fefw_play.cpp, [fefw] fps60): the gameplay start's target frame rate store `str w9, [x8, #0x1dc]`
+# into the graphics object (w9 = 30, from `mov w9, #0x1e` at 0x71007bf1ac)
+inline 0x71007bf1c0
+# movies (runtime games/fefw/fefw_movie.cpp, [media] movies = host): the player's setup (0x1906510) picks native images or frames in CPU
+# buffers by the byte at +0x1318 (`ldrb w21` at 0x190654c); the host decoder fills CPU buffers, so the site at the next instruction sets w21 = 1.
+# On that path the player sets its frame count (+0xff8) to 4 only after making the buffers (2 by default, 0x1903ae0): the site before that sets it
+# first (nxnative-penis6 patches.py does both by rewriting the code)
+inline 0x7101906550
+inline 0x7101906634
+# frame update (runtime games/fefw/fefw_game.cpp, play mode): the present wrapper (nvnWindowSetPresentInterval, nvnQueuePresentTexture), once per
+# presented frame on the main thread; it pumps play mode (window events, the gamepad into the npad state)
+entryhook 0x710005d170
+# time step (runtime games/fefw/fefw_play.cpp, [fefw] smooth_step, on with fps120): app::time::Manager's step (0x180eea0) before its clamp
+# (`ldr s0, [x19, #0x168]`): s0 = the measured time since the last frame and s1 = the step the game chose (60 / target unless s0 is over it
+# by 0.1), both in frames of 1/59.94 s; the hook may replace s1
+inline 0x710180ef44
+# ultrawide (runtime games/fefw/fefw_wide.cpp, [fefw] ultrawide). The camera, UI, scissor, marker, 2D-effect and movie sites follow Kompas9's
+# MIT-licensed 3440x1440 IPS for this build (github.com/Kompas9/Switch-Game-Patches, games/Fire-Emblem-Fortunes-Weave); the picture / window
+# and off-screen indicator sites are this port's. The runtime computes every value from the output's aspect.
+# perspective camera update (0xb51420), after its prologue: x0 = the camera, its aspect as two floats at +0x70 / +0x74 (16, 9)
+inline 0x7100b51440
+# the 2D draw info's projection setter (0x5769d0): `ret` after the 4x4 matrix is copied to x0 + 0x10 (1920x1080 layouts: 1/960, -1/540)
+inline 0x7100576a10
+# nn::ui2d Picture::Calculate (0x595740) and Window::Calculate (0x5af080), after their LoadMtx (vtable + 0xf8) put the pane's global matrix
+# into the draw info's model-view (+0x80) and before it goes to the pane's constant buffer: picture x19 / window x20 = the pane, the other
+# the draw info. A pane covering the whole 1920 layout width (dims, backdrops) is widened there
+inline 0x7100595784
+inline 0x71005af0b8
+# scissor pane (0x5975a0): before `fsub s4, s3, s5` the scissor's left edge s5 and width s7 are in viewport pixels (x1 = the draw info)
+inline 0x71005976d4
+# world-to-screen in 1920x1080 UI units: before `fmadd s1, s1, s2, s2` (s2 = 960; at 0xa7f148 `fmadd s2, s2, s3, s3`) the x is in NDC
+inline 0x7100a7f148
+inline 0x7100b81bfc
+inline 0x7100d939cc
+inline 0x7100d943c4
+inline 0x7100d94528
+inline 0x7100d94670
+inline 0x7100d947b8
+inline 0x7100d94900
+inline 0x7100d94a44
+inline 0x7100d94b88
+inline 0x7100d94ccc
+inline 0x7101912700
+inline 0x71019131ec
+# off-screen indicator (0x18f3760): before `fmul s3, s2, s1` (s2 = 960) s1 is the x in NDC
+inline 0x71018f38c0
+# 2D effects (0xb76680): the ortho built from the effect's screen size (x22) on the stack at sp + 0x80 before `movi d0, #0`; the two
+# full-target scissors (`blr x8`, vtable + 0x58); the epilogue
+inline 0x7100b768d4
+inline 0x7100b76bb0
+inline 0x7100b76cfc
+inline 0x7100b76d9c
+# movies (0x1904aa0): after the render target is set (`ldr x0, [x19, #8]`, x20 + 0x10 = its size) and before the tail-called draw
+# (vtable + 0x110); the midhook draws, puts the viewport back and returns
+inline 0x7101904b5c
+midhook 0x7101904c20

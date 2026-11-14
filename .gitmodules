@@ -1,3 +1,0 @@
-[submodule "engine/fefw-recomp"]
-	path = engine/fefw-recomp
-	url = https://github.com/Goldoire/fefw-recomp.git

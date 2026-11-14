@@ -1,0 +1,32 @@
+name: Bug report
+description: Something is wrong in the game, the build or the launcher.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach game files or anything made from them (lifted code, shaders, textures, saves from others).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did and what happened, and where in the game.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit you built
+      placeholder: e.g. a1b2c3d
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: GPU, driver and Windows version
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: fefw.log or work/setup.log
+      description: Drag in the log from the run (or the setup) where it happened.

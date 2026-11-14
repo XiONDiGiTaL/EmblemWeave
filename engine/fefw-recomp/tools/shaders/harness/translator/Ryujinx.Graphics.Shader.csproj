@@ -1,0 +1,97 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Ryujinx's shader translator (MIT), built from the checkout in third_party/ryubing (staged by scripts/setup_ryujinx.ps1) with our patches.
+       Same assembly name as upstream, so Ryujinx.Common finds the GLSL helper resources by assembly name. Each
+       patch applies to a copy of one source file under the build folder; the checkout itself is never modified.
+       See SuperMarioWonderRecomp docs/nvn/TRANSLATOR.md ("Local patches"). -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Ryujinx.Graphics.Shader</AssemblyName>
+    <RootNamespace>Ryujinx.Graphics.Shader</RootNamespace>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <RyuSrc>$(MSBuildThisFileDirectory)../../third_party/ryubing/src/</RyuSrc>
+    <ShaderSrc>$(RyuSrc)Ryujinx.Graphics.Shader/</ShaderSrc>
+    <PatchedDir>$(BaseIntermediateOutputPath)patched/</PatchedDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(RyuSrc)Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="$(RyuSrc)Spv.Generator/Spv.Generator.csproj" />
+    <!-- Ampere (SM86) SASS decoder: the SassInst model the Ampere front end consumes. -->
+    <ProjectReference Include="../../ampere/decoder/AmpereDecoder.csproj" />
+  </ItemGroup>
+
+  <!-- Patched files: upstream path (relative to the shader project) and the patch that applies to it. -->
+  <ItemGroup>
+    <ShaderPatch Include="portable-warp-shuffle.patch" File="Translation/HelperFunctionManager.cs" />
+    <ShaderPatch Include="portable-warp-move.patch" File="Instructions/InstEmitMove.cs" />
+    <ShaderPatch Include="portable-warp-vote.patch" File="Instructions/InstEmitWarp.cs" />
+    <ShaderPatch Include="spirv-else-if.patch" File="CodeGen/Spirv/SpirvGenerator.cs" />
+    <ShaderPatch Include="spirv-fmz.patch" File="Instructions/InstEmitFloatArithmetic.cs" />
+    <!-- PIXLD (S4d): PIXLD.MY_INDEX reads gl_SampleID, the other modes write 0 (was: not implemented, result undefined). -->
+    <ShaderPatch Include="spirv-pixld-iovariable.patch" File="IntermediateRepresentation/IoVariable.cs" />
+    <ShaderPatch Include="spirv-pixld-iomap-spirv.patch" File="CodeGen/Spirv/IoMap.cs" />
+    <ShaderPatch Include="spirv-pixld-iomap-glsl.patch" File="CodeGen/Glsl/Instructions/IoMap.cs" />
+    <ShaderPatch Include="spirv-pixld-declarations-spirv.patch" File="CodeGen/Spirv/Declarations.cs" />
+    <ShaderPatch Include="spirv-pixld-instemit.patch" File="Instructions/InstEmit.cs" />
+    <!-- Ampere front end (D4): SSA room for the uniform registers UR/UP, kept as extra Flag registers. -->
+    <ShaderPatch Include="ampere-uniform-registers.patch" File="Decoders/RegisterConsts.cs" />
+    <!-- Call arguments stay locals (SPIR-V GenerateCall); see the patch header. -->
+    <ShaderPatch Include="spirv-call-args.patch" File="StructuredIr/AstOptimizer.cs" />
+    <ShaderPatch Include="spirv-g2s-c0-base.patch" File="Translation/Optimizations/GlobalToStorage.cs" />
+    <!-- NVN2: constant banks 18..31 (c[0x18] push constants) and up to 32 storage buffers. -->
+    <ShaderPatch Include="ampere-resource-slots.patch" File="Translation/ResourceManager.cs" />
+    <!-- Bindless handles the elimination pass cannot pin to one word index the texture and sampler pools. -->
+    <ShaderPatch Include="ampere-bindless-pool.patch" File="Translation/Optimizations/BindlessElimination.cs" />
+    <ShaderPatch Include="ampere-no-bindless-to-array.patch" File="Translation/Optimizations/Optimizer.cs" />
+    <ShaderPatch Include="ampere-bindless-offsets.patch" File="Translation/Transforms/TexturePass.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(ShaderSrc)**/*.cs"
+             Exclude="$(ShaderSrc)Instructions/InstEmitMove.cs;$(ShaderSrc)Translation/HelperFunctionManager.cs;$(ShaderSrc)Instructions/InstEmitWarp.cs;$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/ResourceManager.cs;$(ShaderSrc)Translation/Optimizations/BindlessElimination.cs;$(ShaderSrc)Translation/Optimizations/Optimizer.cs;$(ShaderSrc)Translation/Transforms/TexturePass.cs" />
+    <Compile Include="$(PatchedDir)Translation/HelperFunctionManager.cs" />
+    <Compile Include="$(PatchedDir)Instructions/InstEmitMove.cs" />
+    <Compile Include="$(PatchedDir)Instructions/InstEmitWarp.cs" />
+    <Compile Include="$(PatchedDir)CodeGen/Spirv/SpirvGenerator.cs" />
+    <Compile Include="$(PatchedDir)Instructions/InstEmitFloatArithmetic.cs" />
+    <Compile Include="$(PatchedDir)IntermediateRepresentation/IoVariable.cs" />
+    <Compile Include="$(PatchedDir)CodeGen/Spirv/IoMap.cs" />
+    <Compile Include="$(PatchedDir)CodeGen/Glsl/Instructions/IoMap.cs" />
+    <Compile Include="$(PatchedDir)CodeGen/Spirv/Declarations.cs" />
+    <Compile Include="$(PatchedDir)Instructions/InstEmit.cs" />
+    <Compile Include="$(PatchedDir)Decoders/RegisterConsts.cs" />
+    <Compile Include="$(PatchedDir)StructuredIr/AstOptimizer.cs" />
+    <Compile Include="$(PatchedDir)Translation/Optimizations/GlobalToStorage.cs" />
+    <Compile Include="$(PatchedDir)Translation/ResourceManager.cs" />
+    <Compile Include="$(PatchedDir)Translation/Optimizations/BindlessElimination.cs" />
+    <Compile Include="$(PatchedDir)Translation/Optimizations/Optimizer.cs" />
+    <Compile Include="$(PatchedDir)Translation/Transforms/TexturePass.cs" />
+    <!-- Ampere front end: SassInst -> Ryujinx IR (partial InstEmit and translator internals, hence in this assembly). -->
+    <Compile Include="$(MSBuildThisFileDirectory)../../ampere/frontend/*.cs" />
+    <EmbeddedResource Include="$(ShaderSrc)CodeGen/Glsl/HelperFunctions/*.glsl"
+                      LogicalName="Ryujinx.Graphics.Shader.CodeGen.Glsl.HelperFunctions.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Target Name="ApplyShaderPatches" BeforeTargets="BeforeBuild;CoreCompile"
+          Inputs="@(ShaderPatch);@(ShaderPatch->'$(ShaderSrc)%(File)')"
+          Outputs="@(ShaderPatch->'$(PatchedDir)%(File)')">
+    <MakeDir Directories="@(ShaderPatch->'$(PatchedDir)%(File)'->'%(RootDir)%(Directory)')" />
+    <Exec Condition="'$(OS)' != 'Windows_NT'"
+          Command="patch --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
+    <!-- Windows has no `patch`: tools/maxwell/apply_patch.py does the same (unified diff, exact hunks, -o).
+         Python: the repo's venv if present, else `python` on PATH (override with -p:PatchPython=...). -->
+    <PropertyGroup Condition="'$(OS)' == 'Windows_NT' And '$(PatchPython)' == ''">
+      <PatchPython Condition="Exists('$(MSBuildThisFileDirectory)../../../.venv/Scripts/python.exe')">$(MSBuildThisFileDirectory)../../../.venv/Scripts/python.exe</PatchPython>
+      <PatchPython Condition="'$(PatchPython)' == ''">python</PatchPython>
+    </PropertyGroup>
+    <Exec Condition="'$(OS)' == 'Windows_NT'"
+          Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../scripts/apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
+  </Target>
+
+</Project>

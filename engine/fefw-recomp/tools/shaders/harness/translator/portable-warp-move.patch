@@ -1,0 +1,22 @@
+Portable warp lowering.
+--- a/Instructions/InstEmitMove.cs
++++ b/Instructions/InstEmitMove.cs
+@@ -177,7 +177,8 @@
+                 return context.Load(StorageKind.Input, IoVariable.SubgroupLaneId);
+             }
+ 
+-            return context.BitwiseAnd(context.Load(StorageKind.Input, IoVariable.SubgroupLaneId), Const(0x1f));
++            Operand lane = context.Load(StorageKind.Input, IoVariable.SubgroupLaneId);
++            return context.ConditionalSelect(IsNativeWarp(context), lane, context.BitwiseAnd(lane, Const(0x1f)));
+         }
+ 
+         private static Operand EmitLoadSubgroupMask(EmitterContext context, IoVariable ioVariable)
+@@ -199,7 +200,7 @@
+             else
+             {
+                 Operand laneId = context.Load(StorageKind.Input, IoVariable.SubgroupLaneId);
+-                Operand element = context.ShiftRightU32(laneId, Const(5));
++                Operand element = context.ConditionalSelect(IsNativeWarp(context), Const(0), context.ShiftRightU32(laneId, Const(5)));
+ 
+                 Operand res = context.Load(StorageKind.Input, ioVariable, null, Const(0));
+                 res = context.ConditionalSelect(

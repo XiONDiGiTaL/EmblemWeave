@@ -1,0 +1,57 @@
+#version 450
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
+#ifndef FRAGMENT_PROBE
+layout(local_size_x=64) in;
+#endif
+layout(set=0,binding=0,std430) buffer Output { uvec4 values[]; };
+uint lane() { return gl_SubgroupInvocationID & 31u; }
+uint base() { return gl_SubgroupInvocationID & ~31u; }
+uint ballot(bool p) { return subgroupBallot(p)[gl_SubgroupInvocationID >> 5u]; }
+uint readlane(uint v,uint l) { return subgroupShuffle(v,base()+l); }
+bool voteall(bool p) { return ballot(p)==ballot(true); }
+bool voteany(bool p) { return ballot(p)!=0u; }
+bool voteeq(bool p) { uint b=ballot(p); return b==0u || b==ballot(true); }
+uvec2 shfl(uint v,uint b,uint c,uint mode) {
+ uint l=lane(), seg=(c>>8u)&31u, bound=(l&seg)|((c&31u)&~seg);
+ b&=31u;
+ uint j=mode==0u?((b&~seg)|(l&seg)):mode==1u?l-b:mode==2u?l+b:l^b;
+ bool valid=mode==1u?int(j)>=int(bound):j<=bound;
+ uint r=readlane(v,valid?j:l);
+ return uvec2(valid?r:v,valid?1u:0u);
+}
+void main() {
+ uint l=lane(), b=base(), raw=gl_SubgroupInvocationID, errors=0u;
+ uint liveMask=ballot(true);
+ if(ballot(b!=0u)!=(b!=0u?liveMask:0u)) errors|=1u;
+ if(voteany(b==0u)!=(b==0u) || voteall(b!=0u)!=(b!=0u) || !voteeq(b!=0u)) errors|=2u;
+ if(voteeq((l&1u)!=0u) != ((liveMask&0x55555555u)==0u || (liveMask&0xaaaaaaaau)==0u)) errors|=4u;
+ uint eq=gl_SubgroupEqMask[raw>>5u], lt=gl_SubgroupLtMask[raw>>5u], le=gl_SubgroupLeMask[raw>>5u];
+ uint gt=gl_SubgroupGtMask[raw>>5u], ge=gl_SubgroupGeMask[raw>>5u];
+ if(eq!=(1u<<l)||lt!=((1u<<l)-1u)||le!=(lt|eq)||gt!=~le||ge!=~lt) errors|=8u;
+ for(uint mode=0u;mode<4u;mode++) for(uint seg=0u;seg<=24u;seg+=8u) for(uint cval=0u;cval<=31u;cval+=1u) for(uint delta=0u;delta<40u;delta+=7u) {
+  uint c=(seg<<8u)|cval, d=delta&31u;
+  int j=mode==0u?int((d&~seg)|(l&seg)):mode==1u?int(l)-int(d):mode==2u?int(l+d):int(l^d);
+  uint bound=(l&seg)|(cval&~seg);
+  bool valid=mode==1u?j>=int(bound):j<=int(bound);
+  uvec2 r=shfl(raw,delta,c,mode);
+  if(r.y!=(valid?1u:0u)||((!valid || (liveMask&(1u<<uint(j)))!=0u) && r.x!=(valid?b+uint(j):raw))) errors|=16u;
+ }
+ uint sum=0u,mn=~0u,mx=0u,aa=~0u,oo=0u,xx=0u;
+ for(uint j=0u;j<32u;j++) { uint v=readlane(raw,j); if((liveMask&(1u<<j))!=0u) {sum+=v;mn=min(mn,v);mx=max(mx,v);aa&=v;oo|=v;xx^=v;} }
+ uint es=0u,en=~0u,ex=0u,ea=~0u,eo=0u,ee=0u;
+ for(uint j=0u;j<32u;j++) if((liveMask&(1u<<j))!=0u) {uint v=b+j; es+=v;en=min(en,v);ex=max(ex,v);ea&=v;eo|=v;ee^=v;}
+ if(sum!=es||mn!=en||mx!=ex||aa!=ea||oo!=eo||xx!=ee) errors|=32u;
+ uint first=uint(findLSB(liveMask)); bool match=voteall(b==readlane(b,first));
+ if(!match || voteall(raw==readlane(raw,first))!=(bitCount(liveMask)==1)) errors|=64u;
+ // Divergent liveMask mask: the two virtual warps also have different predicates.
+ if((l&1u)==0u) { if(ballot(true)!=(liveMask&0x55555555u)||!voteall(b==readlane(b,uint(findLSB(ballot(true)))))||voteany(b==32u)!=(b==32u)) errors|=128u; }
+#ifdef FRAGMENT_PROBE
+ uint outputIndex=uint(gl_FragCoord.y)*37u+uint(gl_FragCoord.x);
+#else
+ uint outputIndex=gl_GlobalInvocationID.x;
+#endif
+ values[outputIndex]=uvec4(gl_SubgroupSize,l,errors,b);
+}
+
