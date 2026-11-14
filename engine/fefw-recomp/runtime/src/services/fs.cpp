@@ -820,6 +820,16 @@ std::shared_ptr<Service> make_fsp() {
 
 }  // namespace
 
+bool read_romfs_file(const std::string& image_path, std::vector<uint8_t>& out) {
+    auto img = rom_image();
+    if (!img) return false;
+    uint64_t off = 0, size = 0;
+    if (!img->file_extent(image_path, &off, &size)) return false;
+    if (size > (1ull << 30)) return false;   // a font or prompt sheet, not a stream: refuse to take a gigabyte into memory
+    out.resize(static_cast<size_t>(size));
+    return size == 0 || img->read(off, out.data(), size);
+}
+
 void register_fs() {
     add("fsp-srv", [] { return make_fsp(); });
     NXLOG_I("fs", "fsp-srv: RomFS from '%s', save data in '%s', %zu add-on content(s) in '%s'", romfs_dir().c_str(), save_dir().c_str(),
