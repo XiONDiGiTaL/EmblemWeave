@@ -127,6 +127,18 @@ pub struct Nsp {
     pub entries: Vec<Entry>,
 }
 
+/// The unpack stopped because the caller asked it to; nothing else went wrong.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the unpack was cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 /// What a dump wrote.
 #[derive(Debug, Clone, Default)]
 pub struct Dumped {
@@ -233,8 +245,10 @@ impl Nsp {
     /// Copy the ExeFS, the RomFS and the control metadata into `dest`, where the
     /// launcher reads them like an NSP extraction. `progress` is told how many
     /// bytes have been copied and how many there are to copy, about every
-    /// 16 MiB and once more when the last byte lands.
-    pub fn dump(&self, dest: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<Dumped> {
+    /// 16 MiB and once more when the last byte lands. `cancelled` is asked
+    /// between files; when it answers yes the unpack stops with [`Cancelled`]
+    /// and leaves the caller to remove what it wrote.
+    pub fn dump(&self, dest: &Path, progress: &mut dyn FnMut(u64, u64), cancelled: &dyn Fn() -> bool) -> Result<Dumped> {
         let program = self.program()?;
         let mut f = File::open(&self.path)?;
         let exefs = program.exefs(&mut f)?;
@@ -260,6 +274,9 @@ impl Nsp {
         let mut copied = 0u64;
         let mut reported = 0u64;
         let mut put = |f: &mut File, e: &Extent, to: &Path, copied: &mut u64, reported: &mut u64| -> Result<()> {
+            if cancelled() {
+                return Err(anyhow::Error::new(Cancelled));
+            }
             safe_path(&e.path)?;
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;

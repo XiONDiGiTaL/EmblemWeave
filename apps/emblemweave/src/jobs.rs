@@ -311,7 +311,8 @@ pub fn detect(config: &Config) -> Job {
     spawn(JobKind::Detect, &["Locate and validate game data"], move |ctx| {
         ctx.start(0);
         let c = ctx.clone();
-        let g = gamedata::detect_with(&paths, &mut |done, total| c.bytes(done, total));
+        let stop = ctx.cancel.clone();
+        let g = gamedata::detect_with(&paths, &mut |done, total| c.bytes(done, total), &|| stop.load(Ordering::Relaxed));
         ctx.end(0, StageStatus::Done, format!("{} checks", g.checks.len()));
         Ok(JobResult::Detected(Box::new(g)))
     })

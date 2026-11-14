@@ -78,6 +78,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if widgets::button(ui, &p, "Detect again", app.running(JobKind::Detect).is_none()).clicked() {
                 rescan = true;
             }
+            if app.running(JobKind::Detect).is_some() && widgets::button(ui, &p, "Cancel", true).clicked() {
+                app.confirm = Some(crate::Confirm::CancelJob(JobKind::Detect));
+            }
             if let Some(job) = app.running(JobKind::Detect) {
                 let (copied, total) = job.snapshot(|pr| (pr.copied, pr.total));
                 if total == 0 {

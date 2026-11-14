@@ -197,19 +197,32 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
 /// Open a `.nsp` package: unpack its ExeFS, RomFS and control metadata once
 /// into the launcher's work folder, then use that folder like a dump. Returns
 /// the ExeFS folder and keeps the dump counts for the checks.
-fn use_nsp(g: &mut GameData, path: &Path, progress: &mut dyn FnMut(u64, u64)) -> Option<PathBuf> {
+/// What came of the package the user pointed at.
+enum Package {
+    Ready(PathBuf),
+    /// The user stopped the unpack; there is nothing to check yet.
+    Cancelled,
+    Failed,
+}
+
+fn use_nsp(
+    g: &mut GameData,
+    path: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Package {
     let nsp = match ew_format::nsp::Nsp::open(path) {
         Ok(n) => n,
         Err(e) => {
             g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
-            return None;
+            return Package::Failed;
         }
     };
     let program = match nsp.program() {
         Ok(p) => p,
         Err(e) => {
             g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
-            return None;
+            return Package::Failed;
         }
     };
     g.checks.push(Check::new(Severity::Ok, "Game file", nsp.summary().unwrap_or_else(|e| format!(".nsp, {e:#}"))));
@@ -217,7 +230,8 @@ fn use_nsp(g: &mut GameData, path: &Path, progress: &mut dyn FnMut(u64, u64)) ->
     // The dump is keyed by the package's title and size, and re-done when the
     // package changes, so pointing at a new build never reuses stale files.
     let stamp = format!("{}-{}", nsp.size, modified_stamp(path));
-    let dir = Config::work_dir()?.join("nsp").join(format!("{:016X}-{}", program.title_id, nsp.size));
+    let Some(work) = Config::work_dir() else { return Package::Failed };
+    let dir = work.join("nsp").join(format!("{:016X}-{}", program.title_id, nsp.size));
     let marker = dir.join("dump.txt");
     let cached = std::fs::read_to_string(&marker).ok().and_then(|t| {
         let mut lines = t.lines();
@@ -238,11 +252,22 @@ fn use_nsp(g: &mut GameData, path: &Path, progress: &mut dyn FnMut(u64, u64)) ->
                 format!("unpacking {} into {}, which takes a while the first time", path.display(), dir.display()),
             ));
             let _ = std::fs::remove_dir_all(&dir);
-            let dumped = match nsp.dump(&dir, progress) {
+            let dumped = match nsp.dump(&dir, progress, cancelled) {
                 Ok(d) => d,
+                Err(e) if e.downcast_ref::<ew_format::nsp::Cancelled>().is_some() => {
+                    // A half-unpacked folder would be mistaken for a complete
+                    // one next time, so what this run wrote goes with it.
+                    let _ = std::fs::remove_dir_all(&dir);
+                    g.checks.push(Check::new(
+                        Severity::Info,
+                        "Game file",
+                        "the unpack was cancelled and the copy was removed; Detect starts it again",
+                    ));
+                    return Package::Cancelled;
+                }
                 Err(e) => {
                     g.checks.push(Check::new(Severity::Error, "Game file", format!("unpacking {}: {e:#}", path.display())));
-                    return None;
+                    return Package::Failed;
                 }
             };
             let counts = (dumped.exefs, dumped.romfs, dumped.romfs_bytes);
@@ -270,7 +295,7 @@ fn use_nsp(g: &mut GameData, path: &Path, progress: &mut dyn FnMut(u64, u64)) ->
     g.romfs = Some(dir.join("romfs"));
     g.nsp = Some(path.to_path_buf());
     g.romfs_entries = std::fs::read_dir(dir.join("romfs")).map(|rd| rd.count()).unwrap_or(0);
-    Some(dir.join("exefs"))
+    Package::Ready(dir.join("exefs"))
 }
 
 /// A file's modification time as nanoseconds, for the unpack marker.
@@ -285,15 +310,19 @@ fn modified_stamp(path: &Path) -> u128 {
 
 /// [`detect`], reporting how many bytes of a package have been unpacked and
 /// how many there are, while there is a package to unpack.
-pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64)) -> GameData {
+pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64), cancelled: &dyn Fn() -> bool) -> GameData {
     let mut g = GameData::default();
     let root = non_empty(&paths.game_root);
 
     // A .nsp package is unpacked once, then used like a dump.
     if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nsp::Nsp::is_nsp(r)) {
         let r = r.clone();
-        if let Some(exefs) = use_nsp(&mut g, &r, progress) {
-            g.exefs = non_empty(&paths.exefs).or(Some(exefs));
+        match use_nsp(&mut g, &r, progress, cancelled) {
+            Package::Ready(exefs) => g.exefs = non_empty(&paths.exefs).or(Some(exefs)),
+            // Someone who stops the unpack does not want a page of complaints
+            // about the ExeFS it never finished writing.
+            Package::Cancelled => return g,
+            Package::Failed => {}
         }
         return finish(g, paths);
     }
@@ -459,7 +488,7 @@ mod tests {
         std::fs::create_dir_all(root.join("dump").join("data").join("control")).unwrap();
         std::fs::write(root.join("dump").join("romfs").join("Fs.bin.zst"), b"x").unwrap();
         let paths = Paths { game_root: root.to_string_lossy().into(), ..Default::default() };
-        let g = detect_with(&paths, &mut |_, _| {});
+        let g = detect_with(&paths, &mut |_, _| {}, &|| false);
         assert_eq!(g.exefs.as_deref(), Some(root.join("dump").join("exefs").as_path()));
         assert_eq!(g.romfs.as_deref(), Some(root.join("dump").join("romfs").as_path()));
         assert_eq!(g.romfs_entries, 1);
@@ -471,7 +500,7 @@ mod tests {
     #[ignore]
     fn detects_a_nup_dump() {
         let path = std::env::var("EW_NUP").expect("EW_NUP");
-        let g = detect_with(&Paths { game_root: path.clone(), ..Default::default() }, &mut |_, _| {});
+        let g = detect_with(&Paths { game_root: path.clone(), ..Default::default() }, &mut |_, _| {}, &|| false);
         for c in &g.checks {
             eprintln!("{:?} {}: {}", c.severity, c.label, c.detail);
         }
@@ -487,7 +516,7 @@ mod tests {
     #[ignore]
     fn detects_an_nsp_package() {
         let path = std::env::var("EW_NSP").expect("EW_NSP");
-        let g = detect_with(&Paths { game_root: path.clone(), ..Default::default() }, &mut |_, _| {});
+        let g = detect_with(&Paths { game_root: path.clone(), ..Default::default() }, &mut |_, _| {}, &|| false);
         for c in &g.checks {
             eprintln!("{:?} {}: {}", c.severity, c.label, c.detail);
         }
@@ -498,10 +527,42 @@ mod tests {
         assert_eq!(g.title_id, Some(0x04007EF01F8AE000));
     }
 
+    /// On a real package: `EW_NSP=<game.nsp> cargo test -p emblemweave -- --ignored cancels`.
+    #[test]
+    #[ignore]
+    fn cancels_an_nsp_unpack() {
+        let path = std::env::var("EW_NSP").expect("EW_NSP");
+        let stop = std::cell::Cell::new(false);
+        let mut seen = 0u64;
+        let g = detect_with(
+            &Paths { game_root: path.clone(), ..Default::default() },
+            &mut |done, _total| {
+                seen = done;
+                if done > (64 << 20) {
+                    stop.set(true);
+                }
+            },
+            &|| stop.get(),
+        );
+        for c in &g.checks {
+            eprintln!("{:?} {}: {}", c.severity, c.label, c.detail);
+        }
+        assert!(seen > 0, "the unpack never reported progress");
+        assert!(g.checks.iter().any(|c| c.detail.contains("cancelled")), "no cancellation check");
+        assert!(!g.checks.iter().any(|c| c.severity == Severity::Error), "a cancel reported an error: {:?}", g.checks);
+        assert!(g.exefs.is_none() && g.romfs.is_none(), "a cancelled unpack was used anyway");
+        let dir = Config::work_dir().expect("work dir").join("nsp");
+        let left: Vec<_> = std::fs::read_dir(&dir).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        for d in &left {
+            eprintln!("left behind: {}", d.display());
+        }
+        assert!(left.is_empty(), "a cancelled unpack left files behind");
+    }
+
     #[test]
     fn a_missing_folder_is_an_error_not_a_panic() {
         let paths = Paths { game_root: "Z:/definitely/not/here".into(), ..Default::default() };
-        let g = detect_with(&paths, &mut |_, _| {});
+        let g = detect_with(&paths, &mut |_, _| {}, &|| false);
         assert_eq!(g.worst(), Severity::Error);
     }
 }
