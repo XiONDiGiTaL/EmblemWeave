@@ -226,6 +226,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         },
         Tab::Log => {
+            widgets::section(ui, &p, "Log files", |ui| {
+                let dir = crate::jobs::log_dir();
+                let folder = dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "APPDATA is not set".into());
+                widgets::kv(ui, &p, "Folder", &folder);
+                if let Some(path) = &app.last_job_log_path {
+                    widgets::kv(ui, &p, "Last task", &path.display().to_string());
+                }
+                if let Some(dir) = &dir {
+                    if widgets::button(ui, &p, "Open the log folder", true).clicked() {
+                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                    }
+                }
+                ui.label(
+                    RichText::new("Every task writes its own file there: what it ran, the whole output of the tools it called, and why it stopped.")
+                        .size(12.5)
+                        .color(p.muted),
+                );
+            });
             widgets::section(ui, &p, "Activity", |ui| {
                 for a in app.activity.iter().rev().filter(|a| matches(&filter, &a.text)) {
                     ui.horizontal(|ui| {

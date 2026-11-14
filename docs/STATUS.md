@@ -125,6 +125,8 @@ native code runs, as an option, and has since `ew-native` was added.
 | Settings read back | Implemented: **Graphics** and **Audio** re-read `fefw.ini` and `controls.ini` (once a second, `engine::live`), show what the game will start with, name the settings still waiting for the next start, and take back the values the game's F1 menu changed (`engine::adopt`) so the pages agree with it, the render size too (pixels in the file, a ratio on the page) |
 | Quality and shader precompiling | Saved only; the page says so |
 | Taskbar icon | Implemented: the launcher puts its own icon into `fefw.exe` at startup, after a build and before a start (`exe_icon::brand` via `engine::brand_game`); a copy already running keeps the engine's icon until it closes |
+| Log files | Implemented: every job writes `%APPDATA%\EmblemWeave\logs\<task>-<date>.log` with the build stamp, paths, arguments, each stage and the full output of the tools it ran (the C compiler's whole message, not a summary); **Diagnostics > Log** shows the folder and opens it |
+| Compiler preflight | Implemented: one short file is built before the shards, so a compiler that cannot run says so once instead of failing every shard |
 | Command line: `--page`, `--boot-test` | Implemented |
 
 ## Measured boot path

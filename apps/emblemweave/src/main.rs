@@ -35,6 +35,7 @@ use eframe::egui::{self, RichText};
 use gamedata::GameData;
 use jobs::{Job, JobKind, JobResult};
 use pages::Page;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use widgets::Tone;
 
@@ -94,6 +95,8 @@ pub struct App {
     pub last_boot: Option<(ew_boot::BootReport, u128)>,
     pub last_pipeline: Option<jobs::PipelineSummary>,
     pub last_job_log: Vec<String>,
+    /// The file the last task's log was written to, for Diagnostics.
+    pub last_job_log_path: Option<PathBuf>,
     pub activity: Vec<Activity>,
     pub toasts: Vec<Toast>,
     pub confirm: Option<Confirm>,
@@ -158,6 +161,7 @@ impl App {
             last_boot: None,
             last_pipeline: None,
             last_job_log: Vec::new(),
+            last_job_log_path: None,
             activity: Vec::new(),
             toasts: Vec::new(),
             confirm: None,
@@ -273,6 +277,7 @@ impl App {
             let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
             if kind != JobKind::Detect {
                 self.last_job_log = std::mem::take(&mut p.log);
+                self.last_job_log_path = p.log_file.clone();
             }
             if let Some(err) = p.failed.take() {
                 drop(p);

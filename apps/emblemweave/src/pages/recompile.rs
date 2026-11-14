@@ -96,6 +96,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     if !app.last_job_log.is_empty() {
         widgets::section(ui, &p, "Log", |ui| {
+            if let Some(path) = &app.last_job_log_path {
+                ui.label(
+                    RichText::new(format!("Written to {}", path.display())).size(12.0).color(p.muted),
+                );
+            }
             egui::ScrollArea::vertical().max_height(crate::widgets::list_height(ui, 0.24)).stick_to_bottom(true).show(ui, |ui| {
                 for line in &app.last_job_log {
                     ui.label(RichText::new(line).font(theme::mono(12.0)).color(p.body));

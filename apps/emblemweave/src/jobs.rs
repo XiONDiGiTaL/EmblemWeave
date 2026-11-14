@@ -9,10 +9,11 @@
 
 use crate::config::Config;
 use crate::gamedata::{self, GameData};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageStatus {
@@ -59,6 +60,8 @@ pub struct Progress {
     pub finished: bool,
     pub failed: Option<String>,
     pub result: Option<JobResult>,
+    /// The file this job's log is written to, when one could be opened.
+    pub log_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +83,62 @@ impl JobKind {
             JobKind::Engine => "Building the game",
         }
     }
+
+    fn slug(self) -> &'static str {
+        match self {
+            JobKind::Detect => "detect",
+            JobKind::Decode => "decode",
+            JobKind::Pipeline => "pipeline",
+            JobKind::Boot => "boot",
+            JobKind::Engine => "engine",
+        }
+    }
+}
+
+/// `%APPDATA%\EmblemWeave\logs`, where every task writes what it did.
+pub fn log_dir() -> Option<PathBuf> {
+    Config::dir().map(|d| d.join("logs"))
+}
+
+/// A UTC stamp for the file name: `2026-11-14 18.42.07`.
+fn stamp() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (days, rem) = (secs / 86400, secs % 86400);
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Civil date from days since the epoch.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { yoe + era * 400 + 1 } else { yoe + era * 400 };
+    format!("{y:04}-{mo:02}-{d:02} {h:02}.{m:02}.{s:02}")
+}
+
+/// Open a fresh log file for one job, with what a bug report needs first.
+fn open_log(dir: &Path, kind: JobKind) -> std::io::Result<(PathBuf, std::fs::File)> {
+    std::fs::create_dir_all(dir)?;
+    let mut path = dir.join(format!("{}-{}.log", kind.slug(), stamp()));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{}-{} ({}).log", kind.slug(), stamp(), n));
+        n += 1;
+    }
+    let mut f = std::fs::File::create(&path)?;
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    writeln!(f, "EmblemWeave {} ({})", env!("CARGO_PKG_VERSION"), env!("EW_GIT_REV"))?;
+    writeln!(f, "{}: {} UTC", kind.title(), stamp())?;
+    writeln!(f, "os: {} {}", std::env::consts::OS, std::env::consts::ARCH)?;
+    writeln!(f, "exe: {exe}")?;
+    writeln!(f, "cwd: {cwd}")?;
+    writeln!(f, "args: {}", args.join(" "))?;
+    writeln!(f)?;
+    Ok((path, f))
 }
 
 pub struct Job {
@@ -113,6 +172,8 @@ pub struct Ctx {
     progress: Arc<Mutex<Progress>>,
     pub cancel: Arc<AtomicBool>,
     pub steps: Arc<AtomicU64>,
+    /// The job's log file, when one could be created.
+    file: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl Ctx {
@@ -123,8 +184,19 @@ impl Ctx {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+    /// Append one line to the job's log file. The file is the record that
+    /// survives the window, so it is written before the interface copies.
+    fn write(&self, line: &str) {
+        if let Ok(mut f) = self.file.lock() {
+            if let Some(file) = f.as_mut() {
+                let _ = writeln!(file, "{line}");
+                let _ = file.flush();
+            }
+        }
+    }
     pub fn log(&self, line: impl Into<String>) {
         let line = line.into();
+        self.write(&line);
         self.with(|p| {
             p.message = line.clone();
             p.log.push(line);
@@ -141,6 +213,7 @@ impl Ctx {
     }
     pub fn end(&self, i: usize, status: StageStatus, detail: impl Into<String>) {
         let detail = detail.into();
+        self.write(&format!("({status:?}) {detail}"));
         self.with(|p| {
             if let Some(s) = p.stages.get_mut(i) {
                 s.status = status;
@@ -151,6 +224,9 @@ impl Ctx {
         });
     }
     fn finish(&self, result: Result<JobResult, String>) {
+        if let Err(e) = &result {
+            self.write(&format!("failed: {e}"));
+        }
         self.with(|p| {
             for s in p.stages.iter_mut().filter(|s| s.status == StageStatus::Pending) {
                 s.status = StageStatus::Skipped;
@@ -175,7 +251,17 @@ pub(crate) fn spawn(kind: JobKind, stages: &[&'static str], work: impl FnOnce(&C
             .collect(),
         ..Default::default()
     }));
-    let ctx = Ctx { progress: progress.clone(), cancel: Arc::new(AtomicBool::new(false)), steps: Arc::new(AtomicU64::new(0)) };
+    let (log_path, log) = match log_dir().map(|d| open_log(&d, kind)) {
+        Some(Ok((path, file))) => (Some(path), Some(file)),
+        _ => (None, None),
+    };
+    progress.lock().unwrap_or_else(|e| e.into_inner()).log_file = log_path;
+    let ctx = Ctx {
+        progress: progress.clone(),
+        cancel: Arc::new(AtomicBool::new(false)),
+        steps: Arc::new(AtomicU64::new(0)),
+        file: Arc::new(Mutex::new(log)),
+    };
     let job = Job {
         kind,
         started: Instant::now(),
@@ -387,12 +473,24 @@ pub fn pipeline(game: GameData, limit: usize) -> Job {
         match &cc {
             None => ctx.end(6, StageStatus::Skipped, "no C compiler found (install zig with `pip install ziglang`, or clang)"),
             Some(cc) => {
-                let (built, failed, threads) = compile_shards(ctx, cc, &out, &shards)?;
+                if let Err(e) = check_compiler(ctx, cc, &out) {
+                    ctx.end(6, StageStatus::Failed, e.clone());
+                    return Err(e);
+                }
+                let (built, failed, threads, first) = compile_shards(ctx, cc, &out, &shards)?;
                 summary.compiled = Some(failed == 0);
                 if failed == 0 {
                     ctx.end(6, StageStatus::Done, format!("{built} native objects built on {threads} threads"));
                 } else {
-                    ctx.end(6, StageStatus::Failed, format!("{failed} of {} shards were rejected by the C compiler (see the log)", shards.len()));
+                    // The compiler's own words, not just a count: that is what a
+                    // reader needs to tell a missing tool from a bad shard.
+                    let why = first.unwrap_or_else(|| "no output".into());
+                    ctx.end(6, StageStatus::Failed, format!("{failed} of {} shards were rejected by the C compiler: {why}", shards.len()));
+                    return Err(format!(
+                        "the C compiler rejected {failed} of {} shards ({why}). The whole output is in {}",
+                        shards.len(),
+                        log_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "the log".into())
+                    ));
                 }
             }
         }
@@ -450,11 +548,45 @@ fn balanced_shards(funcs: &[ew_lift::LiftedFunction]) -> Vec<&[ew_lift::LiftedFu
 
 /// Compile every shard with one compiler process per core. Cancelling kills
 /// the processes still running. Returns (built, failed, threads).
-fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> Result<(usize, usize, usize), String> {
+/// Build one short file first: a compiler that cannot run at all should say so
+/// once, in its own words, instead of failing every shard in turn.
+fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path) -> Result<(), String> {
+    let probe = out.join("ew_cc_probe.c");
+    std::fs::write(&probe, "int ew_cc_probe(void) { return 0; }
+").map_err(|e| format!("writing {}: {e}", probe.display()))?;
+    let output = std::process::Command::new(&cc[0])
+        .args(&cc[1..])
+        .args(["-std=c99", "-c", "-o"])
+        .arg(probe.with_extension("o"))
+        .arg(&probe)
+        .output()
+        .map_err(|e| {
+            format!("running `{}`: {e}. Install a C compiler: `pip install ziglang` (zig cc), or LLVM's clang", cc.join(" "))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&output.stderr).lines().take(4).collect::<Vec<_>>().join(" | ");
+    ctx.log(format!("the compiler cannot build a one-line file: {err}"));
+    Err(format!("`{}` cannot build C: {err}", cc.join(" ")))
+}
+
+fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> Result<(usize, usize, usize, Option<String>), String> {
+    // What will be run, and which version of it: a failing build is usually one
+    // of these two lines.
+    let version = std::process::Command::new(&cc[0])
+        .args(&cc[1..])
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().to_string())
+        .unwrap_or_else(|e| format!("could not run {}: {e}", cc[0]));
+    ctx.log(format!("compiler: {}", cc.join(" ")));
+    ctx.log(format!("version: {version}"));
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 32);
     let mut pending: std::collections::VecDeque<&PathBuf> = shards.iter().collect();
     let mut running: Vec<(PathBuf, std::process::Child)> = Vec::new();
     let (mut built, mut failed) = (0usize, 0usize);
+    let mut first_error: Option<String> = None;
     loop {
         if ctx.cancelled() {
             for (_, mut child) in running {
@@ -477,7 +609,7 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("starting the C compiler: {e}"))?;
+                .map_err(|e| format!("starting the C compiler ({}): {e}", cc.join(" ")))?;
             running.push((src.clone(), child));
         }
         if running.is_empty() {
@@ -496,7 +628,16 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
                             use std::io::Read;
                             let _ = e.read_to_string(&mut err);
                         }
-                        ctx.log(format!("{}: {}", src.display(), err.lines().take(6).collect::<Vec<_>>().join(" | ")));
+                        let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output").trim().to_string();
+                        if failed == 1 {
+                            first_error = Some(format!("{}: {first}", src.file_name().unwrap_or_default().to_string_lossy()));
+                        }
+                        // The whole complaint goes to the file: the first line is
+                        // usually the file and line, the reason is under it.
+                        ctx.log(format!("{}: {}", src.display(), first));
+                        for line in err.lines().take(200).skip(1) {
+                            ctx.write(&format!("  {line}"));
+                        }
                     }
                     ctx.log(format!("compiled {} of {} shards", built + failed, shards.len()));
                 }
@@ -507,7 +648,10 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
         running = still;
         std::thread::sleep(Duration::from_millis(50));
     }
-    Ok((built, failed, threads))
+    if failed > 0 {
+        ctx.log(format!("{failed} of {} shards failed with `{}`", shards.len(), cc.join(" ")));
+    }
+    Ok((built, failed, threads, first_error))
 }
 
 /// Run up to 100 leaf functions through the reference interpreter and the
@@ -622,4 +766,26 @@ pub fn boot(config: &Config, game: &GameData) -> Job {
         }
         Ok(JobResult::Boot(Box::new(report), ms))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_log_starts_with_what_a_report_needs() {
+        let dir = std::env::temp_dir().join(format!("ew-log-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (path, mut file) = open_log(&dir, JobKind::Pipeline).unwrap();
+        writeln!(file, "compiled 3 of 3 shards").unwrap();
+        drop(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("EmblemWeave "), "{text}");
+        assert!(text.contains("Recompilation pipeline"), "{text}");
+        assert!(text.contains("exe: "), "{text}");
+        assert!(text.contains("compiled 3 of 3 shards"), "{text}");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("pipeline-"), "{name}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
