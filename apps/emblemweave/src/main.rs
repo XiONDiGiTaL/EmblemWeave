@@ -609,13 +609,22 @@ impl App {
                             ),
                         ];
                         for (label, (value, tone)) in severities {
-                            ui.horizontal(|ui| {
-                                widgets::status_dot(ui, &p, tone);
-                                ui.label(RichText::new(label).size(12.5).color(p.body));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(value).font(theme::semibold(12.0)).color(tone.colour(&p)));
-                                });
-                            });
+                            let row = ui
+                                .horizontal(|ui| {
+                                    widgets::status_dot(ui, &p, tone);
+                                    ui.label(RichText::new(label).size(12.5).color(p.body));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(RichText::new(value).font(theme::semibold(12.0)).color(tone.colour(&p)));
+                                    });
+                                })
+                                .response;
+                            // "Needs attention" without the reason is a riddle:
+                            // the row names every check that is open when hovered.
+                            if label == "Game data" {
+                                if let Some(text) = self.game.attention_text() {
+                                    row.on_hover_text(text);
+                                }
+                            }
                             ui.add_space(3.0);
                         }
                     });

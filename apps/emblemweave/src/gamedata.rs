@@ -94,6 +94,33 @@ impl GameData {
         self.decoded.is_some() && self.segments.iter().all(|s| s.ok()) && self.romfs.is_some()
     }
 
+    /// Every check that is not satisfied, in the words of the check that found
+    /// it. A status of "Needs attention" says nothing on its own; this is the
+    /// reason behind it.
+    pub fn attention(&self) -> Vec<&Check> {
+        self.checks.iter().filter(|c| matches!(c.severity, Severity::Warn | Severity::Error)).collect()
+    }
+
+    /// One line naming what is not right, for a status card: the first reason,
+    /// and how many more there are when there is more than one.
+    pub fn attention_line(&self) -> Option<String> {
+        let open = self.attention();
+        let first = open.first()?;
+        Some(match open.len() - 1 {
+            0 => format!("{}: {}", first.label, first.detail),
+            more => format!("{}: {} (+{more} more)", first.label, first.detail),
+        })
+    }
+
+    /// Every reason, one per line, for a hover tooltip.
+    pub fn attention_text(&self) -> Option<String> {
+        let open = self.attention();
+        if open.is_empty() {
+            return None;
+        }
+        Some(open.iter().map(|c| format!("{}: {}", c.label, c.detail)).collect::<Vec<_>>().join("\n"))
+    }
+
     pub fn worst(&self) -> Severity {
         let mut worst = Severity::Ok;
         for c in &self.checks {
@@ -661,5 +688,20 @@ mod tests {
         let paths = Paths { game_root: "Z:/definitely/not/here".into(), ..Default::default() };
         let g = detect_with(&paths, &mut |_, _| {}, &|| false);
         assert_eq!(g.worst(), Severity::Error);
+    }
+
+    #[test]
+    fn a_warning_names_the_check_that_raised_it() {
+        let mut g = GameData::default();
+        g.checks.push(Check::new(Severity::Warn, "Title metadata", "control.nacp not found"));
+        g.checks.push(Check::new(Severity::Warn, "RomFS", "Fs.bin.zst is missing"));
+        g.checks.push(Check::new(Severity::Ok, "ExeFS", "seven modules"));
+        assert_eq!(g.worst(), Severity::Warn);
+        assert_eq!(g.attention_line().as_deref(), Some("Title metadata: control.nacp not found (+1 more)"));
+        assert_eq!(g.attention_text().as_deref(), Some("Title metadata: control.nacp not found\nRomFS: Fs.bin.zst is missing"));
+        g.checks.clear();
+        g.checks.push(Check::new(Severity::Ok, "ExeFS", "seven modules"));
+        assert_eq!(g.attention_line(), None);
+        assert_eq!(g.attention_text(), None);
     }
 }
