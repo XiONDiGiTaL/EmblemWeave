@@ -59,6 +59,7 @@ game code, no assets and no keys, and it only ever reads your files.
 - [Preparing your game data](#preparing-your-game-data)
 - [Using the launcher](#using-the-launcher)
 - [How the recompilation works](#how-the-recompilation-works)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Building from source](#building-from-source)
 - [Testing and verification](#testing-and-verification)
 - [Project structure](#project-structure)
@@ -151,7 +152,8 @@ EmblemWeave's own Rust runtime, which is being completed to replace the baseline
 | Native execution | The whole main module (807,604 functions, 10.6 million instructions) compiled ahead of time into one library; identical to the reference interpreter over the boot's first billion instructions, and about twice as fast |
 
 The full compatibility matrix, the list of verified host services and the
-known limitations live in [docs/STATUS.md](docs/STATUS.md).
+known limitations live in [docs/STATUS.md](docs/STATUS.md). What the launcher needs and what each failure message means
+is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Screenshots
 
