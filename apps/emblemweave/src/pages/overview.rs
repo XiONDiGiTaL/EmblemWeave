@@ -135,7 +135,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Severity::Warn => ("Needs attention", Tone::Warn),
             Severity::Error => ("Incomplete", Tone::Bad),
         };
-        card(&mut cols[0], &p, "Game data", data_text, data_tone, &summary_of_data(app));
+        // The reason first and the version line under it: "Needs attention"
+        // has to say what needs it, and the version still belongs on the card.
+        let (data_detail, data_note) = match app.game.attention_line() {
+            Some(reason) => (reason, Some(summary_of_data(app))),
+            None => (summary_of_data(app), None),
+        };
+        card(&mut cols[0], &p, "Game data", data_text, data_tone, &data_detail, data_note.as_deref());
 
         let (rtext, rtone, rdetail) = match &app.last_pipeline {
             Some(s) => match (&s.report, s.verified) {
@@ -149,7 +155,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             },
             None => ("Not run this session".to_string(), Tone::Neutral, "Run the pipeline on the Recompilation page".to_string()),
         };
-        card(&mut cols[1], &p, "Recompilation", &rtext, rtone, &rdetail);
+        card(&mut cols[1], &p, "Recompilation", &rtext, rtone, &rdetail, None);
 
         let (btext, btone, bdetail) = match &app.last_boot {
             Some((r, ms)) => (
@@ -165,7 +171,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
             None => ("No run yet".to_string(), Tone::Neutral, "Run the boot test to execute the game's code".to_string()),
         };
-        card(&mut cols[2], &p, "Runtime", &btext, btone, &bdetail);
+        card(&mut cols[2], &p, "Runtime", &btext, btone, &bdetail, None);
     });
     ui.add_space(theme::SPACE_M);
 
@@ -220,11 +226,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
 fn summary_of_data(app: &App) -> String {
     let g = &app.game;
-    // The card reads "Needs attention" over a line about version numbers, which
-    // leaves the user guessing. When a check is open, that check is the line.
-    if let Some(line) = g.attention_line() {
-        return line;
-    }
     match (&g.exefs, &g.title) {
         (None, _) => "Choose the folder with your extracted game".into(),
         (Some(_), Some((_, v))) => format!("Version {v}, {} RomFS entries", g.romfs_entries),
@@ -232,11 +233,21 @@ fn summary_of_data(app: &App) -> String {
     }
 }
 
-fn card(ui: &mut egui::Ui, p: &theme::Palette, title: &str, value: &str, tone: Tone, detail: &str) {
+/// The three cards share one body height: they sit side by side, and a card with
+/// more to say must not make the row ragged. The tallest case is a three-line
+/// reason with the version line under it, so that is what every card reserves.
+const CARD_BODY: f32 = 104.0;
+
+fn card(ui: &mut egui::Ui, p: &theme::Palette, title: &str, value: &str, tone: Tone, detail: &str, note: Option<&str>) {
     widgets::section(ui, p, title, |ui| {
+        ui.set_min_height(CARD_BODY);
         ui.label(RichText::new(value).font(theme::display(20.0)).color(tone.colour(p)));
         ui.add_space(2.0);
         ui.label(RichText::new(detail).size(12.5).color(p.body));
+        if let Some(note) = note {
+            ui.add_space(2.0);
+            ui.label(RichText::new(note).size(12.5).color(p.muted));
+        }
     });
 }
 
