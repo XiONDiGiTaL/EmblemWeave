@@ -158,6 +158,56 @@ pub fn missing_tools() -> Vec<&'static str> {
     missing
 }
 
+/// The winget line that installs Visual Studio's C++ tools. It is the one tool
+/// the build cannot do without, the largest download, and the hardest for a
+/// player to find, so the launcher can run it instead of describing it.
+pub const VS_INSTALL: &str = r#"winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-package-agreements --accept-source-agreements"#;
+
+/// Whether winget is there to run that line at all.
+pub fn have_winget() -> bool {
+    tool_path().split(';').any(|d| Path::new(d).join("winget.exe").is_file())
+}
+
+/// The installer script, kept separate so a test can read what it will run.
+fn install_script() -> String {
+    format!(
+        "@echo off\r\n\
+         title EmblemWeave: Visual Studio Build Tools\r\n\
+         echo Installing Visual Studio 2022 Build Tools with the C++ workload.\r\n\
+         echo This is a few GB and can take several minutes.\r\n\
+         echo.\r\n\
+         {VS_INSTALL}\r\n\
+         echo.\r\n\
+         if errorlevel 1 (\r\n\
+           echo The install did not finish. You can install it by hand from https://visualstudio.microsoft.com/downloads/ and pick Desktop development with C++.\r\n\
+         ) else (\r\n\
+           echo Done. Close this window, restart EmblemWeave, then press Build the game again.\r\n\
+         )\r\n\
+         pause\r\n"
+    )
+}
+
+/// Write the installer script and run it in its own console, where winget can
+/// show progress and raise the permission prompt it needs.
+pub fn start_vs_install() -> Result<PathBuf, String> {
+    if !have_winget() {
+        return Err("winget is not available on this PC, so the installer cannot be started. Install Visual Studio 2022 Build Tools from https://visualstudio.microsoft.com/downloads/ and pick Desktop development with C++, or install App Installer from the Microsoft Store first.".into());
+    }
+    let dir = Config::work_dir().ok_or("APPDATA is not set")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let script = dir.join("install-build-tools.cmd");
+    std::fs::write(&script, install_script()).map_err(|e| format!("writing {}: {e}", script.display()))?;
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", "start", "", &script.display().to_string()]).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, so only winget's console shows
+    }
+    cmd.spawn().map_err(|e| format!("starting the installer: {e}"))?;
+    Ok(script)
+}
+
 /// What to install for a tool the build did not find: an error that only says
 /// something is missing sends the user to a search engine (or to the issue
 /// tracker, as it did).
@@ -931,6 +981,19 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_installer_script_installs_the_cpp_workload() {
+        let s = install_script();
+        assert!(s.contains("Microsoft.VisualStudio.2022.BuildTools"), "{s}");
+        assert!(s.contains("Microsoft.VisualStudio.Workload.VCTools"), "{s}");
+        // Without these winget stops at a prompt the console cannot answer.
+        assert!(s.contains("--accept-package-agreements"));
+        assert!(s.contains("--accept-source-agreements"));
+        // A plain cmd script, or the console closes before anything is read.
+        assert!(s.starts_with("@echo off"));
+        assert!(s.contains("\npause") || s.trim_end().ends_with("pause"));
+    }
 
     #[test]
     fn the_ini_points_at_the_dump_saves_and_shaders() {

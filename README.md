@@ -37,10 +37,11 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.6, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.7, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.6 is the release the issue reports asked for: the lifted C now compiles, the
-> decoder ships inside the launcher, and a missing build tool is named with the command that installs it. EmblemWeave's own
+> opening movie and cutscenes. 0.1.7 adds the one thing the issue reports kept coming back to: when the Visual Studio
+> C++ tools are missing, **Overview** has a button that installs them. 0.1.6 fixed the build itself, so the lifted C
+> compiles, the decoder ships inside the launcher, and every missing tool is named with its install command. EmblemWeave's own
 > Rust runtime is being completed to take over running the game: it
 > now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
 > swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
@@ -58,6 +59,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.7](#whats-new-in-017)
 - [What's new in 0.1.6](#whats-new-in-016)
 - [What's new in 0.1.5](#whats-new-in-015)
 - [Development status](#development-status)
@@ -108,6 +110,15 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.7
+
+- **A button for the build tools.** When Visual Studio's C++ tools are missing, **Overview** now shows
+  **Install Visual Studio Build Tools** under the list. Pressing it opens a Windows installer window that runs
+  winget with the exact C++ workload, accepts the licence prompts and shows progress, so the download happens
+  where the user can watch it. Restart the launcher afterwards, because a new PATH is only read by a new
+  process, then press **Build the game**. If winget itself is missing, the button says so and points at the
+  manual download instead of failing silently.
 
 ## What's new in 0.1.6
 
