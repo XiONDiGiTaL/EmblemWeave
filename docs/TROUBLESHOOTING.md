@@ -8,7 +8,7 @@ What EmblemWeave needs, and what the launcher means when it stops.
 | --- | --- | --- |
 | Your game files | Game Setup, always | Your own copy of *Fire Emblem: Fortune's Weave*: the base game and its update, a plaintext `.nup`, `.nx` or `.nsp` package, or a folder holding the extracted ExeFS and RomFS |
 | A decoded `main` module | Recompilation, always | **Game Setup > Decode main module**: the launcher writes `%APPDATA%\EmblemWeave\work\decoded\main` with Python and the `zbic` package (`pip install zbic`) |
-| A C compiler | Recompilation only, for the verification stage | `ziglang` (`pip install ziglang`, used as `zig cc`) or LLVM's `clang` on `PATH`. Without one the pipeline still lifts the game; it skips the native check |
+| A C compiler | Recompilation only, for the verification stage | `ziglang` (`pip install ziglang`, used as `zig cc`) or LLVM's `clang`, found on `PATH` or in its usual install folder (`C:\Program Files\LLVM\bin`, or the clang Visual Studio installs). Without one the pipeline still lifts the game; it skips the native check |
 | A Vulkan 1.3 driver | Play | Your graphics driver. The engine presents through Vulkan and has no other renderer |
 | LLVM 23, CMake, Ninja, .NET 10, uv, Git, PowerShell 7, VS Build Tools with "Desktop development for C++" | Only when building `fefw.exe` from source: **Game Setup > Build the game** | winget (see the README's system requirements). The launcher names whichever are missing |
 | Disk space | Everywhere | About 30 GB for the decoded data, plus build output under `%APPDATA%\EmblemWeave\work` |
@@ -63,7 +63,8 @@ A bug report with the failing task's log attached is worth more than any descrip
 | --- | --- | --- |
 | `set the game folder on Game Setup first` | No ExeFS with a `main` module was found | Set up Game Setup |
 | `the main module is not decoded` | The pipeline needs the decoded copy | Decode on Game Setup |
-| `no C compiler found (install zig with pip install ziglang, or clang)` | Stage 6 was skipped, not failed: the lift is fine, the native check did not run | Optional: `pip install ziglang` |
+| `no C compiler found: install LLVM …` or `… or zig …` | Stage 6 was skipped, not failed: the lift is fine, the native check did not run. The launcher now looks in LLVM's and Visual Studio's own folders as well as `PATH`, so this means there really is no compiler | Optional: `winget install LLVM.LLVM`, or `uv pip install --python tools\.venv ziglang`, then run the pipeline again |
+| `dotnet build failed … sdk-not-found` / exit code `0x8000809b` | The .NET *runtime* is installed, so `dotnet.exe` answers, but there is no 10.x SDK to build the shader translator with. Game Setup now says this before the build starts instead of after it | `winget install Microsoft.DotNet.SDK.10` |
 | `` `…` cannot build C: … `` | A compiler was found but cannot compile anything (wrong build, missing SDK) | Install `ziglang`, or a working LLVM `clang`, and run again |
 | `N of M shards were rejected by the C compiler: <first error>` | The compiler refused the emitted C. It is not a missing game file: every shard it was given came from the decoded module | The log has the whole listing. Send it: this is a launcher bug unless the first error names a missing toolchain file |
 | `the compiler rejected N of M shards before finishing, so the cause is systemic (…)` | More than half the shards failed, so it is one cause (a broken compiler, a full disk, a bad include path), not N problems. Compiling stopped instead of repeating it 118 times | The parenthesised text is the compiler's first error. Free some disk, install `ziglang`, and run the pipeline again |

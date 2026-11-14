@@ -410,9 +410,39 @@ pub const PIPELINE_STAGES: [&str; 9] = [
 /// A C compiler for the emitted code: zig's bundled clang through the Python
 /// wheel, `zig` on the PATH, or LLVM's clang. Each is run once to see that it
 /// answers: a name on the PATH is not a working compiler.
+/// Folders a C compiler is installed into on Windows: the ones the build steps get on their PATH, LLVM's two default homes, and
+/// the clang that Visual Studio's C++ workload can install. LLVM is not usually on the PATH of the running process, which is why
+/// asking for a bare `clang` found nothing on a PC that had it (issue 10).
+fn cc_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = crate::engine::tool_path().split(';').filter(|d| !d.is_empty()).map(PathBuf::from).collect();
+    for extra in [r"C:\Program Files\LLVM\bin", r"C:\Program Files (x86)\LLVM\bin"] {
+        dirs.push(PathBuf::from(extra));
+    }
+    for base in [r"C:\Program Files\Microsoft Visual Studio", r"C:\Program Files (x86)\Microsoft Visual Studio"] {
+        let Ok(editions) = std::fs::read_dir(base) else { continue };
+        for edition in editions.flatten() {
+            let Ok(years) = std::fs::read_dir(edition.path()) else { continue };
+            for year in years.flatten() {
+                let bin = year.path().join("VC").join("Tools").join("Llvm").join("x64").join("bin");
+                if bin.is_dir() {
+                    dirs.push(bin);
+                }
+            }
+        }
+    }
+    dirs
+}
+
 fn find_cc() -> Option<Vec<String>> {
     let works = |program: &str, args: &[&str]| {
-        std::process::Command::new(program).args(args).output().map(|o| o.status.success()).unwrap_or(false)
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args).env("PATH", crate::engine::tool_path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        cmd.status().map(|s| s.success()).unwrap_or(false)
     };
     let mut pythons = vec![interpreter()];
     pythons.push(PathBuf::from("python"));
@@ -421,6 +451,23 @@ fn find_cc() -> Option<Vec<String>> {
         let py = py.to_string_lossy().into_owned();
         if works(&py, &["-m", "ziglang", "version"]) {
             return Some(vec![py, "-m".into(), "ziglang".into(), "cc".into()]);
+        }
+    }
+    // A compiler that is installed but not on PATH, in the order the build trusts: zig, then clang.
+    for dir in cc_dirs() {
+        let zig = dir.join("zig.exe");
+        if zig.is_file() {
+            let zig = zig.to_string_lossy().into_owned();
+            if works(&zig, &["version"]) {
+                return Some(vec![zig, "cc".into()]);
+            }
+        }
+        let clang = dir.join("clang.exe");
+        if clang.is_file() {
+            let clang = clang.to_string_lossy().into_owned();
+            if works(&clang, &["--version"]) {
+                return Some(vec![clang]);
+            }
         }
     }
     if works("zig", &["version"]) {
@@ -507,7 +554,11 @@ pub fn pipeline(game: GameData, limit: usize) -> Job {
         ctx.start(6);
         let cc = find_cc();
         match &cc {
-            None => ctx.end(6, StageStatus::Skipped, "no C compiler found (install zig with `pip install ziglang`, or clang)"),
+            None => ctx.end(
+                6,
+                StageStatus::Skipped,
+                "no C compiler found: install LLVM (`winget install LLVM.LLVM`) or zig (`uv pip install --python tools\\.venv ziglang`), then run the pipeline again",
+            ),
             Some(cc) => {
                 if let Err(e) = check_compiler(ctx, cc, &out) {
                     ctx.end(6, StageStatus::Failed, e.clone());

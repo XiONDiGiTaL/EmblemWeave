@@ -92,7 +92,7 @@ pub fn ready() -> bool {
 
 /// Folders of the build tools, put first on PATH for every step: winget's
 /// default locations for LLVM, CMake, Ninja, NASM and .NET.
-fn tool_path() -> String {
+pub fn tool_path() -> String {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let dirs = [
         r"C:\Program Files\LLVM\bin".to_string(),
@@ -135,10 +135,43 @@ fn vc_tools() -> Option<PathBuf> {
     bat.is_file().then_some(bat)
 }
 
+/// The highest .NET SDK major version installed, from `dotnet --list-sdks`.
+///
+/// A .NET *runtime* also ships `dotnet.exe`, so its presence says nothing about
+/// whether a project can be built. Without this check a PC with only the
+/// runtime got as far as the shader harness and died with
+/// `0x8000809b` / "sdk-not-found", which names neither the missing piece nor
+/// what to install (issue 10).
+pub fn dotnet_sdk_major() -> Option<u32> {
+    let mut cmd = Command::new("dotnet");
+    cmd.args(["--list-sdks"]).env("PATH", tool_path()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok()?;
+    sdk_major_from(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Reads the newest major version out of the `dotnet --list-sdks` listing:
+/// one `MAJOR.MINOR.PATCH [folder]` line per SDK.
+fn sdk_major_from(listing: &str) -> Option<u32> {
+    listing
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter_map(|v| v.split('.').next())
+        .filter_map(|major| major.parse::<u32>().ok())
+        .max()
+}
+
 /// The tools the build needs, and whether each was found.
 pub fn missing_tools() -> Vec<&'static str> {
     let path = tool_path();
     let found = |exe: &str| path.split(';').any(|d| Path::new(d).join(exe).is_file());
+    // `dotnet.exe` alone is not enough: the harness targets net10.0, and an
+    // older or absent SDK fails the build after a long wait.
+    let dotnet_ok = found("dotnet.exe") && dotnet_sdk_major().is_some_and(|major| major >= 10);
     let mut missing: Vec<&'static str> = [
         ("clang-cl.exe", "LLVM 23 (clang-cl)"),
         ("cmake.exe", "CMake"),
@@ -149,7 +182,7 @@ pub fn missing_tools() -> Vec<&'static str> {
         ("pwsh.exe", "PowerShell 7"),
     ]
     .into_iter()
-    .filter(|(exe, _)| !found(exe))
+    .filter(|(exe, name)| if *name == ".NET 10 SDK" { !dotnet_ok } else { !found(exe) })
     .map(|(_, name)| name)
     .collect();
     if vc_tools().is_none() {
@@ -527,7 +560,19 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         }
         run(ctx, &root, "git", &["-C", "work\\refs\\ryubing", "checkout", RYUBING_REV])?;
         run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\shaders\\scripts\\setup_ryujinx.ps1", "-Ryubing", "work\\refs\\ryubing"])?;
-        run(ctx, &root, "dotnet", &["build", "tools\\shaders\\harness\\SpirvHarness.csproj", "-c", "Release"])?;
+        // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
+        // .NET runtime alone satisfies `dotnet.exe` but cannot build a net10.0 project.
+        run(ctx, &root, "dotnet", &["build", "tools\\shaders\\harness\\SpirvHarness.csproj", "-c", "Release"]).map_err(|e| {
+            let lower = e.to_lowercase();
+            if lower.contains("sdk-not-found") || e.contains("0x8000809b") || lower.contains("sdk not found") {
+                format!(
+                    "the shader translator is a .NET 10 program and this PC has the .NET runtime but no 10.x SDK. Install it with `{}`, then press Build the game again. ({e})",
+                    install_hint(".NET 10 SDK")
+                )
+            } else {
+                e
+            }
+        })?;
         ctx.end(5, StageStatus::Done, "spirv_harness built");
     }
 
@@ -1214,6 +1259,14 @@ mod tests {
         assert_eq!(resolution_size("Native display"), None);
         assert_eq!(window_mode("Exclusive fullscreen"), "exclusive");
         assert_eq!(window_mode("Windowed"), "windowed");
+    }
+
+    #[test]
+    fn the_dotnet_sdk_major_is_the_newest_one_listed() {
+        let listing = "8.0.206 [C:\\Program Files\\dotnet\\sdk]\r\n10.0.404 [C:\\Program Files\\dotnet\\sdk]\r\n";
+        assert_eq!(super::sdk_major_from(listing), Some(10));
+        assert_eq!(super::sdk_major_from("6.0.100 [C:\\sdk]"), Some(6));
+        assert_eq!(super::sdk_major_from(""), None);
     }
 
     #[test]
