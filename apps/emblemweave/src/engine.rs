@@ -168,30 +168,44 @@ pub fn have_winget() -> bool {
     tool_path().split(';').any(|d| Path::new(d).join("winget.exe").is_file())
 }
 
-/// The installer script, kept separate so a test can read what it will run.
-fn install_script() -> String {
-    format!(
-        "@echo off\r\n\
-         title EmblemWeave: Visual Studio Build Tools\r\n\
-         echo Installing Visual Studio 2022 Build Tools with the C++ workload.\r\n\
-         echo This is a few GB and can take several minutes.\r\n\
-         echo.\r\n\
-         {VS_INSTALL}\r\n\
-         echo.\r\n\
-         if errorlevel 1 (\r\n\
-           echo The install did not finish. You can install it by hand from https://visualstudio.microsoft.com/downloads/ and pick Desktop development with C++.\r\n\
-         ) else (\r\n\
-           echo Done. Close this window, restart EmblemWeave, then press Build the game again.\r\n\
-         )\r\n\
-         pause\r\n"
-    )
+/// The installer script for a list of missing tools, kept separate so a test
+/// can read exactly what it will run. Each tool is one winget line, and a tool
+/// that fails does not stop the ones after it: the summary at the end names it.
+pub fn install_script_for(tools: &[&str]) -> String {
+    let mut s = String::from("@echo off\r\ntitle EmblemWeave: build tools\r\n");
+    s.push_str("echo Installing the build tools EmblemWeave needs.\r\n");
+    s.push_str("echo.\r\n");
+    s.push_str("echo Accept the administrator prompt when Windows shows it.\r\n");
+    s.push_str("echo Visual Studio is a few GB; the others are small.\r\n");
+    s.push_str("echo.\r\n");
+    for tool in tools {
+        let hint = install_hint(tool);
+        if !hint.starts_with("winget ") {
+            continue;
+        }
+        // Non-interactive: every line accepts the source and package
+        // agreements, or winget stops on a prompt the script never answers.
+        let line = if hint.contains("--accept-package-agreements") {
+            hint.to_string()
+        } else {
+            format!("{hint} --accept-package-agreements --accept-source-agreements")
+        };
+        s.push_str(&format!("echo === {tool} ===\r\n{line}\r\nif errorlevel 1 echo That one did not finish: {tool}\r\n"));
+    }
+    s.push_str("echo.\r\necho Done. Close this window, restart EmblemWeave, then press Build the game again.\r\npause\r\n");
+    s
+}
+
+/// What the button on Overview runs: every tool the preflight says is absent.
+pub fn install_script() -> String {
+    install_script_for(&missing_tools())
 }
 
 /// Write the installer script and run it in its own console, where winget can
-/// show progress and raise the permission prompt it needs.
-pub fn start_vs_install() -> Result<PathBuf, String> {
+/// show progress and raise the permission prompts it needs.
+pub fn start_install() -> Result<PathBuf, String> {
     if !have_winget() {
-        return Err("winget is not available on this PC, so the installer cannot be started. Install Visual Studio 2022 Build Tools from https://visualstudio.microsoft.com/downloads/ and pick Desktop development with C++, or install App Installer from the Microsoft Store first.".into());
+        return Err("winget is not available on this PC, so the installer cannot be started. Install App Installer from the Microsoft Store, or install the tools by hand from https://aka.ms/vs/17/release/vs_buildtools.exe and the links in docs/TROUBLESHOOTING.md.".into());
     }
     let dir = Config::work_dir().ok_or("APPDATA is not set")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
@@ -213,9 +227,7 @@ pub fn start_vs_install() -> Result<PathBuf, String> {
 /// tracker, as it did).
 pub fn install_hint(tool: &str) -> &'static str {
     match tool {
-        "Visual Studio 2022 Build Tools with the C++ workload" => {
-            r#"winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended""#
-        }
+        "Visual Studio 2022 Build Tools with the C++ workload" => VS_INSTALL,
         "LLVM 23 (clang-cl)" => "winget install LLVM.LLVM",
         "CMake" => "winget install Kitware.CMake",
         "Ninja" => "winget install Ninja-build.Ninja",
@@ -983,16 +995,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_installer_script_installs_the_cpp_workload() {
-        let s = install_script();
+    fn the_installer_script_installs_every_missing_tool() {
+        let s = install_script_for(&[
+            "Visual Studio 2022 Build Tools with the C++ workload",
+            "LLVM 23 (clang-cl)",
+            "CMake",
+            "PowerShell 7",
+        ]);
+        // A plain cmd script, or the console closes before anything is read.
+        assert!(s.starts_with("@echo off"));
         assert!(s.contains("Microsoft.VisualStudio.2022.BuildTools"), "{s}");
         assert!(s.contains("Microsoft.VisualStudio.Workload.VCTools"), "{s}");
         // Without these winget stops at a prompt the console cannot answer.
         assert!(s.contains("--accept-package-agreements"));
         assert!(s.contains("--accept-source-agreements"));
-        // A plain cmd script, or the console closes before anything is read.
-        assert!(s.starts_with("@echo off"));
-        assert!(s.contains("\npause") || s.trim_end().ends_with("pause"));
+        // Every tool in the list is run, not just the first.
+        assert!(s.contains("winget install LLVM.LLVM"), "{s}");
+        assert!(s.contains("winget install Kitware.CMake"), "{s}");
+        assert!(s.contains("winget install Microsoft.PowerShell"), "{s}");
+        assert!(s.trim_end().ends_with("pause"));
+    }
+
+    #[test]
+    fn a_tool_without_an_install_line_is_left_out() {
+        let s = install_script_for(&["Some tool nobody knows"]);
+        assert!(!s.contains("winget "), "{s}");
+        assert!(s.contains("Done."));
     }
 
     #[test]

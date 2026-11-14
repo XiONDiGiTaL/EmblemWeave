@@ -39,9 +39,9 @@ carries that engine forward as the launcher around it, and
 
 > **Current status: released as 0.1.7, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.7 adds the one thing the issue reports kept coming back to: when the Visual Studio
-> C++ tools are missing, **Overview** has a button that installs them. 0.1.6 fixed the build itself, so the lifted C
-> compiles, the decoder ships inside the launcher, and every missing tool is named with its install command. EmblemWeave's own
+> opening movie and cutscenes. 0.1.7 adds the one thing the issue reports kept coming back to: when build tools are
+> missing, **Overview** has a button that installs them, Visual Studio included, in one go. 0.1.6 fixed the build itself,
+> so the lifted C compiles and the decoder ships inside the launcher. EmblemWeave's own
 > Rust runtime is being completed to take over running the game: it
 > now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
 > swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
@@ -113,12 +113,13 @@ feature as working before it is.
 
 ## What's new in 0.1.7
 
-- **A button for the build tools.** When Visual Studio's C++ tools are missing, **Overview** now shows
-  **Install Visual Studio Build Tools** under the list. Pressing it opens a Windows installer window that runs
-  winget with the exact C++ workload, accepts the licence prompts and shows progress, so the download happens
-  where the user can watch it. Restart the launcher afterwards, because a new PATH is only read by a new
-  process, then press **Build the game**. If winget itself is missing, the button says so and points at the
-  manual download instead of failing silently.
+- **A button for the build tools.** When anything the build needs is missing, **Overview** shows
+  **Install the missing build tools** under the list, naming what it will install on hover. Pressing it opens a
+  Windows installer window that runs one winget line for each missing tool, Visual Studio with the C++ workload
+  first, accepting the licence prompts so nothing stops on a question. The download and its progress happen in
+  that window, where the user can watch them and accept the administrator prompt. Restart the launcher
+  afterwards, because a new PATH is only read by a new process, then press **Build the game**. If winget itself
+  is missing, the button says so instead of failing silently.
 
 ## What's new in 0.1.6
 
