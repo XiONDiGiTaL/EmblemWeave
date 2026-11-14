@@ -220,6 +220,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
 fn summary_of_data(app: &App) -> String {
     let g = &app.game;
+    // The card reads "Needs attention" over a line about version numbers, which
+    // leaves the user guessing. When a check is open, that check is the line.
+    if let Some(line) = g.attention_line() {
+        return line;
+    }
     match (&g.exefs, &g.title) {
         (None, _) => "Choose the folder with your extracted game".into(),
         (Some(_), Some((_, v))) => format!("Version {v}, {} RomFS entries", g.romfs_entries),
