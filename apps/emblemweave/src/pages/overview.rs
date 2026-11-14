@@ -90,20 +90,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     // download and the permission prompt, the launcher only
                     // starts it. Restarting is needed because a new PATH is
                     // only read by a new process.
-                    if !building && missing.iter().any(|m| m.starts_with("Visual Studio")) {
+                    if !building && !missing.is_empty() {
                         ui.add_space(6.0);
                         let winget = crate::engine::have_winget();
-                        if widgets::button(ui, &p, "Install Visual Studio Build Tools", winget)
+                        let label = if missing.len() == 1 { "Install the missing build tool" } else { "Install the missing build tools" };
+                        if widgets::button(ui, &p, label, winget)
                             .on_hover_text(if winget {
-                                "Runs winget in a new window: Visual Studio 2022 Build Tools with the C++ workload, a few GB. Restart EmblemWeave when it finishes."
+                                format!(
+                                    "Runs winget in a new window for: {}. Visual Studio is a few GB, the others are small. Accept the Windows permission prompt, then restart EmblemWeave.",
+                                    missing.join(", ")
+                                )
                             } else {
-                                "winget is not available on this PC. Install App Installer from the Microsoft Store, or get Visual Studio from visualstudio.microsoft.com."
+                                "winget is not available on this PC. Install App Installer from the Microsoft Store, or install the tools by hand from docs/TROUBLESHOOTING.md.".to_string()
                             })
                             .clicked()
                         {
-                            match crate::engine::start_vs_install() {
+                            let n = missing.len();
+                            match crate::engine::start_install() {
                                 Ok(_) => app.notify(
-                                    "Installing Visual Studio Build Tools in a new window. Restart EmblemWeave when it finishes, then press Build the game.",
+                                    format!("Installing {n} build tool(s) in a new window. Accept the Windows prompt, then restart EmblemWeave and press Build the game."),
                                     Tone::Ok,
                                 ),
                                 Err(e) => app.notify(e, Tone::Bad),
