@@ -68,3 +68,33 @@ One delta is worth recording: the package's `recomp/games/fefw/main.sites` is th
 ours, and it has three extra lines that point at two features our runtime does not implement yet, a real-time map cursor
 step (`cursor_real_time`) and a stat radar chart. Copying the sites without the hooks would do nothing, so they are left
 for whoever ports those two features.
+
+## The FE3H Recomp, inspected
+
+`E:\Quiver Launcher\Apps\FireEmblemThreeHouses-FE3HRecomp` is a built install of *FE3H Recomp* v0.1.6, a MIT-licensed
+static recompilation of *Fire Emblem: Three Houses* built on [LAS Recomp](https://github.com/peiikai/LASRecomp) by
+Peiikai (also MIT), with the Three Houses changes by onerag90. It is not a source tree: the folder holds
+`fe3hrecomp.exe`, its DLLs, `cache/`, `extracted/`, a bundled Zig, a PyInstaller `lasgen`, and the only sources are six
+files in `gamelib-src/` (`cpu.h`, `gamelib.h`, `simd.h`, `simd_fp.h`, `gamelib_entry.c`, an empty
+`hle_symbols.txt`). Nothing from it is redistributed here.
+
+What was taken: its Sharpening setting, four steps off / low / default / high. Our engine has had `[upscale] sharpness`
+all along, applied live, but only the game's F1 menu could reach it; **Graphics > Sharpening** now writes it before
+every start and adopts a value changed in the menu, the same way the upscaler is handled.
+
+What was checked and already matches: `runtime/src/services/audren` carries the reverb commands, edge matrix and 3D
+delay-line reverb their port had to add; shader stages are built on workers, linked from ready parts and only waited
+for when nothing is ready, with the on-disk cache our play folder keeps; upscaling (FSR 1.0, NIS, FSR 3.1, DLSS/DLAA),
+render scale, DLC discovery, movies and Atmosphere cheat codes are all present on our side.
+
+Two of its notes are worth keeping, and neither is a file to copy:
+
+- `simd.h` lowers AArch64 FP/AdvSIMD to portable C with hardware-exact semantics (first signalling NaN quietened then
+  the first quiet NaN, `FPCR.DN` default NaN, `FPCR.FZ` flushing, `FPCR.RMode` for arithmetic and conversions, the ARM
+  estimate tables), and says plainly what it does not model (FPSR cumulative bits and QC, FP16 arithmetic). Our
+  `ew-lift` interpreter decodes scalar FP and keeps `FPCR`/`FPSR` as written rather than applying those modes, so a
+  function that changes rounding or flush mode can diverge from the console. The header is the reference to reach for
+  if that ever matters.
+- Cheats that patch the main module's *code*. Their generator compiles the patched instructions beside the originals
+  and picks at run time, because a recompiled game no longer runs the bytes a cheat rewrites. Our `cheats.rs` states
+  the limitation instead. It is the one feature in their port that our cheats page cannot do.
