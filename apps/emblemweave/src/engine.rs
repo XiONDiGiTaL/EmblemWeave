@@ -349,13 +349,33 @@ fn reason_from(lines: &[String]) -> String {
     let is_error = |l: &&String| {
         let t = l.trim();
         let lower = t.to_lowercase();
+        // cmd wraps "'git' is not recognized …" onto a second line, so the last
+        // two lines of such a run are "…subcommand failed. | operable program
+        // or batch file." — the name of the missing tool would be lost.
         !t.starts_with("--")
-            && (lower.starts_with("error") || lower.contains("cmake error") || lower.contains("error:") || lower.contains(": error"))
+            && (lower.starts_with("error")
+                || lower.contains("cmake error")
+                || lower.contains("error:")
+                || lower.contains(": error")
+                || lower.contains("is not recognized as an internal or external command")
+                || lower.contains("is not recognized as the name of a cmdlet"))
     };
     match lines.iter().find(is_error) {
         Some(err) => err.clone(),
         None => lines.iter().rev().take(2).cloned().collect::<Vec<_>>().join(" | "),
     }
+}
+
+/// The program cmd says it could not find: "'git' is not recognized as an
+/// internal or external command".
+fn missing_program(reason: &str) -> Option<String> {
+    let lower = reason.to_lowercase();
+    if !lower.contains("is not recognized") {
+        return None;
+    }
+    let start = reason.find('\'')? + 1;
+    let end = reason[start..].find('\'')? + start;
+    Some(reason[start..end].to_string())
 }
 
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
@@ -432,6 +452,11 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
         let name = args.first().copied().unwrap_or("");
         if said.is_empty() {
             Err(format!("{program} {name} failed ({status}); the log has the output"))
+        } else if let Some(missing) = missing_program(&said) {
+            Err(format!(
+                "the build called `{missing}`, which is not installed or not on PATH ({program} {name} failed ({status})). \
+                 Install it, restart the launcher, then press Build the game again"
+            ))
         } else {
             Err(format!("{program} {name} failed ({status}): {said}"))
         }
@@ -1411,6 +1436,24 @@ mod tests {
         .collect();
         let said = reason_from(&lines);
         assert!(said.contains("CMake Error at CMakeLists.txt"), "{said}");
+    }
+
+    #[test]
+    fn a_missing_program_is_named_not_just_its_continuation() {
+        // What a failed ninja step on Windows actually ends with.
+        let lines: Vec<String> = [
+            "[9/90] Linking CXX executable fefw.exe",
+            "'ispc' is not recognized as an internal or external command,",
+            "operable program or batch file.",
+            "ninja: build stopped: subcommand failed.",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let said = reason_from(&lines);
+        assert!(said.contains("ispc"), "{said}");
+        assert_eq!(super::missing_program(&said).as_deref(), Some("ispc"));
+        assert_eq!(super::missing_program("CMake Error at x.cmake:2"), None);
     }
 
     #[test]
