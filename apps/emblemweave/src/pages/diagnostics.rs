@@ -294,6 +294,9 @@ fn export(app: &mut App) {
     for a in &app.activity {
         out.push_str(&format!("{} {}\n", a.at, a.text));
     }
+    // What the build tools look like on this PC and the tail of the newest log:
+    // the report a user attaches has to carry the reason, not just the stage.
+    out.push_str(&crate::crash::environment_text());
     match std::fs::write(&path, out) {
         Ok(()) => app.notify(format!("Diagnostics written to {}", path.display()), Tone::Ok),
         Err(e) => app.notify(format!("Could not write the report: {e}"), Tone::Bad),
