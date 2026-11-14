@@ -162,7 +162,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let busy = app.running(JobKind::Decode).is_some();
                 let label = if app.game.decoded.is_some() { "Decode again" } else { "Decode main module" };
                 if widgets::button(ui, &p, label, app.game.exefs.is_some() && !busy)
-                    .on_hover_text("Runs the ZBIC bridge (tools/zbic_extract.py). Output goes to %APPDATA%\\EmblemWeave\\work; your dump is only read.")
+                    .on_hover_text("Runs the ZBIC bridge, which is built into the launcher and needs Python's zbic package. Output goes to %APPDATA%\\EmblemWeave\\work; your dump is only read.")
                     .clicked()
                 {
                     app.start(JobKind::Decode);

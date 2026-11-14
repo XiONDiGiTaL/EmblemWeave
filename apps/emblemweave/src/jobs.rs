@@ -320,31 +320,42 @@ pub fn detect(config: &Config) -> Job {
 
 // ---- decoding ------------------------------------------------------------------
 
-/// The ZBIC decoder is a development bridge (`tools/zbic_extract.py`, run out
-/// of process). Look for it next to the executable and in the working tree.
-fn find_bridge() -> Option<(PathBuf, PathBuf)> {
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-    let mut roots: Vec<PathBuf> = vec![std::env::current_dir().ok()?];
-    if let Some(d) = exe_dir {
-        roots.extend(d.ancestors().take(5).map(Path::to_path_buf));
+/// The ZBIC decoder is a development bridge: a small script run out of
+/// process by a Python that has the `zbic` package. It is compiled into the
+/// launcher, so a release download with no `tools` folder beside it still
+/// decodes, and it is written into the work folder before it runs.
+const ZBIC_BRIDGE: &str = include_str!("../../../tools/zbic_extract.py");
+
+/// A Python to run the bridge with: the engine checkout's own environment
+/// first (that is usually where `zbic` was installed), then the one on PATH.
+fn interpreter() -> PathBuf {
+    let venv = crate::engine::root().map(|r| r.join("tools").join(".venv").join("Scripts").join("python.exe"));
+    match venv {
+        Some(p) if p.is_file() => p,
+        _ => PathBuf::from("python"),
     }
-    for root in roots {
-        let script = root.join("tools").join("zbic_extract.py");
-        if script.is_file() {
-            let venv = root.join(".venv").join("Scripts").join("python.exe");
-            let python = if venv.is_file() { venv } else { PathBuf::from("python") };
-            return Some((python, script));
-        }
+}
+
+/// Write the bridge into `dir` (the work folder's `tools`) and return its path.
+fn write_bridge(dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let script = dir.join("zbic_extract.py");
+    if std::fs::read_to_string(&script).ok().as_deref() != Some(ZBIC_BRIDGE) {
+        std::fs::write(&script, ZBIC_BRIDGE).map_err(|e| format!("writing {}: {e}", script.display()))?;
     }
-    None
+    Ok(script)
+}
+
+/// The bridge in the work folder, with the interpreter that runs it.
+fn bridge() -> Result<(PathBuf, PathBuf), String> {
+    let dir = Config::work_dir().ok_or("APPDATA is not set")?.join("tools");
+    Ok((interpreter(), write_bridge(&dir)?))
 }
 
 pub fn decode(exefs: PathBuf) -> Job {
     spawn(JobKind::Decode, &["Find the ZBIC bridge", "Decode text, rodata and data", "Check sizes"], move |ctx| {
         ctx.start(0);
-        let (python, script) = find_bridge().ok_or_else(|| {
-            "tools/zbic_extract.py was not found next to the launcher or in the working folder".to_string()
-        })?;
+        let (python, script) = bridge()?;
         ctx.end(0, StageStatus::Done, format!("{} with {}", script.display(), python.display()));
         let out = Config::work_dir().ok_or("APPDATA is not set")?.join("decoded");
         std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
@@ -356,14 +367,19 @@ pub fn decode(exefs: PathBuf) -> Job {
             .arg(&out)
             .arg(gamedata::MAIN_MODULE)
             .output()
-            .map_err(|e| format!("starting {}: {e}", python.display()))?;
+            .map_err(|e| format!("starting {}: {e}. Decoding needs Python 3 with the `zbic` package: `winget install Python.Python.3.12`, then `pip install zbic`", python.display()))?;
         let text = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
         for line in text.lines() {
             ctx.log(line.to_string());
         }
         if !output.status.success() {
             ctx.end(1, StageStatus::Failed, "the bridge reported an error (see the log)");
-            return Err("decoding failed; if the log mentions `zbic`, install it with `pip install zbic`".into());
+            // The one failure almost every report is: the Python that ran the
+            // bridge has no `zbic` package. Say the install line, not a hint.
+            if text.contains("zbic") {
+                return Err("the decoder needs Python's `zbic` package: run `pip install zbic` (or `py -m pip install zbic`), then decode again".into());
+            }
+            return Err("decoding failed; the log has the bridge's own message".into());
         }
         ctx.end(1, StageStatus::Done, "segments written");
         ctx.start(2);
@@ -392,20 +408,25 @@ pub const PIPELINE_STAGES: [&str; 9] = [
 ];
 
 /// A C compiler for the emitted code: zig's bundled clang through the Python
-/// wheel, or clang on the PATH.
+/// wheel, `zig` on the PATH, or LLVM's clang. Each is run once to see that it
+/// answers: a name on the PATH is not a working compiler.
 fn find_cc() -> Option<Vec<String>> {
-    if let Some((python, _)) = find_bridge() {
-        let ok = std::process::Command::new(&python)
-            .args(["-m", "ziglang", "version"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(vec![python.to_string_lossy().into(), "-m".into(), "ziglang".into(), "cc".into()]);
+    let works = |program: &str, args: &[&str]| {
+        std::process::Command::new(program).args(args).output().map(|o| o.status.success()).unwrap_or(false)
+    };
+    let mut pythons = vec![interpreter()];
+    pythons.push(PathBuf::from("python"));
+    pythons.push(PathBuf::from("py"));
+    for py in pythons {
+        let py = py.to_string_lossy().into_owned();
+        if works(&py, &["-m", "ziglang", "version"]) {
+            return Some(vec![py, "-m".into(), "ziglang".into(), "cc".into()]);
         }
     }
-    let clang = std::process::Command::new("clang").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
-    clang.then(|| vec!["clang".to_string()])
+    if works("zig", &["version"]) {
+        return Some(vec!["zig".into(), "cc".into()]);
+    }
+    works("clang", &["--version"]).then(|| vec!["clang".to_string()])
 }
 
 pub fn pipeline(game: GameData, limit: usize) -> Job {
@@ -579,7 +600,27 @@ fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path) -> Result<(), String> {
             format!("running `{}`: {e}. Install a C compiler: `pip install ziglang` (zig cc), or LLVM's clang", cc.join(" "))
         })?;
     if output.status.success() {
-        return Ok(());
+        // The shards include the generated headers too, so one of those is
+        // built as well: a broken header then costs one clear message instead
+        // of 118 rejections that all say the same thing.
+        let hdr = out.join("ew_header_probe.c");
+        std::fs::write(&hdr, "#include <ew_aarch64.h>\n#include <ew_dispatch.h>\nint ew_header_probe(void) { return 0; }\n")
+            .map_err(|e| format!("writing {}: {e}", hdr.display()))?;
+        let second = std::process::Command::new(&cc[0])
+            .args(&cc[1..])
+            .args(["-std=c99", "-c", "-I"])
+            .arg(out)
+            .arg(&hdr)
+            .arg("-o")
+            .arg(hdr.with_extension("o"))
+            .output()
+            .map_err(|e| format!("running `{}`: {e}", cc.join(" ")))?;
+        if second.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&second.stderr).lines().take(4).collect::<Vec<_>>().join(" | ");
+        ctx.log(format!("the compiler cannot build the generated headers: {err}"));
+        return Err(format!("`{}` cannot build the generated headers in {}: {err}", cc.join(" "), out.display()));
     }
     let err = String::from_utf8_lossy(&output.stderr).lines().take(4).collect::<Vec<_>>().join(" | ");
     ctx.log(format!("the compiler cannot build a one-line file: {err}"));
@@ -631,7 +672,7 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
             break;
         }
         let mut still = Vec::new();
-        for (src, mut child) in running {
+        for (src, mut child) in std::mem::take(&mut running) {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     if status.success() {
@@ -646,6 +687,17 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
                         let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output").trim().to_string();
                         if failed == 1 {
                             first_error = Some(format!("{}: {first}", src.file_name().unwrap_or_default().to_string_lossy()));
+                        }
+                        // Most shards failing is not 118 separate problems: it
+                        // is one broken compiler, disk or include path, and
+                        // compiling the rest would only bury the reason.
+                        if failed >= 3 && failed * 2 > shards.len() {
+                            for (_, mut child) in running.drain(..) {
+                                let _ = child.kill();
+                            }
+                            let why = first_error.clone().unwrap_or_else(|| first.clone());
+                            ctx.log(format!("{failed} of {} shards already rejected; stopping with the first reason", shards.len()));
+                            return Err(format!("the compiler rejected {failed} of {} shards before finishing, so the cause is systemic ({why})", shards.len()));
                         }
                         // The whole complaint goes to the file: the first line is
                         // usually the file and line, the reason is under it.
@@ -801,6 +853,20 @@ mod tests {
         assert!(text.contains("compiled 3 of 3 shards"), "{text}");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("pipeline-"), "{name}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bridge_is_written_where_it_can_run() {
+        let dir = std::env::temp_dir().join(format!("ew-bridge-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let script = write_bridge(&dir).unwrap();
+        assert!(script.is_file());
+        let text = std::fs::read_to_string(&script).unwrap();
+        assert_eq!(text, ZBIC_BRIDGE);
+        assert!(text.contains("zbic.decompress"), "the bridge is not the decoder");
+        // Written again only when the text differs, so a running copy stays put.
+        assert_eq!(write_bridge(&dir).unwrap(), script);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

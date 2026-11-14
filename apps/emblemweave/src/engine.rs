@@ -105,11 +105,40 @@ fn tool_path() -> String {
     path.join(";")
 }
 
+/// The Visual Studio C++ tools. Every engine script calls `vcvars64.bat`,
+/// found through vswhere; without it the whole build dies with a bare exit
+/// code, which is what made it look like the launcher's fault.
+fn vc_tools() -> Option<PathBuf> {
+    let known = Path::new(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat");
+    if known.is_file() {
+        return Some(known.to_path_buf());
+    }
+    let base = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let vswhere = Path::new(&base).join("Microsoft Visual Studio").join("Installer").join("vswhere.exe");
+    if !vswhere.is_file() {
+        return None;
+    }
+    let mut cmd = Command::new(&vswhere);
+    cmd.args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let bat = PathBuf::from(path).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
+    bat.is_file().then_some(bat)
+}
+
 /// The tools the build needs, and whether each was found.
 pub fn missing_tools() -> Vec<&'static str> {
     let path = tool_path();
     let found = |exe: &str| path.split(';').any(|d| Path::new(d).join(exe).is_file());
-    [
+    let mut missing: Vec<&'static str> = [
         ("clang-cl.exe", "LLVM 23 (clang-cl)"),
         ("cmake.exe", "CMake"),
         ("ninja.exe", "Ninja"),
@@ -121,7 +150,30 @@ pub fn missing_tools() -> Vec<&'static str> {
     .into_iter()
     .filter(|(exe, _)| !found(exe))
     .map(|(_, name)| name)
-    .collect()
+    .collect();
+    if vc_tools().is_none() {
+        missing.insert(0, "Visual Studio 2022 Build Tools with the C++ workload");
+    }
+    missing
+}
+
+/// What to install for a tool the build did not find: an error that only says
+/// something is missing sends the user to a search engine (or to the issue
+/// tracker, as it did).
+pub fn install_hint(tool: &str) -> &'static str {
+    match tool {
+        "Visual Studio 2022 Build Tools with the C++ workload" => {
+            r#"winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended""#
+        }
+        "LLVM 23 (clang-cl)" => "winget install LLVM.LLVM",
+        "CMake" => "winget install Kitware.CMake",
+        "Ninja" => "winget install Ninja-build.Ninja",
+        ".NET 10 SDK" => "winget install Microsoft.DotNet.SDK.10",
+        "uv" => "winget install astral-sh.uv",
+        "Git" => "winget install Git.Git",
+        "PowerShell 7" => "winget install Microsoft.PowerShell",
+        _ => "see docs/TROUBLESHOOTING.md",
+    }
 }
 
 /// Run one command in `cwd`, its output (stdout and stderr) into the job
@@ -139,18 +191,34 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     ctx.log(format!("> {program} {}", args.join(" ")));
+    // The last lines a failed step printed: the log has everything, but the
+    // message is what the user reads, and "exit code 1" alone is not a reason.
+    let tail: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>> = Default::default();
     let mut child = cmd.spawn().map_err(|e| format!("starting {program}: {e}"))?;
     let err = child.stderr.take().map(|e| {
         let ctx = ctx.clone();
+        let tail = tail.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(e).lines().map_while(Result::ok) {
-                ctx.log(line);
+                ctx.log(line.clone());
+                if let Ok(mut t) = tail.lock() {
+                    t.push_back(line);
+                    while t.len() > 4 {
+                        t.pop_front();
+                    }
+                }
             }
         })
     });
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            ctx.log(line);
+            ctx.log(line.clone());
+            if let Ok(mut t) = tail.lock() {
+                t.push_back(line);
+                while t.len() > 4 {
+                    t.pop_front();
+                }
+            }
             if ctx.cancelled() {
                 let _ = child.kill();
                 return Err("cancelled".into());
@@ -167,7 +235,13 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} {} failed ({status})", args.first().copied().unwrap_or("")))
+        let said = tail.lock().map(|t| t.iter().filter(|l| !l.trim().is_empty()).cloned().collect::<Vec<_>>().join(" | ")).unwrap_or_default();
+        let name = args.first().copied().unwrap_or("");
+        if said.is_empty() {
+            Err(format!("{program} {name} failed ({status}); the log has the output"))
+        } else {
+            Err(format!("{program} {name} failed ({status}): {said}"))
+        }
     }
 }
 
@@ -207,7 +281,8 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let root = root().ok_or("the engine (engine/fefw-recomp) was not found; run `git submodule update --init`")?;
     let missing = missing_tools();
     if !missing.is_empty() {
-        return Err(format!("build tools missing: {}", missing.join(", ")));
+        let lines: Vec<String> = missing.iter().map(|m| format!("{m} (`{}`)", install_hint(m))).collect();
+        return Err(format!("the game build needs tools this PC does not have: {}. Each one is a single install command; see docs/TROUBLESHOOTING.md", lines.join(", ")));
     }
     let python = root.join("tools").join(".venv").join("Scripts").join("python.exe");
     let py = python.display().to_string();
@@ -232,6 +307,21 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     ctx.start(2);
     let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(8).to_string();
     run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &[("NX_JOBS", &jobs)])?;
+    // A step that reports success without writing its libraries leaves the
+    // next one failing over a missing `fefw_main.lib`, which says nothing
+    // about why. Name the real problem here instead.
+    let libs = root.join("work").join("build").join("fefw");
+    let absent: Vec<&str> = ["main", "sdk", "subsdk0", "subsdk1", "subsdk2", "rtld"]
+        .into_iter()
+        .filter(|m| !libs.join(format!("fefw_{m}.lib")).is_file())
+        .collect();
+    if !absent.is_empty() {
+        return Err(format!(
+            "the recompile wrote no libraries for {} in {}; its log above says why (usually a compiler or Visual Studio C++ problem, or a full disk)",
+            absent.join(", "),
+            libs.display()
+        ));
+    }
     ctx.end(2, StageStatus::Done, format!("six modules compiled ({jobs} jobs)"));
 
     // 4. Texture transcoders.
