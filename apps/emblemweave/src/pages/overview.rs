@@ -86,6 +86,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         ("Not built yet: press Build the game. It runs once, on this PC, from your own dump.".to_string(), p.warn)
                     };
                     ui.label(RichText::new(text).size(12.5).color(colour));
+                    // One click for the tool everyone trips on: winget does the
+                    // download and the permission prompt, the launcher only
+                    // starts it. Restarting is needed because a new PATH is
+                    // only read by a new process.
+                    if !building && missing.iter().any(|m| m.starts_with("Visual Studio")) {
+                        ui.add_space(6.0);
+                        let winget = crate::engine::have_winget();
+                        if widgets::button(ui, &p, "Install Visual Studio Build Tools", winget)
+                            .on_hover_text(if winget {
+                                "Runs winget in a new window: Visual Studio 2022 Build Tools with the C++ workload, a few GB. Restart EmblemWeave when it finishes."
+                            } else {
+                                "winget is not available on this PC. Install App Installer from the Microsoft Store, or get Visual Studio from visualstudio.microsoft.com."
+                            })
+                            .clicked()
+                        {
+                            match crate::engine::start_vs_install() {
+                                Ok(_) => app.notify(
+                                    "Installing Visual Studio Build Tools in a new window. Restart EmblemWeave when it finishes, then press Build the game.",
+                                    Tone::Ok,
+                                ),
+                                Err(e) => app.notify(e, Tone::Bad),
+                            }
+                        }
+                    }
                     ui.add_space(theme::SPACE_S);
                     quick_actions(app, ui, &p);
                 });
