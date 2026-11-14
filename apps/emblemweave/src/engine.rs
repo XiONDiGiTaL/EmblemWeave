@@ -621,6 +621,112 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     d
 }
 
+/// The page's label for the engine's `[fefw] output`.
+fn output_label(mode: &str) -> Option<&'static str> {
+    Some(match mode {
+        "720p" => "1280 \u{00d7} 720",
+        "1080p" => "1920 \u{00d7} 1080",
+        "1440p" => "2560 \u{00d7} 1440",
+        "2160p" => "3840 \u{00d7} 2160",
+        "console" => "Native display",
+        _ => return None,
+    })
+}
+
+fn window_mode_label(mode: &str) -> Option<&'static str> {
+    Some(match mode {
+        "windowed" => "Windowed",
+        "borderless" => "Borderless window",
+        "exclusive" => "Exclusive fullscreen",
+        _ => return None,
+    })
+}
+
+/// What the game has changed in its own menus: the file's value for a key whose
+/// page still asks for the value the launcher last wrote. A setting changed on
+/// the page is the player's newer intent, and is left for the next start.
+fn take_back<'a>(desired: &Values, applied: &Values, on_file: &'a Values, id: &str) -> Option<&'a str> {
+    let want = desired.get(id)?;
+    if applied.get(id) != Some(want) {
+        return None;
+    }
+    let now = on_file.get(id)?;
+    (now.as_str() != want.as_str()).then_some(now.as_str())
+}
+
+fn put<T: PartialEq>(field: &mut T, value: T) -> bool {
+    if *field == value {
+        return false;
+    }
+    *field = value;
+    true
+}
+
+fn adopt_from(
+    g: &mut crate::config::Graphics,
+    a: &mut crate::config::Audio,
+    desired: &Values,
+    applied: &Values,
+    on_file: &Values,
+) -> bool {
+    let mut changed = false;
+    if let Some(v) = take_back(desired, applied, on_file, "upscale.mode") {
+        changed |= put(&mut g.upscaling, upscale_label(v).to_string());
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "fefw.output") {
+        if let Some(label) = output_label(v) {
+            changed |= put(&mut g.resolution, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "display.window_mode") {
+        if let Some(label) = window_mode_label(v) {
+            changed |= put(&mut g.display_mode, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "display.aspect") {
+        // "auto" is the engine's own default; leaving it out keeps the page's
+        // list of ratios intact.
+        if !v.is_empty() && !v.eq_ignore_ascii_case("auto") {
+            changed |= put(&mut g.aspect, v.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "display.vsync") {
+        changed |= put(&mut g.vsync, matches!(v, "1" | "true" | "on" | "yes"));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "display.fps_limit") {
+        if let Ok(fps) = v.parse::<u32>() {
+            if (30..=240).contains(&fps) {
+                changed |= put(&mut g.frame_limit, fps);
+            }
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "audio.volume") {
+        if let Ok(vol) = v.parse::<f32>() {
+            changed |= put(&mut a.master, vol.clamp(0.0, 1.0));
+        }
+    }
+    changed
+}
+
+/// Take the values the game's own F1 menu changed back into the pages, so they
+/// show what the next start will use instead of only naming it.
+pub fn adopt(g: &mut crate::config::Graphics, a: &mut crate::config::Audio) -> bool {
+    // The pages are drawn many times a second; the files change at human speed.
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if now.saturating_sub(LAST.load(std::sync::atomic::Ordering::Relaxed)) < 1000 {
+        return false;
+    }
+    LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+    let Some(live) = live() else { return false };
+    let desired = desired_values(g, a);
+    let applied = applied_values();
+    adopt_from(g, a, &desired, &applied, &live.values)
+}
+
 /// Write the Graphics and Audio values the game can act on, but only the ones
 /// that changed since the launcher last wrote them.
 ///
@@ -836,6 +942,40 @@ mod tests {
         assert!(text.contains("fps_limit = 60"));
         assert!(text.contains("volume = 1.00"), "the volume goes back up too");
 
+        // The game's F1 menu is the other place these settings are changed: its
+        // values come back onto the pages, but only where the page itself has
+        // not moved on.
+        let mut adopt_g = crate::config::Graphics::default();
+        let mut adopt_au = crate::config::Audio { master: 1.0, ..crate::config::Audio::default() };
+        let desired = desired_values(&adopt_g, &adopt_au);
+        let mut file = desired.clone();
+        file.insert("upscale.mode".into(), "fsr1".into());
+        file.insert("fefw.output".into(), "1080p".into());
+        file.insert("display.window_mode".into(), "exclusive".into());
+        file.insert("display.vsync".into(), "0".into());
+        file.insert("display.fps_limit".into(), "120".into());
+        file.insert("audio.volume".into(), "0.35".into());
+        assert!(
+            adopt_from(&mut adopt_g, &mut adopt_au, &desired, &desired, &file),
+            "the game's values are taken"
+        );
+        assert_eq!(adopt_g.upscaling, "FSR 1.0");
+        assert_eq!(adopt_g.resolution, "1920 \u{00d7} 1080");
+        assert_eq!(adopt_g.display_mode, "Exclusive fullscreen");
+        assert!(!adopt_g.vsync);
+        assert_eq!(adopt_g.frame_limit, 120);
+        assert!((adopt_au.master - 0.35).abs() < 0.001);
+        let second = desired_values(&adopt_g, &adopt_au);
+        assert!(!adopt_from(&mut adopt_g, &mut adopt_au, &second, &second, &file), "nothing left to take");
+
+        // A page setting changed here and not yet written outranks the file.
+        let mut pending = crate::config::Graphics::default();
+        let mut pending_audio = crate::config::Audio::default();
+        let written = desired_values(&pending, &pending_audio);
+        pending.display_mode = "Exclusive fullscreen".into();
+        let asked = desired_values(&pending, &pending_audio);
+        assert!(!adopt_from(&mut pending, &mut pending_audio, &asked, &written, &written));
+        assert_eq!(pending.display_mode, "Exclusive fullscreen", "the page keeps its own change");
         // A second start with nothing changed touches no file, so a setting the
         // game's own menu changed in between survives it.
         let original = std::fs::read_to_string(&controls).unwrap();

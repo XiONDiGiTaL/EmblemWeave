@@ -122,7 +122,7 @@ native code runs, as an option, and has since `ew-native` was added.
 | Display settings | Implemented: resolution, render scale, window mode, vsync, aspect ratio and frame-rate limit are written to play mode's `controls.ini` (`[display] window_mode`, `vsync`, `aspect`, `fps_limit`, `width`/`height`, `render_width`/`render_height`, `render_scale`) and the picture size to `[fefw] output` in `fefw.ini` before every start |
 | Audio master volume | Implemented: written to `[audio] volume` in the same file; music, effects and voice wait for the mixer |
 | Settings only when changed | Implemented: a start writes only values that differ from the ones it wrote last (kept in `%APPDATA%\EmblemWeave\applied.json`), so settings changed in the game's F1 menu are not reset by the next launch |
-| Settings read back | Implemented: **Graphics** and **Audio** re-read `fefw.ini` and `controls.ini` (once a second, `engine::live`) and show what the game will start with, with the settings still waiting for the next start named |
+| Settings read back | Implemented: **Graphics** and **Audio** re-read `fefw.ini` and `controls.ini` (once a second, `engine::live`), show what the game will start with, name the settings still waiting for the next start, and take back the values the game's F1 menu changed (`engine::adopt`) so the pages agree with it |
 | Quality and shader precompiling | Saved only; the page says so |
 | Taskbar icon | Implemented: the launcher puts its own icon into `fefw.exe` at startup, after a build and before a start (`exe_icon::brand` via `engine::brand_game`); a copy already running keeps the engine's icon until it closes |
 | Command line: `--page`, `--boot-test` | Implemented |

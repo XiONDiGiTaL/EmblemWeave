@@ -788,6 +788,11 @@ impl eframe::App for App {
             theme::apply(ctx, self.config.theme);
         }
         self.poll_jobs();
+        // The game's F1 menu is the other place its display and audio settings
+        // are changed: take those back so the pages show what it will use.
+        if crate::engine::adopt(&mut self.config.graphics, &mut self.config.audio) {
+            ctx.request_repaint();
+        }
         if self.boot_on_start && self.running(JobKind::Detect).is_none() && self.game.bootable_inputs() {
             self.boot_on_start = false;
             self.start(JobKind::Boot);

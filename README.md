@@ -309,8 +309,8 @@ same file; **Music**, **Effects** and **Voice** are the game's own mix and have 
 Both pages read the files back. A **What the game will start with** panel lists what the engine will actually do on
 the next start — upscaler, output, window and picture size, frame limit, vsync and aspect ratio on **Graphics**, the
 master volume on **Audio** — and names the settings still waiting for that start, so a value changed after the last run
-is never mistaken for one already in force. A second line names what the game's own F1 menu changed since: those the
-launcher leaves alone, because the choice was made in the game.
+is never mistaken for one already in force, and a setting the game's own F1 menu changed since is taken back onto
+the page, so the two always agree unless you have changed the page yourself and not started the game yet.
 
 ### Upscaling
 
