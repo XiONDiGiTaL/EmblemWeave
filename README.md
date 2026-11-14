@@ -217,8 +217,11 @@ The screenshots are the launcher's own rendering, saved with `EmblemWeave.exe --
 | Game | Your own legally obtained copy of *Fire Emblem: Fortune's Weave* |
 
 Building the game needs these tools (all from winget): LLVM 23 (`LLVM.LLVM`), CMake (`Kitware.CMake`), Ninja
-(`Ninja-build.Ninja`), the .NET 10 SDK (`Microsoft.DotNet.SDK.10`), uv, Git and PowerShell 7, plus Visual Studio Build Tools with
-"Desktop development with C++". NASM (`NASM.NASM`) is optional and speeds up movie decoding. The launcher says which are missing.
+(`Ninja-build.Ninja`), the .NET 10 SDK (`Microsoft.DotNet.SDK.10`), uv (`astral-sh.uv`), Git and PowerShell 7, plus
+Visual Studio 2022 Build Tools with "Desktop development with C++"
+(`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`).
+NASM (`NASM.NASM`) is optional and speeds up movie decoding. Every one of them is checked before the build starts, and the
+launcher names each missing tool with the command that installs it.
 
 To build the launcher from source you also need the tools listed in [Building from source](#building-from-source).
 

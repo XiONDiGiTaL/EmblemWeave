@@ -53,8 +53,8 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 | Message | Meaning | Fix |
 | --- | --- | --- |
-| `tools/zbic_extract.py was not found next to the launcher or in the working folder` | The launcher was moved away from its tools | Run it from the repository, or unpack the release whole |
-| ``decoding failed; if the log mentions `zbic`, install it with `pip install zbic``` | The Python helper failed; the log has its output | `python -m pip install zbic`, then decode again |
+| ``the decoder needs Python's `zbic` package: run `pip install zbic` …`` | The bridge is built into the launcher and ran, but the Python that ran it has no `zbic` package | `pip install zbic` (or `py -m pip install zbic`), then decode again. The bridge needs no `tools` folder beside the launcher |
+| `decoding failed; the log has the bridge's own message` | The bridge failed for another reason (a read error, a missing module) | The `decode` log has Python's traceback |
 | `decoded sizes do not match the module header` | The decode wrote less than the module declares | Decode again; if it repeats, send the `decode` log |
 
 **Recompilation** (Task: `pipeline`):
@@ -66,6 +66,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `no C compiler found (install zig with pip install ziglang, or clang)` | Stage 6 was skipped, not failed: the lift is fine, the native check did not run | Optional: `pip install ziglang` |
 | `` `…` cannot build C: … `` | A compiler was found but cannot compile anything (wrong build, missing SDK) | Install `ziglang`, or a working LLVM `clang`, and run again |
 | `N of M shards were rejected by the C compiler: <first error>` | The compiler refused the emitted C. It is not a missing game file: every shard it was given came from the decoded module | The log has the whole listing. Send it: this is a launcher bug unless the first error names a missing toolchain file |
+| `the compiler rejected N of M shards before finishing, so the cause is systemic (…)` | More than half the shards failed, so it is one cause (a broken compiler, a full disk, a bad include path), not N problems. Compiling stopped instead of repeating it 118 times | The parenthesised text is the compiler's first error. Free some disk, install `ziglang`, and run the pipeline again |
 | `needs the native build` | Stage 7 needs stage 6 | Install a C compiler and recompile |
 | `the verification program did not compile` | The C compiler built the shards but not the check harness | The `pipeline` log names the compiler and the error |
 
@@ -73,10 +74,10 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 | Message | Meaning | Fix |
 | --- | --- | --- |
-| `build tools missing: LLVM 23 (clang-cl), CMake, …` | The named tools are not on `PATH` | Install them with winget; the list is the README's |
+| `the game build needs tools this PC does not have: …` | One or more build tools are absent. The list now includes Visual Studio's C++ tools, which the engine's scripts call through `vcvars64.bat` | Each tool is followed by its install command; install them and press Build the game again. All of them are in the README's prerequisites |
 | `the engine (engine/fefw-recomp) was not found; run git submodule update --init` | Building from source without the engine tree | `git submodule update --init --recursive` |
 | `the game is not built yet: run Build the game on Game Setup` (the button is on **Overview**) | `fefw.exe` is absent | Build the game |
-| `> pwsh … failed (exit code: 1)` | A build step failed; the `engine` log holds its whole output | Send the log |
+| `pwsh … failed (exit code: 1): <last lines>` | A build step failed. The message now carries the last lines that step printed, so the reason is usually right there | The `engine` log holds the whole output. Send it together with the exported report, which now ends with the tail of the newest log |
 | The window closes at once, or the picture stays black | Usually the Vulkan driver | Read `%APPDATA%\EmblemWeave\play\fefw.log`; update the graphics driver. A Vulkan 1.3 device is required |
 
 ## When none of this matches

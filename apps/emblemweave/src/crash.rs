@@ -110,6 +110,38 @@ pub fn diagnostics_text() -> String {
         s.push_str(&r.join("\n"));
         s.push('\n');
     }
+    // What the build needs and what this PC has: the first thing to check when
+    // "Building the game" stops with an exit code.
+    s.push_str("\n== build tools ==\n");
+    let missing = crate::engine::missing_tools();
+    if missing.is_empty() {
+        s.push_str("all found\n");
+    } else {
+        let lines: Vec<String> = missing.iter().map(|m| format!("missing: {m} (`{}`)", crate::engine::install_hint(m))).collect();
+        s.push_str(&lines.join("\n"));
+        s.push('\n');
+    }
+    // The tail of the newest job log, where a failed step's own output is. A
+    // report with no log leaves a failure as unexplained as before.
+    if let Some(dir) = crate::jobs::log_dir() {
+        let newest = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+            .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
+            .max_by_key(|(t, _)| *t)
+            .map(|(_, p)| p);
+        if let Some(path) = newest {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let all: Vec<&str> = text.lines().collect();
+                let from = all.len().saturating_sub(40);
+                s.push_str(&format!("\n== last log: {} ==\n", path.file_name().unwrap_or_default().to_string_lossy()));
+                s.push_str(&all[from..].join("\n"));
+                s.push('\n');
+            }
+        }
+    }
     s
 }
 
