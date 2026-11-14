@@ -317,6 +317,13 @@ then does the rest:
 
 The `.nup` is only ever read.
 
+A **`.nx` archive** (NXFormat) works the same way. Its catalog, manifest and
+block index are checked against the SHA-256 values in the archive's own header,
+the ExeFS is copied out once, and the engine serves the RomFS straight from the
+archive: each block is decompressed and its 16 KiB slices checked with CRC-32C
+as the game reads them. Point **Choose package…** at the `.nx`; nothing is
+extracted and the file is only ever read.
+
 **Which build your copy is.** Game Setup also hashes your ExeFS modules against
 the manifest the engine was tested with, taken from the preserved fefw-recomp
 0.2.0 package: update 131072, `main` build `db93b0125f48…`. If all seven hashes
@@ -369,7 +376,7 @@ takes the chosen scheme's accent, glow and rim.
 | Page | Purpose |
 | --- | --- |
 | **Overview** | **Play** starts the game; **Build the game** compiles it from your dump. Load a save profile and jump to the save editor, mods and cheats. Also readiness, the boot test of the Rust runtime, next steps, and recent activity. |
-| **Game Setup** | Choose and validate your game data (a `.nup` or a folder) and set the language and profile. |
+| **Game Setup** | Choose and validate your game data (a `.nup`, `.nx`, `.nsp` package or a folder) and set the language and profile. |
 | **Saves** | Save profiles: keep the current save under a name and load any profile later (the save it replaces goes to the backups folder). Lists the slots in the current save, with an editor for gold, renown and each unit's level, experience, max HP, stat gains, weapon masteries, items and spells; names come from your own game data. Imports saves from yuzu, suyu, sudachi, citron, eden and torzu, from any folder, and exports to the emulator layout. |
 | **Mods** | Installed RomFS mods, switched on and off with a toggle. Installs from a .zip, .7z or .rar archive, a folder, a GameBanana link, or the game's GameBanana list browsed in the launcher. Mods that only patch the game's code (exefs) are recognised and not installed, since they cannot apply to a recompiled game. |
 | **Cheats** | Atmosphere cheat codes, pasted or imported as `.txt`, each switched on and off and applied about 60 times a second while the game runs (data writes, pointer chains, conditionals, loops and controller-button tests work; instruction patches do not). Cheat Engine tables (`.CT`): `aobscan`/`aobscanregion` entries search the game's memory, and the values below them show live, can be typed in, and can be frozen. |

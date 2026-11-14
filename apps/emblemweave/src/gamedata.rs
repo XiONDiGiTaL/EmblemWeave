@@ -664,6 +664,13 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
             "RomFS",
             format!("{} top-level entries, read in place from the .nup", g.romfs_entries),
         )),
+        // A package is a file, not a folder: reading it with read_dir would
+        // report no entries and turn a good archive into an empty RomFS.
+        Some(_) if g.nx.is_some() => g.checks.push(Check::new(
+            Severity::Ok,
+            "RomFS",
+            format!("{} top-level entries, read in place from the .nx", g.romfs_entries),
+        )),
         Some(dir) => {
             g.romfs_entries = std::fs::read_dir(dir).map(|rd| rd.count()).unwrap_or(0);
             if g.romfs_entries == 0 {

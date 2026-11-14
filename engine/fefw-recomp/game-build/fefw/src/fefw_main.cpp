@@ -24,6 +24,8 @@
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
+#include "nxrt/nup.h"
+#include "nxrt/nx.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/gfx.h"
@@ -262,7 +264,10 @@ int fefw_run(int argc, char** argv) {
     nxrt::config_set("process", "program_id", "0x04007EF01F8AE000");     // GetInfo(ProgramId); an ini value or the environment still wins
     NXLOG_I("boot", "%s (update %s): exefs '%s', main '%s', romfs '%s'", nxrt::game::info().title, nxrt::game::info().version, exefs.c_str(),
             main_nso.c_str(), romfs.c_str());
-    if (!dir_exists(romfs)) NXLOG_W("boot", "RomFS folder '%s' not found: set [fs] romfs", romfs.c_str());
+    // A package (.nup, .nx) is a single file that the fs service serves in place, so only a path that is neither a folder nor one of
+    // those is worth a warning here.
+    if (!dir_exists(romfs) && !nxrt::nup::is_nup(romfs) && !nxrt::nx::is_nx(romfs))
+        NXLOG_W("boot", "RomFS folder '%s' not found: set [fs] romfs", romfs.c_str());
 
     bool play_started = false;
     if (nxrt::config_get_bool("boot", "nvn", true)) {

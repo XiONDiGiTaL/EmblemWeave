@@ -6,7 +6,7 @@ What EmblemWeave needs, and what the launcher means when it stops.
 
 | Need | When | Where it comes from |
 | --- | --- | --- |
-| Your game files | Game Setup, always | Your own copy of *Fire Emblem: Fortune's Weave*: the base game and its update, a plaintext `.nup` or `.nsp` package, or a folder holding the extracted ExeFS and RomFS |
+| Your game files | Game Setup, always | Your own copy of *Fire Emblem: Fortune's Weave*: the base game and its update, a plaintext `.nup`, `.nx` or `.nsp` package, or a folder holding the extracted ExeFS and RomFS |
 | A decoded `main` module | Recompilation, always | **Game Setup > Decode main module**: the launcher writes `%APPDATA%\EmblemWeave\work\decoded\main` with Python and the `zbic` package (`pip install zbic`) |
 | A C compiler | Recompilation only, for the verification stage | `ziglang` (`pip install ziglang`, used as `zig cc`) or LLVM's `clang` on `PATH`. Without one the pipeline still lifts the game; it skips the native check |
 | A Vulkan 1.3 driver | Play | Your graphics driver. The engine presents through Vulkan and has no other renderer |

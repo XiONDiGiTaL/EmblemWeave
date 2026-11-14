@@ -328,10 +328,10 @@ uint32_t rd32(const std::vector<uint8_t>& b, size_t o) {
     return o + 4 <= b.size() ? static_cast<uint32_t>(b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (static_cast<uint32_t>(b[o + 3]) << 24)) : 0;
 }
 
-bool read_zst(const std::filesystem::path& p, std::vector<uint8_t>& out) {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return false;
-    std::vector<uint8_t> comp((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+// Reads a zstd frame from the RomFS through the game's own image, so it is found whether the data is a folder or a package.
+bool read_zst(const std::string& image_path, std::vector<uint8_t>& out) {
+    std::vector<uint8_t> comp;
+    if (!services::read_romfs_file(image_path, comp)) return false;
     const unsigned long long n = ZSTD_getFrameContentSize(comp.data(), comp.size());
     if (n == ZSTD_CONTENTSIZE_ERROR || n == ZSTD_CONTENTSIZE_UNKNOWN || n > (64ull << 20)) return false;
     out.resize(static_cast<size_t>(n));
@@ -341,10 +341,11 @@ bool read_zst(const std::filesystem::path& p, std::vector<uint8_t>& out) {
 
 // FFNT 4.x: FINF (glyph, width and map pointers), TGLP (cells and the sheet: a BNTX with one BRTI and its BRTD data), CMAP chain.
 bool load_font(Font& f, const std::string& romfs) {
+    (void)romfs;
     std::vector<uint8_t> b;
-    const std::filesystem::path p = std::filesystem::path(romfs) / "Font" / f.file;
+    const std::string p = "/Font/" + std::string(f.file);
     if (!read_zst(p, b) || b.size() < 0x40 || std::memcmp(b.data(), "FFNT", 4) != 0) {
-        NXLOG_W(kTag, "%s: cannot read the font", p.string().c_str());
+        NXLOG_W(kTag, "%s: cannot read the font", p.c_str());
         return false;
     }
     const size_t finf = rd16(b, 6);

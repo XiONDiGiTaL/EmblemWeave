@@ -47,6 +47,7 @@ native code runs, as an option, and has since `ew-native` was added.
 | --- | --- | --- |
 | NSO0 parsing, LZ4 segments | Verified | segment boundaries land on end of file for every LZ4 module |
 | `.nup` game containers | Verified | table of contents and every file checked against SHA-256; the ExeFS copied out byte-identical to an extracted dump; the RomFS served in place to `nn::fs` (the same 122 opens and stop as from a folder) |
+| `.nx` game containers | Verified | catalog, manifest and block index checked against the digests in the archive's header; the ExeFS copied out of the real 28.9 GB archive and the game built from it end to end; the engine serves the RomFS from the archive (252,693 files, 29.1 GB) and the game ran at 60 fps with its prompt fonts read through the image |
 | Known-build check | Verified | the `.nup` of update 131072 matches all seven module SHA-256 values in the manifest preserved from the fefw-recomp 0.2.0 package; a different build is reported, not refused |
 | `.nsp` game packages | Verified | plaintext NCAs read and unpacked by the recompiler itself: the real 29.2 GB package yields the same 7 ExeFS files and the same 252,686 RomFS files as the `.nup` of the same build, and `main` is the same size in both |
 | ZBIC segments (`main`) | Implemented (bridge) | `tools/zbic_extract.py`; decoded sizes match the header |

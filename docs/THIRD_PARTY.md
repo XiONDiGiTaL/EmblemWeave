@@ -28,3 +28,4 @@ EmblemWeave's reader.
 | --- | --- |
 | `crates/ew-format/src/nx.rs` | an independent reader written from NXFormat's `docs/SPEC.md` |
 | `crates/ew-format/tests/nx-fixtures/*.nx` | `tests/fixtures/` from NXFormat V1.0.3, unmodified |
+| `engine/fefw-recomp/runtime/src/loader/nx.cpp` | the same reader in the engine, written from that specification |
