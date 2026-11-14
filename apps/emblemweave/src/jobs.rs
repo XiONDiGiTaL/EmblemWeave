@@ -98,9 +98,12 @@ impl JobKind {
     }
 }
 
-/// `%APPDATA%\EmblemWeave\logs`, where every task writes what it did.
+/// `%APPDATA%\EmblemWeave\logs`, where every task writes what it did. When the
+/// settings folder cannot be found the system temp folder is used instead, so a
+/// failed build always leaves a file to read.
 pub fn log_dir() -> Option<PathBuf> {
-    Config::dir().map(|d| d.join("logs"))
+    let base = Config::dir().unwrap_or_else(|| std::env::temp_dir().join("EmblemWeave"));
+    Some(base.join("logs"))
 }
 
 /// A UTC stamp for the file name: `2026-11-14 18.42.07`.
@@ -557,10 +560,10 @@ pub fn pipeline(game: GameData, limit: usize) -> Job {
             None => ctx.end(
                 6,
                 StageStatus::Skipped,
-                "no C compiler found: install LLVM (`winget install LLVM.LLVM`) or zig (`uv pip install --python tools\\.venv ziglang`), then run the pipeline again",
+                "no C compiler found: install Visual Studio Build Tools with the C++ workload (or LLVM's clang, or zig via `uv pip install --python tools\\.venv ziglang`), then run the pipeline again",
             ),
             Some(cc) => {
-                if let Err(e) = check_compiler(ctx, cc, &out) {
+                if let Err(e) = check_compiler(ctx, cc, &out, shards.first().map(|p| p.as_path())) {
                     ctx.end(6, StageStatus::Failed, e.clone());
                     return Err(e);
                 }
@@ -576,7 +579,7 @@ pub fn pipeline(game: GameData, limit: usize) -> Job {
                     return Err(format!(
                         "the C compiler rejected {failed} of {} shards ({why}). The whole output is in {}",
                         shards.len(),
-                        log_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "the log".into())
+                        log_hint()
                     ));
                 }
             }
@@ -633,11 +636,21 @@ fn balanced_shards(funcs: &[ew_lift::LiftedFunction]) -> Vec<&[ew_lift::LiftedFu
     out
 }
 
+/// The flags every shard and both probes are compiled with. One copy, so a
+/// change cannot make the probe pass while the shards fail.
+const CC_FLAGS: [&str; 5] = ["-std=c99", "-O0", "-c", "-w", "-I"];
+
+/// Where a reader can find the compiler's own words. Named in every failure.
+fn log_hint() -> String {
+    log_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "the log folder".into())
+}
+
 /// Compile every shard with one compiler process per core. Cancelling kills
 /// the processes still running. Returns (built, failed, threads).
-/// Build one short file first: a compiler that cannot run at all should say so
-/// once, in its own words, instead of failing every shard in turn.
-fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path) -> Result<(), String> {
+/// Build one short file first, then one real shard: a compiler that cannot run
+/// at all, or that cannot compile what the lifter emits, says so once in its own
+/// words instead of failing 118 shards in turn.
+fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path, shard: Option<&Path>) -> Result<(), String> {
     let probe = out.join("ew_cc_probe.c");
     std::fs::write(&probe, "int ew_cc_probe(void) { return 0; }
 ").map_err(|e| format!("writing {}: {e}", probe.display()))?;
@@ -666,16 +679,52 @@ fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path) -> Result<(), String> {
             .arg(hdr.with_extension("o"))
             .output()
             .map_err(|e| format!("running `{}`: {e}", cc.join(" ")))?;
-        if second.status.success() {
-            return Ok(());
+        if !second.status.success() {
+            let err = String::from_utf8_lossy(&second.stderr).lines().take(4).collect::<Vec<_>>().join(" | ");
+            ctx.log(format!("the compiler cannot build the generated headers: {err}"));
+            return Err(format!(
+                "`{}` cannot build the generated headers in {}: {err}. Install Visual Studio Build Tools with the \
+                 \"Desktop development with C++\" workload (its C++ headers and Windows SDK are what the generated \
+                 code needs), or a recent LLVM: {}",
+                cc.join(" "),
+                out.display(),
+                log_hint()
+            ));
         }
-        let err = String::from_utf8_lossy(&second.stderr).lines().take(4).collect::<Vec<_>>().join(" | ");
-        ctx.log(format!("the compiler cannot build the generated headers: {err}"));
-        return Err(format!("`{}` cannot build the generated headers in {}: {err}", cc.join(" "), out.display()));
+        // One real shard, with the exact flags the rest use: a header that
+        // compiles on its own is not proof that the lifted code does.
+        if let Some(shard) = shard {
+            let probe = std::process::Command::new(&cc[0])
+                .args(&cc[1..])
+                .args(CC_FLAGS)
+                .arg(out)
+                .arg(shard)
+                .arg("-o")
+                .arg(shard.with_extension("o"))
+                .output()
+                .map_err(|e| format!("running `{}`: {e}", cc.join(" ")))?;
+            if !probe.status.success() {
+                let text = String::from_utf8_lossy(&probe.stderr).into_owned();
+                let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output").trim().to_string();
+                ctx.log(format!("the compiler cannot build {}: {first}", shard.display()));
+                for line in text.lines().take(60) {
+                    ctx.write(line);
+                }
+                return Err(format!(
+                    "`{}` cannot compile the lifted code ({}): {first}. Every line the compiler printed is in {}. \
+                     If it names a missing header, install Visual Studio Build Tools with the \"Desktop development \
+                     with C++\" workload and press Build the game again.",
+                    cc.join(" "),
+                    shard.file_name().unwrap_or_default().to_string_lossy(),
+                    log_hint()
+                ));
+            }
+        }
+        return Ok(());
     }
     let err = String::from_utf8_lossy(&output.stderr).lines().take(4).collect::<Vec<_>>().join(" | ");
     ctx.log(format!("the compiler cannot build a one-line file: {err}"));
-    Err(format!("`{}` cannot build C: {err}", cc.join(" ")))
+    Err(format!("`{}` cannot build C: {err}. Every line it printed is in {}", cc.join(" "), log_hint()))
 }
 
 fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> Result<(usize, usize, usize, Option<String>), String> {
@@ -708,7 +757,7 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
                 // -O0: this stage proves the translation builds natively. The
                 // largest lifted functions take many minutes at -O1, which is
                 // recorded as open work in docs/STATUS.md.
-                .args(["-std=c99", "-O0", "-c", "-w", "-I"])
+                .args(CC_FLAGS)
                 .arg(out)
                 .arg(src)
                 .arg("-o")

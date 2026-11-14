@@ -282,8 +282,15 @@ impl App {
                 self.last_job_log = std::mem::take(&mut p.log);
             }
             if let Some(err) = p.failed.take() {
+                // The log path travels with the failure: a report that says
+                // "no log files are generated" is worse than one line of text.
+                let where_ = p
+                    .log_file
+                    .as_ref()
+                    .map(|f| format!(" [log: {}]", f.display()))
+                    .unwrap_or_default();
                 drop(p);
-                self.notify(format!("{}: {err}", kind.title()), Tone::Bad);
+                self.notify(format!("{}: {err}{where_}", kind.title()), Tone::Bad);
                 continue;
             }
             match p.result.take() {

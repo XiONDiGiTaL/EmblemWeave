@@ -982,8 +982,17 @@ fn save_applied(v: &Values) {
 /// lives in both of the game's files, so it is written to both.
 pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> Values {
     let mut d = Values::new();
+    let sdk = sdk();
     d.insert("fefw.output".into(), output_mode(&g.resolution).into());
-    d.insert("upscale.mode".into(), upscale_mode(&g.upscaling).into());
+    // Never ask the engine for an upscaler whose DLLs are not there: the run
+    // folder is created by this launcher, so it is the one place they can be,
+    // and a mode the engine cannot load is a black picture with working sound.
+    let mode = match upscale_mode(&g.upscaling) {
+        "fsr3" if fsr_dll(&sdk).is_none() => "fsr1",
+        "dlss" | "dlaa" if sdk.dlss.is_none() => "off",
+        other => other,
+    };
+    d.insert("upscale.mode".into(), mode.into());
     d.insert("upscale.sharpness".into(), sharpen_value(&g.sharpening).into());
     d.insert("display.window_mode".into(), window_mode(&g.display_mode).into());
     d.insert("display.vsync".into(), if g.vsync { "1" } else { "0" }.into());
@@ -1008,7 +1017,6 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     // Point the engine at the DLLs the Graphics page found. Its own defaults
     // only look beside the game and the launcher, so naming them keeps what the
     // page reports and what the game loads the same file.
-    let sdk = sdk();
     let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
     if let Some(dll) = fsr_dll(&sdk) {
         d.insert("upscale.fsr_dll".into(), fwd(&dll));
@@ -1357,6 +1365,24 @@ mod tests {
     }
 
     #[test]
+    fn an_upscaler_without_its_dlls_is_not_requested() {
+        let mut g = crate::config::Graphics::default();
+        g.upscaling = "FSR 3.1".into();
+        let d = super::desired_values(&g, &crate::config::Audio::default());
+        assert_eq!(
+            d.get("upscale.mode").map(String::as_str),
+            Some("fsr1"),
+            "FSR 3 without its loader DLL would draw nothing, so the spatial one is requested instead"
+        );
+        g.upscaling = "DLSS".into();
+        let d = super::desired_values(&g, &crate::config::Audio::default());
+        assert_eq!(d.get("upscale.mode").map(String::as_str), Some("off"));
+        g.upscaling = "FSR 1.0".into();
+        let d = super::desired_values(&g, &crate::config::Audio::default());
+        assert_eq!(d.get("upscale.mode").map(String::as_str), Some("fsr1"));
+    }
+
+    #[test]
     fn sharpening_uses_the_engines_four_steps() {
         assert_eq!(super::sharpen_value("Off"), "0");
         assert_eq!(super::sharpen_value("Low"), "0.45");
@@ -1404,7 +1430,9 @@ mod tests {
             resolution: "2560 × 1440".into(),
             display_mode: "Borderless window".into(),
             frame_limit: 120,
-            upscaling: "FSR 3.1".into(),
+            // A mode whose DLLs this machine may not have: FSR 1 needs none,
+            // so what the page selects is what both files must carry.
+            upscaling: "FSR 1.0".into(),
             ..crate::config::Graphics::default()
         };
         let a = crate::config::Audio { master: 0.4, ..crate::config::Audio::default() };
@@ -1413,7 +1441,7 @@ mod tests {
 
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = 1440p"));
-        assert!(text.contains("mode = fsr3"));
+        assert!(text.contains("mode = fsr1"));
         assert!(text.contains("fps60 = 1"), "the rest of the file stays");
         assert!(text.contains("sharpness = 0.8"), "the sharpening the page shows");
 
@@ -1431,7 +1459,7 @@ mod tests {
         // The sharpening sits in the same section, so look for the keys rather than for the section header followed by one of
         // them: either order in the section is fine, a missing key is not.
         let upscale = text.split("[upscale]").nth(1).unwrap_or_default();
-        assert!(upscale.lines().any(|l| l.trim() == "mode = fsr3"), "the F1 menu shows the same choice");
+        assert!(upscale.lines().any(|l| l.trim() == "mode = fsr1"), "the F1 menu shows the same choice");
         assert!(upscale.lines().any(|l| l.trim() == "sharpness = 0.8"), "and the same sharpening");
 
         // Back to the defaults: the game's own console size again, and the keys
