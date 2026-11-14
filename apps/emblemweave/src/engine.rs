@@ -422,7 +422,20 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // 3. Game code: ninja rebuilds only what changed.
     ctx.start(2);
     let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(8).to_string();
-    let built = run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &[("NX_JOBS", &jobs)]);
+    // The engine's scripts look for `vcvars64.bat` through vswhere, and their
+    // `%ProgramFiles(x86)%` path breaks inside cmd's `for /f` parentheses, so
+    // every build logged "'vswhere.exe' is not recognized". The path is already
+    // known here, and the scripts read NX_VCVARS first.
+    let vc_env: Option<String> = vc_tools().map(|p| p.display().to_string());
+    ctx.log(format!(
+        "visual studio: {}",
+        vc_env.clone().unwrap_or_else(|| "not found; the engine's scripts will look for it themselves".into())
+    ));
+    let mut envs: Vec<(&str, &str)> = vec![("NX_JOBS", &jobs)];
+    if let Some(vc) = &vc_env {
+        envs.push(("NX_VCVARS", vc));
+    }
+    let built = run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs);
     if let Err(e) = built {
         // A cache left by an older CMake or compiler cannot be reused, and CMake
         // answers with "Build files cannot be regenerated correctly" instead of
@@ -436,7 +449,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         ctx.log("the build folder holds a cache CMake cannot reuse; clearing it and configuring again");
         let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
         let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
-        run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &[("NX_JOBS", &jobs)])?;
+        run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs)?;
     }
     // A step that reports success without writing its libraries leaves the
     // next one failing over a missing `fefw_main.lib`, which says nothing
@@ -466,7 +479,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
 
     // 5. fefw.exe.
     ctx.start(4);
-    run(ctx, &root, "pwsh", &["-NoProfile", "-File", "game-build\\scripts\\build_fefw.ps1"])?;
+    let fefw_envs: Vec<(&str, &str)> = match &vc_env {
+        Some(vc) => vec![("NX_VCVARS", vc)],
+        None => Vec::new(),
+    };
+    run_env(ctx, &root, "pwsh", &["-NoProfile", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs)?;
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
     let _ = brand_game();
