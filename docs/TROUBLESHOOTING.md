@@ -13,6 +13,12 @@ What EmblemWeave needs, and what the launcher means when it stops.
 | LLVM 23, CMake, Ninja, .NET 10, uv, Git, PowerShell 7, VS Build Tools with "Desktop development for C++" | Only when building `fefw.exe` from source: **Game Setup > Build the game** | winget (see the README's system requirements). The launcher names whichever are missing |
 | Disk space | Everywhere | About 30 GB for the decoded data, plus build output under `%APPDATA%\EmblemWeave\work` |
 
+## Running straight from a `.nup`
+
+**Game Setup > Choose .nup…** takes the package as it is: the ExeFS is copied out once (it is small) and the RomFS is read in place, so nothing has to be unpacked into a folder first. The engine serves reads and module loads straight from the package.
+
+One condition comes with that: the package's files must be **stored**, not zstd-compressed, because the game reads them at offsets it chooses. A compressed package is refused with the message above and breaks at the first frame; a stored one boots like an extracted folder. The launcher now says which case a package is in at detection, before anything is built or run.
+
 ## Where the evidence is
 
 Every task writes its own file to `%APPDATA%\EmblemWeave\logs`: the launcher's build stamp, the folders it ran from, each stage, and the whole output of every tool it called. **Diagnostics > Activity log > Log files** names the folder and opens it. The game keeps its own log at `%APPDATA%\EmblemWeave\play\fefw.log`.
@@ -30,6 +36,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 | ``ExeFS: no `main` module in this ExeFS`` | The folder is an ExeFS but not this game's | Pick the update's ExeFS if the base one has no `main` |
 | `RomFS: not found; the game cannot load its assets without it` | No `romfs` folder | Extract the RomFS beside the ExeFS |
 | `RomFS: Fs.bin.zst (the content index the game loads first) is missing` | A partial extraction | Extract the RomFS again, complete |
+| `N of M files in this .nup are zstd-compressed; …` | The package is served in place, so its files must be stored: a zstd frame has no offset to read into, and the game breaks before its first frame | Repack without compression (`nup pack` without the zstandard module writes stored files), or use an extracted `exefs` and `romfs` folder |
 | `Decoded module: segment sizes do not match the module header; decode again` | The decoded copy is stale or truncated | **Game Setup > Decode again** |
 
 **Decoding** (Task: `decode`):
