@@ -823,8 +823,8 @@ impl eframe::App for App {
         self.poll_jobs();
         // A launch that drew nothing says so here, while the window is still
         // on screen and the player can act on it.
-        while let Some(said) = crate::engine::take_play_alert() {
-            self.notify(said, Tone::Bad);
+        while let Some((said, good)) = crate::engine::take_play_alert() {
+            self.notify(said, if good { Tone::Ok } else { Tone::Bad });
         }
         if crate::engine::play_watch_active() {
             ctx.request_repaint_after(Duration::from_millis(500));

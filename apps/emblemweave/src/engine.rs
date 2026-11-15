@@ -1272,14 +1272,16 @@ fn write_settings(
 // One line the launcher shows after a launch that did not draw anything. The
 // engine's own log is written by another process, so a watcher thread fills
 // this and the app drains it once per frame.
-static PLAY_ALERT: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+static PLAY_ALERT: std::sync::OnceLock<std::sync::Mutex<Vec<(String, bool)>>> = std::sync::OnceLock::new();
 
-fn alerts() -> &'static std::sync::Mutex<Vec<String>> {
+fn alerts() -> &'static std::sync::Mutex<Vec<(String, bool)>> {
     PLAY_ALERT.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// The next launch finding, if the watcher made one.
-pub fn take_play_alert() -> Option<String> {
+/// The next launch finding, if the watcher made one, and whether it is good
+/// news. Both kinds are recorded: "it presented a frame at 59.9 fps" is what
+/// tells a black-screen report apart from a game that never drew at all.
+pub fn take_play_alert() -> Option<(String, bool)> {
     let mut a = alerts().lock().unwrap_or_else(|e| e.into_inner());
     if a.is_empty() {
         None
@@ -1288,8 +1290,8 @@ pub fn take_play_alert() -> Option<String> {
     }
 }
 
-fn alert(text: String) {
-    alerts().lock().unwrap_or_else(|e| e.into_inner()).push(text);
+fn alert(text: String, good: bool) {
+    alerts().lock().unwrap_or_else(|e| e.into_inner()).push((text, good));
 }
 
 static WATCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1374,24 +1376,34 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
             if let Ok(Some(status)) = child.try_wait() {
                 if !status.success() {
                     let why = last_error(&log).map(|e| format!(" Last line: {e}")).unwrap_or_default();
-                    alert(format!(
-                        "The game exited after {} s without finishing (code {:?}).{why} The Game Log has everything it printed.",
-                        started.elapsed().as_secs(),
-                        status.code()
-                    ));
+                    alert(
+                        format!(
+                            "The game exited after {} s without finishing (code {:?}).{why} The Game Log has everything it printed.",
+                            started.elapsed().as_secs(),
+                            status.code()
+                        ),
+                        false,
+                    );
                 }
                 return;
             }
             let text = new_log_text(&log, &mut offset);
-            if presented_fps(&text).is_some() {
-                return; // it draws: nothing to report
+            if let Some(fps) = presented_fps(&text) {
+                alert(
+                    format!("The game presented its first frame after {} s ({fps:.1} fps).", started.elapsed().as_secs()),
+                    true,
+                );
+                return;
             }
             if started.elapsed().as_secs() >= 90 {
                 let gpu = gpu_name(&std::fs::read_to_string(&log).unwrap_or_default()).unwrap_or_else(|| "the graphics card it picked".into());
-                alert(format!(
-                    "The game has been running for 90 s and has not presented a single frame: the window looks black while the sound plays. \
+                alert(
+                    format!(
+                        "The game has been running for 90 s and has not presented a single frame: the window looks black while the sound plays. \
 It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card's Vulkan driver, and if it stays black send the Game Log."
-                ));
+                    ),
+                    false,
+                );
                 return;
             }
         }

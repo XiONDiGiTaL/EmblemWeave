@@ -155,6 +155,19 @@ pub fn environment_text() -> String {
             }
         }
     }
+    // The game's own log. "Black screen but the sound works" cannot be answered
+    // from the launcher's log: the engine is the only thing that knows whether a
+    // frame was presented, which GPU it picked and which pipelines it built.
+    if let Some(dir) = crate::engine::run_dir() {
+        let path = dir.join("fefw.log");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let all: Vec<&str> = text.lines().collect();
+            let from = all.len().saturating_sub(120);
+            s.push_str("\n== game log: fefw.log ==\n");
+            s.push_str(&all[from..].join("\n"));
+            s.push('\n');
+        }
+    }
     s
 }
 
