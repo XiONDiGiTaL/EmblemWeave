@@ -88,6 +88,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         ("Not built yet: press Build the game. It runs once, on this PC, from your own dump.".to_string(), p.warn)
                     };
                     ui.label(RichText::new(text).size(12.5).color(colour));
+                    // A game folder built by an older release keeps that release's engine, which is why an update can look like it changed
+                    // nothing: name the version and the one press that replaces it (#24, reported again on a build from before 0.1.20).
+                    if ready && !building {
+                        let now = env!("CARGO_PKG_VERSION");
+                        // No stamp at all is a build from before the stamp existed, which is older than any release that writes one.
+                        let stale = match crate::engine::built_by() {
+                            Some(v) => v != now,
+                            None => true,
+                        };
+                        if stale {
+                            let built = crate::engine::built_by().unwrap_or_else(|| "an earlier release".to_string());
+                            ui.label(
+                                RichText::new(format!(
+                                    "This game folder was built by {built}; press Rebuild to update its engine to {now}."
+                                ))
+                                .size(12.5)
+                                .color(p.warn),
+                            );
+                        }
+                    }
                     // One click for the tool everyone trips on: winget does the
                     // download and the permission prompt, the launcher only
                     // starts it. Restarting is needed because a new PATH is

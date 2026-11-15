@@ -951,14 +951,24 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
          [upscale]\nmode = off\n\
          [dlss]\nupscaler = auto\n\
          [diag]\nwatchdog_seconds = 30\n\
-         [fefw]\nfps60 = 1\n",
+         [fefw]\nfps60 = 1\n\
+         [engine]\nbuilt_by = {}\n",
         fwd(&run.exefs),
         fwd(&run.romfs),
         overlay.trim_end(),
         fwd(&run.save_dir),
         fwd(&root.join("work").join("shaders").join("spirv")),
         fwd(&root.join("work").join("bc7_cache")),
+        env!("CARGO_PKG_VERSION"),
     )
+}
+
+/// The launcher version the game folder was built with, from the `[engine] built_by` this launcher writes into `fefw.ini`. A build from an
+/// older release keeps its old engine, and an old engine can still refuse what the newer launcher has learned to handle (#24), so the
+/// Overview names the version instead of leaving the player to guess why a fresh launcher behaves like the old one.
+pub fn built_by() -> Option<String> {
+    let dir = run_dir()?;
+    ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned()
 }
 
 /// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
@@ -1443,6 +1453,7 @@ pub fn upscale_mode(label: &str) -> &'static str {
         "NVIDIA Image Scaling" => "nis",
         "DLSS" => "dlss",
         "DLAA" => "dlaa",
+        "XeSS" => "xess",
         _ => "off",
     }
 }
@@ -1473,19 +1484,66 @@ fn bundled_harness_in(root: &Path) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// The files FSR 3.1 is built from, either layout: the SDK 2.x loader with its upscaler, or the single v1.1.4 DLL.
+pub const FSR_FILES: &[&str] = &["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll", "amd_fidelityfx_vk.dll"];
+/// The four DLLs DLSS needs.
+pub const DLSS_FILES: &[&str] = &["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll"];
+/// The five more DLSS Frame Generation needs beside those four (`streamline_framegen_files` in the engine).
+pub const DLSS_FRAMEGEN_FILES: &[&str] = &["sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "NvLowLatencyVk.dll"];
+/// Intel's XeSS is one DLL.
+pub const XESS_FILES: &[&str] = &["libxess.dll"];
+
 /// The SDK folders the engine looks for the upscaler DLLs in, and which of them
-/// are actually there. FSR 3.1 and DLSS cannot be shipped with the launcher, so
+/// are actually there. FSR 3.1, DLSS and XeSS cannot be shipped with the launcher, so
 /// the Graphics page says where to put them instead of pretending they work.
 #[derive(Debug, Default, Clone)]
 pub struct Sdk {
-    /// `upscalers\fsr3`: AMD's FidelityFX Vulkan DLLs.
+    /// `upscalers\fsr`: AMD's FidelityFX Vulkan DLLs.
     pub fsr3: Option<PathBuf>,
     /// `upscalers\streamline`: NVIDIA's Streamline DLLs.
     pub dlss: Option<PathBuf>,
+    /// `upscalers\xess`: Intel's `libxess.dll`.
+    pub xess: Option<PathBuf>,
 }
 
-fn sdk_in(dirs: &[PathBuf], folder: &str, needed: &[&str], every: bool) -> Option<PathBuf> {
-    dirs.iter().map(|d| d.join("upscalers").join(folder)).find(|d| {
+impl Sdk {
+    /// FSR 3 frame generation goes through the v1.1.4 DLL, so the v2.4 loader pair alone cannot make frames.
+    pub fn fsr_framegen(&self) -> bool {
+        self.fsr3.as_ref().is_some_and(|d| d.join("amd_fidelityfx_vk.dll").is_file())
+    }
+
+    /// DLSS Frame Generation needs five more files beside the four DLSS ones, from the same Streamline release.
+    pub fn dlss_framegen(&self) -> bool {
+        self.dlss.as_ref().is_some_and(|d| DLSS_FRAMEGEN_FILES.iter().all(|f| d.join(f).is_file()))
+    }
+}
+
+/// Every root the vendor folders are looked under: the run folder, the game's own folder, the engine folder in the package (where the
+/// original project's `upscalers` folder sits) and the launcher's folder.
+pub fn sdk_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut add = |d: PathBuf| {
+        if !dirs.iter().any(|o| o == &d) {
+            dirs.push(d);
+        }
+    };
+    if let Some(d) = run_dir() {
+        add(d);
+    }
+    if let Some(r) = root() {
+        add(r.clone());
+        if let Some(d) = game_exe(&r).parent() {
+            add(d.to_path_buf());
+        }
+    }
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        add(d);
+    }
+    dirs
+}
+
+fn sdk_in(dirs: &[PathBuf], folders: &[&str], needed: &[&str], every: bool) -> Option<PathBuf> {
+    dirs.iter().flat_map(|d| folders.iter().map(move |f| d.join("upscalers").join(f))).find(|d| {
         if every {
             needed.iter().all(|f| d.join(f).is_file())
         } else {
@@ -1494,26 +1552,120 @@ fn sdk_in(dirs: &[PathBuf], folder: &str, needed: &[&str], every: bool) -> Optio
     })
 }
 
-/// Where the engine will look: the run folder, the game's folder and the
-/// launcher's folder.
+/// Where the engine will look, in the same order: `upscalers\fsr` (and the older `upscalers\fsr3`), `upscalers\streamline`,
+/// `upscalers\xess`, under each of `sdk_dirs`.
 pub fn sdk() -> Sdk {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(d) = run_dir() {
-        dirs.push(d);
+    let dirs = sdk_dirs();
+    let fsr = ["fsr", "fsr3"];
+    Sdk {
+        // Either FSR layout is a complete upscaler, so one of the three files being there is what the page reports.
+        fsr3: sdk_in(&dirs, &fsr, FSR_FILES, false),
+        dlss: sdk_in(&dirs, &["streamline"], DLSS_FILES, true),
+        xess: sdk_in(&dirs, &["xess"], XESS_FILES, true),
+    }
+}
+
+/// The one folder the launcher can point a player at: `upscalers` in the run folder, beside the game's ini and log. Created on demand.
+pub fn upscalers_dir() -> Option<PathBuf> {
+    run_dir().map(|d| d.join("upscalers"))
+}
+
+/// Finds the vendor DLLs in the places a player is likely to have left them (beside the launcher, in the engine folder, in Downloads and on
+/// the Desktop, one folder deep) and copies them into the run folder's `upscalers\<vendor>`. Only files that are absent are copied, and
+/// nothing is removed, so running it twice changes nothing.
+pub fn adopt_upscaler_files() -> Result<String, String> {
+    let root_dir = upscalers_dir().ok_or(crate::platform::NO_DATA_DIR)?;
+    let mut sources: Vec<PathBuf> = Vec::new();
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        sources.push(d);
     }
     if let Some(r) = root() {
-        if let Some(d) = game_exe(&r).parent() {
-            dirs.push(d.to_path_buf());
+        sources.push(r.clone());
+    }
+    for key in ["USERPROFILE", "HOME"] {
+        if let Ok(home) = std::env::var(key) {
+            if home.is_empty() {
+                continue;
+            }
+            let home = PathBuf::from(home);
+            sources.push(home.join("Downloads"));
+            sources.push(home.join("Desktop"));
         }
     }
-    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        dirs.push(d);
+    // One level deeper: the DLLs arrive inside a folder named after the SDK, not loose in Downloads.
+    let shallow = sources.clone();
+    for s in shallow {
+        if let Ok(entries) = std::fs::read_dir(&s) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    sources.push(p);
+                }
+            }
+        }
     }
-    Sdk {
-        // The SDK 2.x loader, or the single v1.1.4 DLL: FSR 3.1 runs on either.
-        fsr3: sdk_in(&dirs, "fsr3", &["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"], false),
-        dlss: sdk_in(&dirs, "streamline", &["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll"], true),
+    sources.dedup();
+    let mut copied = 0usize;
+    let mut where_from: Option<PathBuf> = None;
+    for (folder, files) in [
+        ("fsr", FSR_FILES),
+        ("streamline", DLSS_FILES),
+        ("streamline", DLSS_FRAMEGEN_FILES),
+        ("xess", XESS_FILES),
+    ] {
+        for name in files {
+            let dest = root_dir.join(folder).join(name);
+            if dest.is_file() {
+                continue;
+            }
+            let Some(src) = sources.iter().map(|s| s.join(name)).find(|p| p.is_file()) else { continue };
+            if std::fs::create_dir_all(root_dir.join(folder)).is_err() {
+                continue;
+            }
+            // A running game holds its DLLs; a copy that fails leaves the folder as it was and the report says what is still missing.
+            if std::fs::copy(&src, &dest).is_ok() {
+                copied += 1;
+                where_from.get_or_insert_with(|| src.parent().map(Path::to_path_buf).unwrap_or_default());
+            }
+        }
     }
+    let sdk = sdk();
+    let mut have: Vec<&str> = Vec::new();
+    let mut lack: Vec<String> = Vec::new();
+    if sdk.fsr3.is_some() {
+        have.push("FSR 3.1");
+        if sdk.fsr_framegen() {
+            have.push("FSR 3 frame generation");
+        }
+    } else {
+        lack.push("AMD's FidelityFX DLLs".into());
+    }
+    match &sdk.dlss {
+        Some(_) => {
+            have.push("DLSS");
+            if sdk.dlss_framegen() {
+                have.push("DLSS Frame Generation");
+            }
+        }
+        None => lack.push("NVIDIA's Streamline DLLs".into()),
+    }
+    if sdk.xess.is_some() {
+        have.push("XeSS");
+    }
+    let from = where_from.map(|p| format!(" from {}", p.display())).unwrap_or_default();
+    let found = if copied == 0 {
+        "No new upscaler files were found".to_string()
+    } else {
+        format!("{copied} upscaler file(s) copied{from} into {}", root_dir.display())
+    };
+    let (ok, missing) = if have.is_empty() {
+        (String::new(), format!("; still missing: {}", lack.join(", ")))
+    } else if lack.is_empty() {
+        (format!("; ready: {}", have.join(", ")), String::new())
+    } else {
+        (format!("; found: {}", have.join(", ")), format!("; missing: {}", lack.join(", ")))
+    };
+    Ok(format!("{found}{ok}{missing}"))
 }
 
 /// Set one key of an ini in place, adding its section when the file has none.
@@ -1783,6 +1935,7 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     let mode = match upscale_mode(&g.upscaling) {
         "fsr3" if fsr_dll(&sdk).is_none() => "fsr1",
         "dlss" | "dlaa" if sdk.dlss.is_none() => "off",
+        "xess" if sdk.xess.is_none() => "fsr1",
         other => other,
     };
     d.insert("upscale.mode".into(), mode.into());
@@ -1816,6 +1969,9 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     }
     if let Some(dir) = &sdk.dlss {
         d.insert("upscale.dlss_dll".into(), fwd(dir));
+    }
+    if let Some(dir) = &sdk.xess {
+        d.insert("upscale.xess_dll".into(), fwd(dir));
     }
     // The rest of the Rendering page: the preset the temporal upscalers scale by, the scene buffer's
     // share of the output, and what makes the frames between two rendered ones.
@@ -1882,6 +2038,7 @@ fn dlss_upscaler_word(label: &str) -> &'static str {
         "TAAU" => "taau",
         "DLSS" => "dlss",
         "FSR 3" => "fsr3",
+        "XeSS" => "xess",
         "Bilinear" => "bilinear",
         _ => "auto",
     }
@@ -1893,6 +2050,7 @@ fn dlss_upscaler_label(word: &str) -> Option<&'static str> {
         "taau" => "TAAU",
         "dlss" => "DLSS",
         "fsr3" => "FSR 3",
+        "xess" => "XeSS",
         "bilinear" => "Bilinear",
         _ => return None,
     })

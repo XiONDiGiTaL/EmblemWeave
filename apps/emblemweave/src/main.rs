@@ -1182,6 +1182,19 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    // The Graphics page's "Look for the files" without the window, for a support report or a script.
+    if args.iter().any(|a| a == "--adopt-upscalers") {
+        match engine::adopt_upscaler_files() {
+            Ok(m) => {
+                println!("{m}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("adopt-upscalers: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
         let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });

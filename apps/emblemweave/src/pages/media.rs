@@ -5,13 +5,13 @@
 //! today. Each page says so at the top.
 
 use crate::theme;
-use crate::widgets;
+use crate::widgets::{self, Tone};
 use crate::App;
 use eframe::egui::{self, RichText};
 
 /// Every upscaler the engine can run itself. `engine::upscale_mode` maps these
 /// labels to the modes in its ini.
-const UPSCALERS: &[&str] = &["Off", "FSR 1.0", "FSR 3.1", "NVIDIA Image Scaling", "DLSS", "DLAA"];
+const UPSCALERS: &[&str] = &["Off", "FSR 1.0", "FSR 3.1", "NVIDIA Image Scaling", "DLSS", "DLAA", "XeSS"];
 
 /// The engine's `[upscale] sharpness` steps: Off, Low, its own 0.8, and 1.0.
 const SHARPENING: &[&str] = &["Off", "Low", "Default", "High"];
@@ -30,6 +30,10 @@ fn upscaler_help(current: &str, sdk: &crate::engine::Sdk) -> String {
             Some(dir) => format!("NVIDIA's temporal upscaler through Streamline, in {}. Applies at the game's next start.", dir.display()),
             None => "NVIDIA's temporal upscaler. Needs NVIDIA's four Streamline DLLs in upscalers\\streamline next to the game, on an RTX GPU; without them the engine keeps its own upscaler.".into(),
         },
+        "XeSS" => match &sdk.xess {
+            Some(dir) => format!("Intel's temporal upscaler through libxess.dll in {}. Applies at the game's next start.", dir.display()),
+            None => "Intel's temporal upscaler, which runs on any GPU with DP4a (best on Intel Arc). Needs libxess.dll in upscalers\\xess next to the game, and the Visual C++ 2015-2022 runtime; without them the engine keeps its own upscaler.".into(),
+        },
         _ => "The picture is scaled by the presentation path alone.".into(),
     }
 }
@@ -44,7 +48,7 @@ fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
 
 const UPSCALE_QUALITIES: &[&str] = &["Native", "Quality", "Balanced", "Performance", "Ultra performance"];
 const FRAME_GENERATION: &[&str] = &["Off", "DLSS Frame Generation", "FSR 3 Frame Generation"];
-const DLSS_UPSCALERS: &[&str] = &["Automatic", "TAAU", "DLSS", "FSR 3", "Bilinear"];
+const DLSS_UPSCALERS: &[&str] = &["Automatic", "TAAU", "DLSS", "FSR 3", "XeSS", "Bilinear"];
 const ASTC_QUALITIES: &[&str] = &["High", "Fast", "Uncompressed"];
 const GPU_CHOICES: &[&str] = &["Automatic", "Discrete", "Integrated"];
 const COMPILE_THREADS: &[(u32, &str)] = &[(0, "Automatic"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (6, "6"), (8, "8")];
@@ -70,6 +74,7 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
          but draw commands are recorded and counted, not rendered yet. Everything on this page except Quality and Precompile shaders is handed to the engine \
          in its ini files before every start, so the game itself uses it.",
     );
+    upscaler_files(app, ui);
     let g = &mut app.config.graphics;
     widgets::section(ui, &p, "Display", |ui| {
         widgets::setting_row(ui, &p, "Resolution", "The picture's size and the window's, taken at the game's next start. Native display keeps the game's own console size.", |ui| {
@@ -231,10 +236,10 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
+    let desired = crate::engine::desired_values(g, &app.config.audio);
     // The files the game actually reads, so a change the launcher has written
     // for the next start is visibly waiting rather than silently absent.
     if let Some(l) = crate::engine::live() {
-        let desired = crate::engine::desired_values(&g, &app.config.audio);
         let (pending, kept) = waiting(&desired, &l.values);
         widgets::section(ui, &p, "What the game will start with", |ui| {
             widgets::kv(ui, &p, "Upscaler", crate::engine::upscale_label(&l.upscaling));
@@ -265,6 +270,63 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             waiting_line(ui, &p, pending, kept);
         });
     }
+}
+
+/// The vendor DLLs the engine cannot ship, whether they are on disk, and the two buttons that make finding them the launcher's job rather
+/// than the player's. A report that says "not running" without saying what is missing and where it goes is how #26 was filed.
+fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.config.theme.palette();
+    let sdk = crate::engine::sdk();
+    let dir = crate::engine::upscalers_dir();
+    let fsr = match &sdk.fsr3 {
+        Some(d) if sdk.fsr_framegen() => format!("found in {}, with frame generation", d.display()),
+        Some(d) => format!("found in {}; frame generation still needs amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)", d.display()),
+        None => "missing: amd_fidelityfx_upscaler_vk.dll with amd_fidelityfx_loader_vk.dll (FSR SDK v2.4), or amd_fidelityfx_vk.dll (v1.1.4)".to_string(),
+    };
+    let dlss = match &sdk.dlss {
+        Some(d) if sdk.dlss_framegen() => format!("found in {}, with frame generation", d.display()),
+        Some(d) => format!("found in {}; frame generation still needs sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll, nvngx_dlssg.dll and NvLowLatencyVk.dll", d.display()),
+        None => "missing: sl.interposer.dll, sl.common.dll, sl.dlss.dll and nvngx_dlss.dll from Streamline".to_string(),
+    };
+    let xess = match &sdk.xess {
+        Some(d) => format!("found in {}", d.display()),
+        None => "missing: libxess.dll from the Intel XeSS SDK".to_string(),
+    };
+    let where_to = match &dir {
+        Some(d) => format!("Put them in {} (fsr, streamline and xess), or in an upscalers folder beside the game.", d.display()),
+        None => "Put them in an upscalers folder beside the game.".to_string(),
+    };
+    widgets::section(ui, &p, "Upscaler files", |ui| {
+        widgets::status_line(ui, &p, if sdk.fsr3.is_some() { Tone::Ok } else { Tone::Bad }, "FSR 3.1", &fsr);
+        widgets::status_line(ui, &p, if sdk.dlss.is_some() { Tone::Ok } else { Tone::Bad }, "DLSS", &dlss);
+        widgets::status_line(ui, &p, if sdk.xess.is_some() { Tone::Ok } else { Tone::Bad }, "XeSS", &xess);
+        ui.add_space(theme::SPACE_S);
+        let note = format!(
+            "{} AMD, NVIDIA and Intel do not let these travel with EmblemWeave, so the game falls back to its own temporal upscaler until they are there; the F1 menu's Graphics tab then names them under Files found.",
+            where_to
+        );
+        ui.label(RichText::new(note).size(12.5).color(p.body));
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal(|ui| {
+            if widgets::button(ui, &p, "Open the upscalers folder", dir.is_some()).clicked() {
+                if let Some(d) = &dir {
+                    for f in ["fsr", "streamline", "xess"] {
+                        let _ = std::fs::create_dir_all(d.join(f));
+                    }
+                    let _ = std::process::Command::new("explorer").arg(d).spawn();
+                }
+            }
+            if widgets::button(ui, &p, "Look for the files", true)
+                .on_hover_text("Searches beside the launcher, the engine folder, Downloads and the Desktop, one folder deep, and copies what it finds into the upscalers folder.")
+                .clicked()
+            {
+                match crate::engine::adopt_upscaler_files() {
+                    Ok(m) => app.notify(m, Tone::Ok),
+                    Err(e) => app.notify(e, Tone::Bad),
+                }
+            }
+        });
+    });
 }
 
 pub fn audio(app: &mut App, ui: &mut egui::Ui) {
