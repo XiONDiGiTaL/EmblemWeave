@@ -14,11 +14,11 @@ project and removed the repository from GitHub. **Obersteinn** had saved the las
 release, `fefw-recomp-0.2.0-win64.zip`, with its build tools and documentation,
 and shared it so the work would not be lost
 ([archive](https://drive.google.com/file/d/1U8_QkcL7yxbW8eUTwGywHsynLCOCshHu/view)).
-That archive is the only copy of the 0.2.0 package we know of.
+That archive is the only known copy of the 0.2.0 package.
 
-## What we keep and use
+## What this repository keeps
 
-- **The engine** in `engine/fefw-recomp`: the last upstream commit we had
+- **The engine** in `engine/fefw-recomp`: the last upstream commit taken in
   (`501f7c0`, 9 November 2026) plus EmblemWeave's own changes, such as serving
   zstd-packed `.nup` entries from a decompressed cache. It is committed here as
   ordinary files rather than as a submodule, since a submodule would point at a
@@ -36,7 +36,7 @@ That archive is the only copy of the 0.2.0 package we know of.
   a resumable stamp) is the reference the launcher's own pipeline and its
   Build the game checks follow.
 
-## What we do not ship
+## What it does not ship
 
 The packaged `fefw-launcher.exe`, `fefw_rt.dll`, `renhdrum.dll`, the bundled
 Python and Zig runtimes and the translation files stay out of this repository.
@@ -58,22 +58,22 @@ About page.
 ## The 0.2.0 package, audited
 
 The archive was compared against this tree file by file. Every build-tool file it carries is present here already: its
-`tools/build/recomp` (41 files) is a subset of our `recomp/` (135), its `sdk/` pieces (`fefw.ico`, `fefw.manifest`,
-`fefw.rc`, `fefw_rt_api.h`, `fefw_stub.cpp`) live in `game-build/fefw`, `dump_hashes.json` is in
+`tools/build/recomp` (41 files) is a subset of this repository's `recomp/` (135), its `sdk/` pieces (`fefw.ico`,
+`fefw.manifest`, `fefw.rc`, `fefw_rt_api.h`, `fefw_stub.cpp`) live in `game-build/fefw`, `dump_hashes.json` is in
 `apps/emblemweave/data`, and the runtime font it ships (`fonts/DejaVuSans.ttf`) is already committed at
 `runtime/assets/fonts/`. `fefw_fma.c` and `fefw_rt.lib` are products of its release-only `FEFW_RT_DLL` build, which this
-project does not use. So nothing from the package is missing here.
+project does not use. Nothing from the package is missing here.
 
 One delta is worth recording: the package's `recomp/games/fefw/main.sites` is the only file whose contents differ from
-ours, and it has three extra lines that point at two features our runtime does not implement yet, a real-time map cursor
-step (`cursor_real_time`) and a stat radar chart. Copying the sites without the hooks would do nothing, so they are left
-for whoever ports those two features.
+this repository's, and its three extra lines point at two features the runtime does not implement yet, a real-time map
+cursor step (`cursor_real_time`) and a stat radar chart. Copying the sites without the hooks would do nothing, so they
+wait for whoever ports those two features.
 
 ## The FE3H Recomp, inspected
 
-`E:\Quiver Launcher\Apps\FireEmblemThreeHouses-FE3HRecomp` is a built install of *FE3H Recomp* v0.1.6, a MIT-licensed
-static recompilation of *Fire Emblem: Three Houses* built on [LAS Recomp](https://github.com/peiikai/LASRecomp) by
-Peiikai (also MIT), with the Three Houses changes by onerag90. It is not a source tree: the folder holds
+A built install of *FE3H Recomp* v0.1.6 was inspected: an MIT-licensed static recompilation of
+*Fire Emblem: Three Houses* built on [LAS Recomp](https://github.com/peiikai/LASRecomp) by Peiikai (also MIT), with the
+Three Houses changes by onerag90. It is not a source tree: the folder holds
 `fe3hrecomp.exe`, its DLLs, `cache/`, `extracted/`, a bundled Zig, a PyInstaller `lasgen`, and the only sources are six
 files in `gamelib-src/` (`cpu.h`, `gamelib.h`, `simd.h`, `simd_fp.h`, `gamelib_entry.c`, an empty
 `hle_symbols.txt`). Nothing from it is redistributed here.
@@ -84,8 +84,8 @@ every start and adopts a value changed in the menu, the same way the upscaler is
 
 What was checked and already matches: `runtime/src/services/audren` carries the reverb commands, edge matrix and 3D
 delay-line reverb their port had to add; shader stages are built on workers, linked from ready parts and only waited
-for when nothing is ready, with the on-disk cache our play folder keeps; upscaling (FSR 1.0, NIS, FSR 3.1, DLSS/DLAA),
-render scale, DLC discovery, movies and Atmosphere cheat codes are all present on our side.
+for when nothing is ready, with the on-disk cache the play folder keeps; upscaling (FSR 1.0, NIS, FSR 3.1, DLSS/DLAA),
+render scale, DLC discovery, movies and Atmosphere cheat codes are all present in the engine.
 
 Two of its notes are worth keeping, and neither is a file to copy:
 
@@ -98,14 +98,14 @@ Two of its notes are worth keeping, and neither is a file to copy:
   the equivalent gap recorded in `recomp/docs/GAPS.md`.
 - Cheats that patch the main module's *code*. Their generator compiles the patched instructions beside the originals
   and picks at run time, because a recompiled game no longer runs the bytes a cheat rewrites. Our `cheats.rs` states
-  the limitation instead. It is the one feature in their port that our cheats page cannot do.
+  the limitation instead. It is the one feature in their port that the cheats page cannot do.
 
 ## The Engage PC Recomp, inspected
 
-`E:\Quiver Launcher\Apps\FireEmblemEngage-EngagePCRecomp` is *Engage PC Recomp* 0.1.0-alpha.6 at
-`5e0ce98f120bd669cb79d3b365d0da1d6d54145b`, MIT (Valiantsin Dzerakh), built on TotK Recomp (also MIT). Unlike the FE3H
-install this one ships its sources: a Python recompiler (`recomp/`, 4,951 lines), a C runtime (`runtime/`, 152 files),
-the setup and launcher GUIs, the tools, and a bundled Python, LLVM and Ninja. Nothing from it is redistributed here; it
+A second install was inspected, *Engage PC Recomp* 0.1.0-alpha.6 at `5e0ce98f120bd669cb79d3b365d0da1d6d54145b`, MIT
+(Valiantsin Dzerakh), built on TotK Recomp (also MIT). Unlike the FE3H install this one ships its sources: a Python
+recompiler (`recomp/`, 4,951 lines), a C runtime (`runtime/`, 152 files), the setup and launcher GUIs, the tools, and a
+bundled Python, LLVM and Ninja. Nothing from it is redistributed here; it
 is MIT, which the GPL recompiler may take from the way it already takes from smo-recomp and SuperMarioWonderRecomp.
 
 Three mechanisms are worth knowing about:
@@ -115,23 +115,23 @@ Three mechanisms are worth knowing about:
   lifted twice and the generated C runs `if (rt_patch_on[set]) { replacement } else { original }`, so a code patch is
   switched from the menu instead of being fixed at generation time. Runtime-owned values live in a reserved 4 KiB page
   after the module image (`@page:x<n>` encodes `adrp` to it). Our `load_sites` has `patch <addr> <orig> <new>`, which is
-  compile-time only, and so is the only feature in it we cannot express.
+  compile-time only, and is the only feature in it this project cannot express.
 - **Spin-wait detection.** `tools/spin_waits.py` (adapted from nxnative, MIT, Copyright (c) 2026 seedds) proves a loop
   cannot leave by itself - only loads, register and flag arithmetic, direct branches and barriers on every path back,
   nothing live at the head written - and names its back-edges. Those are lifted as `rt_spin_gate(c, head); goto head`,
   which slows the poll and hands the virtual core to a waiting thread. Our kernel already blocks in
-  `kernel/busy_mutex.cpp`, but we have no static detector to find loops that burn a core without one.
+  `kernel/busy_mutex.cpp`, but there is no static detector to find loops that burn a core without one.
 - **Static jump-table resolution.** `recomp/jumptables.py` (1,345 lines) walks back from the `br` over its block and
   predecessor blocks, evaluates paths symbolically, and iterates tables and function-wide facts to a common fixpoint; it
   handles a dispatch block placed elsewhere (`b.ls`), `ccmp` chains and table bases hoisted out of loops. Our
   `nxrecomp/jumptables.py` (287 lines, adapted from SuperMarioWonderRecomp) covers clang's compressed tables and
-  table-relative `ldrsw` tables, and falls back to a dispatch over the function otherwise. That fallback is why our
-  STATUS still calls jump tables partial.
+  table-relative `ldrsw` tables, and falls back to a dispatch over the function otherwise. That fallback is why
+  [STATUS.md](STATUS.md) still calls jump tables partial.
 
-What we already have that they also needed: the same site kinds minus the run-time switch (`patch`, `inline`,
+What the engine already has that they also needed: the same site kinds minus the run-time switch (`patch`, `inline`,
 `midhook`, `entryhook`, `dynimm`, `noinline`, `jtable`), C++ exception lifting, a config file, an audio mixer with
 reverb, ASTC decoding, FSR shaders and an extractor that unpacks `.nsp`.
 
-One experiment did not transfer: their `tools/spin_waits.py` run against our own ExeFS stops in `recomp/nso.py` with an
-LZ4 block error on the first module it opens, so their readers cover their module set rather than ours. The tools are
+One experiment did not transfer: their `tools/spin_waits.py` run against this title's ExeFS stops in `recomp/nso.py` with an
+LZ4 block error on the first module it opens, so their readers cover their module set rather than this title's. The tools are
 Engage-specific; the three designs above are not.

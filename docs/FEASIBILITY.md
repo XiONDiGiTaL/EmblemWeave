@@ -4,6 +4,7 @@
 **Goal:** a native Windows x64 build that executes the game's own code, built by [XiØN](https://github.com/XiONDiGiTaL)
 **Report date:** 8 November 2026
 **Status of this report:** every claim below was measured against the user's own dump. Numbers are reproducible with the tools in this repository.
+**Progress since:** [STATUS.md](STATUS.md). The measurements below are the ones taken for this report, and where they have moved on, STATUS.md carries the current figure.
 
 ---
 
@@ -17,8 +18,7 @@ The supplied package is **not** a Switch 1 title. Three independent facts establ
 | Title ID | `04007EF0...`, where the `0x0400` application prefix is reserved for Switch 2 titles (Switch 1 uses `0x0100`) |
 | Executable format | NSO0 modules with 64 MiB+ rodata and Switch 2 process metadata, segmented differently from Switch 1 |
 
-The `NUP` is an encrypted retail package and was **not** usable directly. A decrypted view of the content already existed on this machine at
-`E:\Switch2\Games\.nup-convert-h_e2mfw5\.nup-nsp-f_aicmw_\`, containing a decrypted PFS0 (NSP) and an extracted ExeFS/romfs. EmblemWeave consumes that extracted material and never touches, modifies, or redistributes the original package.
+The `NUP` is an encrypted retail package and was **not** usable directly. A decrypted view of the content already existed on this machine: a decrypted PFS0 (NSP) with an extracted ExeFS and romfs. EmblemWeave reads that extracted material and never touches, modifies or redistributes the original package.
 
 ### Executable modules (measured, `ew-inspect`)
 
@@ -102,7 +102,7 @@ Every decoded size matches the declaration, so `tools/zbic_extract.py` is a trus
 | **B. Full decompilation to source** | Not tractable: 27.5 MB of text with stripped symbols and heavy inlining. Viable only for small, hot subsystems later. |
 | **C. Hybrid** | **Recommended end state.** Static recompilation for bulk code, hand-written native implementations for the platform layer (graphics, audio, input, filesystem), and reconstructed high-level code where behaviour must be cleanly reimplemented. |
 
-Frameworks examined: N64Recomp and XenonRecomp target different ISAs (MIPS/PPC) and cannot be reused; McSema/Remill lift to LLVM IR but supply no Switch loader, no service layer and no graphics; Ghidra is the right tool for *analysis*, not for producing runnable translations. Public Switch recompilation projects (`ssbu-recomp`, `smo-recomp`, `dkb-pc-recomp`) are title-specific and confirm the shape of the work: lifter + per-title runtime + shader translation.
+Frameworks examined: N64Recomp and XenonRecomp target other ISAs (MIPS, PPC) and cannot be reused; McSema and Remill lift to LLVM IR but bring no Switch loader, no service layer and no graphics; Ghidra is the right tool for *analysis*, not for runnable translations. The public Switch recompilation projects (`ssbu-recomp`, `smo-recomp`, `dkb-pc-recomp`) are title-specific, and together they confirm the shape of the work: a lifter, a per-title runtime and shader translation.
 
 **Recommendation: Option C**, with the lifter and runtime built here as the reusable core.
 
@@ -112,7 +112,7 @@ Frameworks examined: N64Recomp and XenonRecomp target different ISAs (MIPS/PPC) 
 | --- | --- |
 | Container parsing | All 6 modules parsed; segment boundaries verified to EOF |
 | Code extraction | 6/6 modules decoded (app via ZBIC bridge), sizes match declarations |
-| Decoder coverage | **86.18 %** of `app` text decodes to supported instructions (6,886,588 words; 951,908 unsupported) |
+| Decoder coverage | **86.18%** of `app` text decodes to supported instructions (6,886,588 words, 951,908 unsupported) |
 | Lifting | 1,352 register-only blocks (2,783 instructions) lifted with 0 unsupported instructions in the lifted set |
 | Emitted C compiles | `zig cc -std=c99 -Wall`: clean build of `app_lift.c` |
 | Execution | Lifted guest `0x81468` executed natively; results **bit-identical** to the independent interpreter (x5=`cf1bbcdcbfa56300`, x6=`cf1bbcdcbf9b0000`, x7=`cf1bbcdcbb000000`, pc=`0x814dc`) |
@@ -121,19 +121,19 @@ Frameworks examined: N64Recomp and XenonRecomp target different ISAs (MIPS/PPC) 
 ## 5. Major obstacles (honest list)
 
 1. **CFG recovery.** Blocks currently end at the first control-flow instruction; conditional branches mark a block partial and the runtime halts instead of guessing. Jump tables and indirect branches are the next lift milestone.
-2. **14 % undecoded text.** SIMD/FP, bitfield-extract and system instructions are not yet modelled. Each becomes either an emitter case or a documented trap.
+2. **14% undecoded text.** SIMD/FP, bitfield-extract and system instructions are not yet modelled. Each becomes either an emitter case or a documented trap.
 3. **No service layer.** Nothing in `nn::os`, `nn::mem`, `nn::fs`, `nn::hid`, `nn::audio`, `nn::vi` or `nn::nvn` is implemented. Nine blocked services are listed in the runtime registry, each with a reason.
 4. **NVN2 graphics.** The renderer needs Switch 2 (Ampere-class) shader translation to SPIR-V. Public work exists but is incomplete; mesh shaders, VRS and sparse virtual textures are open problems.
 5. **Threading and scheduling.** The guest's synchronisation primitives must be mapped onto the host without changing observable ordering.
-6. **No C toolchain on this machine by default.** Verification used `zig cc` from a Python wheel. Release engineering needs a pinned LLVM/MSVC toolchain.
+6. **No pinned C toolchain.** Verification used `zig cc` from a Python wheel; release engineering needs its own LLVM/MSVC toolchain.
 
 ## 6. Milestones ahead
 
 | Phase | Work | Exit criterion |
 | --- | --- | --- |
 | 3a | Port ZBIC decoding to Rust (remove Python bridge) | `ew-format` decodes `app` with no external tool |
-| 3b | CFG recovery: basic blocks, conditional successors, jump tables | ≥95 % of text reachable; blocks no longer partial |
-| 3c | Widen instruction coverage (SIMD/FP, bitfield, system) | ≥99 % decodable |
+| 3b | CFG recovery: basic blocks, conditional successors, jump tables | ≥95% of text reachable, blocks no longer partial |
+| 3c | Widen instruction coverage (SIMD/FP, bitfield, system) | ≥99% decodable |
 | 3d | `nn::os`/`nn::mem` HLE with a guest heap and threads | `app` reaches its own initialisation and reports a clean failure at the first unimplemented service |
 | 4 | NVN2 device + shader translation to Vulkan | First clear colour rendered from the game's own init path |
 | 5 | Filesystem, audio, input HLE | First boot to title screen |

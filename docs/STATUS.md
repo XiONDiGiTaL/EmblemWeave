@@ -1,33 +1,30 @@
 # EmblemWeave status
 
-**Summary: the game is playable through the engine.** EmblemWeave builds and
-runs the game with [fefw-recomp](https://github.com/Goldoire/fefw-recomp)
-(GPL-3.0, at `engine/fefw-recomp`): on this PC (AMD Radeon RX 7900 XT) the
-retail game, update 131072, runs at about 60 fps with sound, from the
-launcher's **Build the game** and **Play**. The rest of this page covers
-EmblemWeave's own Rust recompiler and runtime, a research path that now
-runs the game's frame loop past the autosave notice and the opening movie
-into its first map load. Its command buffers now carry out the clears and
-texel copies that write render targets and swap textures, and the launcher's
-runtime presents the presented swap texture in a window of its own; the
-game's draws are still counted rather than rendered, so the window does not
-yet show the game's picture.
+**The game is playable through the engine.** EmblemWeave builds and runs the
+game with [fefw-recomp](https://github.com/Goldoire/fefw-recomp) (GPL-3.0, at
+`engine/fefw-recomp`): on this PC (AMD Radeon RX 7900 XT) the retail game,
+update 131072, runs at about 60 fps with sound, from the launcher's **Build the
+game** and **Play**.
 
-A 25-minute headless run reaches 27.9 billion instructions and then stops
-where the game aborts: its pool of sound handles fills up, because the host
-audio renderer never reports a voice's wave buffers as played, so no handle is
-ever released. That is the next blocker.
+The rest of this page covers EmblemWeave's own Rust recompiler and runtime,
+which is a research path: it now runs the game's frame loop past the autosave
+notice and the opening movie into its first map load. Its command buffers carry
+out the clears and texel copies that write render targets and swap textures, and
+the runtime presents the swap texture in a window of its own. Draws are still
+counted rather than rendered, so the window does not yet show the game's
+picture.
 
-Last verified: 9 November 2026, retail `main` module of version 1.1.0, release build. The
-state of the code itself (native dispatch behind `--native`, the window that presents
-frames) was re-read on 13 November 2026 without a run; every measurement here is still
-the 9-10 November one.
+A 25-minute headless run reaches 27.9 billion instructions and stops where the
+game aborts: its pool of sound handles fills up, because the host audio renderer
+never reports a voice's wave buffers as played, so no handle is released. That is
+the next blocker.
 
-This page is the summary: it records what was measured on the game data.
-[docs/ENGINE.md](ENGINE.md) is the engine's own plan and is kept current with the code.
-Where the two disagree, this page carries the measurement and ENGINE.md carries the
-detail. The row about native execution below had gone stale and is corrected here:
-native code runs, as an option, and has since `ew-native` was added.
+Last verified: 9 November 2026, retail `main` module of version 1.1.0, release
+build. The code's own state (native dispatch behind `--native`, the window that
+presents frames) was re-read on 13 November 2026 without a run, so every
+measurement here is still the 9 to 10 November one. [docs/ENGINE.md](ENGINE.md)
+is the engine's own plan and follows the code; where the two disagree, this page
+carries the measurement and ENGINE.md carries the detail.
 
 ## How to read the states
 

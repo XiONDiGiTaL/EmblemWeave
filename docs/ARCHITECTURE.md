@@ -4,7 +4,7 @@
 
 1. **Evidence over assumption.** Format layouts in this project were derived from the dump and then verified by construction (decode boundaries must land exactly where the header says).
 2. **Loud failure.** Unsupported instructions and unimplemented services trap with an address and a reason. No silent no-ops, no fake successes.
-3. **Two implementations of instruction semantics, and an outside judge.** The C emitter is the product; the interpreter exists to disagree with it when it is wrong. Because both share one decoder, a third, independent CPU model (Unicorn, development only) checks the interpreter instruction by instruction.
+3. **Two implementations of instruction semantics, judged from outside.** The C emitter is the product; the interpreter exists to disagree with it. Because both share one decoder, a third, independent CPU model (Unicorn, development only) checks the interpreter instruction by instruction.
 4. **The launcher is not the runtime.** They share a format layer and nothing else.
 
 ## Components
@@ -63,7 +63,7 @@ int ew_fn_00081468(Cpu *cpu)
 
 `x31` is context-dependent (XZR or SP); the `EW_R`/`EW_W` macros encode that rule, and the index expression clamps 31 so the unused branch of the ternary is never an out-of-bounds access.
 
-### `ew-boot` the whole-program dispatcher
+### `ew-boot`, the whole-program dispatcher
 
 * `Module`: maps `text`, `rodata`, and `data` at the addresses the code expects,
   and derives the entry stub from the loader header at the start of `.text`.
@@ -75,7 +75,6 @@ int ew_fn_00081468(Cpu *cpu)
   lock, semaphore, page allocation, thread-local storage, thread queries). State
   lives in the caller's guest object with a magic tag, so no handler needs global
   state and two runs cannot see each other.
-* `math`: the C math library, whose results are exact because IEEE 754 is.
 * `cxx`: the libc++ entry points the module imports (`std::random_device`,
   the static-initialisation guards, `__hash_memory`, `__next_prime`, nothrow
   `operator new`).
@@ -91,8 +90,8 @@ int ew_fn_00081468(Cpu *cpu)
   answered from launcher settings and the title's `control.nacp`.
 * `libc`: the musl C runtime: formatted I/O with AAPCS64 varargs, `sscanf`,
   `strto*`, stdio over `nn::fs`, pthreads on the scheduler, `rand`, `errno`.
-* `math`: musl's libm (through the `libm` crate), arguments in `s`/`d`
-  registers, results in `v0`.
+* `math`: musl's libm (through the `libm` crate), exact because IEEE 754 is;
+  arguments in `s`/`d` registers, results in `v0`.
 * `boot`: the dispatch loop. It follows nnSdk's startup order
   (`nninitStartup`, module entry, `nnMain`), runs recovered functions, executes
   host services, switches threads, and stops with a typed reason.
@@ -101,7 +100,7 @@ The stop reason is the product of this crate. A run that ends with
 `called std::__1::__hash_memory` has proved which service to build next.
 
 A host service must state a contract that is true in the host's model. Mutexes
-can be exact because exactly one guest thread exists; `CreateThread` cannot be,
+can be exact because exactly one guest thread exists. `CreateThread` cannot be,
 so it is absent and stops the run by name instead of dropping work.
 
 ### `ew-runtime` host services
