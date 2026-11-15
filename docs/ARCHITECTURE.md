@@ -2,9 +2,13 @@
 
 ## Principles
 
-1. **Evidence over assumption.** Format layouts in this project were derived from the dump and then verified by construction (decode boundaries must land exactly where the header says).
-2. **Loud failure.** Unsupported instructions and unimplemented services trap with an address and a reason. No silent no-ops, no fake successes.
-3. **Two implementations of instruction semantics, judged from outside.** The C emitter is the product; the interpreter exists to disagree with it. Because both share one decoder, a third, independent CPU model (Unicorn, development only) checks the interpreter instruction by instruction.
+1. **Evidence over assumption.** Format layouts in this project were derived from the dump and then verified
+   by construction (decode boundaries must land exactly where the header says).
+2. **Loud failure.** Unsupported instructions and unimplemented services trap with an address and a reason.
+   No silent no-ops, no fake successes.
+3. **Two implementations of instruction semantics, judged from outside.** The C emitter is the product; the
+   interpreter exists to disagree with it. Because both share one decoder, a third, independent CPU model
+   (Unicorn, development only) checks the interpreter instruction by instruction.
 4. **The launcher is not the runtime.** They share a format layer and nothing else.
 
 ## Components
@@ -45,7 +49,8 @@
 ### `ew-lift` static recompilation
 
 * `aarch64`: decoder producing a typed `Op`. Unknown words become `Op::Unsupported`, never a guess.
-* `scan`: discovery of dispatchable addresses (entry, branch targets, call targets, call return sites) and linear block lifting.
+* `scan`: discovery of dispatchable addresses (entry, branch targets, call targets, call return sites) and
+  linear block lifting.
 * `lift`: C emission, one statement per guest instruction, return-to-dispatcher at every control-flow edge.
 * `interpreter`: reference semantics for differential testing.
 
@@ -61,7 +66,8 @@ int ew_fn_00081468(Cpu *cpu)
 }
 ```
 
-`x31` is context-dependent (XZR or SP); the `EW_R`/`EW_W` macros encode that rule, and the index expression clamps 31 so the unused branch of the ternary is never an out-of-bounds access.
+`x31` is context-dependent (XZR or SP); the `EW_R`/`EW_W` macros encode that rule, and the index expression
+clamps 31 so the unused branch of the ternary is never an out-of-bounds access.
 
 ### `ew-boot`, the whole-program dispatcher
 
@@ -106,7 +112,8 @@ so it is absent and stops the run by name instead of dropping work.
 ### `ew-runtime` host services
 
 * `image::GuestMemory`: region-bounded guest bus. Reads/writes outside a mapped region are errors; `.text` is not writable.
-* `hle::HleRegistry`: service table where every entry is `Implemented` or `Unimplemented(reason)`. The default set is drawn from symbol names actually present in the dump.
+* `hle::HleRegistry`: service table where every entry is `Implemented` or `Unimplemented(reason)`. The default
+set is drawn from symbol names actually present in the dump.
 * `readiness`: single source of truth for "can this boot yet?", currently **no**.
   Its implemented entries mirror the handlers `ew-boot` registers, so the list
   cannot claim less than the runtime delivers.
@@ -148,7 +155,8 @@ while !cpu->halted:
     fn(&cpu)
 ```
 
-Each function returns `1` to continue dispatch and `0` after a trap, so a missing implementation stops the guest instead of corrupting state.
+Each function returns `1` to continue dispatch and `0` after a trap, so a missing implementation stops the
+guest instead of corrupting state.
 
 ## The launcher
 
