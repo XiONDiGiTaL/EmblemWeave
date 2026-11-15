@@ -961,6 +961,18 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
     )
 }
 
+/// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
+/// those files first and then starts the game. True for a game folder built before 0.1.20, or one whose write never ran.
+pub fn packed_package_without_overlay() -> Option<PathBuf> {
+    let dir = run_dir()?;
+    let written = ini_map(&dir.join("fefw.ini"));
+    if written.get("fs.romfs_overlay").is_some() {
+        return None;
+    }
+    let path = PathBuf::from(written.get("fs.romfs")?);
+    (path.is_file() && crate::gamedata::packed_romfs(&path).is_some()).then_some(path)
+}
+
 /// Game Setup's "Check my game folder": what the build does for a package it cannot read in place, done on its own so a game folder that
 /// was built by an older release can be fixed without compiling anything. It reads the package, writes the files that are packed with
 /// zstd into `work/romfs-overlay`, and points the existing `fefw.ini` at that folder.
@@ -2285,14 +2297,11 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     if !exe.is_file() || !dir.join("fefw.ini").is_file() {
         return Err("the game is not built yet: run Build the game on Game Setup".into());
     }
-    // A build from an earlier release can point the game at a packed .nup, which the engine refuses a second into boot. Name that here,
-    // with the one action that fixes it, instead of letting the game die on `main.npdm is compressed in the .nup` (issue #24).
-    let written = ini_map(&dir.join("fefw.ini"));
-    if let Some(romfs) = written.get("fs.romfs") {
-        let path = PathBuf::from(romfs);
-        if path.is_file() && written.get("fs.romfs_overlay").is_none() && crate::gamedata::packed_romfs(&path).is_some() {
-            return Err("this game was built against a package whose files are packed with zstd, which the engine cannot read in place: press Build the game once and those files are written into your work folder for good".into());
-        }
+    // A build from an earlier release can point the game at a packed .nup, which the engine cannot read in place. The launcher writes those
+    // files before play, so reaching this means that write has not happened yet; say so instead of letting the game die on `main.npdm is
+    // compressed in the .nup` (issue #24).
+    if packed_package_without_overlay().is_some() {
+        return Err("this package keeps some of its files packed: press Play again and the launcher writes them into your work folder first".into());
     }
     // The haptics backend is loaded from beside `fefw.exe` and is not part of a game folder that was built by an earlier
     // release, so it is put there on the way in as well as after a build: updating the launcher should not quietly drop

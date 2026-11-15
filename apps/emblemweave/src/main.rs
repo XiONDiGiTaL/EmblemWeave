@@ -111,6 +111,8 @@ pub struct App {
     pub boot_on_start: bool,
     /// `--build-engine`: build the game with the engine once detection finishes.
     build_on_start: bool,
+    /// Set when Play had to write a packed package's files first: the game starts when that finishes.
+    play_after_repair: bool,
     /// `--screenshot PATH`: save the window's own rendered frame and close.
     screenshot: Option<(std::path::PathBuf, u32)>,
     applied: theme::Scheme,
@@ -178,6 +180,7 @@ impl App {
             lift_limit: 4000,
             boot_on_start: false,
             build_on_start: false,
+            play_after_repair: false,
             screenshot: None,
             saves_ui: Default::default(),
             mods_ui: Default::default(),
@@ -273,6 +276,30 @@ impl App {
         self.jobs.push(job);
     }
 
+    /// Play, after preparing the game folder when it needs it: a package that keeps some of its files packed cannot be read in place, so
+    /// the same check Game Setup offers runs first, and the game starts on its own the moment that finishes (issue #24).
+    pub fn play(&mut self) {
+        // A check already on its way (from Game Setup, or an earlier press of Play) is the same work: wait for it rather than starting twice.
+        if self.running(JobKind::Repair).is_some() {
+            self.play_after_repair = true;
+            self.notify("Writing the files this package keeps packed: the game starts when that finishes", Tone::Accent);
+            return;
+        }
+        if let Some(romfs) = engine::packed_package_without_overlay() {
+            self.play_after_repair = true;
+            self.notify("This package keeps some of its files packed: writing them first, then the game starts", Tone::Accent);
+            if self.game.nup.is_none() {
+                self.game.nup = Some(romfs);
+            }
+            self.start(JobKind::Repair);
+            return;
+        }
+        match engine::play(&self.config.graphics, &self.config.audio) {
+            Ok(()) => self.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok),
+            Err(e) => self.notify(e, Tone::Bad),
+        }
+    }
+
     /// Collect finished jobs and apply their results.
     fn poll_jobs(&mut self) {
         let mut finished = Vec::new();
@@ -302,6 +329,10 @@ impl App {
                     .unwrap_or_default();
                 drop(p);
                 self.notify(format!("{}: {err}{where_}", kind.title()), Tone::Bad);
+                // A Play waiting on the check has to be dropped, or it would start the game after a failure.
+                if kind == JobKind::Repair {
+                    self.play_after_repair = false;
+                }
                 continue;
             }
             match p.result.take() {
@@ -336,6 +367,9 @@ impl App {
                         None => "Game folder ready: the package is read where it lies, nothing to prepare".to_string(),
                     };
                     self.notify(text, Tone::Ok);
+                    if std::mem::take(&mut self.play_after_repair) {
+                        self.play();
+                    }
                 }
                 Some(JobResult::Boot(report, ms)) => {
                     drop(p);
