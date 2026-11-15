@@ -2150,6 +2150,14 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     if !exe.is_file() || !dir.join("fefw.ini").is_file() {
         return Err("the game is not built yet: run Build the game on Game Setup".into());
     }
+    // The haptics backend is loaded from beside `fefw.exe` and is not part of a game folder that was built by an earlier
+    // release, so it is put there on the way in as well as after a build: updating the launcher should not quietly drop
+    // rumble to the standard two motors (issue #10). A running game holds the file, and a copy that fails leaves the one
+    // already in place.
+    let vendor = root.join("runtime").join("third_party").join("renhdrum").join("renhdrum.dll");
+    if vendor.is_file() && !dir.join("renhdrum.dll").is_file() {
+        let _ = std::fs::copy(&vendor, dir.join("renhdrum.dll"));
+    }
     // The taskbar shows the icon inside the .exe: make it EmblemWeave's.
     // Not while a copy is running (Windows cannot update a running program).
     let _ = brand_game();

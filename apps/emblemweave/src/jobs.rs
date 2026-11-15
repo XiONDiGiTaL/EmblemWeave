@@ -345,12 +345,31 @@ const ZBIC_BRIDGE: &str = include_str!("../../../tools/zbic_extract.py");
 
 /// A Python to run the bridge with: the engine checkout's own environment
 /// first (that is usually where `zbic` was installed), then the one on PATH.
-fn interpreter() -> PathBuf {
+/// The interpreter that runs the bridge: the engine's own virtual environment when it has one, otherwise `py -3`,
+/// otherwise `python`. The answer is a whole command because `py` needs its `-3`, and a candidate only counts when it
+/// says which version it is: the Microsoft Store alias named `python` prints nothing and opens the Store instead, which
+/// is the silent decode failure in issue #11.
+fn interpreter() -> Vec<String> {
     let venv = crate::engine::root().map(|r| r.join("tools").join(".venv").join("Scripts").join("python.exe"));
-    match venv {
-        Some(p) if p.is_file() => p,
-        _ => PathBuf::from("python"),
+    let mut candidates: Vec<Vec<String>> = Vec::new();
+    if let Some(p) = venv.filter(|p| p.is_file()) {
+        candidates.push(vec![p.to_string_lossy().into_owned()]);
     }
+    candidates.push(vec!["py".into(), "-3".into()]);
+    candidates.push(vec!["python".into()]);
+    candidates.push(vec!["python3".into()]);
+    for c in &candidates {
+        let mut cmd = std::process::Command::new(&c[0]);
+        cmd.args(&c[1..]).arg("--version").stdin(std::process::Stdio::null());
+        hidden(&mut cmd);
+        if let Ok(out) = cmd.output() {
+            let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+            if said.contains("Python 3") {
+                return c.clone();
+            }
+        }
+    }
+    vec!["python".into()]
 }
 
 /// Write the bridge into `dir` (the work folder's `tools`) and return its path.
@@ -364,7 +383,7 @@ fn write_bridge(dir: &Path) -> Result<PathBuf, String> {
 }
 
 /// The bridge in the work folder, with the interpreter that runs it.
-fn bridge() -> Result<(PathBuf, PathBuf), String> {
+fn bridge() -> Result<(Vec<String>, PathBuf), String> {
     let dir = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("tools");
     Ok((interpreter(), write_bridge(&dir)?))
 }
@@ -373,19 +392,25 @@ pub fn decode(exefs: PathBuf) -> Job {
     spawn(JobKind::Decode, &["Find the ZBIC bridge", "Decode text, rodata and data", "Check sizes"], move |ctx| {
         ctx.start(0);
         let (python, script) = bridge()?;
-        ctx.end(0, StageStatus::Done, format!("{} with {}", script.display(), python.display()));
+        ctx.end(0, StageStatus::Done, format!("{} with {}", script.display(), python.join(" ")));
         let out = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("decoded");
         std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
         ctx.start(1);
-        let mut decode = std::process::Command::new(&python);
+        let mut decode = std::process::Command::new(&python[0]);
         let output = hidden(&mut decode)
+            .args(&python[1..])
             .arg("-I")
             .arg(&script)
             .arg(&exefs)
             .arg(&out)
             .arg(gamedata::MAIN_MODULE)
             .output()
-            .map_err(|e| format!("starting {}: {e}. Decoding needs Python 3 with the `zbic` package: `winget install Python.Python.3.12`, then `pip install zbic`", python.display()))?;
+            .map_err(|e| {
+                format!(
+                    "starting {}: {e}. Decoding needs Python 3 with the `zbic` package: `winget install Python.Python.3.12`, then `py -3 -m pip install zbic`",
+                    python.join(" ")
+                )
+            })?;
         let text = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
         for line in text.lines() {
             ctx.log(line.to_string());
@@ -478,13 +503,17 @@ fn find_cc() -> Option<Vec<String>> {
             .map(|s| s.success())
             .unwrap_or(false)
     };
-    let mut pythons = vec![interpreter()];
-    pythons.push(PathBuf::from("python"));
-    pythons.push(PathBuf::from("py"));
+    let mut pythons: Vec<Vec<String>> = vec![interpreter()];
+    pythons.push(vec!["python".into()]);
+    pythons.push(vec!["py".into(), "-3".into()]);
     for py in pythons {
-        let py = py.to_string_lossy().into_owned();
-        if works(&py, &["-m", "ziglang", "version"]) {
-            return Some(vec![py, "-m".into(), "ziglang".into(), "cc".into()]);
+        let mut args: Vec<String> = py[1..].to_vec();
+        args.extend(["-m".into(), "ziglang".into(), "version".into()]);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        if works(&py[0], &refs) {
+            let mut cc = py.clone();
+            cc.extend(["-m".into(), "ziglang".into(), "cc".into()]);
+            return Some(cc);
         }
     }
     // A compiler that is installed but not on PATH, in the order the build trusts: zig, then clang.
