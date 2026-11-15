@@ -425,7 +425,10 @@ std::string u8(const std::filesystem::path& p) {
 
 void load_one(const std::string& mod, const std::filesystem::path& mod_dir, const std::filesystem::path& file, uint64_t base) {
     const std::string name = mod + "/" + u8(file.filename());
-    HMODULE dll = LoadLibraryExW(file.wstring().c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR needs a full path (a relative one fails with ERROR_INVALID_PARAMETER): [fs] mods may be relative
+    std::error_code ec;
+    const std::filesystem::path full = std::filesystem::absolute(file, ec);
+    HMODULE dll = LoadLibraryExW((ec ? file : full).wstring().c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!dll) {
         NXLOG_E(kTag, "%s: cannot be loaded (Windows error %lu)", name.c_str(), static_cast<unsigned long>(GetLastError()));
         return;
