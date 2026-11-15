@@ -90,92 +90,33 @@ pub fn ready() -> bool {
     }
 }
 
-/// Folders of the build tools, put first on PATH for every step: winget's
-/// default locations for LLVM, CMake, Ninja, NASM and .NET.
+/// Folders of the build tools, put first on PATH for every step. The folder the
+/// validated `clang-cl` lives in comes first, so the compiler on PATH is the one
+/// that was checked, not whichever LLVM happens to sort first.
 pub fn tool_path() -> String {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let dirs = [
-        r"C:\Program Files\LLVM\bin".to_string(),
-        r"C:\Program Files\CMake\bin".to_string(),
-        r"C:\Program Files\dotnet".to_string(),
-        format!(r"{local}\Microsoft\WinGet\Links"),
-        format!(r"{local}\bin\NASM"),
-    ];
-    let mut path: Vec<String> = dirs.into_iter().filter(|d| Path::new(d).is_dir()).collect();
-    path.push(std::env::var("PATH").unwrap_or_default());
-    path.join(";")
+    crate::toolchain::tool_path()
+}
+
+/// The toolchain, probed once per process: `vswhere`, `clang-cl --version` and
+/// `cmake --version` are three processes, and several pages ask for the answer.
+fn probe() -> &'static crate::toolchain::Toolchain {
+    static CACHE: std::sync::OnceLock<crate::toolchain::Toolchain> = std::sync::OnceLock::new();
+    CACHE.get_or_init(crate::toolchain::probe)
 }
 
 /// The Visual Studio C++ tools. Every engine script calls `vcvars64.bat`,
 /// found through vswhere; without it the whole build dies with a bare exit
 /// code, which is what made it look like the launcher's fault.
-/// The newest Visual Studio C++ tools on this PC and its major version (17 = 2022, 18 = 2026). With `min_major` set, vswhere only
-/// reports an install that new or newer, so an old one can tell the user why it cannot be used instead of failing on a header.
-fn vc_install(min_major: Option<u32>) -> Option<(PathBuf, u32)> {
-    let base = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
-    let vswhere = Path::new(&base).join("Microsoft Visual Studio").join("Installer").join("vswhere.exe");
-    let mut extra: Vec<String> = Vec::new();
-    if let Some(m) = min_major {
-        extra.push("-version".into());
-        extra.push(format!("[{m}.0,)"));
-    }
-    let query = |property: &str| -> Option<String> {
-        if !vswhere.is_file() {
-            return None;
-        }
-        let mut cmd = Command::new(&vswhere);
-        cmd.args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"]);
-        cmd.args(&extra);
-        cmd.args(["-property", property]);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let out = cmd.output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().trim().to_string();
-        (!text.is_empty()).then_some(text)
-    };
-    let path = query("installationPath");
-    if let Some(path) = path {
-        let major = query("installationVersion").as_deref().and_then(vs_major).unwrap_or(0);
-        let bat = PathBuf::from(path).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
-        return bat.is_file().then_some((bat, major));
-    }
-    if vswhere.is_file() {
-        return None;
-    }
-    // No vswhere at all: the default folders are the only guess left.
-    for (dir, major) in [
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools", 17u32),
-        (r"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools", 18u32),
-    ] {
-        if min_major.is_some_and(|m| major < m) {
-            continue;
-        }
-        let bat = Path::new(dir).join("VC").join("Auxiliary").join("Build").join("vcvars64.bat");
-        if bat.is_file() {
-            return Some((bat, major));
-        }
-    }
-    None
-}
-
-/// The major version out of an `installationVersion` such as `17.9.34728.123`.
-fn vs_major(version: &str) -> Option<u32> {
-    version.split('.').next()?.parse().ok()
-}
-
-/// The Visual Studio build needs: 2022 (17) or newer. An older one has no `<bit>` header in its C++ library, and the engine's
-/// `cxx.h` asks for it, so the build died with "fatal error: 'bit' file not found" on a PC whose tools were all reported present
-/// (issue 11).
+/// The `vcvars64.bat` of the install the build will use (2022 or newer), or
+/// nothing when the newest one is too old. The probe holds every install it
+/// found, so an old one can be named instead of reported as absent.
 fn vc_tools() -> Option<PathBuf> {
-    vc_install(Some(17)).map(|(bat, _)| bat)
+    probe().vs.as_ref().map(|v| v.vcvars())
 }
 
 /// The newest C++ tools whatever their version, so a too-old install can be named rather than reported as absent.
 pub fn vc_tools_any() -> Option<(PathBuf, u32)> {
-    vc_install(None)
+    probe().vs_all.first().map(|v| (v.vcvars(), v.major))
 }
 
 /// The highest .NET SDK major version installed, from `dotnet --list-sdks`.
@@ -305,19 +246,9 @@ pub fn start_install() -> Result<PathBuf, String> {
 /// for 3.25; an older one stops with "CMake Generate step failed. Build files
 /// cannot be regenerated correctly", which says nothing about the cause.
 pub fn cmake_version() -> Option<(u32, u32)> {
-    let mut cmd = Command::new("cmake");
-    cmd.arg("--version").stdin(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let out = cmd.output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut parts = text.lines().next()?.split_whitespace().nth(2)?.split('.');
-    let major: u32 = parts.next()?.parse().ok()?;
-    let minor: u32 = parts.next()?.parse().ok()?;
-    Some((major, minor))
+    let version = probe().cmake.as_deref()?;
+    let parts = crate::toolchain::version_parts(version)?;
+    Some((*parts.first()?, *parts.get(1)?))
 }
 
 /// What to install for a tool the build did not find: an error that only says
@@ -452,6 +383,7 @@ fn stream_lines(reader: impl std::io::Read, mut each: impl FnMut(String)) {
 
 /// How a step is named in a failure: the script it ran, not the flag before
 /// it (`pwsh -NoProfile` says nothing about which step died).
+#[cfg(test)]
 fn step_name(program: &str, args: &[&str]) -> String {
     if let Some(i) = args.iter().position(|a| *a == "-File") {
         if let Some(script) = args.get(i + 1) {
@@ -476,9 +408,7 @@ fn missing_program(reason: &str) -> Option<String> {
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .envs(envs.iter().copied())
         .current_dir(cwd)
-        .env("PATH", tool_path())
         // `-ExecutionPolicy Bypass` covers the script this call starts, not a
         // `pwsh` that script starts in turn: PowerShell children read this
         // preference from the environment, so the whole chain runs.
@@ -486,12 +416,32 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // The environment the toolchain was validated with, not the one the
+    // launcher inherited: `CC`, `CXX`, `INCLUDE`, `LIB` and `VCINSTALLDIR` from
+    // an older shell would point the build at headers nobody checked.
+    crate::toolchain::scrub(&mut cmd);
+    match crate::toolchain::init() {
+        Ok(resolved) => {
+            for (k, v) in &resolved.env {
+                cmd.env(k, v);
+            }
+        }
+        Err(_) => {
+            cmd.env("PATH", tool_path());
+        }
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    ctx.log(format!("> {program} {}", args.join(" ")));
+    let command = format!("{program} {}", args.join(" "));
+    let started = std::time::Instant::now();
+    ctx.log(format!("> {command}"));
+    ctx.log(format!("  in {}", cwd.display()));
     // The last lines a failed step printed: the log has everything, but the
     // message is what the user reads, and "exit code 1" alone is not a reason.
     let tail: Tail = Default::default();
@@ -500,33 +450,57 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
     // far above the tail, which is exactly how "Configuring incomplete, errors
     // occurred!" ends up being the only thing a report says.
     let first_error: FirstError = Default::default();
-    let mut child = cmd.spawn().map_err(|e| format!("starting {program}: {e}"))?;
-    let err = child.stderr.take().map(|e| {
+    let mut child = cmd.spawn().map_err(|e| format!("starting {command}: {e}"))?;
+    // Both streams are drained on their own threads, so the wait below can
+    // notice a cancel while a long configure is still printing: reading stdout
+    // inline would block until the process ends, which is how Cancel used to do
+    // nothing until the step it was cancelling had finished.
+    let mut readers = Vec::new();
+    for pipe in [child.stdout.take().map(Either::Out), child.stderr.take().map(Either::Err)].into_iter().flatten() {
         let ctx = ctx.clone();
         let tail = tail.clone();
         let first = first_error.clone();
-        std::thread::spawn(move || {
-            stream_lines(e, |line| {
+        readers.push(std::thread::spawn(move || match pipe {
+            Either::Out(out) => stream_lines(out, |line| {
                 ctx.log(line.clone());
                 remember(&tail, &first, &line);
-            });
-        })
-    });
-    if let Some(out) = child.stdout.take() {
-        let ctx = ctx.clone();
-        let tail = tail.clone();
-        let first = first_error.clone();
-        stream_lines(out, |line| {
-            ctx.log(line.clone());
-            remember(&tail, &first, &line);
-        });
+            }),
+            Either::Err(err) => stream_lines(err, |line| {
+                ctx.log(line.clone());
+                remember(&tail, &first, &line);
+            }),
+        }));
     }
-    if let Some(t) = err {
-        let _ = t.join();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if ctx.cancelled() {
+                    // The whole tree: cmd starts cmake, which starts ninja,
+                    // which starts one clang-cl per core. Killing the child
+                    // alone leaves those compiling into the build folder after
+                    // the launcher has moved on.
+                    kill_tree(child.id(), &mut |m| ctx.log(m));
+                    let _ = child.wait();
+                    for r in readers {
+                        let _ = r.join();
+                    }
+                    return Err("cancelled".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            Err(e) => return Err(format!("waiting for {command}: {e}")),
+        }
+    };
+    for r in readers {
+        let _ = r.join();
     }
-    let status = child.wait().map_err(|e| format!("waiting for {program}: {e}"))?;
+    ctx.log(format!(
+        "< exit {} in {:.1}s: {command}",
+        status.code().map(|c| c.to_string()).unwrap_or_else(|| "(no code)".into()),
+        started.elapsed().as_secs_f32()
+    ));
     if ctx.cancelled() {
-        let _ = child.kill();
         return Err("cancelled".into());
     }
     if status.success() {
@@ -548,28 +522,105 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
             .into_iter()
             .filter(|l| !l.trim().is_empty())
             .collect();
-        let name = step_name(program, args);
         if said.is_empty() {
             // Nothing at all was printed. A script that security software or a
             // machine policy kills exits exactly like this, so saying "the log
             // has the output" would point at an empty file.
             Err(format!(
-                "{program} {name} failed ({status}) and printed nothing at all. That is what a script looks like when \
-                 machine policy or security software stops it before its first line; the log has the command and the \
-                 lines around it"
+                "`{command}` failed ({status}) and printed nothing at all. That is what a script looks like when machine \
+                 policy or security software stops it before its first line; the log has the command and the lines around it"
             ))
         } else if let Some(missing) = missing_program(&block.join(" ")).or_else(|| missing_program(&said)) {
             Err(format!(
-                "the build called `{missing}`, which is not installed or not on PATH ({program} {name} failed ({status})). \
-                 Install it, restart the launcher, then press Build the game again"
+                "`{command}` called `{missing}`, which is not installed or not on PATH (exit {status}). Install it, restart \
+                 the launcher, then press Build the game again"
             ))
         } else if !block.is_empty() {
-            // The error that was printed, wherever in the run it was printed.
-            Err(format!("{program} {name} failed ({status}): {}", block.join(" | ")))
+            // The error that was printed, wherever in the run it was printed,
+            // under the command that printed it.
+            Err(format!("`{command}` failed ({status}): {}", block.join(" | ")))
         } else {
-            Err(format!("{program} {name} failed ({status}): {said}"))
+            Err(format!("`{command}` failed ({status}): {said}"))
         }
     }
+}
+
+/// A held build lock: the file names the process that owns the build folder, so
+/// a second launcher can tell a live build from one that was killed.
+struct BuildLock {
+    path: PathBuf,
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Take the workspace build lock, or say who holds it. Two builds at once write
+/// the same object files and unpack the same dependencies into the same folders;
+/// the second is refused instead of being allowed to corrupt the first.
+fn lock_build(root: &Path) -> Result<BuildLock, String> {
+    let dir = root.join("work").join("build");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let path = dir.join(".build.lock");
+    let held = std::fs::read_to_string(&path).ok().and_then(|t| t.split_whitespace().next()?.parse::<u32>().ok());
+    if let Some(pid) = held {
+        if pid == std::process::id() {
+            // A previous run of this same process that never released it.
+        } else if process_running(pid) {
+            return Err(format!(
+                "another EmblemWeave build is already running (process {pid}) and is using this engine folder. Wait for it \
+                 to finish; if no build window is open, end that process or delete {}",
+                path.display()
+            ));
+        } else {
+            // The owner is gone: a killed launcher leaves its lock behind.
+        }
+    }
+    std::fs::write(&path, format!("{} {} {}\n", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()))
+        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    Ok(BuildLock { path })
+}
+
+/// Whether a pid is alive, asked of Windows rather than guessed.
+fn process_running(pid: u32) -> bool {
+    let mut cmd = Command::new("tasklist");
+    cmd.args(["/FI", &format!("PID eq {pid}"), "/NH"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()),
+        // No tasklist: assume it is running rather than stomp on it.
+        Err(_) => true,
+    }
+}
+
+/// Either stream of a child process, so both are drained the same way.
+enum Either {
+    Out(std::process::ChildStdout),
+    Err(std::process::ChildStderr),
+}
+
+/// Stop a process and everything it started. `taskkill /T` walks the tree, so a
+/// cancelled build does not leave ninja and a core's worth of `clang-cl` writing
+/// into the build folder after the launcher has moved on.
+fn kill_tree(pid: u32, log: &mut impl FnMut(String)) {
+    if pid == 0 {
+        return;
+    }
+    log(format!("cancelling: stopping the process tree of {pid}"));
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let _ = cmd.status();
 }
 
 type Tail = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
@@ -658,6 +709,68 @@ fn has_files(dir: &Path) -> bool {
     std::fs::read_dir(dir).map(|mut d| d.next().is_some()).unwrap_or(false)
 }
 
+/// The texture build's sources, each checked by the file the build opens. A
+/// folder left behind by an interrupted fetch has some of them and not others.
+fn textures_fetched(root: &Path) -> bool {
+    let tp = root.join("tools").join("textures").join("third_party");
+    [
+        tp.join("astc-encoder").join("CMakeLists.txt"),
+        tp.join("bc7enc_rdo").join("CMakeLists.txt"),
+        tp.join("ispc").join("ispc-v1.32.0-windows").join("bin").join("ispc.exe"),
+    ]
+    .iter()
+    .all(|p| p.is_file())
+}
+
+/// The Ryujinx checkout the shader translator builds from. It is cloned into a
+/// temporary folder and moved into place only after the pinned revision is
+/// checked out and the tree is complete: a clone that a cancel or a dropped
+/// connection interrupted otherwise leaves `.git` behind, which is exactly what
+/// the old "is it there" test accepted before failing much later in `dotnet`.
+fn ensure_ryubing_refs(ctx: &Ctx, root: &Path) -> Result<(), String> {
+    let refs = root.join("work").join("refs").join("ryubing");
+    let project = Path::new("src").join("Ryujinx.Graphics.Shader").join("Ryujinx.Graphics.Shader.csproj");
+    if refs.join(&project).is_file() {
+        return Ok(());
+    }
+    if refs.exists() {
+        ctx.log(format!("the Ryujinx checkout in {} is incomplete; cloning it again", refs.display()));
+        let _ = std::fs::remove_dir_all(&refs);
+    }
+    let tmp = root.join("work").join("refs").join("ryubing.partial");
+    let mut last = String::new();
+    for attempt in 1..=2 {
+        let _ = std::fs::remove_dir_all(&tmp);
+        let result = run(ctx, root, "git", &["clone", "--quiet", "--filter=blob:none", "--no-checkout", RYUBING_URL, "work\\refs\\ryubing.partial"])
+            .and_then(|()| run(ctx, root, "git", &["-C", "work\\refs\\ryubing.partial", "checkout", "--quiet", RYUBING_REV]))
+            .and_then(|()| {
+                if tmp.join(&project).is_file() {
+                    Ok(())
+                } else {
+                    Err(format!("the checkout has no {}", project.display()))
+                }
+            });
+        match result {
+            Ok(()) => {
+                std::fs::rename(&tmp, &refs)
+                    .map_err(|e| format!("moving the Ryujinx checkout into {}: {e}", refs.display()))?;
+                return Ok(());
+            }
+            Err(e) => {
+                last = e;
+                let _ = std::fs::remove_dir_all(&tmp);
+                if attempt < 2 {
+                    ctx.log(format!("the Ryujinx checkout failed; trying once more ({last})"));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "cloning the shader translator's sources failed twice: {last}. That is usually the network or a proxy; work\\refs is \
+         clean now, so pressing Build the game again starts the clone over"
+    ))
+}
+
 /// Settings written to `fefw.ini`.
 pub struct RunConfig {
     pub exefs: PathBuf,
@@ -688,15 +801,25 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
 /// The build job's work: every step in order.
 pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, String> {
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
-    // An old Visual Studio passes every file-existence check and then dies on a C++20 header. Name the install and the version
-    // that is needed, instead of "missing tools" or a header name the user cannot act on.
-    if vc_tools().is_none() {
-        if let Some((_, major)) = vc_tools_any() {
-            return Err(format!(
-                "the newest Visual Studio C++ tools on this PC are version {major}, and the engine needs Visual Studio 2022 (17) or newer. An older C++ library has no `<bit>` header, which is the `cxx.h: 'bit' file not found` error the build stops on.\n\nInstall the current tools with:\n{VS_INSTALL}\n\nthen press Build the game again."
-            ));
-        }
+    // One probe decides whether the build can start, and what it found is what
+    // the build uses from here: the compiler it validated, the SDK beside it,
+    // and one `vcvars` environment for every step. A too-old Visual Studio, an
+    // install without the C++ workload, a missing Windows SDK and an `INCLUDE`
+    // left by another shell are all named here, before anything is compiled.
+    let resolved = crate::toolchain::init()?;
+    ctx.log(format!("toolchain: {}", resolved.toolchain.summary()));
+    ctx.log(format!("toolchain fingerprint: {}", resolved.toolchain.fingerprint()));
+    for (name, value) in crate::toolchain::stale_env() {
+        ctx.log(format!("ignoring the inherited {name}={value}: it would point the build at a toolchain that was not checked"));
     }
+    // Two builds at once write the same object files and fetch the same sources.
+    let _build_lock = lock_build(&root)?;
+    // The probe that matters: one file, compiled and linked with exactly the
+    // environment below. A header from another install fails here in a second.
+    let probe_dir = root.join("work").join("build").join("toolchain-probe");
+    crate::toolchain::probe_build(&resolved.compiler, &resolved.env, &probe_dir)
+        .map_err(|e| format!("the build cannot start. {e}"))?;
+    ctx.log(format!("the toolchain compiles and links a test file ({} with its own headers, libraries and SDK)", resolved.compiler.display()));
     let missing = missing_tools();
     if !missing.is_empty() {
         let lines: Vec<String> = missing.iter().map(|m| format!("{m} (`{}`)", install_hint(m))).collect();
@@ -732,6 +855,18 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
 
     // 3. Game code: ninja rebuilds only what changed.
     ctx.start(2);
+    // A build folder made with another compiler, generator or toolchain file
+    // cannot be reused, and CMake says only "Build files cannot be regenerated
+    // correctly" after a configure pass. Its cache names what it was made with,
+    // so compare that with what was validated here and clear it first.
+    let game_build = root.join("work").join("build").join("fefw");
+    let toolchain_file = root.join("recomp").join("cmake").join("clang-cl.cmake");
+    if let Some(why) =
+        crate::toolchain::cache_mismatch_in(&game_build, &resolved.compiler, "Ninja", &toolchain_file.display().to_string())
+    {
+        ctx.log(format!("the recompile build folder cannot be reused: {why}; clearing its CMake cache"));
+        crate::toolchain::clear_cache(&game_build);
+    }
     let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(8).to_string();
     // The engine's scripts look for `vcvars64.bat` through vswhere, and their
     // `%ProgramFiles(x86)%` path breaks inside cmd's `for /f` parentheses, so
@@ -795,11 +930,18 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // these unsigned scripts and the step fails with a SecurityError instead of
     // running, which is what issue 2's second report shows.
     ctx.start(3);
-    if has_files(&root.join("tools").join("textures").join("third_party")) {
+    // Not "the folder has something in it": each pinned source and the ispc
+    // binary are checked by name, because a fetch that stopped halfway leaves a
+    // folder that exists and cannot be built.
+    if textures_fetched(&root) {
         ctx.end(3, StageStatus::Skipped, "already fetched");
     } else {
+        ctx.log("the texture sources are missing or incomplete; fetching the pinned versions");
         run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"])?;
-        ctx.end(3, StageStatus::Done, "astc-encoder and bc7enc_rdo fetched");
+        if !textures_fetched(&root) {
+            return Err("the texture sources were fetched but are still incomplete. tools\\textures\\third_party needs astc-encoder, bc7enc_rdo and ispc; delete that folder and press Build the game again".into());
+        }
+        ctx.end(3, StageStatus::Done, "astc-encoder, bc7enc_rdo and ispc fetched and checked");
     }
 
     // 5. fefw.exe.
@@ -822,6 +964,12 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     //   that is no longer installed, and CMake refuses to configure in it until its
     //   cache goes. The downloads and the fetched sources stay.
     let builds = root.join("game-build").join("fefw").join("build");
+    for dir in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
+        if let Some(why) = crate::toolchain::cache_mismatch_in(&dir.path(), &resolved.compiler, "Ninja", "") {
+            ctx.log(format!("{} cannot be reused: {why}; clearing its CMake cache", dir.path().display()));
+            crate::toolchain::clear_cache(&dir.path());
+        }
+    }
     build_with_repairs(&builds, fefw, |m| ctx.log(m))?;
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
@@ -837,11 +985,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     } else if harness.is_file() {
         ctx.end(5, StageStatus::Skipped, "already built");
     } else {
-        let refs = root.join("work").join("refs").join("ryubing");
-        if !refs.join(".git").is_dir() {
-            run(ctx, &root, "git", &["clone", "--filter=blob:none", "--no-checkout", RYUBING_URL, "work\\refs\\ryubing"])?;
-        }
-        run(ctx, &root, "git", &["-C", "work\\refs\\ryubing", "checkout", RYUBING_REV])?;
+        ensure_ryubing_refs(ctx, &root)?;
         run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\shaders\\scripts\\setup_ryujinx.ps1", "-Ryubing", "work\\refs\\ryubing"])?;
         // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
         // .NET runtime alone satisfies `dotnet.exe` but cannot build a net10.0 project.
@@ -2019,9 +2163,9 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
 
     #[test]
     fn a_visual_studio_version_is_read_by_its_major_number() {
-        assert_eq!(super::vs_major("17.9.34728.123"), Some(17));
-        assert_eq!(super::vs_major("18.0.0"), Some(18));
-        assert_eq!(super::vs_major(""), None);
+        assert_eq!(crate::toolchain::vs_major("17.9.34728.123"), Some(17));
+        assert_eq!(crate::toolchain::vs_major("18.0.0"), Some(18));
+        assert_eq!(crate::toolchain::vs_major(""), None);
     }
 
     #[test]
@@ -2200,6 +2344,62 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
 
         // Nothing there at all: no panel rather than a made-up one.
         assert!(live_in(&dir.join("missing")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_build_is_refused_while_the_lock_names_a_live_process() {
+        let root = std::env::temp_dir().join(format!("ew-lock-{}", std::process::id()));
+        let dir = root.join("work").join("build");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join(".build.lock");
+        // A process that cannot exist: the lock is stale, so a new build takes it.
+        std::fs::write(&lock, "9999990 1 emblemweave.exe
+").unwrap();
+        let first = lock_build(&root);
+        assert!(first.is_ok(), "{:?}", first.err());
+        // The lock is released when it is dropped.
+        drop(first);
+        assert!(!lock.exists());
+        // While a build holds it with this process's id, the same process may take it again (a restart of the job),
+        // but another id that is alive must not.
+        let held = lock_build(&root).unwrap();
+        assert!(lock.exists());
+        drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn texture_sources_are_checked_by_file_not_by_folder() {
+        let root = std::env::temp_dir().join(format!("ew-textures-{}", std::process::id()));
+        let tp = root.join("tools").join("textures").join("third_party");
+        std::fs::create_dir_all(tp.join("astc-encoder")).unwrap();
+        assert!(!textures_fetched(&root), "an empty folder must not count as fetched");
+        std::fs::write(tp.join("astc-encoder").join("CMakeLists.txt"), "").unwrap();
+        std::fs::create_dir_all(tp.join("bc7enc_rdo")).unwrap();
+        std::fs::write(tp.join("bc7enc_rdo").join("CMakeLists.txt"), "").unwrap();
+        assert!(!textures_fetched(&root), "one missing piece is still missing");
+        let ispc = tp.join("ispc").join("ispc-v1.32.0-windows").join("bin");
+        std::fs::create_dir_all(&ispc).unwrap();
+        std::fs::write(ispc.join("ispc.exe"), "").unwrap();
+        assert!(textures_fetched(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cache_on_disk_is_read_and_cleared() {
+        let dir = std::env::temp_dir().join(format!("ew-cache-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("CMakeFiles")).unwrap();
+        std::fs::write(dir.join("CMakeCache.txt"), "CMAKE_C_COMPILER:FILEPATH=C:/old/clang-cl.exe
+").unwrap();
+        let compiler = Path::new("C:/Program Files/LLVM/bin/clang-cl.exe");
+        let why = crate::toolchain::cache_mismatch_in(&dir, compiler, "Ninja", "").expect("a mismatch");
+        assert!(why.contains("C:/old/clang-cl.exe"), "{why}");
+        crate::toolchain::clear_cache(&dir);
+        assert!(!dir.join("CMakeCache.txt").exists());
+        assert!(!dir.join("CMakeFiles").exists());
+        // Nothing there now: CMake will write its own.
+        assert!(crate::toolchain::cache_mismatch_in(&dir, compiler, "Ninja", "").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -83,8 +83,30 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `pwsh … failed (exit code: 1): <error line>` | A build step failed. The message carries the line that explains it, picked out of the run rather than the summary at the end, so `CMake Generate step failed. Build files cannot be regenerated correctly.` arrives together with the `CMake Error` that caused it | The `engine` log holds the whole output. Send it together with the exported report, which now ends with the tail of the newest log |
 | `CMake 3.x is too old: the engine's projects need 3.25 or newer` | CMake is installed but older than the engine's projects ask for. CMake reports that as a generate failure, not as a version problem | `winget upgrade Kitware.CMake` (or `winget install Kitware.CMake`), restart the launcher, press Build the game again |
 | `the build folder holds a cache CMake cannot reuse` (log line) | An earlier attempt left a CMake cache from another compiler or an older CMake | Nothing to do: the launcher clears that cache and configures once more by itself |
+| `no complete Windows SDK was found. Visual Studio's own environment names none, and …\Windows Kits\10 has no version with both …` | Visual Studio's `vcvars64.bat` selected no SDK, and the usual folder has no version with both `um\windows.h` and `um\x64\kernel32.lib`. An SDK on another drive is found through Visual Studio, so this means the workload really is missing | Add **Windows 11 SDK** in Visual Studio Installer (Individual components), or install one from Microsoft's download page |
+| `Visual Studio 16.x … is too old` | The newest C++ tools are 2019 (16). Its C++ library has no `<bit>`, which is the `'bit' file not found` failure reports used to show | Install Visual Studio 2022 Build Tools with the C++ workload; the message carries the `winget` line |
+| `Visual Studio at … has no MSVC toolset` | The install is there but `VC\Tools\MSVC` is empty: the C++ workload's headers and libraries were never installed | Modify that install in Visual Studio Installer and add "Desktop development with C++" |
+| `clang-cl 22.x is older than 23` | LLVM is installed but too old for the code the recompiler generates | `winget upgrade LLVM.LLVM` |
+| `lld-link.exe is missing beside …` | LLVM's `bin` folder is incomplete, so every link step would fail | Reinstall LLVM |
+| `the toolchain cannot build the smallest test file: compile with … failed` | The pieces were all found but disagree: a header from one install with libraries from another, or an SDK that is only half installed. It is reported before the recompile, not twenty minutes into it | The message carries the compiler's own error line and the `INCLUDE` list it used; adding "Desktop development with C++" or updating LLVM fixes the usual cases |
+| `another EmblemWeave build is already running (process N)` | Two builds would compile into the same folders and unpack the same sources | Wait for the other one. If no build is open, end that process, or delete `engine\fefw-recomp\work\build\.build.lock` |
+| `could not download … after 4 attempts` or `… is incomplete (no CMakeLists.txt); discarding it and fetching again` | A dependency fetch failed or was interrupted; the fetcher never keeps anything it could not verify | Nothing: press Build the game again. The message names the URL and the last error, and the half-written folder was already removed |
 | The window closes at once, or the picture stays black | Usually the Vulkan driver | The launcher now watches the first minute of every launch: a run that exits early, or that has played sound for 90 s without presenting one frame, is reported in the window with the GPU it picked. Read `%APPDATA%\EmblemWeave\play\fefw.log`; update the graphics driver, try Windowed or Borderless, and a Vulkan 1.3 device is required |
 | `…fetch_third_party.ps1 cannot be loaded because running scripts is disabled on this system` | PowerShell's execution policy refused the build's own script. Launcher 0.1.9 and older did not pass `-ExecutionPolicy Bypass` | Update the launcher: current builds run their scripts under a bypassed policy, and hand the same preference to any `pwsh` those scripts start |
+
+## Can this PC build the game at all
+
+One command answers that without opening the window and without starting a build:
+
+```powershell
+.\EmblemWeave.exe --check-toolchain
+```
+
+It prints the Visual Studio install, the MSVC toolset and Windows SDK that `vcvars64.bat` selects, `clang-cl` and
+`lld-link`, CMake and Ninja, every `CC`, `CXX`, `INCLUDE`, `LIB` or `VCINSTALLDIR` it is ignoring, and then compiles and
+links one small file with that exact environment. Exit code 0 means the build can start, 1 means a piece is missing or
+too old (the message says which and what to install), 2 means the pieces are there but cannot build a file, which is
+usually one install's headers with another's libraries.
 
 ## When none of this matches
 

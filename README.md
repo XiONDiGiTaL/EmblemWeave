@@ -37,7 +37,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.15, playable through the baseline engine.** Build the game once from your dump, press **Play**,
+> **Current status: 0.1.16, playable through the baseline engine.** Build the game once from your dump, press **Play**,
 > and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the opening movie and cutscenes. The build
 > needs Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with
 > its own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
@@ -249,6 +249,13 @@ command it runs is written to the task's log in `%APPDATA%\EmblemWeave\logs`. Th
 tools in turn (Visual Studio's `vcvars64.bat`, `robocopy`, `cmake`, `ninja`, `clang-cl`, `python`); those appear in the
 same log, line by line, for every build. If you see terminal windows, shell
 scripts or "press any key to continue" prompts while EmblemWeave is open, they are not from EmblemWeave.
+
+Before a build starts, the launcher asks `vswhere` for Visual Studio, reads the MSVC toolset and the Windows SDK out of
+the environment `vcvars64.bat` itself sets, checks `clang-cl` and `lld-link` beside each other, and then compiles and
+links one small file with exactly that environment. A missing header, an install without the C++ workload or an `INCLUDE`
+left by another shell stops the build in a second, with the piece named. `EmblemWeave.exe --check-toolchain` prints the
+same report without a window (0 ready, 1 a piece is missing, 2 it cannot compile), and only one build can use the folder
+at a time.
 
 Network access, only for the action you asked for. The launcher's own HTTP goes through Windows' `curl.exe`; `git`
 and `uv` make their own connections during a build:

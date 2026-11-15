@@ -162,9 +162,12 @@ guest instead of corrupting state.
 
 `apps/emblemweave` is organised by responsibility: `config` (versioned, atomic
 settings), `theme` (palettes, type and spacing tokens), `widgets` (shared
-components), `gamedata` (detection and validation), `jobs` (background work with
-staged progress and cancellation) and one module per page under `pages/`. Long
-operations never run on the interface thread.
+components), `gamedata` (detection and validation), `toolchain` (Visual Studio
+through `vswhere`, the MSVC toolset and Windows SDK read from `vcvars`, LLVM's
+`clang-cl` and `lld-link`, the CMake cache check, and the one-file probe that
+compiles and links with them), `jobs` (background work with staged progress and
+cancellation) and one module per page under `pages/`. Long operations never run
+on the interface thread.
 
 ## Planned platform layer
 

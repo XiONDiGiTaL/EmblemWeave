@@ -28,6 +28,7 @@ mod updater;
 mod saves;
 mod savefile;
 mod theme;
+mod toolchain;
 mod widgets;
 
 use config::Config;
@@ -979,9 +980,52 @@ fn verify_log_cli(path: Option<&str>) -> i32 {
     }
 }
 
+/// `--check-toolchain`: what the build will use, everything wrong with it, and
+/// one file compiled and linked with it. It answers "can this PC build the game"
+/// without starting a build, which is the only way to find out that a header is
+/// missing before twenty minutes of compiling.
+///
+/// Exit codes: 0 ready, 1 a piece is missing or too old, 2 the pieces are there
+/// but they cannot compile and link the test file.
+fn check_toolchain_cli() -> i32 {
+    let tc = crate::toolchain::probe();
+    println!("toolchain: {}", tc.summary());
+    println!("fingerprint: {}", tc.fingerprint());
+    for (name, value) in crate::toolchain::stale_env() {
+        println!("ignoring the inherited {name}={value}");
+    }
+    if !tc.problems.is_empty() {
+        for p in &tc.problems {
+            println!("\nproblem: {p}");
+        }
+        return 1;
+    }
+    let resolved = match crate::toolchain::init() {
+        Ok(r) => r,
+        Err(e) => {
+            println!("\nproblem: {e}");
+            return 1;
+        }
+    };
+    let dir = std::env::temp_dir().join("emblemweave-toolchain-probe");
+    match crate::toolchain::probe_build(&resolved.compiler, &resolved.env, &dir) {
+        Ok(()) => {
+            println!("\nthe toolchain compiled and linked its test file with its own headers, libraries and SDK; the build can start");
+            0
+        }
+        Err(e) => {
+            println!("\nproblem: {e}");
+            2
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
     crash::install();
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--check-toolchain") {
+        std::process::exit(check_toolchain_cli());
+    }
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
         let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
