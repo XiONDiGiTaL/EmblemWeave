@@ -48,8 +48,8 @@ the compiler in `jobs.rs`, not the steps; that is phase 2 in [LINUX.md](LINUX.md
 
 * the launcher's own folder, which is now `platform::data_root()` in one place (`Config::dir()`), the same
   `%APPDATA%\EmblemWeave` on Windows as before;
-* the engine's `nup-cache`, which is the *engine's* folder and is passed to it as a path, so a port gives it the
-  port's cache folder;
+* the engine's own caches (shader SPIR-V, the BC7/ASTC texture cache), which are *the engine's* folders and are
+  passed to it as paths in `fefw.ini`, so a port gives it the port's cache folders;
 * prose in messages, which now goes through `platform::NO_DATA_DIR` where it is an error and is written out in full
   where it is a sentence.
 

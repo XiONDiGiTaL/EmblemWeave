@@ -300,7 +300,7 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
             Severity::Warn,
             "Game file",
             format!(
-                "{} of {} files are zstd-compressed: each is decompressed once into %LOCALAPPDATA%\\EmblemWeave\\nup-cache (about {:.1} GB), so the first start is slower and needs that space",
+                "{} of {} files are zstd-compressed: each is decompressed the first time the game reads it, so the first start is slower (about {:.1} GB of them, and the package itself is never rewritten)",
                 packed.len(),
                 listed.len(),
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)
