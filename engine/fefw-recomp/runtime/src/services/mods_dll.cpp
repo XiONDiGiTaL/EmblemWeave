@@ -2,11 +2,15 @@
 // Code mods as DLLs (nxrt/mod_api.h): every *.dll in the exefs/ folder of an installed mod (installed_mods(), common.cpp) is loaded when
 // play mode starts; its nxmod_init is called with a table of runtime functions at the game's first frame boundary (main thread), when
 // the game's modules are mapped and relocated. [fs] dll_mods = false turns loading off.
+// A DLL may also export nxmod_early, called straight after it is loaded: the place to register file edits (edit_file), which the RomFS
+// image applies when it is built (fs.cpp, on the game's first file access, long before the first frame).
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #include <algorithm>
 #include <cstring>
 #include <cwctype>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -43,6 +47,7 @@ struct Mod {
     NxModInitFn init = nullptr;
     std::string dir;             // the mod's folder, UTF-8
     std::vector<uint32_t> hooks; // added during nxmod_init, removed if the mod declines
+    bool declined = false;       // nxmod_early returned nonzero: nxmod_init is not called
 };
 struct FrameFn {
     NxModFrameFn fn;
@@ -57,8 +62,22 @@ struct ModFn {
     const Mod* owner;            // the mod whose nxmod_init made it (switched off if that mod declines), or null
 };
 
+// A file edit a mod registered (edit_file)
+struct Editor {
+    std::string key;             // image path, lower case ASCII: "/gamedata/job.bin"
+    std::string path;            // as the mod wrote it (handed back in NxModFile::path)
+    NxModFileFn fn;
+    void* user;
+    const Mod* owner;            // the mod whose nxmod_early / nxmod_init registered it, or null
+};
+
 struct State {
     std::mutex mu;
+    std::vector<Editor> editors;
+    bool edits_closed = false;   // the RomFS image has asked: later edit_file calls are too late
+    std::vector<std::string> folders;   // the installed mods' folders (mod_folder), filled on first use
+    bool folders_known = false;
+    ModCodec codec;
     std::unordered_map<std::string, ModFn> fns;   // by thunk name
     std::vector<Mod*> mods;      // never freed: hooks and frame callbacks may still point into the DLLs
     std::vector<FrameFn> frame;
@@ -160,6 +179,121 @@ int api_make_writable(uint64_t addr, uint64_t size) {
     return mem::protect(first, end - first, mem::Prot::RW) ? 1 : 0;
 }
 
+// ---- version 3: file edits and helpers ---------------------------------------------------------------------------------------------
+std::string edit_key(const char* path) {
+    std::string k = path ? path : "";
+    std::replace(k.begin(), k.end(), '\\', '/');
+    while (!k.empty() && k.front() == '/') k.erase(k.begin());
+    for (char& ch : k)
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + 32);
+    return k.empty() ? k : "/" + k;
+}
+
+int api_edit_file(const char* path, NxModFileFn fn, void* user) {
+    const std::string key = edit_key(path);
+    if (key.empty() || !fn) return 0;
+    std::lock_guard<std::mutex> lk(st().mu);
+    if (st().edits_closed) {
+        NXLOG_W(kTag, "edit_file(%s): too late, the game's file system is already set up (register it from nxmod_early)", path);
+        return 0;
+    }
+    st().editors.push_back({key, path, fn, user, st().in_init});
+    return 1;
+}
+
+uint32_t api_mod_count() {
+    std::lock_guard<std::mutex> lk(st().mu);
+    if (!st().folders_known) {
+        st().folders_known = true;
+        namespace stdfs = std::filesystem;
+        const stdfs::path root = stdfs::u8path(mods_dir());
+        for (const RomfsMod& m : installed_mods()) {
+            const std::u8string s = (root / stdfs::u8path(m.name)).lexically_normal().u8string();
+            st().folders.emplace_back(reinterpret_cast<const char*>(s.data()), s.size());
+        }
+    }
+    return static_cast<uint32_t>(st().folders.size());
+}
+const char* api_mod_folder(uint32_t index) {
+    const uint32_t n = api_mod_count();
+    std::lock_guard<std::mutex> lk(st().mu);
+    return index < n ? st().folders[index].c_str() : nullptr;   // the strings are never changed once filled
+}
+
+int64_t api_read_file(const char* path, void* buf, uint64_t cap) {
+    if (!path || !*path) return -1;
+    std::error_code ec;
+    const std::filesystem::path p = std::filesystem::u8path(path);
+    if (!std::filesystem::is_regular_file(p, ec)) return -1;
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f) return -1;
+    const int64_t size = static_cast<int64_t>(f.tellg());
+    if (size < 0) return -1;
+    const uint64_t n = std::min<uint64_t>(static_cast<uint64_t>(size), buf ? cap : 0);
+    if (n) {
+        f.seekg(0);
+        f.read(static_cast<char*>(buf), static_cast<std::streamsize>(n));
+        if (static_cast<uint64_t>(f.gcount()) != n) return -1;
+    }
+    return size;
+}
+
+int api_write_file(const char* path, const void* data, uint64_t size) {
+    if (!path || !*path || (size && !data)) return 0;
+    const std::filesystem::path p = std::filesystem::u8path(path);
+    std::filesystem::path tmp = p;
+    tmp += L".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return 0;
+        if (size) f.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+        f.flush();
+        if (!f) return 0;
+    }
+    if (!MoveFileExW(tmp.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        return 0;
+    }
+    return 1;
+}
+
+int64_t api_zstd_decompress(const void* src, uint64_t src_size, void* dst, uint64_t cap) {
+    return st().codec.zstd_decompress && src ? st().codec.zstd_decompress(src, src_size, dst, cap) : -1;
+}
+int64_t api_zstd_compress(const void* src, uint64_t src_size, void* dst, uint64_t cap, int level) {
+    return st().codec.zstd_compress && (src || !src_size) ? st().codec.zstd_compress(src, src_size, dst, cap, level) : -1;
+}
+
+void* api_alloc(uint64_t size) { return std::calloc(1, static_cast<size_t>(size ? size : 1)); }
+void api_free(void* p) { std::free(p); }
+
+// What NxModFile::replace writes to: the public part first, so the mod's pointer is this object's.
+struct FileCall {
+    NxModFile pub;
+    std::vector<uint8_t> next;
+    bool replaced = false;
+};
+void file_replace(const NxModFile* file, const void* data, uint64_t size) {
+    if (!file || (size && !data)) return;
+    FileCall* call = reinterpret_cast<FileCall*>(const_cast<NxModFile*>(file));
+    const uint8_t* b = static_cast<const uint8_t*>(data);
+    std::vector<uint8_t> copy(b, b + size);   // data may point into the file's current content or into an earlier replace
+    call->next = std::move(copy);
+    call->replaced = true;
+}
+
+// Takes back what a declining mod registered: its hooks, frame callbacks, functions and file edits.
+void withdraw(Mod* m) {
+    for (uint32_t id : m->hooks) hook_remove(id);
+    m->hooks.clear();
+    std::lock_guard<std::mutex> lk(st().mu);
+    std::erase_if(st().frame, [m](const FrameFn& f) { return f.owner == m; });
+    std::erase_if(st().editors, [m](const Editor& e) { return e.owner == m; });
+    for (auto& [name, f] : st().fns)   // the thunks stay (the game may hold their addresses): they answer 0 from now on
+        if (f.owner == m) f.fn = nullptr;
+}
+
 // nxmod_init of every loaded mod, in load order: at the first frame boundary, once the game's modules are mapped and relocated
 void start_all() {
     std::vector<Mod*> mods;
@@ -168,16 +302,12 @@ void start_all() {
         mods = st().mods;
     }
     for (Mod* m : mods) {
+        if (m->declined) continue;
         st().in_init = m;
         const int rc = m->init(&m->api, m->dir.c_str());
         st().in_init = nullptr;
         if (rc != 0) {
-            for (uint32_t id : m->hooks) hook_remove(id);
-            m->hooks.clear();
-            std::lock_guard<std::mutex> lk(st().mu);
-            std::erase_if(st().frame, [m](const FrameFn& f) { return f.owner == m; });
-            for (auto& [name, f] : st().fns)   // the thunks stay (the game may hold their addresses): they answer 0 from now on
-                if (f.owner == m) f.fn = nullptr;
+            withdraw(m);
             NXLOG_W(kTag, "%s: declined to start (nxmod_init returned %d); its hooks are removed", m->name.c_str(), rc);
             continue;   // the DLL stays loaded: it may still own memory the runtime saw
         }
@@ -236,14 +366,71 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
     m->api.is_function = &api_is_function;
     m->api.make_function = &api_make_function;
     m->api.make_writable = &api_make_writable;
+    m->api.edit_file = &api_edit_file;
+    m->api.mod_count = &api_mod_count;
+    m->api.mod_folder = &api_mod_folder;
+    m->api.read_file = &api_read_file;
+    m->api.write_file = &api_write_file;
+    m->api.zstd_decompress = &api_zstd_decompress;
+    m->api.zstd_compress = &api_zstd_compress;
+    m->api.alloc = &api_alloc;
+    m->api.free_mem = &api_free;
     m->init = init;
     m->dir = u8(mod_dir);
-    std::lock_guard<std::mutex> lk(st().mu);
-    st().mods.push_back(m);
+    {
+        std::lock_guard<std::mutex> lk(st().mu);
+        st().mods.push_back(m);
+    }
     NXLOG_I(kTag, "%s: loaded, starts at the first frame", name.c_str());
+    // nxmod_early (optional): before the game's file system is set up, so the mod can register file edits
+    if (const auto early = reinterpret_cast<NxModEarlyFn>(GetProcAddress(dll, "nxmod_early"))) {
+        st().in_init = m;
+        const int rc = early(&m->api, m->dir.c_str());
+        st().in_init = nullptr;
+        if (rc != 0) {
+            m->declined = true;
+            withdraw(m);
+            NXLOG_W(kTag, "%s: declined at load (nxmod_early returned %d): not started", name.c_str(), rc);
+        }
+    }
 }
 
 }  // namespace
+
+void set_codec(const ModCodec& c) { st().codec = c; }
+
+bool file_edit_wanted(const std::string& image_path) {
+    const std::string key = edit_key(image_path.c_str());
+    std::lock_guard<std::mutex> lk(st().mu);
+    st().edits_closed = true;
+    return std::any_of(st().editors.begin(), st().editors.end(), [&](const Editor& e) { return e.key == key; });
+}
+
+bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data) {
+    const std::string key = edit_key(image_path.c_str());
+    std::vector<Editor> run;
+    {
+        std::lock_guard<std::mutex> lk(st().mu);
+        st().edits_closed = true;
+        for (const Editor& e : st().editors)
+            if (e.key == key) run.push_back(e);
+    }
+    bool changed = false;
+    for (const Editor& e : run) {   // each editor sees what the one before it left
+        FileCall call;
+        call.pub.path = e.path.c_str();
+        call.pub.data = data.data();
+        call.pub.size = data.size();
+        call.pub.replace = &file_replace;
+        e.fn(&call.pub, e.user);
+        if (!call.replaced) continue;
+        NXLOG_I(kTag, "%s: %s edited (%zu -> %zu bytes)", e.owner ? e.owner->name.c_str() : "?", image_path.c_str(), data.size(),
+                call.next.size());
+        data = std::move(call.next);
+        changed = true;
+    }
+    return changed;
+}
 
 void load_dll_mods(uint64_t base, uint64_t frame_update) {
     if (st().loaded) return;

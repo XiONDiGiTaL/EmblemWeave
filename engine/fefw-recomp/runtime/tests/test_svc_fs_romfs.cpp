@@ -30,6 +30,7 @@ NXTEST_GROUP(svc_fs_romfs)
 namespace {
 
 using nxrt::services::fs::RomfsImage;
+using nxrt::services::fs::RomfsEdits;
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 
 // One entry of a host test tree. `path` is an image path ("/dir/name").
@@ -798,6 +799,42 @@ NXTEST(romfs_overlays_replace_and_add) {
                      {"/top.txt", false, pattern(11, 7)}});
     uint64_t off = 0, sz = 0;
     CHECK(!img.file_extent("/data/unit.bin", &off, &sz));   // the game's spelling is kept
+}
+
+// Edits (code mods' edit_file): a wanted file is handed over as it stands after the overlays, the image serves the returned bytes with
+// their new size, the files around it keep their content, and a file the editor leaves alone is still read from the host.
+NXTEST(romfs_edits_replace_content_and_size) {
+    TempTree base, mod;
+    write_host(base.root, {{"/Data/A.bin", false, pattern(100, 1)}, {"/Data/B.bin", false, pattern(64, 2)}, {"/Data/C.bin", false, pattern(33, 3)},
+                           {"/z.bin", false, pattern(40, 4)}});
+    write_host(mod.root, {{"/Data/B.bin", false, pattern(70, 5)}});
+    RomfsEdits edits;
+    std::vector<std::string> asked;
+    edits.wants = [](const std::string& path) { return path == "/Data/B.bin" || path == "/Data/C.bin" || path == "/z.bin"; };
+    edits.edit = [&](const std::string& path, std::vector<uint8_t>& data) {
+        asked.push_back(path);
+        if (path == "/Data/B.bin") {
+            if (data != pattern(70, 5)) return false;        // the overlay's file, not the game's
+            data = pattern(5000, 9);                         // grows past its old place
+            return true;
+        }
+        if (path == "/z.bin") {
+            data.resize(3);                                  // shrinks
+            return true;
+        }
+        return false;                                        // C.bin: looked at, left alone
+    };
+    RomfsImage img;
+    std::string err;
+    REQUIRE(img.build(utf8(base.root), &err, {utf8(mod.root)}, &edits));
+    CHECK_EQ(asked.size(), size_t{3});
+    CHECK_EQ(img.stats().edited_files, 2u);
+    std::vector<uint8_t> z = pattern(40, 4);
+    z.resize(3);
+    check_tree(img, {{"/Data/A.bin", false, pattern(100, 1)},
+                     {"/Data/B.bin", false, pattern(5000, 9)},
+                     {"/Data/C.bin", false, pattern(33, 3)},
+                     {"/z.bin", false, z}});
 }
 
 // An overlay file where the game has a folder replaces the folder.

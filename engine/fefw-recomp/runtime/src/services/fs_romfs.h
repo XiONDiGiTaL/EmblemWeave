@@ -9,11 +9,21 @@
 // the offsets and sizes. Entries are sorted by name (byte order) within a directory.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace nxrt::services::fs {
+
+// Edits of files while the image is laid out (code mods, nxrt/mod_api.h edit_file). A file whose path `wants` accepts is read whole and
+// handed to `edit`; when that returns true the image serves the changed bytes from memory, with their new size. Paths are image
+// paths ("/GameData/Job.bin"). Files over max_size are left alone.
+struct RomfsEdits {
+    std::function<bool(const std::string& path)> wants;
+    std::function<bool(const std::string& path, std::vector<uint8_t>& data)> edit;
+    uint64_t max_size = 256ull << 20;
+};
 
 class RomfsImage {
 public:
@@ -25,7 +35,9 @@ public:
     // `overlays` are host folders laid over the tree in order (RomFS mods, LayeredFS style; a later one wins): a file at the same path
     // replaces the game's, a new path is added. Names match the game's ignoring ASCII case and keep the game's spelling. An overlay that
     // cannot be read is skipped with a warning; it never fails the build.
-    bool build(const std::string& host_dir, std::string* err = nullptr, const std::vector<std::string>& overlays = {});
+    // `edits` (optional) is applied to the merged tree, so an edit sees a mod's replacement of a file, not the game's original.
+    bool build(const std::string& host_dir, std::string* err = nullptr, const std::vector<std::string>& overlays = {},
+               const RomfsEdits* edits = nullptr);
     bool built() const;
     uint64_t size() const;                                  // total image size in bytes
     // Copies [offset, offset + len) of the image into dst. False when the range is outside the image or a host file cannot be read
@@ -36,6 +48,7 @@ public:
         uint64_t data_bytes = 0;                            // sum of file sizes
         uint64_t data_offset = 0;                           // header.file_partition_ofs
         uint32_t overlay_files = 0;                         // files served from overlays (replaced or added)
+        uint32_t edited_files = 0;                          // files served from memory after an edit (RomfsEdits)
     };
     Stats stats() const;
     // Image offset and size of a file by its path inside the image ("/a/b.bin", case sensitive), for tests and logs. False when absent.

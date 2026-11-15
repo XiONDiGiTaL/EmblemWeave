@@ -110,6 +110,7 @@ struct Node {
     uint32_t first_child = kNone;  // directories: first subdirectory entry
     uint32_t first_file = kNone;   // directories: first file entry
     uint64_t data = 0;           // files: offset of the data from the partition start
+    std::shared_ptr<const std::vector<uint8_t>> mem;   // files: the content after an edit (RomfsEdits), served instead of the host file
 };
 
 std::string shown(const Node& n) { return n.path.empty() ? std::string("/") : n.path; }
@@ -300,12 +301,12 @@ void flatten(Node& n, std::vector<Node*>& dirs, std::vector<Node*>& files) {
 }
 
 struct Segment {
-    enum class Kind : uint8_t { kHeader, kTables, kZero, kFile };
+    enum class Kind : uint8_t { kHeader, kTables, kZero, kFile, kMem };
     uint64_t off = 0;            // image offset
     uint64_t len = 0;
     Kind kind = Kind::kZero;
     uint64_t src = 0;            // kHeader/kTables: offset in that buffer; kFile: offset in the host file
-    uint32_t file = 0;           // kFile: index into Layout::files
+    uint32_t file = 0;           // kFile, kMem: index into Layout::files
 };
 
 struct FileRec {
@@ -314,7 +315,30 @@ struct FileRec {
     uint64_t image_off = 0;
     uint64_t src = 0;            // offset of the data in the host file
     std::string path;            // path inside the image ("/a/b.bin"), for the first-read note
+    std::shared_ptr<const std::vector<uint8_t>> mem;   // set: the content is here (an edited file), the host file is not read
 };
+
+// The whole of a file of the tree (a host file, or its range of a package). False when it cannot be read.
+bool read_whole(const Node& f, std::vector<uint8_t>& out) {
+    HANDLE h = CreateFileW(f.host.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    out.resize(static_cast<size_t>(f.size));
+    uint64_t done = 0;
+    bool ok = true;
+    while (ok && done < f.size) {
+        const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(f.size - done, 1ull << 30));
+        const uint64_t ofs = f.src + done;
+        OVERLAPPED ov{};
+        ov.Offset = static_cast<DWORD>(ofs & 0xFFFFFFFFull);
+        ov.OffsetHigh = static_cast<DWORD>(ofs >> 32);
+        DWORD got = 0;
+        ok = ReadFile(h, out.data() + done, chunk, &got, &ov) && got == chunk;
+        done += chunk;
+    }
+    CloseHandle(h);
+    return ok;
+}
 
 // Everything build() produces. Replaced as a whole.
 struct Layout {
@@ -329,7 +353,8 @@ struct Layout {
 };
 
 // Lays out the host folder: entries sorted by full path in each table, file data in that order, 16-byte aligned.
-bool make_layout(const std::string& host_dir, const std::vector<std::string>& overlays, Layout& L, std::string* err) {
+bool make_layout(const std::string& host_dir, const std::vector<std::string>& overlays, const RomfsEdits* edits, Layout& L,
+                 std::string* err) {
     std::string msg;
     std::wstring wdir;
     const bool packaged = nup::is_nup(host_dir);
@@ -385,6 +410,31 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     auto by_path = [](const Node* a, const Node* b) { return a->path < b->path; };
     std::sort(dirs.begin(), dirs.end(), by_path);
     std::sort(files.begin(), files.end(), by_path);
+
+    // Edits by code mods: the file as it stands after the overlays, changed in memory. Its size is the edited one from here on.
+    uint32_t edited = 0;
+    if (edits && edits->wants && edits->edit) {
+        for (Node* f : files) {
+            if (!edits->wants(f->path)) continue;
+            if (f->size > edits->max_size) {
+                NXLOG_W("fs", "romfs: %s is too large to be edited by a mod (%llu bytes): served as it is", f->path.c_str(),
+                        static_cast<unsigned long long>(f->size));
+                continue;
+            }
+            std::vector<uint8_t> data;
+            if (!read_whole(*f, data)) {
+                NXLOG_W("fs", "romfs: %s cannot be read for a mod's edit: served as it is", f->path.c_str());
+                continue;
+            }
+            const uint64_t before = f->size;
+            if (!edits->edit(f->path, data)) continue;
+            f->size = data.size();
+            f->mem = std::make_shared<const std::vector<uint8_t>>(std::move(data));
+            edited++;
+            NXLOG_I("fs", "romfs: %s edited by a code mod: %llu -> %llu bytes", f->path.c_str(), static_cast<unsigned long long>(before),
+                    static_cast<unsigned long long>(f->size));
+        }
+    }
 
     // Entry offsets in the two tables (root first: its path is empty).
     uint64_t dir_bytes = 0, file_bytes = 0;
@@ -493,8 +543,8 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         const uint64_t img = kPartitionOfs + f->data;
         if (img > cursor) L.segs.push_back({cursor, img - cursor, Segment::Kind::kZero, 0, 0});
         const uint32_t idx = static_cast<uint32_t>(L.files.size());
-        L.files.push_back({f->host, f->size, img, f->src, f->path});
-        if (f->size > 0) L.segs.push_back({img, f->size, Segment::Kind::kFile, f->src, idx});
+        L.files.push_back({f->host, f->size, img, f->src, f->path, f->mem});
+        if (f->size > 0) L.segs.push_back({img, f->size, f->mem ? Segment::Kind::kMem : Segment::Kind::kFile, f->mem ? 0 : f->src, idx});
         L.by_path[f->path] = idx;
         cursor = img + f->size;
         data_bytes += f->size;
@@ -508,6 +558,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     L.stats.data_bytes = data_bytes;
     L.stats.data_offset = kPartitionOfs;
     L.stats.overlay_files = taken;
+    L.stats.edited_files = edited;
     L.built = true;
     return true;
 }
@@ -597,9 +648,9 @@ struct RomfsImage::Impl {
 RomfsImage::RomfsImage() : p_(std::make_unique<Impl>()) {}
 RomfsImage::~RomfsImage() = default;
 
-bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays) {
+bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays, const RomfsEdits* edits) {
     Layout fresh;
-    const bool ok = make_layout(host_dir, overlays, fresh, err);
+    const bool ok = make_layout(host_dir, overlays, edits, fresh, err);
     std::lock_guard<std::mutex> lk(p_->mu);
     p_->cache.clear();
     p_->l = ok ? std::move(fresh) : Layout{};
@@ -630,6 +681,10 @@ bool RomfsImage::read(uint64_t offset, void* dst, uint64_t len) const {
             case Segment::Kind::kFile:
                 p_->note_read(g.file);
                 if (!p_->read_host(g.file, g.src + within, out, n)) return false;
+                break;
+            case Segment::Kind::kMem:
+                p_->note_read(g.file);
+                std::memcpy(out, L.files[g.file].mem->data() + within, n);
                 break;
         }
         out += n;

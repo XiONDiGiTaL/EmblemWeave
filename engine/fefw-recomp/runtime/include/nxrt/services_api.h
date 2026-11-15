@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace nxrt::services {
 
@@ -60,6 +61,18 @@ namespace modapi {
 // Loads the exefs/*.dll of the installed mods and calls their nxmod_init (once; later calls do nothing). base = main's guest address,
 // frame_update = the game's frame boundary relative to base (GamePlay::frame_update; 0 = no frame calls). Play mode start, main thread.
 void load_dll_mods(uint64_t base, uint64_t frame_update);
+// The file edits code mods registered (edit_file), for the RomFS image as it is built (fs.cpp). wants: some mod edits this image path
+// ("/GameData/Job.bin"). edit: runs the editors on the file's bytes; true when one of them replaced them. The first call of either
+// closes registration: edit_file answers 0 afterwards.
+// zstd for the mods (zstd_decompress / zstd_compress of the interface): the library is linked with the graphics half, which hands its
+// functions over before load_dll_mods. Signatures as in nxrt/mod_api.h. Without them the two interface functions answer -1.
+struct ModCodec {
+    int64_t (*zstd_decompress)(const void* src, uint64_t src_size, void* dst, uint64_t cap) = nullptr;
+    int64_t (*zstd_compress)(const void* src, uint64_t src_size, void* dst, uint64_t cap, int level) = nullptr;
+};
+void set_codec(const ModCodec& c);
+bool file_edit_wanted(const std::string& image_path);
+bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data);
 }  // namespace modapi
 
 // ---- acc (acc.cpp) ----------------------------------------------------------------------------------------------------------------

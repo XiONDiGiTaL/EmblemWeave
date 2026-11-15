@@ -466,7 +466,11 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
         if (at == std::string::npos) break;
         list.erase(0, at + 1);
     }
-    if (!img->build(dir, &err, overlays)) {
+    // code mods' file edits (nxrt/mod_api.h edit_file): applied to the tree with the RomFS mods laid over it
+    fs::RomfsEdits edits;
+    edits.wants = &modapi::file_edit_wanted;
+    edits.edit = &modapi::file_edit_run;
+    if (!img->build(dir, &err, overlays, &edits)) {
         NXLOG_E("fs", "RomFS folder '%s' cannot be served: %s (set [fs] romfs)", dir.c_str(), err.c_str());
         st().rom_failed = true;
         return nullptr;
@@ -475,6 +479,7 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     NXLOG_I("fs", "RomFS image from %s: %u files, %u directories, %llu bytes of data, image size %llu", dir.c_str(), s.files, s.dirs,
             static_cast<unsigned long long>(s.data_bytes), static_cast<unsigned long long>(img->size()));
     if (!overlays.empty()) NXLOG_I("mods", "%zu RomFS mod(s), %u files from mods", overlays.size(), s.overlay_files);
+    if (s.edited_files) NXLOG_I("mods", "%u file(s) edited by code mods", s.edited_files);
     // [fs] romfs_files: the file count of the complete RomFS of the supported version (the game sets it). A dump well short of it (the
     // base game's RomFS beside the update's code, a copy that stopped part way) boots and then crashes on a file that is not there (#64).
     if (const int64_t want = config_get_int("fs", "romfs_files", 0); want > 0 && s.files < want * 95 / 100) {
