@@ -42,9 +42,10 @@ set(FEFW_ROMFS_DEFAULT "game/dump/romfs" CACHE PATH "default [fs] romfs")
 set(FEFW_MAIN_DEFAULT "" CACHE FILEPATH "default [fs] main: main as an uncompressed NSO (empty: <exefs>/main)")
 configure_file(src/fefw_paths.h.in "${CMAKE_CURRENT_BINARY_DIR}/fefw_paths.h" @ONLY)
 
-# clang-cl takes a clang argument through -clang:, the other drivers take it as it is. A cache that had fallen back to clang++ used to
-# stop here with "unknown argument: '-clang:-fmacro-prefix-map=...'".
-if(CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+# clang-cl takes a clang argument through -clang:, the other drivers take it as it is. What tells the two apart is the frontend variant: on a
+# Windows host the clang++ driver also reports a simulated MSVC ABI (CMAKE_CXX_SIMULATE_ID is "MSVC" for it), so asking that handed
+# "-clang:" to clang++ and the build stopped on "unknown argument: '-clang:-fmacro-prefix-map=...'" (issues #22 and #25).
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     add_compile_options("-clang:-fmacro-prefix-map=${FEFW_ROOT}=.")
 else()
     add_compile_options("-fmacro-prefix-map=${FEFW_ROOT}=.")

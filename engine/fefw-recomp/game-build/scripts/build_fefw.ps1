@@ -14,6 +14,18 @@ $env_cmd = Join-Path $root "..\runtime\scripts\env.cmd"
 # them afterwards makes CMake wipe itself and configure again with its defaults (Debug, the clang++ driver), which is issue #22.
 $llvm_bin = if ($env:NX_LLVM_BIN) { $env:NX_LLVM_BIN } else { 'C:\Program Files\LLVM\bin' }
 $clang_cl = if (Test-Path (Join-Path $llvm_bin 'clang-cl.exe')) { (Join-Path $llvm_bin 'clang-cl.exe').Replace('\', '/') } else { 'clang-cl' }
+# A build folder configured by an older release was configured for the clang++ driver, and CMake keeps the MSVC flags it wrote from then
+# when the compiler is swapped on it later: the flags reach clang++ as `-clang:-fmacro-prefix-map=...` and `/W3`, which it rejects (issue
+# #25). Nothing in that folder is worth keeping, so it is started over when the compiler it recorded is not the one this run uses.
+$cache = Join-Path $bd 'CMakeCache.txt'
+if (Test-Path $cache) {
+    $recorded = @(Select-String -Path $cache -Pattern '^CMAKE_C(XX)?_COMPILER:[^=]*=(.+)$' | ForEach-Object { $_.Matches[0].Groups[2].Value.Trim() })
+    $stale = @($recorded | Where-Object { $_ -and ((Split-Path -Leaf $_).ToLower() -ne (Split-Path -Leaf $clang_cl).ToLower()) })
+    if ($stale.Count -gt 0) {
+        Write-Host "this build folder was configured for $($stale -join ', '); starting it over for $(Split-Path -Leaf $clang_cl)"
+        Remove-Item -Recurse -Force $bd
+    }
+}
 $llvm_rc = if (Test-Path (Join-Path $llvm_bin 'llvm-rc.exe')) { (Join-Path $llvm_bin 'llvm-rc.exe').Replace('\', '/') } else { '' }
 $cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER=`"$clang_cl`" -DCMAKE_CXX_COMPILER=`"$clang_cl`""
 if ($llvm_rc) { $cfg += " -DCMAKE_RC_COMPILER=`"$llvm_rc`"" }
