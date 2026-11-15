@@ -77,6 +77,21 @@ pub struct Toast {
     pub text: String,
     pub tone: Tone,
     pub until: Instant,
+    /// The one thing worth doing about what the toast says, when there is one (a failed build can be started again from here).
+    pub action: Option<ToastAction>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ToastAction {
+    BuildAgain,
+}
+
+impl ToastAction {
+    fn label(self) -> &'static str {
+        match self {
+            ToastAction::BuildAgain => "Build again",
+        }
+    }
 }
 
 /// A question the user must answer before an action runs.
@@ -237,7 +252,12 @@ impl App {
     pub fn notify(&mut self, text: impl Into<String>, tone: Tone) {
         let text = text.into();
         self.note(text.clone(), tone);
-        self.toasts.push(Toast { text, tone, until: Instant::now() + Duration::from_secs(5) });
+        self.toasts.push(Toast { text, tone, until: Instant::now() + Duration::from_secs(5), action: None });
+    }
+
+    /// A toast that carries the action that answers it, and stays long enough to be used.
+    pub fn notify_action(&mut self, text: String, tone: Tone, action: ToastAction) {
+        self.toasts.push(Toast { text, tone, until: Instant::now() + Duration::from_secs(60), action: Some(action) });
     }
 
     pub fn running(&self, kind: JobKind) -> Option<&Job> {
@@ -328,7 +348,14 @@ impl App {
                     .map(|f| format!(" [log: {}]", f.display()))
                     .unwrap_or_default();
                 drop(p);
-                self.notify(format!("{}: {err}{where_}", kind.title()), Tone::Bad);
+                let text = format!("{}: {err}{where_}", kind.title());
+                // A failed build is the one failure with an obvious next step, and the step resets a broken build folder on its own, so the
+                // message carries the button that runs it.
+                if kind == JobKind::Engine {
+                    self.notify_action(text, Tone::Bad, ToastAction::BuildAgain);
+                } else {
+                    self.notify(text, Tone::Bad);
+                }
                 // A Play waiting on the check has to be dropped, or it would start the game after a failure.
                 if kind == JobKind::Repair {
                     self.play_after_repair = false;
@@ -750,6 +777,7 @@ impl App {
     fn overlays(&mut self, ctx: &egui::Context) {
         let p = self.config.theme.palette();
         // Toasts, newest at the bottom right.
+        let mut clicked: Option<ToastAction> = None;
         self.toasts.retain(|t| t.until > Instant::now());
         if !self.toasts.is_empty() {
             egui::Area::new(egui::Id::new("toasts"))
@@ -765,11 +793,26 @@ impl App {
                             .show(ui, |ui| {
                                 ui.set_max_width(420.0);
                                 ui.label(RichText::new(&t.text).size(13.5).color(p.ink));
+                                if let Some(action) = t.action {
+                                    ui.add_space(theme::SPACE_XS);
+                                    if widgets::button(ui, &p, action.label(), true).clicked() {
+                                        clicked = Some(action);
+                                    }
+                                }
                             });
                         ui.add_space(6.0);
                     }
                 });
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if let Some(action) = clicked {
+            match action {
+                ToastAction::BuildAgain => {
+                    // One press answers the message that is still on screen.
+                    self.toasts.retain(|t| !matches!(t.action, Some(ToastAction::BuildAgain)));
+                    self.start(JobKind::Engine);
+                }
+            }
         }
         // Confirmation dialog.
         if let Some(confirm) = &self.confirm {
