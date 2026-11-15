@@ -10,7 +10,13 @@ $bd = if ($BuildDir) { if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDi
       else { Join-Path $src ("build\" + $Config.ToLower()) }
 if ($Clean -and (Test-Path $bd)) { Remove-Item -Recurse -Force $bd }
 $env_cmd = Join-Path $root "..\runtime\scripts\env.cmd"
-$cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl"
+# Both compilers and the resource compiler go into the first configure, by full path when they are there: a cache that gets one of
+# them afterwards makes CMake wipe itself and configure again with its defaults (Debug, the clang++ driver), which is issue #22.
+$llvm_bin = if ($env:NX_LLVM_BIN) { $env:NX_LLVM_BIN } else { 'C:\Program Files\LLVM\bin' }
+$clang_cl = if (Test-Path (Join-Path $llvm_bin 'clang-cl.exe')) { (Join-Path $llvm_bin 'clang-cl.exe').Replace('\', '/') } else { 'clang-cl' }
+$llvm_rc = if (Test-Path (Join-Path $llvm_bin 'llvm-rc.exe')) { (Join-Path $llvm_bin 'llvm-rc.exe').Replace('\', '/') } else { '' }
+$cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER=`"$clang_cl`" -DCMAKE_CXX_COMPILER=`"$clang_cl`""
+if ($llvm_rc) { $cfg += " -DCMAKE_RC_COMPILER=`"$llvm_rc`"" }
 $sccache = (Get-Command sccache -ErrorAction SilentlyContinue).Source
 if (-not $sccache -and $env:NX_TOOLCHAIN -and (Test-Path (Join-Path $env:NX_TOOLCHAIN 'bin\sccache.exe'))) { $sccache = Join-Path $env:NX_TOOLCHAIN 'bin\sccache.exe' }
 if ($sccache) {
