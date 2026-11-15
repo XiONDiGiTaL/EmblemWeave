@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.21](0.1.21.md) | 2026-11-15 | Game Setup has a one-click check that prepares a packed package in a minute, without compiling anything |
 | [0.1.20](0.1.20.md) | 2026-11-15 | A package that packs part of its RomFS with zstd now plays without being repacked, and its compressed files cost 2 GB instead of a second copy of the game |
 | [0.1.19](0.1.19.md) | 2026-11-15 | New areas compile about four fifths fewer shader parts, the compilers step aside when the picture is late, and a fresh copy keeps everything in its own folder |
 | [0.1.18](0.1.18.md) | 2026-11-15 | The build survives spaced and apostrophe folders, the pipeline stops opening hundreds of console windows, and the launcher finally has a portable mode |
