@@ -16,8 +16,18 @@
  *
  * What a mod can do:
  *   - attach to the hook sites the game was lifted with (recomp/games/<game>/main.sites): inline, midhook and entry hooks, the same as
- *     the runtime's own features (nxrt/hooks.h). A site that is not in that list is never reached: a new site needs a change to
- *     main.sites (and a Set up run) like any other hook.
+ *     the runtime's own features (nxrt/hooks.h). A site that is not in that list is never reached. A mod that needs sites of its
+ *     own lists them beside its DLL in exefs/<any name>.sites, in the syntax of main.sites with only the kinds inline, midhook and
+ *     entryhook, plus a line `@nsobid <main build ID>` (sites for another version are left out):
+ *
+ *         @nsobid DB93B0125F4850601D61C3EDDE012F8EB2ECFE77
+ *         midhook 0x7100e1d03c      # comment
+ *
+ *     The game build lifts main with main.sites plus the sites of the installed mods (the launcher merges them before the build), so
+ *     after installing, updating or removing such a mod the game is built again. A mod switched off keeps its sites (a site with no
+ *     hook attached only passes through), so switching it needs only the next start. The build puts the list main was lifted with
+ *     next to the exe (fefw.sites); the runtime checks hook_inline / hook_mid / hook_entry in main against it (a warning in the log
+ *     for a site this build lacks) and, at start, the installed mods' .sites files: a mod whose sites are missing is named on screen.
  *   - call any lifted guest function (call_guest) from a hook or the frame callback, on the thread and Ctx it was given.
  *   - read and write guest memory directly: guest addresses are host addresses (main is at main_base); is_mapped checks a range first.
  *   - run once per presented frame (on_frame), on the main thread with its Ctx.

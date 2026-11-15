@@ -72,6 +72,11 @@ struct ModCodec {
 };
 void set_codec(const ModCodec& c);
 bool file_edit_wanted(const std::string& image_path);
+// Hook sites (a mod's exefs/*.sites, built in by the game build): how many sites the mod in mod_dir lists for this game build that the running
+// game exe was not lifted with (0 = all there); -1 when the build's own list (<exe>.sites) is unknown. Any thread.
+int sites_missing(const std::string& mod_dir);
+// What the overlay shows on screen at start about code mods (installed mods whose sites are missing): lines, "" for nothing.
+std::string notice();
 bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data);
 }  // namespace modapi
 

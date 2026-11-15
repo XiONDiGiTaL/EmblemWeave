@@ -427,14 +427,15 @@ std::shared_ptr<Service> make_storage_rom(std::shared_ptr<fs::RomfsImage> img) {
     });
 }
 
-// An emulator's code patches in a mod's exefs/ (.ips, .pchtxt, ...): anything but the DLLs mods_dll.cpp loads
+// An emulator's code patches in a mod's exefs/ (.ips, .pchtxt, ...): anything but the DLLs mods_dll.cpp loads and the hook
+// site lists (.sites) the game build reads for them
 bool has_exefs_patches(const RomfsMod& m) {
     std::error_code ec;
     for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(m.exefs), ec)) {
         if (!e.is_regular_file(ec)) continue;
         std::wstring ext = e.path().extension().wstring();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        if (ext != L".dll") return true;
+        if (ext != L".dll" && ext != L".sites") return true;
     }
     return false;
 }

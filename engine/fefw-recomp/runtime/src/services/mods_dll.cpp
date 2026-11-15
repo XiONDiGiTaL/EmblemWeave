@@ -12,7 +12,9 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -83,6 +85,8 @@ struct State {
     std::vector<FrameFn> frame;
     Mod* in_init = nullptr;      // the mod whose nxmod_init is running (main thread)
     uint32_t frame_hook = 0;
+    uint64_t main_base = 0;
+    std::vector<std::string> notices;   // shown on screen at start (notice())
     bool loaded = false;
     bool started = false;        // nxmod_init has run (first frame boundary)
 };
@@ -113,9 +117,93 @@ uint32_t track(uint32_t id) {
     if (id && st().in_init) st().in_init->hooks.push_back(id);
     return id;
 }
-uint32_t api_hook_inline(uint64_t addr, NxModInlineFn fn, void* user) { return track(hook_add_inline(addr, fn, user)); }
-uint32_t api_hook_mid(uint64_t addr, NxModSiteFn fn, void* user) { return track(hook_add_mid(addr, fn, user)); }
-uint32_t api_hook_entry(uint64_t addr, NxModSiteFn fn, void* user) { return track(hook_add_entry(addr, fn, user)); }
+
+// ---- the sites main was lifted with ---------------------------------------------------------------------------------------------------
+// The game build writes the site list main was lifted with next to the exe, as <exe>.sites (fefw.sites): game-build/fefw/CMakeLists.txt
+// copies the list the libraries were lifted with (recomp/games/fefw/CMakeLists.txt FEFW_SITES: main.sites, plus the mods' sites when
+// the launcher merged them). Without the file the list is unknown: hooks are not checked (a midhook only by the "is a lifted function" test).
+struct SiteList {
+    bool known = false;
+    std::string bid;                                 // upper-case hex, "" when the file has no @nsobid line
+    std::set<std::pair<std::string, uint64_t>> sites;   // (kind, guest address)
+};
+
+std::string upper(std::string t) {
+    for (char& ch : t) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return t;
+}
+
+// Reads a site list: `<kind> <address>` lines, `#` comments, `@nsobid <id>`. Every kind is kept (patch lines too).
+bool read_site_list(const std::filesystem::path& file, SiteList* out) {
+    std::ifstream f(file);
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (const size_t h = line.find('#'); h != std::string::npos) line.resize(h);
+        char kind[32] = {}, arg[80] = {};
+        if (std::sscanf(line.c_str(), "%31s %79s", kind, arg) != 2) continue;
+        if (_stricmp(kind, "@nsobid") == 0) out->bid = upper(arg);
+        else out->sites.insert({kind, std::strtoull(arg, nullptr, 16)});
+    }
+    out->known = true;
+    return true;
+}
+
+const SiteList& lifted_sites() {
+    static const SiteList list = [] {
+        SiteList l;
+        wchar_t exe[MAX_PATH * 2];
+        const DWORD n = GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(std::size(exe)));
+        if (n == 0 || n >= std::size(exe)) return l;
+        const std::filesystem::path file = std::filesystem::path(exe).replace_extension(L".sites");
+        const std::u8string name = file.filename().u8string();
+        const char* shown = reinterpret_cast<const char*>(name.c_str());
+        if (read_site_list(file, &l)) NXLOG_I(kTag, "this build's hook sites: %zu (%s)", l.sites.size(), shown);
+        else NXLOG_I(kTag, "no %s next to the exe: hooks of code mods are not checked against this build's sites", shown);
+        return l;
+    }();
+    return list;
+}
+
+// A main.sites build ID against the list's: a prefix of it, the rest zeros (as Atmosphere matches build IDs).
+bool same_build(const std::string& mod_bid, const std::string& list_bid) {
+    if (list_bid.empty()) return true;               // a developer build's list: assume the same game build
+    std::string full = list_bid;
+    full.resize(64, '0');
+    const std::string t = upper(mod_bid);
+    if (t.size() < 16 || t.size() > 64 || full.compare(0, t.size(), t) != 0) return false;
+    return full.find_first_not_of('0', t.size()) == std::string::npos;
+}
+
+// Whether a hook of this kind at addr can run in this build. Addresses outside main are not checked (sites are main's only).
+bool site_ok(const char* kind, uint64_t addr) {
+    const uint64_t base = st().main_base;
+    if (!addr || !base || addr < base || addr >= base + 0x400000000ull) return true;
+    const SiteList& l = lifted_sites();
+    if (!l.known) return std::strcmp(kind, "midhook") != 0 || fn_lookup(addr) != nullptr;
+    return l.sites.count({kind, addr}) != 0;
+}
+
+void check_hook(const char* api_fn, const char* kind, uint64_t addr) {
+    if (site_ok(kind, addr)) return;
+    const Mod* m = st().in_init;
+    NXLOG_W(kTag, "%s: %s(0x%llx): this build has no %s site there, the hook will never run (a mod lists its sites in "
+                  "exefs/*.sites; the game build lifts them in)", m ? m->name.c_str() : "a code mod", api_fn,
+            static_cast<unsigned long long>(addr), kind);
+}
+
+uint32_t api_hook_inline(uint64_t addr, NxModInlineFn fn, void* user) {
+    check_hook("hook_inline", "inline", addr);
+    return track(hook_add_inline(addr, fn, user));
+}
+uint32_t api_hook_mid(uint64_t addr, NxModSiteFn fn, void* user) {
+    check_hook("hook_mid", "midhook", addr);
+    return track(hook_add_mid(addr, fn, user));
+}
+uint32_t api_hook_entry(uint64_t addr, NxModSiteFn fn, void* user) {
+    check_hook("hook_entry", "entryhook", addr);
+    return track(hook_add_entry(addr, fn, user));
+}
 int api_hook_remove(uint32_t id) { return hook_remove(id) ? 1 : 0; }
 
 int api_is_function(uint64_t addr) { return addr && (fn_lookup(addr) || hle_is_thunk(addr)) ? 1 : 0; }
@@ -397,6 +485,28 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
 
 }  // namespace
 
+int sites_missing(const std::string& mod_dir) {
+    namespace stdfs = std::filesystem;
+    const SiteList& l = lifted_sites();
+    if (!l.known || mod_dir.empty()) return -1;
+    std::error_code ec;
+    int missing = 0;
+    for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(mod_dir) / "exefs", ec)) {
+        if (!e.is_regular_file(ec) || _wcsicmp(e.path().extension().c_str(), L".sites") != 0) continue;
+        SiteList want;
+        if (!read_site_list(e.path(), &want) || want.bid.empty() || !same_build(want.bid, l.bid)) continue;
+        for (const auto& s : want.sites) missing += l.sites.count(s) == 0;
+    }
+    return missing;
+}
+
+std::string notice() {
+    std::lock_guard<std::mutex> lk(st().mu);
+    std::string out;
+    for (const std::string& n : st().notices) out += (out.empty() ? "" : "\n") + n;
+    return out;
+}
+
 void set_codec(const ModCodec& c) { st().codec = c; }
 
 bool file_edit_wanted(const std::string& image_path) {
@@ -435,6 +545,17 @@ bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data) {
 void load_dll_mods(uint64_t base, uint64_t frame_update) {
     if (st().loaded) return;
     st().loaded = true;
+    st().main_base = base;
+    // a mod whose hook sites this build was not lifted with: say so on screen as well as in the log, since its hooks would never run
+    for (const RomfsMod& mod : installed_mods()) {
+        if (mod.exefs.empty()) continue;
+        const int missing = sites_missing(u8(std::filesystem::u8path(mod.exefs).parent_path()));
+        if (missing <= 0) continue;
+        NXLOG_W(kTag, "%s: %d of its hook sites (exefs/*.sites) are not in this build: its hooks will not run. Build the game again.",
+                mod.name.c_str(), missing);
+        std::lock_guard<std::mutex> lk(st().mu);
+        st().notices.push_back(mod.name + ": build the game again (its hook sites are not in this build)");
+    }
     if (!config_get_bool("fs", "dll_mods", true)) {
         NXLOG_I(kTag, "code mods (exefs/*.dll) are off ([fs] dll_mods = false)");
         return;
