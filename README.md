@@ -219,7 +219,7 @@ starts, and the Requirements page names each missing one with the command that i
 | PowerShell 7 | Build the game | 7 | `winget install --id Microsoft.PowerShell --exact --accept-package-agreements --accept-source-agreements` |
 | uv | Build the game | any | `winget install --id astral-sh.uv --exact --accept-package-agreements --accept-source-agreements` |
 | .NET 10 SDK | Build the game (only without the bundled translator) | 10 | `winget install --id Microsoft.DotNet.SDK.10 --exact --accept-package-agreements --accept-source-agreements` |
-| .NET runtime | Shaders (optional) | 10 | `winget install --id Microsoft.DotNet.Runtime.10 --exact --accept-package-agreements --accept-source-agreements` |
+| .NET runtime | Shaders (optional) | 10 | Only runs a translator that was built here without being published as one executable. The bundled one carries its own runtime. |
 | Shader translator | Shaders | any | Turns the game's shaders into SPIR-V. The release zip carries it, published with its own .NET runtime. |
 | Python | Decode | 3.9 | `winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements` |
 | zbic (Python package) | Decode | any | `py -m pip install zbic` |

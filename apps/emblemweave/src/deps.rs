@@ -227,7 +227,10 @@ pub static DEPS: &[Dep] = &[
         min: Some("10"),
         min_parts: &[10],
         detect: Detect::DotnetRuntime,
-        install: Some(Install::Winget("winget install --id Microsoft.DotNet.Runtime.10 --exact --accept-package-agreements --accept-source-agreements")),
+        // Nothing is ever asked for here: the bundled translator carries its
+        // own runtime, and a translator built from source is published
+        // self-contained. The row exists so the page can say which case applies.
+        install: None,
         need: Need::Optional,
         stages: &[Stage::Translate],
         note: "Only runs a translator that was built here without being published as one executable. The bundled one carries its own runtime.",
