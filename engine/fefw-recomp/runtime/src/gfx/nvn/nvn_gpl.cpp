@@ -81,7 +81,10 @@ struct Entry {
 
 std::mutex g_mu;
 std::condition_variable g_cv;
-bool g_inited = false, g_enabled = false, g_stop = false, g_lto = false, g_cold = true;
+// g_cold: build the parts of programs the game set but has not drawn with yet. Off by default: those are a guess, and in a session measured on
+// this PC 88% of the parts built that way were never taken by a draw, so the guess cost more processor time than the drawing did. With it off a
+// program's parts are built when a command buffer is recorded with it, which is still a few frames before the draw needs them.
+bool g_inited = false, g_enabled = false, g_stop = false, g_lto = false, g_cold = false;
 std::atomic<bool> g_on{false};
 std::atomic<bool> g_discard{false};
 std::atomic<bool> g_prepare_cache{false};      // shader preparation keeps what it compiled in the pipeline cache file ([nvn] prepare_cache)
@@ -588,7 +591,7 @@ void init_once() {
     g_stop = false;
     g_enabled = config_get_bool("nvn", "gpl", true) && device().features().graphics_pipeline_library;
     g_lto = config_get_bool("nvn", "gpl_lto", false);
-    g_cold = config_get_bool("nvn", "gpl_cold", true);
+    g_cold = config_get_bool("nvn", "gpl_cold", false);
     {
         const std::string m = config_get_str("nvn", "gpl_upgrade", "whole");
         g_up_mode = (m == "off" || m == "false" || m == "0") ? UpMode::Off : (m == "lto") ? UpMode::Lto : UpMode::Whole;
@@ -618,6 +621,12 @@ void learn_raster(const RasterKey& r) {
         if (k == r) return;
     g_rasters.push_back(r);
     for (const auto& p : g_programs) {
+        // A program no command buffer has been recorded with is not drawn: with the speculative queue off (the default) its part for this raster
+        // is built when a draw does ask for it, not now.
+        if (!g_cold && !g_hot.count(p)) {
+            ++g_stats.prog_deferred;
+            continue;
+        }
         Job j;
         for (int i = 0; i < 3; ++i) j.st[i] = p[i];
         j.r = r;
@@ -683,6 +692,10 @@ bool gpl_active() {
 
 // Jobs of one program, shader parts first. `front` = urgent (a draw recorded with the program): ahead of everything queued speculatively.
 static void queue_program(const std::array<const ShaderInfo*, 3>& prog, bool front) {
+    if (!front && !g_cold) {                 // set but not drawn with: its parts are built when a command buffer records it
+        ++g_stats.prog_deferred;
+        return;
+    }
     std::vector<Job> jobs;
     Job f;
     for (int i = 0; i < 3; ++i) f.st[i] = prog[i];
@@ -970,12 +983,12 @@ void gpl_progress_log() {
             static_cast<unsigned long long>(s.upgrades_failed));
     if (s.paced_ms > 0) NXLOG_I(kTag, "compile threads stepped aside for late frames: %.0f ms in all", s.paced_ms);
     NXLOG_I(kTag, "libraries ahead: programs set %llu (covered by the key file %llu, new %llu), bound %llu (new %llu); jobs queued %llu, run %llu, "
-                  "no layout %llu, no modules %llu; draws deferred %llu for %llu parts; single-stage programs %llu; key-file keys queued %llu, run %llu",
+                  "no layout %llu, no modules %llu; draws deferred %llu for %llu parts; single-stage programs %llu; left to their first record %llu; key-file keys queued %llu, run %llu",
             static_cast<unsigned long long>(s.prog_set), static_cast<unsigned long long>(s.prog_covered), static_cast<unsigned long long>(s.prog_new),
             static_cast<unsigned long long>(s.prog_bound), static_cast<unsigned long long>(s.prog_bound_new), static_cast<unsigned long long>(s.jobs),
             static_cast<unsigned long long>(s.jobs_run), static_cast<unsigned long long>(s.jobs_no_layout), static_cast<unsigned long long>(s.jobs_no_modules),
             static_cast<unsigned long long>(s.draws_deferred), static_cast<unsigned long long>(s.parts_async), static_cast<unsigned long long>(s.prog_single),
-            static_cast<unsigned long long>(s.prebuild_jobs), static_cast<unsigned long long>(s.prebuild_run));
+            static_cast<unsigned long long>(s.prog_deferred), static_cast<unsigned long long>(s.prebuild_jobs), static_cast<unsigned long long>(s.prebuild_run));
 }
 
 void program_bound(const ShaderInfo* const stages[6]) { gpl_program_bound(stages); }
