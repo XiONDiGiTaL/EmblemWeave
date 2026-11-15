@@ -37,10 +37,13 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.16, playable through the baseline engine.** Build the game once from your dump, press **Play**,
-> and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the opening movie and cutscenes. The build
-> needs Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with
-> its own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
+> **Current status: 0.1.17, playable through the baseline engine.** Build the game once from your dump, press **Play**,
+> and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the opening movie and cutscenes. 0.1.17
+> moves the engine to the 0.2.0 tree Obersteinn preserved, builds it from an empty folder on this PC, and was checked by
+> playing: title screen, the save loaded through **Continue**, the hub walked through, the in-game menu and the F1
+> settings overlay. The build needs Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader
+> translator ships in the zip with its own runtime. What changed in each release is in the
+> [changelog](docs/changelog/README.md).
 >
 > EmblemWeave's own Rust runtime is being completed to take over running the game. It executes the game's code natively,
 > serves NVN on the host GPU through Vulkan, opens a window and presents the swap chain, and carries out the command
@@ -120,13 +123,15 @@ what changed. The README keeps the current state; the changelog keeps the histor
 
 ## Development status
 
-Measured on the retail game (version 1.1.0, update 131072) on 13 November 2026.
+Measured on the retail game (version 1.1.0, update 131072) on 15 November 2026.
 
 **Playable through the baseline engine.** On an AMD Radeon RX 7900 XT the game runs at about 60 fps, with sound and
 its movies, from the launcher's **Build the game** and **Play**. The first build takes a while (the game code is
 compiled and about 12,000 shaders are translated); later builds only redo what changed. The baseline is built with
 libvpx for the title's VP9/VP8 codecs and dav1d for its AV1 decoder, so the opening movie and cutscenes decode on the
-host instead of being skipped.
+host instead of being skipped. 0.1.17 ran that build from an empty folder on the test PC and played it: title screen,
+the existing save loaded through **Continue** into chapter 4 of Theodora's Path, the hub area walked with `W`, the
+in-game menu on `Tab` and the engine's settings overlay on `F1`, at 47 to 68 fps with no errors in the log.
 
 EmblemWeave's own Rust runtime, which is being completed to replace the baseline engine ([docs/ENGINE.md](docs/ENGINE.md)):
 

@@ -522,7 +522,10 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
                 "`{command}` failed ({status}) and printed nothing at all. That is what a script looks like when machine \
                  policy or security software stops it before its first line; the log has the command and the lines around it"
             ))
-        } else if let Some(missing) = missing_program(&block.join(" ")).or_else(|| missing_program(&said)) {
+        } else if let Some(missing) = missing_program(&said).or_else(|| missing_program(&block.join(" "))) {
+            // The reason first: a step can print "'vswhere.exe' is not recognized" as a warning near the top and still
+            // fail later for another reason, and naming vswhere as the cause sent a real build failure (the SDK's
+            // rc.exe hanging) to an install instruction that changed nothing.
             Err(format!(
                 "`{command}` called `{missing}`, which is not installed or not on PATH (exit {status}). Install it, restart \
                  the launcher, then press Build the game again"

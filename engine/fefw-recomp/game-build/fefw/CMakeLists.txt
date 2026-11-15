@@ -9,6 +9,25 @@ if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 project(fefw_game C CXX)
+# The resource compiler: llvm-rc, next to the clang-cl this build already requires. The Windows SDK's rc.exe under a newer SDK
+# folder has been seen to hang on the preprocessed .rc this project feeds it (it wrote its temp files and never returned), and
+# llvm-rc compiles the same file at once. A value already in the cache is replaced when it names that rc.exe.
+if(NOT CMAKE_RC_COMPILER OR CMAKE_RC_COMPILER MATCHES "[Rr][Cc]\\.exe$")
+    get_filename_component(_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(_llvm_rc "${_llvm_bin}/llvm-rc.exe" "${_llvm_bin}/llvm-rc")
+        if(EXISTS "${_llvm_rc}")
+            set(CMAKE_RC_COMPILER "${_llvm_rc}" CACHE FILEPATH "resource compiler" FORCE)
+            break()
+        endif()
+    endforeach()
+    # The compiler may be named without its folder; then take the first llvm-rc on PATH.
+    if(NOT CMAKE_RC_COMPILER OR CMAKE_RC_COMPILER MATCHES "[Rr][Cc]\\.exe$")
+        find_program(_llvm_rc_prog NAMES llvm-rc llvm-rc.exe)
+        if(_llvm_rc_prog)
+            set(CMAKE_RC_COMPILER "${_llvm_rc_prog}" CACHE FILEPATH "resource compiler" FORCE)
+        endif()
+    endif()
+endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
