@@ -808,6 +808,13 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     dci.ppEnabledExtensionNames = dev_exts.data();
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
+    {   // What the device was created with, in the log rather than only in a report:
+        // a driver that drops an extension, or a run whose swapchain extension was
+        // never enabled, is one line to see.
+        std::string names;
+        for (const char* e : dev_exts) names += (names.empty() ? "" : ", ") + std::string(e);
+        NXLOG_I(kTag, "device extensions enabled (%zu): %s", dev_exts.size(), names.empty() ? "none" : names.c_str());
+    }
     if (sl_gipa) {
         // Resolve the device loader from the interposer itself. Do not let device loading
         // replace the swapchain hooks with driver pointers (including on recreation).
