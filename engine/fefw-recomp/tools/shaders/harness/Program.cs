@@ -5,7 +5,9 @@
 //       (--glsl: Vulkan GLSL text instead of SPIR-V, to read what the translator made or compare backends)
 //   spirv_harness --batch <extracted dir> --out <dir> [--jobs 2] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--target-env vulkan1.3] [--host desktop|moltenvk]
 //       every distinct code block named in any manifest.tsv under <extracted dir>; writes <hash>.spv, results.tsv
-//       (one line per block) and summary.txt (counts, exceptions and translator messages grouped by text)
+//       (one line per block) and summary.txt (counts, exceptions and translator messages grouped by text).
+//       The translation runs in a child process (--worker, Batch.cs) that journals each block to <out>/journal.tsv, so a
+//       native crash in the translator costs one block (status "crash"), not the run, and a stopped run resumes.
 //
 // Everything this program learns about the block comes from the control section (see docs/nvn/SHADERS.md):
 // +0x708 program start (0x30 graphics, 0x100 compute), +0x6fc/+0x700 constant data size/offset. The stage comes
@@ -41,7 +43,7 @@ namespace SpirvHarness
         public List<string> Unsupported = new();
     }
 
-    static class Program
+    static partial class Program
     {
         const uint ComputeMagic = 0x12345679;
         static readonly TimeSpan Timeout = TimeSpan.FromSeconds(60);
@@ -64,6 +66,7 @@ namespace SpirvHarness
             {
                 if (args.Length >= 2 && args[0] == "--warp-tests") return WarpTests.Run(args[1]);
                 if (args.Length >= 2 && args[0] == "--batch") return Batch(args);
+                if (args.Length >= 2 && args[0] == "--worker") return Worker(args);
                 if (args.Length >= 2 && !args[0].StartsWith("-")) return Single(args);
             }
             catch (ArgumentException e)
@@ -71,7 +74,7 @@ namespace SpirvHarness
                 Console.Error.WriteLine(e.Message);
             }
             Console.Error.WriteLine("usage: spirv_harness <code.bin> <ctrl.bin> [-o out.spv] [--glsl] [--glslc <GLSLC output, NVN2>]\n" +
-                                    "       spirv_harness --batch <extracted dir> --out <dir> [--jobs N] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--target-env E] [--host desktop|moltenvk] [--spirv-val PATH] [--reflect <Ampere corpus>] [--only-missing]");
+                                    "       spirv_harness --batch <extracted dir> --out <dir> [--jobs N] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--target-env E] [--host desktop|moltenvk] [--spirv-val PATH] [--reflect <Ampere corpus>] [--crash-budget N]");
             return 2;
         }
 
@@ -107,8 +110,30 @@ namespace SpirvHarness
             return spv != null ? 0 : 1;
         }
 
-        // One code block through the translator. Never throws: failures are recorded in the result.
+        // One code block through the translator. Never throws: failures (also a short or malformed control section or
+        // code block, read before the translator's own try, and the Ampere SASS decoder) are recorded in the result.
         static Result Translate(byte[] code, byte[] ctrl, out byte[] spv, bool glsl = false, string glslcPath = null)
+        {
+            try
+            {
+                return TranslateAny(code, ctrl, out spv, glsl, glslcPath);
+            }
+            catch (Exception e)
+            {
+                spv = null;
+                return ExceptionResult(e);
+            }
+        }
+
+        static Result ExceptionResult(Exception e)
+        {
+            Result r = new() { Status = "exception", Error = $"{e.GetType().Name}: {e.Message}", Stack = e.StackTrace ?? "" };
+            string frame = e.StackTrace?.Split('\n').FirstOrDefault(l => l.Contains("Ryujinx.Graphics.Shader") || l.Contains("Nx.Shaders"))?.Trim();
+            if (frame != null) r.Error += $" @ {Regex.Replace(frame, @" in (/|[A-Za-z]:\\).*", "")}";
+            return r;
+        }
+
+        static Result TranslateAny(byte[] code, byte[] ctrl, out byte[] spv, bool glsl, string glslcPath)
         {
             if (IsNvn2(ctrl)) return TranslateNvn2(code, ctrl, out spv, glsl, glslcPath);
             if (CudaKernel.Is(ctrl)) return TranslateCuda(code, ctrl, out spv, glsl);
@@ -479,79 +504,6 @@ namespace SpirvHarness
             }
         }
 
-        static int Batch(string[] args)
-        {
-            // --reflect <Ampere corpus>: find each block's GLSLC output (reflection section) by code hash.
-            string reflect = Opt(args, "--reflect", null);
-            if (reflect != null)
-                foreach (var row in ReadTsv(Path.Combine(reflect, "unique.tsv")))
-                    GlslcByHash[row["code_sha1_16"]] = Path.Combine(reflect, "glslc", row["first_glslc"] + ".bin");
-            string root = args[1];
-            string outDir = Opt(args, "--out", null) ?? throw new ArgumentException("--out is required");
-            int jobsN = int.Parse(Opt(args, "--jobs", "2"));
-            int limit = int.Parse(Opt(args, "--limit", "0"));
-            string targetEnv = Opt(args, "--target-env", "vulkan1.3");
-            bool validate = !args.Contains("--no-val");
-            string spirvVal = Opt(args, "--spirv-val", FindSpirvVal());
-            Directory.CreateDirectory(outDir);
-
-            bool onlyMissing = args.Contains("--only-missing");
-            List<Job> jobs = LoadJobs(root);
-            if (onlyMissing)
-            {
-                // A run that was interrupted leaves the blocks it finished in --out
-                // and no report. Redoing them costs minutes; asking for the rest does not.
-                int before = jobs.Count;
-                jobs = jobs.Where(j => !File.Exists(Path.Combine(outDir, j.Hash + ".spv"))).ToList();
-                Console.WriteLine($"{before - jobs.Count} blocks already translated in {outDir}, {jobs.Count} to do");
-            }
-            if (limit > 0) jobs = jobs.Take(limit).ToList();
-            Console.WriteLine($"{jobs.Count} distinct code blocks, {jobsN} jobs, validation {(validate ? targetEnv : "off")}");
-
-            ConcurrentBag<Result> results = new();
-            int done = 0;
-            Stopwatch total = Stopwatch.StartNew();
-            Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = jobsN }, job =>
-            {
-                Result r;
-                byte[] spv = null;
-                // A translator bug could loop forever; run on a task so a stuck block is reported, not waited on.
-                Task<(Result, byte[])> t = Task.Run(() =>
-                {
-                    Result x = Translate(File.ReadAllBytes(job.CodePath), File.ReadAllBytes(job.CtrlPath), out byte[] s, false, job.GlslcPath);
-                    return (x, s);
-                });
-                if (t.Wait(Timeout)) (r, spv) = t.Result;
-                else r = new Result { Status = "timeout", Error = $"no result after {Timeout.TotalSeconds} s" };
-                r.Hash = job.Hash;
-                r.Group = job.Group;
-                r.Stages = job.Stages;
-                if (spv != null)
-                {
-                    string spvPath = Path.Combine(outDir, job.Hash + ".spv");
-                    File.WriteAllBytes(spvPath, spv);
-                    if (validate)
-                    {
-                        r.ValError = RunSpirvVal(spirvVal, targetEnv, spvPath);
-                        if (r.ValError != "") r.Status = "invalid";
-                    }
-                }
-                results.Add(r);
-                int n = Interlocked.Increment(ref done);
-                if (n % 500 == 0) Console.WriteLine($"  {n}/{jobs.Count}  {total.Elapsed.TotalSeconds:F0} s");
-            });
-
-            List<Result> all = results.OrderBy(r => r.Group).ThenBy(r => r.Hash).ToList();
-            // Always merge: a resumed run must not erase what an earlier one
-            // recorded, because the runtime reads results.tsv for the storage
-            // buffer offsets of every block, translated in this run or not.
-            WriteResults(Path.Combine(outDir, "results.tsv"), all, merge: true);
-            string summary = Summarize(all, total.Elapsed, targetEnv);
-            File.WriteAllText(Path.Combine(outDir, "summary.txt"), summary);
-            Console.Write(summary);
-            return 0;
-        }
-
         // spirv-val prints "error: line N: <message>" then the offending instruction; keep the first line.
         static string RunSpirvVal(string tool, string targetEnv, string path)
         {
@@ -568,28 +520,16 @@ namespace SpirvHarness
             return first.Trim();
         }
 
-        static string ResultLine(Result r)
+        static void WriteResults(string path, List<Result> all)
         {
-            string err = (r.Error + " " + r.ValError).Trim().Replace('\t', ' ').Replace('\n', ' ');
-            return $"{r.Hash}\t{r.Group}\t{r.Stage}\t{r.Stages}\t{r.Status}\t{r.Ms:F1}\t{r.SpvBytes}\t{r.Resources}\t" +
-                   $"{string.Join(" | ", r.Messages).Replace('\t', ' ')}\t{err}\t{r.Queries}\t{r.Reflection}";
-        }
-
-        static void WriteResults(string path, List<Result> all, bool merge = false)
-        {
-            const string header = "hash\tgroup\tstage\tstages_using\tstatus\tms\tspv_bytes\tresources\ttranslator_messages\terror\tdraw_time_queries\tglslc_reflection";
-            Dictionary<string, string> rows = new(StringComparer.Ordinal);
-            if (merge && File.Exists(path))
-                foreach (string line in File.ReadLines(path).Skip(1))
-                {
-                    int tab = line.IndexOf('\t');
-                    if (tab > 0) rows[line[..tab]] = line;
-                }
-            foreach (Result r in all) rows[r.Hash] = ResultLine(r);
             using StreamWriter w = new(path) { NewLine = "\n" };  // LF on Windows too: same bytes as on macOS
-            w.WriteLine(header);
-            foreach (string line in rows.Values.OrderBy(l => l.Split('\t')[1], StringComparer.Ordinal).ThenBy(l => l.Split('\t')[0], StringComparer.Ordinal))
-                w.WriteLine(line);
+            w.WriteLine("hash\tgroup\tstage\tstages_using\tstatus\tms\tspv_bytes\tresources\ttranslator_messages\terror\tdraw_time_queries\tglslc_reflection");
+            foreach (Result r in all)
+            {
+                string err = (r.Error + " " + r.ValError).Trim().Replace('\t', ' ').Replace('\n', ' ');
+                w.WriteLine($"{r.Hash}\t{r.Group}\t{r.Stage}\t{r.Stages}\t{r.Status}\t{r.Ms:F1}\t{r.SpvBytes}\t{r.Resources}\t" +
+                            $"{string.Join(" | ", r.Messages).Replace('\t', ' ')}\t{err}\t{r.Queries}\t{r.Reflection}");
+            }
         }
 
         // Group messages that differ only in numbers ("Attribute offset 0x3A0 ..." etc.) so the summary stays short.
@@ -608,11 +548,11 @@ namespace SpirvHarness
                 sb.AppendLine($"{g.Key,-12} {g.Count(),7} {g.Sum(r => r.Stages),8}   ({kinds})");
             }
             sb.AppendLine();
-            sb.AppendLine("per group (blocks: ok / ok-retry / invalid / exception / timeout)");
+            sb.AppendLine("per group (blocks: ok / ok-retry / invalid / exception / timeout / crash)");
             foreach (var g in all.GroupBy(r => Regex.Replace(r.Group, @"^(effect|layout)_.*", "$1_*")).OrderBy(g => g.Key))
             {
                 sb.AppendLine($"  {g.Key,-24} {g.Count(),6}: {g.Count(r => r.Status == "ok")} / {g.Count(r => r.Status == "ok-retry")} / {g.Count(r => r.Status == "invalid")} / " +
-                              $"{g.Count(r => r.Status == "exception")} / {g.Count(r => r.Status == "timeout")}");
+                              $"{g.Count(r => r.Status == "exception")} / {g.Count(r => r.Status == "timeout")} / {g.Count(r => r.Status == "crash")}");
             }
             void Top(string title, IEnumerable<string> items, int n = 25)
             {
@@ -623,7 +563,7 @@ namespace SpirvHarness
                 foreach (var g in groups.Take(n)) sb.AppendLine($"  {g.Count(),6}  {g.First()}");
                 if (groups.Count > n) sb.AppendLine($"  ... {groups.Count - n} more kinds");
             }
-            Top("exceptions (by message)", all.Where(r => r.Status is "exception" or "timeout").Select(r => r.Error));
+            Top("exceptions (by message)", all.Where(r => r.Status is "exception" or "timeout" or "crash").Select(r => r.Error));
             // Ampere front end: blocks per unhandled instruction form, and per mnemonic (a block counts once per entry).
             Top("unsupported instruction forms (blocks)", all.SelectMany(r => r.Unsupported), 40);
             Top("unsupported mnemonics (blocks)", all.SelectMany(r => r.Unsupported.Select(u => u.Split(':', '.')[0]).Distinct()), 40);

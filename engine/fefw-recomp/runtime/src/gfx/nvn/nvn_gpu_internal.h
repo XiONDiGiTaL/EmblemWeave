@@ -9,6 +9,7 @@
 // Everything declared here must be called on the render thread (gpu::on_render_thread()) unless it says otherwise.
 #pragma once
 #include <atomic>
+#include <unordered_set>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -41,6 +42,7 @@ struct Counters {
     std::atomic<uint64_t> pools_imported{0}, unresolved_addresses{0}, unsupported_ops{0}, submit_replay_ns{0};
 };
 Counters& counters();
+bool counters_ready();   // false until the GPU back end is set up (counters() would read through a null pointer)
 Counters* counters_if();   // null before the GPU is up
 // An operation the back end does not implement was skipped: logged the first time per name, counted for the report.
 void note_unsupported(const char* what);
@@ -134,7 +136,8 @@ void pool_shutdown();             // destroys every imported pool still alive an
 // and mirror_begin_submit before anything else of a submission (it records the copies of the pages draws wanted; on = this submission may
 // read copies).
 bool mirror_enabled();
-enum ReadUse { kReadVertex = 0, kReadIndex = 1, kReadUniform = 2 };
+enum ReadUse { kReadVertex = 0, kReadIndex = 1, kReadUniform = 2, kReadStorage = 3 };
+void storage_probe(uint64_t gpu_address, uint64_t size, bool vertex);   // [nvn] storage_read_copy diagnostics
 enum WriteUse { kWriteStorage = 0, kWriteXfb = 1, kWriteImageCopy = 2, kWriteUpdate = 3, kWriteFill = 4, kWriteCopy = 5 };
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use);
 // The device-local copy of [gpu_address, +size) for the compute shadows (nvn_replay.cpp): its chunk and offset (buf null: no copy for it, or the
@@ -239,8 +242,15 @@ void tex_transition(Texture* t, Frame& f, VkImageLayout layout);
 // nvn_pipeline.cpp: tex_transition moves t to `layout`. A texture leaving its sampled layout is looked at again by the next draw that
 // samples through a pool array (pool_textures_to_prepare).
 void pool_note_layout(Texture* t, VkImageLayout layout);
+// nvn_pipeline.cpp, any thread: the CPU wrote t (or its prepared content changed): the pools it is registered in look at it again at their
+// next draw, without a scan of every registered texture.
+void pool_note_cpu_write(Texture* t);
+// nvn_pipeline.cpp, render thread: pool_textures_to_prepare calls that scanned every registered texture, and all calls (replay_stats).
+void pool_scan_counts(uint64_t* full_scans, uint64_t* looks);
 // nvn_pipeline.cpp: t's image and views were remade (tex_rescale) or released: the pool arrays write the ids it sits at again.
 void pool_texture_remade(Texture* t);
+// Every texture registered at some id of a texture pool the replay uses (render thread).
+void pool_registered_textures(std::unordered_set<const Texture*>& out);
 VkImageLayout tex_layout(Texture* t);
 // The texture has been (or is about to be) written by the GPU: no more uploads from memory until the CPU writes it.
 void tex_mark_gpu_written(Texture* t);
@@ -250,8 +260,11 @@ VkFormat tex_vk_format(Texture* t);
 VkImageAspectFlags tex_aspect(Texture* t);
 VkExtent3D tex_extent(Texture* t, uint32_t level = 0);
 uint32_t tex_levels(Texture* t);
+uint32_t tex_level_drop(Texture* t);   // NVN levels the image leaves out at the top ([gfx] texture_detail; 0 for nearly every texture)
 uint32_t tex_layers(Texture* t);
 bool tex_is_depth(Texture* t);
+// Readiness aligned with supported uploads; retains layout dependencies.
+bool tex_pool_preparation_pending(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req);
 // A float-declared sampler over this texture (the view format `requested`, UNDEFINED: the image's own): 0 when a float view gives the
@@ -306,6 +319,9 @@ void trace_dump_prepared(Texture* t, const std::string& dir);
 int snapshot_record_raw(Texture* t, Frame& f);   // block-compressed level 0 as the GPU holds it; snapshot_write writes the bytes
 void tex_destroy(TexGpu* g);      // render thread
 void tex_shutdown();              // frees samplers and dummy resources (device idle)
+// Per-load census lines ([diag] load_census, render thread): live texture images by kind, the Vulkan side of the game pools.
+void log_texture_census(const char* why);
+void log_import_census(const char* why);
 // Image formats chosen: bool descriptor for tests and logs
 struct TexStats { uint64_t images = 0, uploads = 0, upload_bytes = 0, transcodes = 0, failed = 0; };
 TexStats tex_stats();

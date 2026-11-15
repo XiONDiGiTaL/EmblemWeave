@@ -450,6 +450,18 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     NXLOG_I("fs", "RomFS image from %s: %u files, %u directories, %llu bytes of data, image size %llu", dir.c_str(), s.files, s.dirs,
             static_cast<unsigned long long>(s.data_bytes), static_cast<unsigned long long>(img->size()));
     if (!overlays.empty()) NXLOG_I("mods", "%zu RomFS mod(s), %u files from mods", overlays.size(), s.overlay_files);
+    // [fs] romfs_files: the file count of the complete RomFS of the supported version (the game sets it). A dump well short of it (the
+    // base game's RomFS beside the update's code, a copy that stopped part way) boots and then crashes on a file that is not there (#64).
+    if (const int64_t want = config_get_int("fs", "romfs_files", 0); want > 0 && s.files < want * 95 / 100) {
+        char hint[768];
+        std::snprintf(hint, sizeof hint,
+                      "the game's files are incomplete: the RomFS folder %s has %u files, the complete RomFS of this version has %lld. "
+                      "Use the romfs of the update (updates/<version>/romfs, with the base game's files merged in), not the base game's, "
+                      "and make sure the dump or copy finished; then run Set up again.",
+                      dir.c_str(), s.files, static_cast<long long>(want));
+        NXLOG_E("fs", "%s", hint);
+        crash_set_hint(hint);
+    }
     st().rom = img;
     return img;
 }
@@ -819,16 +831,6 @@ std::shared_ptr<Service> make_fsp() {
 }
 
 }  // namespace
-
-bool read_romfs_file(const std::string& image_path, std::vector<uint8_t>& out) {
-    auto img = rom_image();
-    if (!img) return false;
-    uint64_t off = 0, size = 0;
-    if (!img->file_extent(image_path, &off, &size)) return false;
-    if (size > (1ull << 30)) return false;   // a font or prompt sheet, not a stream: refuse to take a gigabyte into memory
-    out.resize(static_cast<size_t>(size));
-    return size == 0 || img->read(off, out.data(), size);
-}
 
 void register_fs() {
     add("fsp-srv", [] { return make_fsp(); });

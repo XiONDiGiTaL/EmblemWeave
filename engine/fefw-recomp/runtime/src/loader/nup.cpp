@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // .nup package reader (nxrt/nup.h). Layout from the format's SPEC.md (github.com/a55uka/nup): a 0x80-byte superblock, the table of
 // contents at toc_offset (package records 0x40, dir records 0x18, file records 0x50, a u32 children array, the string pool), file
-// extents at absolute offsets. A file is stored as-is (codec 0) or as one zstd frame (codec 1), which the runtime decompresses into
-// its cache. The package is a file the player supplies: every index, name and extent is bounds checked.
+// extents at absolute offsets. The package is a file the player supplies: every index, name and extent is bounds checked.
 #include "nxrt/nup.h"
 
 #include <cstring>
-#include <zstd.h>
 #include <filesystem>
 #include <fstream>
 
@@ -15,7 +13,6 @@ namespace {
 
 constexpr uint32_t kNoDir = 0xFFFFFFFFu;
 constexpr uint8_t kKindBase = 0, kKindUpdate = 1;
-constexpr uint8_t kCodecStore = 0, kCodecZstd = 1;
 constexpr uint64_t kMaxToc = 1ull << 30;
 constexpr int kMaxDepth = 64;
 
@@ -72,12 +69,11 @@ bool walk(const Toc& t, uint32_t dir, const std::string& prefix, int depth, std:
         f.offset = u64(t.b, fr + 0x10);
         const uint64_t stored = u64(t.b, fr + 0x18);
         const uint8_t codec = t.b[fr + 0x40];
-        if (codec > kCodecZstd) return fail(err, f.path + " uses a .nup codec this build does not know");
-        const uint64_t in_package = (codec == kCodecStore ? f.size : stored);   // bytes the extent really covers
-        if (f.size > 0 && (stored == 0 || f.offset > t.file_size || in_package > t.file_size - f.offset))
+        if (f.size > 0 && codec != 0)
+            return fail(err, f.path + " is compressed in the .nup; the game reads packages directly and needs stored files. Repack without "
+                             "compression (nup pack with the zstandard module unavailable writes stored files)");
+        if (f.size > 0 && (stored != f.size || f.offset > t.file_size || f.size > t.file_size - f.offset))
             return fail(err, f.path + " points outside the .nup file");
-        f.stored = stored;
-        f.compressed = codec == kCodecZstd;
         out.push_back(std::move(f));
     }
     return true;
@@ -140,29 +136,12 @@ bool open(const std::string& path, Content& out, std::string* err) {
     return true;
 }
 
-bool read_stored(const std::string& path, uint64_t offset, uint64_t len, std::vector<uint8_t>& out, std::string* err) {
-    std::ifstream f(fs_path(path), std::ios::binary);
-    out.resize(static_cast<size_t>(len));
-    f.seekg(static_cast<std::streamoff>(offset));
-    if (!f || !f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(len)))
-        return fail(err, "cannot read " + path + " at " + std::to_string(offset));
-    return true;
-}
-
 bool read_file(const std::string& path, const File& file, std::vector<uint8_t>& out, std::string* err) {
-    const uint64_t stored = file.compressed ? file.stored : file.size;
-    if (stored > 0 && !read_stored(path, file.offset, stored, out, err)) {
-        if (err) *err = file.path + ": " + *err;
-        return false;
-    }
-    if (!file.compressed) return true;
-    // One frame per file, so the decompressed size is known before it starts.
-    std::vector<uint8_t> plain(static_cast<size_t>(file.size));
-    const size_t got = ZSTD_decompress(plain.data(), plain.size(), out.data(), out.size());
-    if (ZSTD_isError(got) || got != plain.size())
-        return fail(err, file.path + ": the zstd frame in " + path + " is damaged (" +
-                             (ZSTD_isError(got) ? ZSTD_getErrorName(got) : "wrong size") + ")");
-    out.swap(plain);
+    std::ifstream f(fs_path(path), std::ios::binary);
+    out.resize(static_cast<size_t>(file.size));
+    f.seekg(static_cast<std::streamoff>(file.offset));
+    if (!f || !f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(file.size)))
+        return fail(err, "cannot read " + file.path + " from " + path);
     return true;
 }
 

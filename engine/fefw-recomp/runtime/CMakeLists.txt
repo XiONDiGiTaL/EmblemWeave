@@ -47,8 +47,6 @@ endif()
 file(GLOB_RECURSE NXRT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER NXRT_SOURCES EXCLUDE REGEX "/src/gfx/")   # the graphics shell is its own library (cmake/gfx.cmake)
 add_library(nxrt STATIC ${NXRT_SOURCES})
-# The .nup reader decompresses zstd entries (the shader pack's library, defined in cmake/gfx_deps.cmake).
-target_link_libraries(nxrt PUBLIC nxrt_zstd)
 target_include_directories(nxrt PUBLIC include)
 if(EXISTS "${NXRT_RECOMP_INCLUDE}")
     target_include_directories(nxrt PUBLIC "${NXRT_RECOMP_INCLUDE}")

@@ -65,11 +65,26 @@ struct WideInfo {
     bool active = false;
     int out_w = 0, out_h = 0;
     float k = 1.0f;                                  // the output's width over a 16:9 picture's of the same height
-    static constexpr int kCounters = 9;
+    static constexpr int kCounters = 10;
     uint64_t counts[kCounters] = {};                 // times each hook did its work
     const char* names[kCounters] = {};
 };
 WideInfo wide_info();
+
+// fefw_mouse.cpp: the game's own Joy-Con 2 mouse controls, read for the log, the tests and the F1 menu
+struct MouseInfo {
+    bool valid = false;
+    bool mode = false;                 // the game is in its mouse controls
+    bool manual = false;               // turned on with SL + SR (the manual switching setting)
+    bool allowed = false, enabled = false;
+    int32_t dx = 0, dy = 0;            // the game's movement this frame (pointer units)
+    int32_t cursor_x = 0, cursor_y = 0;   // the game's pointer, 1920 x 1080
+    float cfg[5] = {};                 // +0xc8..+0xd8: seconds to switch on, movement threshold (squared), two motion thresholds, seconds to switch off
+    uint64_t frames = 0, frames_mouse = 0, entries = 0, exits = 0;
+};
+void mouse_install(uint64_t base);
+void mouse_frame();                    // main thread, once per frame
+MouseInfo mouse_info();
 
 // fefw_prompts.cpp: the button glyphs of the game's text follow the controller in use ([prompts] style; notes/prompts.md)
 void prompts_install(play::GameHost* host);

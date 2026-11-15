@@ -26,18 +26,10 @@ endif()
 
 # dav1d (BSD-2-Clause, third_party/dav1d) for the Switch 2 movie player's AV1 decoder (src/media/movie_vdec.cpp): built from source, C only.
 option(NXRT_DAV1D "Build dav1d for AV1 movies (src/media/movie_vdec.cpp)" ON)
-# third_party/ is not in the release zip (it is fetched, not shipped), so a build from a download has no dav1d. That
-# used to be a configure error - "add_subdirectory given source .../third_party/dav1d which is not an existing
-# directory" - at every build from a zip, whatever the player did. The AV1 movie decoder is the only thing lost:
-set(_nxrt_dav1d "${CMAKE_CURRENT_LIST_DIR}/../third_party/dav1d")
-if(NXRT_DAV1D AND EXISTS "${_nxrt_dav1d}/CMakeLists.txt")
-    add_subdirectory("${_nxrt_dav1d}" "${CMAKE_BINARY_DIR}/third_party/dav1d")
+if(NXRT_DAV1D)
+    add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../third_party/dav1d" "${CMAKE_BINARY_DIR}/third_party/dav1d")
     target_link_libraries(nxrt PUBLIC nxrt_dav1d)
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=1)
 else()
-    if(NXRT_DAV1D)
-        message(STATUS "nxrt: third_party/dav1d is not here: building without the AV1 movie decoder "
-                "(clone https://code.videolan.org/videolan/dav1d into third_party/dav1d, or pass -DNXRT_DAV1D=OFF, to be rid of this line)")
-    endif()
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=0)
 endif()

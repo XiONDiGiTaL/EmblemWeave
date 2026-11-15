@@ -7,18 +7,29 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
+#include <csignal>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include <stdexcept>
+#include <thread>
+
 #include "nxrt/abi.h"
+#include "nxrt/config.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/write_watch.h"
+#include "nxrt/memory.h"
 #include "nxrt/symbols.h"
 #include "stackwalk.h"
 
@@ -28,6 +39,15 @@ namespace {
 constexpr DWORD kTrapCode = 0xE0000001u;
 constexpr DWORD kUntranslatedCode = 0xE0000002u;
 constexpr DWORD kGuestBreakCode = 0xE0000003u;   // svcBreak / svcReturnFromException (svc_thread.cpp)
+// Failures that never reach the unhandled-exception filter, so they ended the process with no report (#132, #127):
+//  - STATUS_HEAP_CORRUPTION: ntdll raises it from inside the heap and ends the process itself (WER) when no handler takes it; only a
+//    vectored handler sees it.
+//  - abort(), std::terminate, an invalid parameter to a C runtime function, a pure virtual call: the C runtime ends the process with a
+//    fail-fast (0xC0000409) after calling its handlers, which are ours now. The fail-fast itself cannot be caught.
+// (Approach after NX2navi's runtime/platform/win32.c crash hooks; written here from scratch.)
+constexpr DWORD kHeapCorruptionCode = 0xC0000374u;
+constexpr DWORD kFailFastCode = 0xC0000409u;
+constexpr DWORD kInvalidCrtParamCode = 0xC0000417u;
 constexpr size_t kMaxHostFrames = 32;
 constexpr int kMaxGuestFrames = 24;
 constexpr DWORD kOverflowWaitMs = 30000;
@@ -45,7 +65,7 @@ uint32_t g_exit_code = 4;
 void (*g_on_report)(const char*, void*) = nullptr;
 void* g_user = nullptr;
 
-std::atomic<bool> g_in_handler{false};          // set while the handler runs: a second exception terminates
+std::atomic<DWORD> g_handler_tid{0};           // the thread whose report is being written; 0 = none
 std::atomic<bool> g_overflow_reported{false};   // the vectored handler already reported this stack overflow
 std::atomic<uint32_t> g_reports{0};
 
@@ -54,6 +74,13 @@ std::atomic<uint32_t> g_reports{0};
 EXCEPTION_RECORD g_ov_rec{};
 CONTEXT g_ov_ctx{};
 DWORD g_ov_tid = 0;
+
+// Heap corruption: the report path worked out at install time (writing the first report must not allocate), and the watchdog that
+// ends the process when the full report hangs on the damaged heap (its lock, or the log writer waiting for it).
+char g_raw_path[1024] = {};
+HANDLE g_heap_watch_event = nullptr;
+constexpr DWORD kHeapWatchMs = 10000;
+const char* g_failure_what = nullptr;   // the header of a C runtime failure report (report_runtime_failure)
 
 #if defined(__clang__) || defined(__GNUC__)
 __attribute__((format(printf, 2, 3)))
@@ -145,6 +172,9 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
     if (rec->ExceptionCode == kTrapCode) code_name = "GUEST TRAP";
     else if (rec->ExceptionCode == kUntranslatedCode) code_name = "UNTRANSLATED INSTRUCTION";
     else if (rec->ExceptionCode == kGuestBreakCode) code_name = "GUEST BREAK (svcBreak)";
+    else if (rec->ExceptionCode == kHeapCorruptionCode) code_name = "HEAP CORRUPTION";
+    else if (rec->ExceptionCode == kFailFastCode || rec->ExceptionCode == kInvalidCrtParamCode)
+        code_name = g_failure_what ? g_failure_what : "FAIL FAST";
     if (code_name) {
         appendf(out, "HOST EXCEPTION 0x%08lX (%s) at host address 0x%llx on thread %s (tid %lu)\n",
                 static_cast<unsigned long>(rec->ExceptionCode), code_name, static_cast<unsigned long long>(rip),
@@ -159,6 +189,15 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
         const ULONG_PTR kind = rec->ExceptionInformation[0];
         const char* what = kind == 0 ? "reading" : kind == 1 ? "writing" : kind == 8 ? "executing" : "accessing";
         appendf(out, "  %s address 0x%llx\n", what, static_cast<unsigned long long>(rec->ExceptionInformation[1]));
+        const uint64_t addr = rec->ExceptionInformation[1];
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi)) {
+            appendf(out, "  host page: base=0x%llx size=0x%llx allocation=0x%llx state=0x%lx protect=0x%lx allocation_protect=0x%lx type=0x%lx\n",
+                (unsigned long long)mbi.BaseAddress, (unsigned long long)mbi.RegionSize, (unsigned long long)mbi.AllocationBase,
+                mbi.State, mbi.Protect, mbi.AllocationProtect, mbi.Type);
+        } else appendf(out, "  host page: VirtualQuery failed error=%lu\n", GetLastError());
+        out += mem::describe_page(addr);
+        out += mem::ww::describe_page(addr);
     }
 
     // Last guest function: the lifted function whose host code contains the faulting instruction.
@@ -240,8 +279,12 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
     return out;
 }
 
+// crash_set_hint: a known setup problem found earlier, put first in the report ("LIKELY CAUSE: ..."; the launcher shows that line).
+char g_hint[1024] = {};
+
 // Log block, report file, stderr, then the on_report callback. Terminating is the caller's decision.
-void emit(const std::string& text) {
+void emit(const std::string& report) {
+    const std::string text = g_hint[0] ? std::string("LIKELY CAUSE: ") + g_hint + "\n\n" + report : report;
     for (size_t pos = 0; pos < text.size();) {
         size_t eol = text.find('\n', pos);
         if (eol == std::string::npos) eol = text.size();
@@ -263,18 +306,33 @@ void emit(const std::string& text) {
     for (;;) Sleep(1000);
 }
 
+// Takes the handler for this thread. The same thread faulting again inside it terminates; another thread faulting at the same time
+// (a bad object shared by two guest threads often makes both fault together) waits, so the first report is finished and written
+// instead of the process ending with an empty one. The owner terminates the process, or (tests) releases the handler to the waiter.
+void enter_handler() {
+    const DWORD me = GetCurrentThreadId();
+    for (;;) {
+        DWORD owner = 0;
+        if (g_handler_tid.compare_exchange_strong(owner, me)) return;
+        if (owner == me) second_exception();
+        Sleep(50);
+    }
+}
+
+void leave_handler() { g_handler_tid = 0; }
+
 LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
     if (ep && ep->ExceptionRecord && ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW &&
         g_overflow_reported.exchange(false))
         return EXCEPTION_CONTINUE_SEARCH;  // the vectored handler already wrote this report
-    if (g_in_handler.exchange(true)) second_exception();
+    enter_handler();
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) {
-        g_in_handler = false;
+        leave_handler();
         return EXCEPTION_CONTINUE_SEARCH;
     }
     emit(build_report(ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId()));
     if (g_terminate) TerminateProcess(GetCurrentProcess(), g_exit_code);
-    g_in_handler = false;
+    leave_handler();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -284,10 +342,139 @@ DWORD WINAPI overflow_thread(LPVOID) {
     return 0;
 }
 
+// The first report of a heap corruption, made without the heap: the exception, and the host frames as module+offset, into a static buffer
+// and straight to the report file. The full report (which allocates) is tried after it and replaces it when it gets through.
+void raw_heap_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx) {
+    static char buf[6144];
+    const size_t cap = sizeof buf;
+    size_t n = 0;
+    auto put = [&](int w) { if (w > 0) n = std::min(cap - 1, n + static_cast<size_t>(w)); };
+    put(std::snprintf(buf, cap, "HOST EXCEPTION 0x%08lX (HEAP CORRUPTION) at host address 0x%llx on thread tid %lu\n"
+                      "  the process heap was found damaged; this short report was written first, without the heap.\n"
+                      "  The damage was done earlier, elsewhere: the frames below are where it was noticed.\n"
+                      "host call stack (innermost first):\n",
+                      static_cast<unsigned long>(rec->ExceptionCode), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(rec->ExceptionAddress)),
+                      static_cast<unsigned long>(GetCurrentThreadId())));
+    uint64_t frames[kMaxHostFrames] = {};
+    const size_t nframes = detail::capture_stack(cx, frames, kMaxHostFrames);
+    for (size_t i = 0; i < nframes && n < cap - 160; ++i) {
+        void* base = nullptr;
+        RtlPcToFileHeader(reinterpret_cast<void*>(static_cast<uintptr_t>(frames[i])), &base);
+        char mod[MAX_PATH] = "?";
+        if (base) {
+            const DWORD m = GetModuleFileNameA(static_cast<HMODULE>(base), mod, sizeof mod);
+            if (!m || m >= sizeof mod) std::snprintf(mod, sizeof mod, "?");
+        }
+        const char* slash = std::strrchr(mod, '\\');
+        put(std::snprintf(buf + n, cap - n, "  %s+0x%llx\n", slash ? slash + 1 : mod,
+                          static_cast<unsigned long long>(frames[i] - reinterpret_cast<uintptr_t>(base))));
+    }
+    if (g_raw_path[0]) {
+        HANDLE h = CreateFileA(g_raw_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD done = 0;
+            WriteFile(h, buf, static_cast<DWORD>(n), &done, nullptr);
+            CloseHandle(h);
+        }
+    }
+    HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    if (err && err != INVALID_HANDLE_VALUE) {
+        DWORD done = 0;
+        WriteFile(err, buf, static_cast<DWORD>(n), &done, nullptr);
+    }
+}
+
+DWORD WINAPI heap_watchdog(LPVOID) {
+    WaitForSingleObject(g_heap_watch_event, INFINITE);
+    Sleep(kHeapWatchMs);
+    TerminateProcess(GetCurrentProcess(), g_exit_code);
+    return 0;
+}
+
+LONG heap_corruption(EXCEPTION_POINTERS* ep) {
+    enter_handler();
+    if (g_heap_watch_event) SetEvent(g_heap_watch_event);
+    raw_heap_report(ep->ExceptionRecord, ep->ContextRecord);
+    // the full report: the file first (the log writer may be stuck behind the heap), then the log
+    const std::string text = build_report(ep->ExceptionRecord, ep->ContextRecord, GetCurrentThreadId());
+    const std::string path = g_path_given ? g_path : default_report_path();
+    if (!path.empty()) write_file(path, text);
+    emit(text);
+    if (g_terminate) TerminateProcess(GetCurrentProcess(), g_exit_code);
+    leave_handler();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// abort, std::terminate, an invalid C runtime parameter, a pure virtual call: the report of the calling thread, from here.
+void report_runtime_failure(const char* what, DWORD code) {
+    CONTEXT cx{};
+    RtlCaptureContext(&cx);
+    EXCEPTION_RECORD rec{};
+    rec.ExceptionCode = code;
+    rec.ExceptionAddress = reinterpret_cast<void*>(static_cast<uintptr_t>(cx.Rip));
+    enter_handler();
+    g_failure_what = what;
+    emit(build_report(&rec, &cx, GetCurrentThreadId()));
+    if (g_terminate) TerminateProcess(GetCurrentProcess(), g_exit_code);
+    g_failure_what = nullptr;
+    leave_handler();
+}
+
+void on_sigabrt(int) { report_runtime_failure("ABORT (abort(), or std::terminate: an uncaught C++ exception)", kFailFastCode); }
+void on_terminate() {
+    report_runtime_failure("STD::TERMINATE (an uncaught C++ exception, or one leaving a noexcept function)", kFailFastCode);
+    std::abort();
+}
+void on_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+    report_runtime_failure("INVALID C RUNTIME PARAMETER", kInvalidCrtParamCode);
+}
+void on_purecall() {
+    report_runtime_failure("PURE VIRTUAL CALL (an object used while or after it was destroyed)", kFailFastCode);
+    std::abort();
+}
+
+// [test] crash_kind / crash_after_s: the failure this runtime reports without the unhandled-exception filter, made on purpose from a helper
+// thread, to check the reports (heap: a double free of a process-heap block).
+struct PureBase {
+    PureBase();
+    virtual ~PureBase() = default;
+    virtual void f() = 0;
+};
+void call_f(PureBase* p) { p->f(); }
+PureBase::PureBase() { call_f(this); }   // during construction the vtable is PureBase's: a pure virtual call
+struct PureDerived : PureBase { void f() override {} };
+
+DWORD WINAPI test_crash_thread(LPVOID arg) {
+    const std::string kind = *static_cast<std::string*>(arg);
+    Sleep(static_cast<DWORD>(std::clamp<int64_t>(config_get_int("test", "crash_after_s", 30), 0, 86400) * 1000));
+    NXLOG_W("crash", "[test] crash_kind = %s: failing now", kind.c_str());
+    log_flush();
+    if (kind == "heap") {
+        HANDLE heap = GetProcessHeap();
+        void* volatile p = HeapAlloc(heap, 0, 64);
+        HeapFree(heap, 0, p);
+        HeapFree(heap, 0, p);
+        for (int i = 0; i < 64; ++i) HeapFree(heap, 0, HeapAlloc(heap, 0, 64));   // in case the second free went unnoticed
+    } else if (kind == "abort") {
+        std::abort();
+    } else if (kind == "terminate") {
+        std::thread([] { throw std::runtime_error("[test] crash_kind = terminate"); }).join();
+    } else if (kind == "purecall") {
+        PureDerived d;
+    } else if (kind == "invalid_parameter") {
+        char buf[4];
+        const char* volatile src = "too long for the buffer";
+        strcpy_s(buf, sizeof buf, src);
+    }
+    NXLOG_W("crash", "[test] crash_kind = %s: the process went on", kind.c_str());
+    return 0;
+}
+
 LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    if (ep->ExceptionRecord->ExceptionCode == kHeapCorruptionCode) return heap_corruption(ep);
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
-    if (g_in_handler.exchange(true)) second_exception();
+    enter_handler();
     g_ov_rec = *ep->ExceptionRecord;
     g_ov_ctx = *ep->ContextRecord;
     g_ov_tid = GetCurrentThreadId();
@@ -297,7 +484,7 @@ LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
         CloseHandle(th);
         g_overflow_reported = true;
     }
-    g_in_handler = false;
+    leave_handler();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -311,12 +498,30 @@ void crash_install(const CrashOptions& opt) {
     g_exit_code = opt.exit_code;
     g_on_report = opt.on_report;
     g_user = opt.user;
+    {
+        const std::string p = g_path_given ? g_path : default_report_path();
+        std::snprintf(g_raw_path, sizeof g_raw_path, "%s", p.size() < sizeof g_raw_path ? p.c_str() : "");
+    }
     if (g_installed) return;
+    if (g_terminate && !g_heap_watch_event) {
+        g_heap_watch_event = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        if (g_heap_watch_event) {
+            if (HANDLE th = CreateThread(nullptr, 64 * 1024, heap_watchdog, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr)) CloseHandle(th);
+        }
+    }
+    // the C runtime's last steps before its fail-fast (this module's runtime: the runtime is linked with the static one)
+    signal(SIGABRT, on_sigabrt);
+    std::set_terminate(on_terminate);
+    _set_invalid_parameter_handler(on_invalid_parameter);
+    _set_purecall_handler(on_purecall);
     g_prev_filter = SetUnhandledExceptionFilter(crash_filter);
     ULONG guarantee = 64 * 1024;  // stack reserved for the handlers if the thread overflows
     SetThreadStackGuarantee(&guarantee);
     g_veh = AddVectoredExceptionHandler(0, crash_vectored);
     g_installed = true;
+    static std::string test_kind = config_get_str("test", "crash_kind", "");
+    if (!test_kind.empty())
+        if (HANDLE th = CreateThread(nullptr, 0, test_crash_thread, &test_kind, 0, nullptr)) CloseHandle(th);
 }
 
 void crash_uninstall() {
@@ -335,6 +540,11 @@ std::string crash_build_report(void* exception_pointers) {
 }
 
 std::string crash_report_path() { return g_path_given ? g_path : default_report_path(); }
+
+void crash_set_hint(const char* text) {
+    std::lock_guard<std::mutex> lk(g_install_mu);
+    std::snprintf(g_hint, sizeof g_hint, "%s", text ? text : "");
+}
 
 uint32_t crash_exceptions_reported() { return g_reports.load(std::memory_order_relaxed); }
 

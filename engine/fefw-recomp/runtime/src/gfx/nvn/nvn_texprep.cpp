@@ -19,7 +19,9 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nvn_astc_gpu.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_texup.h"
 
 namespace nxrt::nvn::be::texprep {
 namespace {
@@ -142,7 +144,7 @@ void schedule_locked(Texture* t) {
     if (e.st == Entry::Queued) return;                // the job reads the generation when it starts
     if (e.st == Entry::Running) { e.again = true; return; }
     if (e.st == Entry::Waiting) { leave_waiting_locked(t); e.st = Entry::Idle; }
-    if (e.st == Entry::Done) drop_result(e);          // its content is older than the new write
+    if (e.st == Entry::Done) { drop_result(e); e.st = Entry::Idle; }   // its content is older than the new write
     uint64_t est = std::min<uint64_t>(t->storage_size, 1ull << 30);
     // [gfx] astc_quality = uncompressed: a job holds the texture as RGBA8, 4 bytes a texel against 16 per ASTC block
     if (t->fmt && t->fmt->astc && !S().caps.astc && astc_quality() == AstcQuality::Uncompressed) est = std::min<uint64_t>(est * t->fmt->block_w * t->fmt->block_h / 4, 1ull << 30);
@@ -150,7 +152,8 @@ void schedule_locked(Texture* t) {
     while (s.held_bytes + est > s.budget) {
         auto victim = s.map.end();
         for (auto it = s.map.begin(); it != s.map.end(); ++it)
-            if (it->second.st == Entry::Done && (victim == s.map.end() || it->second.seq < victim->second.seq)) victim = it;
+            // not t itself: e refers to its node, and erasing it here had the code below write into freed memory
+            if (it->first != t && it->second.st == Entry::Done && (victim == s.map.end() || it->second.seq < victim->second.seq)) victim = it;
         if (victim == s.map.end()) break;
         drop_result(victim->second);
         s.map.erase(victim);
@@ -239,7 +242,22 @@ void worker_main() {
         if (!t->destroyed.load() && hash_guarded(*t, h0)) {
             const uint16_t zid = ft::zone_id("tex.prep.job");
             ft::Scope zs(zid, 0, t->id);
-            ok = prepare_guarded(*t, s.caps, *res, crashed);
+            // [gfx] astc_gpu (nvn_astc_gpu.h): a texture without a cache entry leaves the job as its ASTC blocks (ok, PreparedTexture::gpu_astc) for the
+            // GPU to transcode at the upload, so the slow pass below is not entered
+            TexCaps jc = s.caps;
+            if (!gpu::astc_gpu_ready()) {   // its pipelines are still being built (seconds at a first start): a take does not wait for this job
+                {
+                    std::lock_guard<std::mutex> sl(s.mu);
+                    s.map[t].slow = true;
+                }
+                s.cv_done.notify_all();
+            }
+            jc.gpu_astc = gpu::astc_gpu_enabled(true);
+            if (jc.gpu_astc) {
+                jc.upgrade = gpu::astc_gpu_upgrade();
+                jc.skip_entries = gpu::astc_gpu_skip_entries();
+            }
+            ok = prepare_guarded(*t, jc, *res, crashed);
             // no cache entry: the job transcodes it itself (one thread, below normal priority) and writes the entry; take does not wait for this
             if (!ok && !crashed && res->error == "no cache entry" && !t->destroyed.load()) {
                 {
@@ -254,8 +272,13 @@ void worker_main() {
                 full.encode_threads = 1;
                 const int prio = GetThreadPriority(GetCurrentThread());
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                // efficiency mode for the transcode (#122: a new area kept every core of a laptop at full clock), and the upgrade pool waits meanwhile
+                texup::set_thread_eco(true);
+                texup::first_pass_begin();
                 *res = PreparedTexture();
                 ok = prepare_guarded(*t, full, *res, crashed);
+                texup::first_pass_end();
+                texup::set_thread_eco(false);
                 SetThreadPriority(GetCurrentThread(), prio);
                 if (ok) s_transcoded.fetch_add(1, std::memory_order_relaxed);
             }
@@ -293,7 +316,10 @@ void worker_main() {
             stage = gfx::Buffer{};
             e2.st = Entry::Done;
             // the image holds a quick stand-in of this content: the next use uploads this result (cpu_dirty without a new generation)
-            if (t->prep_prov.load(std::memory_order_acquire) == (gen | 0x80000000u)) t->cpu_dirty.store(true);
+            if (t->prep_prov.load(std::memory_order_acquire) == (gen | 0x80000000u)) {
+                t->cpu_dirty.store(true);
+                gpu::pool_note_cpu_write(t);   // a texture drawn through a pool takes the final content too
+            }
         } else {
             if (ok) s.st.stale++;
             e2.st = Entry::Idle;
@@ -391,6 +417,7 @@ void consider(Texture* t) {
             S().caps.astc = ft.astc_ldr;
             S().caps.bc7_transcode = true;
             S().caps.upgrade = true;
+            S().caps.bc1 = astc_bc1_active();   // [gfx] astc_bc: the job makes the format the image will be made in (nvn_texdata.h)
             S().caps.cache_only = true;
             S().caps.image_format = VK_FORMAT_UNDEFINED;   // whatever the cache entry holds; the user checks the format against its image
             S().caps_ready.store(true, std::memory_order_release);
@@ -401,7 +428,8 @@ void consider(Texture* t) {
 }
 
 bool is_entry_format(VkFormat f) {
-    return f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_BC5_UNORM_BLOCK;
+    return f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_BC5_UNORM_BLOCK || f == VK_FORMAT_BC1_RGB_UNORM_BLOCK ||
+           f == VK_FORMAT_BC1_RGB_SRGB_BLOCK;
 }
 
 }  // namespace
@@ -419,6 +447,7 @@ void on_flushed(Texture* t) {
     if (!t) return;
     t->prep_gen.fetch_add(1, std::memory_order_acq_rel);
     g_tex_scan_epoch.fetch_add(1, std::memory_order_relaxed);        // handles looked at before may now lead to a dirty texture
+    gpu::pool_note_cpu_write(t);                                     // the pools it is registered in look at it (no scan of every texture)
     // Sparse textures (the big volumes): tiles are mapped and written range by range, each reported here. Once a pool or a command list has named the
     // texture, a job follows the writes and starts when they stop.
     if (t->vpool && (t->prep_flags.load(std::memory_order_acquire) & kWanted) && enabled() && gpu::active() && eligible(t)) {
@@ -538,7 +567,7 @@ bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged, uint64_t* src_h
                 if (staged) *staged = stage;
                 else gpu::device().destroy_buffer(stage);     // the caller cannot use it: it would be left without the data
             }
-            if (s.verify) {
+            if (s.verify && !out.gpu_astc) {   // (ASTC blocks for the GPU transcode: nothing made here to compare)
                 PreparedTexture fresh;
                 const bool ok = prepare_texture(*t, s.caps, fresh);
                 uint64_t after = 0;
@@ -589,7 +618,11 @@ void provisional_uploaded(Texture* t) {
     auto it = s.map.find(t);
     if (it != s.map.end()) {
         Entry& e = it->second;
-        if (e.st == Entry::Done && e.job_gen == gen) { t->cpu_dirty.store(true); return; }   // finished meanwhile: used at the next upload
+        if (e.st == Entry::Done && e.job_gen == gen) {   // finished meanwhile: used at the next upload
+            t->cpu_dirty.store(true);
+            gpu::pool_note_cpu_write(t);
+            return;
+        }
         if (e.st == Entry::Running && e.job_gen == gen) return;                             // the worker marks the texture when it is done
         if (e.st == Entry::Queued || e.st == Entry::Waiting) return;
     }

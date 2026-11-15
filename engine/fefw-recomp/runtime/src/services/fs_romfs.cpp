@@ -11,10 +11,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -25,7 +23,6 @@
 #include "nxrt/diag.h"
 #include "nxrt/log.h"
 #include "nxrt/nup.h"
-#include "nxrt/nx.h"
 #include "nxrt/write_watch.h"
 
 namespace nxrt::services::fs {
@@ -105,12 +102,7 @@ struct Node {
     std::wstring host;           // host path to open
     bool is_dir = false;
     uint64_t size = 0;           // files only
-    uint64_t src = 0;            // files: offset of the data in the host file
-    bool packed = false;         // files: a zstd frame in the .nup, served from the cache once decompressed
-    uint64_t stored = 0;         // files: bytes the frame covers in the package
-    uint64_t pkg_off = 0;        // files: where the frame is in the package
-    bool archived = false;       // files: read from the blocks of an .nx archive
-    nx::File nx_src;             // files: the archive record (path, size, block range)
+    uint64_t src = 0;            // files: offset of the data in the host file (0, or the extent in a .nup)
     std::vector<Node> kids;      // sorted by name bytes
     uint32_t entry = 0;          // offset of this entry in its table
     uint32_t parent = 0;         // entry offset of the parent directory (the root's is 0)
@@ -188,79 +180,8 @@ void sort_tree(Node& d) {
         if (k.is_dir) sort_tree(k);
 }
 
-// Where decompressed .nup entries are kept: %LOCALAPPDATA%\EmblemWeave\nup-cache\<package name>-<bytes>\files.
-std::string nup_cache_dir(const std::string& nup_path) {
-    std::filesystem::path base;
-    if (const char* local = std::getenv("LOCALAPPDATA"); local && *local) {
-        std::wstring wide;
-        if (to_wide(std::string(local), wide)) base = std::filesystem::path(wide);
-    }
-    std::error_code ec;
-    if (base.empty()) base = std::filesystem::temp_directory_path(ec);
-    std::wstring wpkg;
-    if (!to_wide(nup_path, wpkg)) return std::string();
-    const std::filesystem::path pkg(wpkg);
-    const auto bytes = std::filesystem::file_size(pkg, ec);
-    std::string name = nup_path;
-    if (const auto slash = name.find_last_of("/\\"); slash != std::string::npos) name = name.substr(slash + 1);
-    if (const auto dot = name.find_last_of('.'); dot != std::string::npos) name = name.substr(0, dot);
-    name += "-" + std::to_string(ec ? 0 : static_cast<uint64_t>(bytes));
-    std::wstring wname;
-    if (!to_wide(name, wname)) return std::string();
-    std::string out;
-    if (!to_utf8((base / L"EmblemWeave" / L"nup-cache" / wname / L"files").wstring(), out)) return std::string();
-    return out;
-}
-
-// Fills root from the RomFS of an .nx archive. The archive is read through its own reader: a file is a range of blocks, decoded
-// and integrity checked on demand, so nothing is copied out before the game asks for it.
-bool scan_nx(const std::string& path, Node& root, std::string& msg, std::shared_ptr<nx::Reader>& out) {
-    auto reader = std::make_shared<nx::Reader>(path);
-    if (!reader->ok()) {
-        msg = reader->error();
-        return false;
-    }
-    const nx::Content& c = reader->content();
-    if (c.romfs.empty()) {
-        msg = path + " has no RomFS";
-        return false;
-    }
-    for (const nx::File& f : c.romfs) {
-        Node* d = &root;
-        size_t at = 0;
-        for (size_t slash; (slash = f.path.find('/', at)) != std::string::npos; at = slash + 1) {
-            const std::string name = f.path.substr(at, slash - at);
-            auto it = std::find_if(d->kids.begin(), d->kids.end(), [&](const Node& k) { return k.is_dir && k.name == name; });
-            if (it == d->kids.end()) {
-                Node k;
-                k.is_dir = true;
-                k.name = name;
-                k.path = d->path + "/" + name;
-                d->kids.push_back(std::move(k));
-                it = d->kids.end() - 1;
-            }
-            d = &*it;
-        }
-        Node k;
-        k.name = f.path.substr(at);
-        k.path = "/" + f.path;
-        k.size = f.size;
-        k.archived = true;
-        k.nx_src = f;
-        if (k.name.size() > kMaxName || k.path.size() > kMaxPath) {
-            msg = "name or path too long for a RomFS: " + k.path;
-            return false;
-        }
-        d->kids.push_back(std::move(k));
-    }
-    sort_tree(root);
-    out = std::move(reader);
-    return true;
-}
-
-// Fills root from the RomFS of a .nup package: a stored file is a range of the package file, a zstd one is decompressed into the
-// cache the first time the game reads it, and the image then reads that file.
-bool scan_nup(const std::string& nup_path, Node& root, std::string& msg, const std::string& cache) {
+// Fills root from the RomFS of a .nup package: every file is a range of the package file.
+bool scan_nup(const std::string& nup_path, Node& root, std::string& msg) {
     nup::Content c;
     if (!nup::open(nup_path, c, &msg)) return false;
     if (c.romfs.empty()) {
@@ -286,20 +207,9 @@ bool scan_nup(const std::string& nup_path, Node& root, std::string& msg, const s
         Node k;
         k.name = f.path.substr(at);
         k.path = "/" + f.path;
+        k.host = root.host;
         k.size = f.size;
-        if (f.compressed) {
-            const std::string cached = cache + "/" + std::to_string(f.offset) + ".bin";
-            if (!to_wide(cached, k.host)) {
-                msg = "the cache path of " + f.path + " cannot be represented";
-                return false;
-            }
-            k.packed = true;
-            k.stored = f.stored;
-            k.pkg_off = f.offset;
-        } else {
-            k.host = root.host;
-            k.src = f.offset;
-        }
+        k.src = f.offset;
         if (k.name.size() > kMaxName || k.path.size() > kMaxPath) {
             msg = "name or path too long for a RomFS: " + k.path;
             return false;
@@ -392,15 +302,10 @@ struct Segment {
 
 struct FileRec {
     std::wstring host;
-    bool archived = false;       // read from the .nx archive rather than the host
-    nx::File nx_src;             // the archive record, when archived
     uint64_t size = 0;
     uint64_t image_off = 0;
     uint64_t src = 0;            // offset of the data in the host file
     std::string path;            // path inside the image ("/a/b.bin"), for the first-read note
-    bool packed = false;         // still a zstd frame in the package until it is extracted
-    uint64_t stored = 0;
-    uint64_t pkg_off = 0;
 };
 
 // Everything build() produces. Replaced as a whole.
@@ -413,8 +318,6 @@ struct Layout {
     std::vector<Segment> segs;          // contiguous, covering [0, size)
     std::vector<FileRec> files;         // in data order
     std::map<std::string, uint32_t> by_path;
-    std::string package;                // the .nup or .nx, when the files come from one
-    std::shared_ptr<nx::Reader> archive;  // the .nx reader the files are read through
 };
 
 // Lays out the host folder: entries sorted by full path in each table, file data in that order, 16-byte aligned.
@@ -422,41 +325,22 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     std::string msg;
     std::wstring wdir;
     const bool packaged = nup::is_nup(host_dir);
-    const bool archived = !packaged && nx::is_nx(host_dir);
     if (!to_wide(host_dir, wdir)) {
         if (err) *err = "host folder name is empty or not valid UTF-8";
         return false;
     }
     std::error_code ec;
     const std::filesystem::path abs = std::filesystem::absolute(std::filesystem::path(wdir), ec);
-    // A package is a single file and is served through its own reader, so only a
-    // path that is neither a package nor a folder is rejected here.
-    if (ec || (!packaged && !archived && !std::filesystem::is_directory(abs, ec))) {
+    if (ec || (!packaged && !std::filesystem::is_directory(abs, ec))) {
         if (err) *err = "not a folder: " + host_dir;
         return false;
     }
     Node root;
     root.is_dir = true;
     root.host = long_path(abs.wstring());
-    const std::string cache = packaged ? nup_cache_dir(host_dir) : std::string();
-    if (packaged || archived) L.package = host_dir;
-    if (!cache.empty()) {
-        std::wstring wcache;
-        if (to_wide(cache, wcache)) {
-            std::error_code cec;
-            std::filesystem::create_directories(std::filesystem::path(wcache), cec);
-            if (cec) NXLOG_W("fs", "nup: cannot make the cache folder '%s' (%s); a compressed package will not run", cache.c_str(), cec.message().c_str());
-        }
-    }
-    std::shared_ptr<nx::Reader> archive;
-    const bool scanned = archived ? scan_nx(host_dir, root, msg, archive) : packaged ? scan_nup(host_dir, root, msg, cache) : scan(root, msg);
-    if (!scanned) {
+    if (!(packaged ? scan_nup(host_dir, root, msg) : scan(root, msg))) {
         if (err) *err = msg;
         return false;
-    }
-    if (archived) {
-        L.archive = std::move(archive);
-        NXLOG_I("fs", "nx: %s, %zu top-level RomFS entries", host_dir.c_str(), root.kids.size());
     }
     uint32_t taken = 0;
     for (const std::string& o : overlays) {
@@ -601,7 +485,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         const uint64_t img = kPartitionOfs + f->data;
         if (img > cursor) L.segs.push_back({cursor, img - cursor, Segment::Kind::kZero, 0, 0});
         const uint32_t idx = static_cast<uint32_t>(L.files.size());
-        L.files.push_back({f->host, f->archived, f->nx_src, f->size, img, f->src, f->path, f->packed, f->stored, f->pkg_off});
+        L.files.push_back({f->host, f->size, img, f->src, f->path});
         if (f->size > 0) L.segs.push_back({img, f->size, Segment::Kind::kFile, f->src, idx});
         L.by_path[f->path] = idx;
         cursor = img + f->size;
@@ -655,63 +539,6 @@ struct RomfsImage::Impl {
     }
     mutable std::vector<OpenSlot> cache;    // at most kOpenFiles entries
     mutable uint64_t tick = 0;
-    mutable std::vector<uint8_t> ready;     // per file: its bytes are readable from host (always, unless packed)
-
-    // A zstd entry becomes a file of the cache the first time it is read. The
-    // package holds one frame per file, so it is decompressed whole.
-    bool ensure(uint32_t idx) const {
-        const FileRec& f = l.files[idx];
-        if (!f.packed) return true;
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            if (idx < ready.size() && ready[idx]) return true;
-        }
-        nup::File src;
-        src.path = f.path;
-        src.size = f.size;
-        src.offset = f.pkg_off;
-        src.stored = f.stored;
-        src.compressed = true;
-        std::vector<uint8_t> data;
-        std::string err;
-        if (!nup::read_file(l.package, src, data, &err)) {
-            NXLOG_E("fs", "nup: %s", err.c_str());
-            return false;
-        }
-        std::filesystem::path out(f.host);
-        std::error_code ec;
-        std::filesystem::create_directories(out.parent_path(), ec);
-        std::filesystem::path tmp = out;
-        tmp += std::wstring(L".part") + std::to_wstring(GetCurrentThreadId());
-        {
-            std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
-            if (!o) {
-                NXLOG_E("fs", "nup: cannot write the cache file %ls", tmp.c_str());
-                return false;
-            }
-            o.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-            if (!o) {
-                NXLOG_E("fs", "nup: cannot write the cache file %ls (disk full?)", tmp.c_str());
-                return false;
-            }
-        }
-        std::filesystem::rename(tmp, out, ec);
-        if (ec) {
-            std::error_code rec;
-            std::filesystem::remove(out, rec);
-            std::filesystem::rename(tmp, out, ec);
-            if (ec) {
-                NXLOG_E("fs", "nup: cannot move the cache file into place: %ls", out.c_str());
-                return false;
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            if (idx < ready.size()) ready[idx] = 1;
-        }
-        NXLOG_I("fs", "nup: %s decompressed to the cache (%llu bytes)", f.path.c_str(), static_cast<unsigned long long>(f.size));
-        return true;
-    }
 
     // The handle for file idx, opened if it is not cached. The least recently used entry is dropped when the cache is full.
     std::shared_ptr<HandleBox> acquire(uint32_t idx) const {
@@ -740,18 +567,9 @@ struct RomfsImage::Impl {
 
     // Positioned reads (OVERLAPPED offset), so concurrent readers of one handle need no seek lock.
     bool read_host(uint32_t idx, uint64_t ofs, uint8_t* out, uint64_t n) const {
-        if (!ensure(idx)) return false;
-        const mem::ww::OsWriteScope ws(out, n);   // ReadFile fails on a page the write tracker made read-only
-        const FileRec& rec = l.files[idx];
-        if (rec.archived) {
-            if (!l.archive || !l.archive->read(rec.nx_src, ofs, out, n)) {
-                NXLOG_E("fs", "nx: cannot read %s at %llu", rec.path.c_str(), static_cast<unsigned long long>(ofs));
-                return false;
-            }
-            return true;
-        }
         std::shared_ptr<HandleBox> box = acquire(idx);
         if (!box) return false;
+        const mem::ww::OsWriteScope ws(out, n);   // ReadFile fails on a page the write tracker made read-only
         while (n > 0) {
             const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(n, 1ull << 30));
             OVERLAPPED ov{};
@@ -778,15 +596,6 @@ bool RomfsImage::build(const std::string& host_dir, std::string* err, const std:
     p_->cache.clear();
     p_->l = ok ? std::move(fresh) : Layout{};
     p_->read_seen.assign(p_->l.files.size(), 0);
-    p_->ready.assign(p_->l.files.size(), 1);
-    for (size_t i = 0; ok && i < p_->l.files.size(); i++) {
-        const FileRec& f = p_->l.files[i];
-        if (!f.packed) continue;
-        // An entry decompressed by an earlier run is used as it is.
-        std::error_code ec;
-        const auto have = std::filesystem::file_size(std::filesystem::path(f.host), ec);
-        p_->ready[i] = (!ec && have == f.size) ? 1 : 0;
-    }
     return ok;
 }
 

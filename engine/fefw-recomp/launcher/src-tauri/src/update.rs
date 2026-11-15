@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Updates of the release package from inside the launcher: asks GitHub for the latest release, downloads its zip (Windows' own
-//! curl.exe), checks it against the SHA-256 digest GitHub lists for the asset, unpacks it (Windows' own tar.exe) and moves the new
-//! files over the install folder. Everything the old package had is moved to update/old first and moved back if any step fails.
+//! Updates of the release package from inside the launcher: asks GitHub for the latest release, downloads its package for this
+//! platform (the -win64.zip, or the -linux-x64.tar.gz) with curl (Windows' own curl.exe), checks it against the SHA-256 digest
+//! GitHub lists for the asset, unpacks it with tar (Windows' own tar.exe) and moves the new files over the install folder. Everything the old package had is moved to update/old first and moved back if any step fails.
 //! The player's files (fefw.exe, fefw.ini, controls.ini, save/, shader_cache/, build/, logs) are not in the zip and stay as they are.
 //! Afterwards the new package's `fefw_build.py --check` says whether fefw.exe has to be built again (Set up).
 
@@ -14,9 +14,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The GitHub repository whose releases the launcher follows.
-pub const REPO: &str = "Goldoire/fefw-recomp";
+/// The GitHub repository whose releases the launcher follows. FEFW_UPDATE_REPO at build time: a fork's launcher follows the fork.
+pub const REPO: &str = match option_env!("FEFW_UPDATE_REPO") {
+    Some(r) => r,
+    None => "Goldoire/fefw-recomp",
+};
+/// FEFW_BUILD_ID at build time: the release tag this launcher was built for (a fork tagging its releases by commit). Any other
+/// latest release then counts as newer, as tags like that have no order.
+pub const BUILD_ID: Option<&str> = option_env!("FEFW_BUILD_ID");
+/// The release asset for this platform, and files a downloaded package must have.
+#[cfg(windows)]
+const PACKAGE: (&str, &str, [&str; 4]) = ("-win64.zip", "Windows", ["fefw-launcher.exe", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/python.exe"]);
+#[cfg(not(windows))]
+const PACKAGE: (&str, &str, [&str; 4]) =
+    ("-linux-x64.tar.gz", "Linux", ["fefw-launcher.AppImage", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/bin/python3"]);
 const AGENT: &str = "fefw-launcher";
+const CURL: &str = if cfg!(windows) { "curl.exe" } else { "curl" };
+const TAR: &str = if cfg!(windows) { "tar.exe" } else { "tar" };
 /// The launcher's working folder inside the install folder: downloads, the unpacked package, the previous version's files.
 const WORK: &str = "update";
 
@@ -71,26 +85,30 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn system_tool(name: &str) -> PathBuf {
+    if !cfg!(windows) {
+        return PathBuf::from(name.trim_end_matches(".exe")); // curl and tar from PATH
+    }
     let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let p = root.join("System32").join(name);
     if p.is_file() { p } else { PathBuf::from(name) }
 }
 
 fn curl() -> Command {
-    let mut c = Command::new(system_tool("curl.exe"));
+    let mut c = Command::new(system_tool(CURL));
     c.args(["--fail", "--location", "--silent", "--show-error", "--user-agent", AGENT]);
     crate::setup::quiet(&mut c);
     c
 }
 
-/// The latest published release of REPO and its Windows zip.
+/// The latest published release of REPO and its package for this platform. A release without one (Linux, while only the Windows
+/// zip is published) comes back with an empty asset: it can be shown, not installed.
 pub fn latest() -> Result<Release, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let out = curl()
         .args(["--retry", "2", "--retry-all-errors", "--max-time", "30", "--header", "Accept: application/vnd.github+json", &url])
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("cannot run curl.exe: {e}"))?;
+        .map_err(|e| format!("cannot run {CURL}: {e}"))?;
     if !out.status.success() {
         return Err(format!("Could not reach GitHub: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -98,10 +116,8 @@ pub fn latest() -> Result<Release, String> {
     let tag = v["tag_name"].as_str().unwrap_or_default();
     let version = tag.trim_start_matches(['v', 'V']).to_string();
     let assets = v["assets"].as_array().cloned().unwrap_or_default();
-    let zip = assets
-        .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("fefw-recomp-") && n.ends_with("-win64.zip")))
-        .ok_or_else(|| format!("Release {tag} has no Windows package."))?;
+    let none = serde_json::Value::Null;
+    let zip = assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n.starts_with("fefw-recomp-") && n.ends_with(PACKAGE.0))).unwrap_or(&none);
     let digest = zip["digest"].as_str().unwrap_or_default();
     Ok(Release {
         name: v["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(tag).to_string(),
@@ -117,7 +133,10 @@ pub fn latest() -> Result<Release, String> {
 
 pub fn check(current: &str, package: bool) -> Result<Check, String> {
     let rel = latest()?;
-    let newer = matches!((parse_version(&rel.version), parse_version(current)), (Some(a), Some(b)) if a > b);
+    let newer = match BUILD_ID {
+        Some(_) => !rel.version.is_empty() && rel.version != current.trim_start_matches(['v', 'V']),
+        None => matches!((parse_version(&rel.version), parse_version(current)), (Some(a), Some(b)) if a > b),
+    };
     Ok(Check { current: current.to_string(), latest: Some(rel), newer, package })
 }
 
@@ -164,7 +183,7 @@ impl Run<'_> {
 
     pub fn run(&self, rel: &Release) -> Result<Status, String> {
         if rel.sha256.len() != 64 {
-            return Err("GitHub lists no checksum for this download, so it cannot be verified. Download the zip from the release page instead.".into());
+            return Err("GitHub lists no checksum for this download, so it cannot be verified. Download the package from the release page instead.".into());
         }
         if rel.asset_name.contains(['/', '\\']) || rel.asset_name.contains("..") {
             return Err("The release's file name is not usable.".into());
@@ -203,14 +222,14 @@ impl Run<'_> {
         let _ = fs::remove_file(&zip);
         let _ = fs::remove_file(&part);
         let mut child = curl()
-            .args(["--retry", "3", "--output"])
+            .args(["--retry", "3", "--speed-limit", "1024", "--speed-time", "60", "--output"])  // a stalled connection fails after a minute instead of hanging
             .arg(&part)
             .arg(&rel.asset_url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("cannot run curl.exe: {e}"))?;
+            .map_err(|e| format!("cannot run {CURL}: {e}"))?;
         let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
         let status = loop {
             if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
@@ -251,11 +270,13 @@ impl Run<'_> {
             fs::remove_dir_all(stage).map_err(|e| format!("cannot clear {}: {e}", stage.display()))?;
         }
         fs::create_dir_all(stage).map_err(|e| format!("cannot create {}: {e}", stage.display()))?;
-        let mut c = Command::new(system_tool("tar.exe"));
-        c.arg("-xf").arg(zip).arg("-C").arg(stage);
+        let mut c = Command::new(system_tool(TAR));
+        // -m: do not restore the file times. The files only need to be there; a zip with a time the file system cannot hold
+        // ("Can't restore time: Invalid argument", seen on some Windows setups) must not fail the whole update.
+        c.arg("-xmf").arg(zip).arg("-C").arg(stage);
         crate::setup::quiet(&mut c);
-        let out = c.stdin(Stdio::null()).output().map_err(|e| format!("cannot run tar.exe: {e}"))?;
-        if !out.status.success() {
+        let out = c.stdin(Stdio::null()).output().map_err(|e| format!("cannot run {TAR}: {e}"))?;
+        if !out.status.success() && !only_time_errors(&String::from_utf8_lossy(&out.stderr)) {
             return Err(format!("Unpacking failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
         let dirs: Vec<PathBuf> = fs::read_dir(stage).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
@@ -263,13 +284,30 @@ impl Run<'_> {
             [one] => one.clone(),
             _ => return Err("The package does not have the expected layout.".into()),
         };
-        for need in ["fefw-launcher.exe", "fefw_rt.dll", "tools/build/fefw_build.py", "tools/python/python.exe"] {
+        for need in PACKAGE.2 {
             if !top.join(need).is_file() {
                 return Err(format!("The package is missing {need}."));
             }
         }
         Ok(top)
     }
+}
+
+/// True when every line tar printed is a failure to set a file time (the contents were written). The package check after
+/// unpacking still catches a missing file.
+fn only_time_errors(stderr: &str) -> bool {
+    let mut any = false;
+    for l in stderr.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let l = l.to_ascii_lowercase();
+        if l.contains("error exit delayed") {   // bsdtar's closing line after any non-fatal error
+            continue;
+        }
+        if !l.contains("can't restore time") && !l.contains("cannot utime") {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 /// Files of a tree, as paths relative to `root` (sorted).
@@ -309,7 +347,7 @@ fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 /// under it, a file can). Each old file goes to `old` first: the files the new package replaces, and in the package's own folders
 /// (those the new package has, such as tools/) the files it no longer has. Anything else in the install folder (fefw.exe,
 /// fefw.ini, save/, shader_cache/, build/) is left alone. Any failure moves back what was already moved. The running launcher
-/// can be moved too (Windows allows renaming a running exe).
+/// can be moved too (Windows allows renaming a running exe; on Linux the running AppImage keeps its old file until it exits).
 pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
     if old.exists() {
         fs::remove_dir_all(old).map_err(|e| format!("cannot clear {} (close any program using it): {e}", old.display()))?;
@@ -322,7 +360,11 @@ pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
     for e in fs::read_dir(top).map_err(|e| e.to_string())?.flatten() {
         if e.path().is_dir() {
             let name = PathBuf::from(e.file_name());
-            stale.extend(walk(&install.join(&name)).into_iter().map(|r| name.join(r)).filter(|r| !new_set.contains(r)));
+            // locales/ holds the shipped language tables, but the player may have put their own translation there too:
+            // a table the package does not ship is not stale, it is theirs.
+            if name.to_string_lossy().eq_ignore_ascii_case("locales") {
+                continue;
+            }            stale.extend(walk(&install.join(&name)).into_iter().map(|r| name.join(r)).filter(|r| !new_set.contains(r)));
         }
     }
     // (relative path, the old file was moved to old/, a new file was moved in)
@@ -342,7 +384,13 @@ pub fn install(install: &Path, top: &Path, old: &Path) -> Result<(), String> {
         }
         for rel in &new_files {
             let target = install.join(rel);
-            let had = target.exists();
+            // symlink_metadata: a symlink (python-build-standalone has them) whose target was moved aside still counts
+            let had = fs::symlink_metadata(&target).is_ok();
+            // a language table is added, never replaced: the copy in the install folder may be the player's own.
+            let shared = rel.components().next().is_some_and(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("locales"));
+            if had && shared {
+                continue;
+            }
             if had {
                 aside(rel)?;
             }
@@ -376,7 +424,7 @@ pub fn rebuild_needed(install: &Path, game_dir: &Path) -> (Option<bool>, String)
     if !game_dir.join("fefw.exe").is_file() {
         return (Some(true), "fefw.exe is not built yet".into());
     }
-    let mut c = Command::new(tools.join("python").join("python.exe"));
+    let mut c = Command::new(crate::setup::package_python(&tools));
     c.arg("-I").arg(tools.join("build").join("fefw_build.py")).arg("--check").arg("--game").arg(game_dir);
     crate::setup::quiet(&mut c);
     match c.stdin(Stdio::null()).output() {
@@ -411,6 +459,17 @@ pub fn cleanup(install: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpacking_tolerates_only_time_errors() {
+        // #129: tar could not set the file times (some Windows file systems); the files themselves were written
+        assert!(only_time_errors("fefw-recomp-0.1.7/fefw.exe: Can't restore time: Invalid argument\nfefw-recomp-0.1.7/LEGAL.txt: Can't restore time: Invalid argument\n"));
+        assert!(only_time_errors("a: Can't restore time: Invalid argument\ntar.exe: Error exit delayed from previous errors.\n"));
+        assert!(!only_time_errors("a: Can't restore time: Invalid argument\ntar: b: Cannot open: Permission denied\n"));
+        assert!(!only_time_errors("tar.exe: Error exit delayed from previous errors.\n"));
+        assert!(!only_time_errors("fefw-recomp-0.1.7/a: Cannot open: No space left on device"));
+        assert!(!only_time_errors(""));
+    }
 
     #[test]
     fn versions() {
@@ -455,6 +514,28 @@ mod tests {
         assert_eq!(get(inst.join("save/x")), "player save");
         assert_eq!(get(old.join("fefw_rt.dll")), "old dll");
         assert_eq!(get(old.join("tools/gone.py")), "stale");
+    }
+
+    #[test]
+    fn install_adds_language_tables_without_replacing_the_players_own() {
+        let (inst, top, old) = (tmp("i3"), tmp("t3"), tmp("o3").join("old"));
+        put(inst.join("locales/zh.ini"), "the player's own zh");
+        put(inst.join("locales/mine.ini"), "a table the player wrote");
+        put(top.join("locales/zh.ini"), "the shipped zh");
+        put(top.join("fefw_rt.dll"), "new dll");
+        install(&inst, &top, &old).unwrap();
+        // the shipped table does not overwrite the copy already there
+        assert_eq!(get(inst.join("locales/zh.ini")), "the player's own zh");
+        // and a table only the player has is not treated as stale
+        assert_eq!(get(inst.join("locales/mine.ini")), "a table the player wrote");
+        assert_eq!(get(inst.join("fefw_rt.dll")), "new dll");
+
+        // with no copy there yet, the shipped table is put in place
+        let (inst2, top2, old2) = (tmp("i4"), tmp("t4"), tmp("o4").join("old"));
+        put(top2.join("locales/zh.ini"), "the shipped zh");
+        put(top2.join("fefw_rt.dll"), "new dll");
+        install(&inst2, &top2, &old2).unwrap();
+        assert_eq!(get(inst2.join("locales/zh.ini")), "the shipped zh");
     }
 
     #[test]

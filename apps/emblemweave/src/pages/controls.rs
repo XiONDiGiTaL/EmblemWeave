@@ -164,29 +164,31 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             save = Some(("trigger_threshold", t.trigger));
         }
     });
-    widgets::setting_row(ui, p, "Rumble", "Whether the game may shake the pad. Written to controls.ini as [pad] rumble.", |ui| {
+    widgets::setting_row(ui, p, "Rumble", "Whether the game may shake the pad. Written to controls.ini as [pad] haptic: automatic uses DualSense haptics or HD Rumble, off sends nothing.", |ui| {
         let mut on = t.rumble;
         if widgets::toggle(ui, p, &mut on).changed() {
             t.rumble = on;
-            save_flag = Some(("rumble", on));
+            save_flag = Some(("haptic", on));
         }
     });
-    widgets::setting_row(ui, p, "Rumble strength", "Multiplies the game's own amplitude, 0 to 100 %. [pad] rumble_scale.", |ui| {
+    widgets::setting_row(ui, p, "Rumble strength", "Multiplies the game's own amplitude, 0 to 100 %. [pad] haptic_strength.", |ui| {
         let mut pct = (t.rumble_scale * 100.0).round();
         if widgets::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").show(ui, p).changed() {
             t.rumble_scale = pct / 100.0;
             app.config.input.vibration = pct / 100.0;
-            save = Some(("rumble_scale", t.rumble_scale));
+            save = Some(("haptic_strength", t.rumble_scale));
         }
     });
 
     if let Some((key, on)) = save_flag {
-        match pad::write_flag(&ini, key, on) {
+        let written = if key == "haptic" { pad::write_haptic(&ini, on) } else { pad::write_flag(&ini, key, on) };
+        match written {
             Ok(()) => app.tuning = Some(t),
             Err(e) => app.notify(e, Tone::Bad),
         }
     } else if let Some((key, v)) = save {
-        match pad::write(&ini, key, v) {
+        let written = if key == "haptic_strength" { pad::write_haptic_strength(&ini, v) } else { pad::write(&ini, key, v) };
+        match written {
             Ok(()) => {
                 if key == "deadzone" {
                     app.config.input.deadzone = v;

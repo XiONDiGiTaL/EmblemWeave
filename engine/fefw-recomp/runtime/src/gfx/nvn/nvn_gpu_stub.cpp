@@ -8,8 +8,8 @@
 
 namespace nxrt::nvn::be {
 // Destructors of host objects that own GPU resources (defined here so tests link without Vulkan).
-Texture::~Texture() {}
-MemoryPool::~MemoryPool() {}
+Texture::~Texture() { lifetime_texture_freed(this); }
+MemoryPool::~MemoryPool() { lifetime_pool_freed(this); }
 }  // namespace nxrt::nvn::be
 
 namespace nxrt::nvn::be::gpu {
@@ -41,3 +41,6 @@ uint64_t timestamp_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 }  // namespace nxrt::nvn::be::gpu
+namespace nxrt::nvn::be {
+bool astc_bc1_active() { return false; }   // [gfx] astc_bc: no GPU, no BC1 choice (nvn_texdata.h)
+}  // namespace nxrt::nvn::be

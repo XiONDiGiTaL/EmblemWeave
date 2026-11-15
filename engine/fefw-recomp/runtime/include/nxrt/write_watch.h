@@ -17,14 +17,18 @@
 #include <atomic>
 #include <cstdint>
 #include <vector>
+#include <string>
+#include <utility>
 
 namespace nxrt::mem::ww {
 
 struct Region;
 
 // A region over [addr, addr + size) (page aligned down/up). Null when the range is not inside the heap's primary view or the tracker is
-// unavailable. Any thread; the region has one owner thread for the calls below marked "owner".
-Region* region_create(uint64_t addr, uint64_t size);
+// unavailable. owner is a diagnostic name with static lifetime. Any thread; the region has one owner thread for the calls below marked "owner".
+Region* region_create(uint64_t addr, uint64_t size, const char* owner = "unspecified");
+// Crash diagnostics: snapshots atomic ownership bits without taking region locks.
+std::string describe_page(uint64_t addr);
 // Makes every armed page writable again and frees the region. Owner.
 void region_destroy(Region* r);
 uint64_t region_base(const Region* r);
@@ -57,6 +61,22 @@ public:
     OsWriteScope& operator=(const OsWriteScope&) = delete;
 private:
     int slot_ = -1;
+};
+// The CPU's writes to [p, p + n) (the heap's primary view) wait while the object lives: its pages that are read-write become read-only, a
+// write to one faults and the fault handler holds it until the scope ends, and file reads into the range (OsWriteScope) and arm() wait
+// too. Hold it around a Vulkan import of the same pages through another view (nvn_gpu_pool.cpp): the NVIDIA driver's vkAllocateMemory
+// with VK_EXT_external_memory_host reads and writes back every page it pins, and a CPU write landing between its read and its write
+// was lost (one byte at the start of a page, issue 97: a zstd frame the game then failed to decompress forever, a stuck loading screen).
+// Pages that are no-access (guarded) or read-only already are left as they are; their writes fault and wait the same way.
+class ImportFreeze {
+public:
+    ImportFreeze(const void* p, uint64_t n);
+    ~ImportFreeze();
+    ImportFreeze(const ImportFreeze&) = delete;
+    ImportFreeze& operator=(const ImportFreeze&) = delete;
+private:
+    int slot_ = -1;
+    std::vector<std::pair<uint64_t, uint64_t>> runs_;   // the runs made read-only here, made read-write again at the end
 };
 // Any thread: the operating system is about to read [p, p + n) (WriteFile from guest memory): guarded pages in the range are made
 // current by the guard handler and become readable. Armed pages stay armed. Cheap when no region exists.

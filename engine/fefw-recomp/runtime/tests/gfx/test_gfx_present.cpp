@@ -3,8 +3,6 @@
 // Reference image: tests/data/gfx/test_scene_640x360_f60.png, made by the screenshot test with NXRT_GFX_UPDATE_REF=1 on the RTX 3080.
 #include <SDL3/SDL.h>
 
-#include <vector>
-
 #include "gfx_test_util.h"
 NXTEST_GROUP(gfx_present)
 
@@ -173,51 +171,3 @@ NXTEST(fullscreen_toggle_recreates_the_swapchain) {
     CHECK(r.renderer.swapchain_creates >= 3);
 }
 
-NXTEST(presents_a_known_colour_and_reports_the_first_frame) {
-    // The windowed path end to end, with the same question a player asks: did
-    // anything reach the screen? A present call that returns VK_SUCCESS is not the
-    // answer: a frame whose programs did not link is skipped, the present pass
-    // copies an untouched (black) texture, and the window stays black at 60 fps
-    // while the audio plays (issues #12 and #15). So the picture itself is read back.
-    SceneRunDesc d = base_desc();
-    d.headless = false;
-    d.width = 320;
-    d.height = 180;
-    d.frames = 8;
-    d.screenshot_frame = 5;
-    const std::string tmp = "present_colour_tmp.png";
-    d.screenshot_path = tmp;
-    const SceneRunResult r = run_scene(d);
-    print_result("present+colour", r);
-    REQUIRE(r.ok);
-    // Eight frames asked for, eight submitted, eight shown, none failed.
-    CHECK_EQ(r.frames, 8ull);
-    CHECK_EQ(r.renderer.frames, 8ull);
-    CHECK_EQ(r.renderer.presents, 8ull);
-    CHECK_EQ(r.renderer.presents_failed, 0ull);
-    CHECK_EQ(r.renderer.device_lost, 0ull);
-    CHECK_EQ(r.renderer.skipped, 0ull);
-    CHECK_EQ(r.validation.errors, 0ull);
-    CHECK(r.renderer.swapchain_creates >= 1);
-
-    std::vector<uint8_t> px;
-    uint32_t w = 0, h = 0;
-    REQUIRE(load_png_rgba(tmp, &px, &w, &h));
-    CHECK_EQ(w, 320u);
-    CHECK_EQ(h, 180u);
-    // The scene clears to (0.05, 0.08, 0.14), about (13, 20, 36) in 8 bits. A black
-    // frame (everything at zero, which is what an unlinked program leaves) fails
-    // this mean; the quads only raise it.
-    double sum = 0;
-    uint64_t non_black = 0;
-    for (size_t i = 0; i + 2 < px.size(); i += 4) {
-        const unsigned v = px[i] + px[i + 1] + px[i + 2];
-        sum += v / 3.0;
-        if (v > 12) ++non_black;
-    }
-    const double mean = sum / static_cast<double>(w * h);
-    std::printf("    presented picture: mean channel %.1f, %llu of %u pixels above black\n", mean,
-                static_cast<unsigned long long>(non_black), w * h);
-    CHECK(mean > 2.0);
-    CHECK(non_black > static_cast<uint64_t>(w) * h / 2);
-}

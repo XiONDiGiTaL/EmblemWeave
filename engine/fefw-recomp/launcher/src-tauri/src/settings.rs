@@ -97,19 +97,57 @@ pub fn apply(dir: &Path, edits: &[Edit]) -> Result<(), String> {
 /// cache are. With no dlc/ in the dump, [aoc] dir is empty: no add-on content.
 fn owned(p: &Paths) -> Vec<(&'static str, &'static str, String)> {
     vec![
-        ("fs", "exefs", crate::dump::fwd(&p.plain_exefs())),
+        ("fs", "exefs", crate::dump::game_path(&p.plain_exefs())),
         ("fs", "main", String::new()),
-        ("fs", "romfs", crate::dump::fwd(&p.romfs)),
-        ("fs", "mods", crate::dump::fwd(&p.mods())),
-        ("aoc", "dir", p.dlc.as_deref().map(crate::dump::fwd).unwrap_or_default()),
-        ("nvn", "shader_cache", crate::dump::fwd(&p.spirv())),
-        ("nvn", "bc7_cache", crate::dump::fwd(&p.bc7())),
+        ("fs", "romfs", crate::dump::game_path(&p.romfs)),
+        ("fs", "mods", crate::dump::game_path(&p.mods())),
+        ("aoc", "dir", p.dlc.as_deref().map(crate::dump::game_path).unwrap_or_default()),
+        ("nvn", "shader_cache", crate::dump::game_path(&p.spirv())),
+        ("nvn", "bc7_cache", crate::dump::game_path(&p.bc7())),
     ]
 }
 
 pub fn play_paths_ok(dir: &Path, p: &Paths) -> bool {
     let Some(ini) = load(&dir.join(GAME_INI)) else { return false };
     owned(p).iter().all(|(s, k, v)| ini.get(s, k).unwrap_or_default().replace('\\', "/") == *v)
+}
+
+/// The shipped language tables (`locales\*.ini`), from the package next to the launcher or from the checkout.
+fn locale_sources(p: &Paths) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(tools) = &p.package {
+        if let Some(root) = tools.parent() {
+            out.push(root.join("locales"));
+        }
+    }
+    out.push(p.repo.join("locales"));
+    out
+}
+
+/// Copies the language tables the package ships into the run folder, where fefw_rt.dll reads them (`locales\<lang>.ini` next to
+/// the DLL). A table already there is left alone: it may be the player's own translation of that language. Only `.ini` files are
+/// copied, and only the ones the run folder does not have yet.
+pub fn install_locales(dir: &Path, p: &Paths) {
+    let target = dir.join("locales");
+    for src in locale_sources(p) {
+        let Ok(rd) = fs::read_dir(&src) else { continue };
+        for e in rd.flatten() {
+            let from = e.path();
+            let is_ini = from.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("ini"));
+            if !is_ini || !from.is_file() {
+                continue;
+            }
+            let Some(name) = from.file_name() else { continue };
+            let to = target.join(name);
+            if to.exists() {
+                continue; // the player's copy, or one this already put there
+            }
+            let _ = fs::create_dir_all(&target);
+            if let Err(e) = fs::copy(&from, &to) {
+                eprintln!("[locales] could not copy {} to {}: {e}", from.display(), to.display());
+            }
+        }
+    }
 }
 
 /// Writes fefw.ini's paths (kept: every other key, and a save folder the player chose). Used by setup and before every Play.
@@ -121,6 +159,7 @@ pub fn ensure_play_paths(dir: &Path, p: &Paths) -> Result<(), String> {
     });
     let mut changed = new;
     let _ = fs::create_dir_all(p.mods());
+    install_locales(dir, p);
     for (s, k, v) in owned(p) {
         if ini.get(s, k).unwrap_or_default().replace('\\', "/") != v {
             ini.set(s, k, &v);
@@ -145,4 +184,46 @@ pub fn ensure_play_paths(dir: &Path, p: &Paths) -> Result<(), String> {
         write_atomic(&path, &ini.to_text())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fefw-loc-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn paths_with(repo: &Path, game: &Path) -> Paths {
+        Paths {
+            repo: repo.to_path_buf(),
+            exefs: repo.join("exefs"),
+            romfs: repo.join("romfs"),
+            dlc: None,
+            game_dir: game.to_path_buf(),
+            package: None,
+        }
+    }
+
+    #[test]
+    fn install_locales_copies_the_shipped_tables_only_once() {
+        let repo = tmp("repo");
+        let game = tmp("game");
+        fs::create_dir_all(repo.join("locales")).unwrap();
+        fs::write(repo.join("locales").join("zh.ini"), "shipped zh").unwrap();
+        fs::write(repo.join("locales").join("README.md"), "docs").unwrap();
+        let p = paths_with(&repo, &game);
+
+        install_locales(&game, &p);
+        assert_eq!(fs::read_to_string(game.join("locales").join("zh.ini")).unwrap(), "shipped zh");
+        assert!(!game.join("locales").join("README.md").exists(), "only the tables are copied");
+
+        // the player's own copy is never replaced by a later run
+        fs::write(game.join("locales").join("zh.ini"), "the player's own").unwrap();
+        install_locales(&game, &p);
+        assert_eq!(fs::read_to_string(game.join("locales").join("zh.ini")).unwrap(), "the player's own");
+    }
 }

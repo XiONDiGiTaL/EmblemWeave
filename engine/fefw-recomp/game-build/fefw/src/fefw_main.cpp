@@ -14,6 +14,7 @@
 // The command line and the NXRT_FS_* variables win over the ini. [boot] keys as in pkp_main.cpp (docs/CONFIG.md).
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,8 +25,6 @@
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
-#include "nxrt/nup.h"
-#include "nxrt/nx.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/gfx.h"
@@ -42,6 +41,7 @@
 #include "nxrt/runtime.h"
 
 #include "fefw/fefw_game.h"   // the Fortune's Weave game module (runtime/games/fefw)
+#include "fefw_cpu.h"         // the CPU features the lifted code needs (per build: FMA3 + AVX or SSE4.2 + POPCNT; CX16), checked first
 #include "fefw_paths.h"       // FEFW_EXEFS_DEFAULT, FEFW_MAIN_DEFAULT, FEFW_ROMFS_DEFAULT (game-build/fefw/CMakeLists.txt)
 
 // Two builds of this file (game-build/fefw/CMakeLists.txt):
@@ -101,6 +101,38 @@ bool file_exists(const std::string& p) {
 bool dir_exists(const std::string& p) {
     const DWORD a = GetFileAttributesW(widen_utf8(p).c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// The game's own files cannot be read: says so (message box, stderr, the log and fefw_fatal.txt, which the launcher shows) and ends with
+// code 1, before the game's first fs call turns it into a guest abort and a bare "code 4" crash report (issue 142). Under Wine / Proton
+// the usual cause is Steam's container (the Steam Linux Runtime), which sees only the home folder, /mnt, /media, /run/media and the
+// Steam libraries: a dump elsewhere does not exist inside it.
+[[noreturn]] void die_romfs(const std::string& romfs) {
+    const bool wine = GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version") != nullptr;
+    std::string shown = romfs, top;
+    if (wine && shown.size() > 2 && (shown[0] == 'Z' || shown[0] == 'z') && shown[1] == ':') {
+        shown.erase(0, 2);                                       // Z:/cracks/... is /cracks/... on the Linux side
+        for (char& ch : shown) ch = ch == '\\' ? '/' : ch;
+        top = shown.substr(0, shown.find('/', 1));
+    }
+    std::string msg = "The game's files (the RomFS folder of your dump) cannot be read:\n  " + shown +
+                      "\n\nfefw.ini ([fs] romfs) points there. If the dump was moved or deleted, run Set up again in the launcher with "
+                      "its new place, or set [fs] romfs to the dump's romfs folder.";
+    if (wine)
+        msg += "\n\nOn Linux, Steam runs the game in a container (the Steam Linux Runtime) that sees only your home folder, /mnt, "
+               "/media, /run/media and Steam's library folders. A dump anywhere else is invisible to the game. Move the dump under "
+               "one of those and run Set up again, or put STEAM_COMPAT_MOUNTS=" + (top.empty() ? std::string("<the dump's top folder>") : top) +
+               " %command% in the game's launch options in Steam.";
+    NXLOG_E("boot", "RomFS folder '%s' cannot be read (wine: %s)", romfs.c_str(), wine ? "yes" : "no");
+    nxrt::log_flush();
+    std::fprintf(stderr, "fefw: %s\n", msg.c_str());
+    if (FILE* f = std::fopen("fefw_fatal.txt", "w")) {
+        std::fprintf(f, "fefw cannot find the game's files.\n\n%s\n", msg.c_str());
+        std::fclose(f);
+    }
+    MessageBoxW(nullptr, widen_utf8(msg).c_str(), L"fefw: the game's files cannot be read", MB_OK | MB_ICONERROR);
+    TerminateProcess(GetCurrentProcess(), 1);
+    for (;;) {}
 }
 
 // NSO header flags (0x0C): bits 0..2 LZ4 per segment, bit 7 ZBIC (Switch 2's patched zstd). 0xFFFFFFFF when unreadable.
@@ -202,11 +234,38 @@ std::string fs_path(const char* key, const std::string& cli, const char* def) {
 
 int fefw_run(int argc, char** argv);
 
+// The processor features the build of the game code needs (FEFW_CPU_*), logged at start-up.
+uint32_t g_cpu_needs = FEFW_CPU_NEEDS_FMA_BUILD;
+
+// Before the first lifted instruction: a CPU without what this build of the game code needs (`needs`: FMA3 / AVX for the default build,
+// SSE4.2 / POPCNT for the compatible one, CX16 for both) would die on an illegal instruction in a blank window (issues 33, 5). Says which
+// feature is missing in a message box, on stderr and in fefw_fatal.txt (the launcher offers it), then ends with code 4.
+void check_cpu_or_exit(uint32_t needs) {
+    g_cpu_needs = needs;
+    const fefw_cpu::Report r = fefw_cpu::probe();
+    if (!r.missing(needs)) return;
+    const std::string msg = fefw_cpu::message(r, needs);
+    std::fprintf(stderr, "fefw: %s\n", msg.c_str());
+    if (FILE* f = std::fopen("fefw_fatal.txt", "w")) {
+        auto yes = [&](uint32_t bit) { return (r.have & bit) ? "yes" : "NO"; };
+        std::fprintf(f, "fefw cannot start on this processor.\n\n%s\n\nfefw.exe build: %s\nCPU features: FMA3 %s, AVX %s, SSE4.2 %s, POPCNT %s, CMPXCHG16B %s\n",
+                     msg.c_str(), fefw_cpu::build_name(needs), yes(FEFW_CPU_FMA), yes(FEFW_CPU_AVX), yes(FEFW_CPU_SSE42), yes(FEFW_CPU_POPCNT),
+                     yes(FEFW_CPU_CX16));
+        std::fclose(f);
+    }
+    MessageBoxA(nullptr, msg.c_str(), "fefw: this processor is too old", MB_OK | MB_ICONERROR);
+    TerminateProcess(GetCurrentProcess(), 4);
+    for (;;) {}
+}
+
 }  // namespace
 
 #ifdef FEFW_RT_DLL
 extern "C" int fefw_rt_main(int argc, char** argv, const FefwRtModules* m) {
-    if (!m || m->size < sizeof(FefwRtModules) || m->api != FEFW_RT_API) {
+    // the build's processor features; a stub from before cpu_needs (0.1.6 and older) was always the FMA3 build
+    const bool has_needs = m && m->size >= offsetof(FefwRtModules, cpu_needs) + sizeof(uint32_t);
+    check_cpu_or_exit(has_needs ? m->cpu_needs : FEFW_CPU_NEEDS_FMA_BUILD);
+    if (!m || m->size < offsetof(FefwRtModules, cpu_needs) || m->api != FEFW_RT_API) {
         MessageBoxA(nullptr, "fefw.exe and fefw_rt.dll are from different releases: run Set up again in the launcher.", "fefw", MB_OK | MB_ICONERROR);
         return 3;
     }
@@ -220,6 +279,7 @@ extern "C" int fefw_rt_main(int argc, char** argv, const FefwRtModules* m) {
 }
 #else
 int main(int argc, char** argv) {
+    check_cpu_or_exit(FEFW_CPU_NEEDS_FMA_BUILD);     // the libraries of recomp/games/fefw are compiled with -mfma
     const NxModule* nx[6] = {&nxmod_rtld, &nxmod_main, &nxmod_subsdk0, &nxmod_subsdk1, &nxmod_subsdk2, &nxmod_sdk};
     const uint32_t* abi[6] = {&nxmod_rtld_abi, &nxmod_main_abi, &nxmod_subsdk0_abi, &nxmod_subsdk1_abi, &nxmod_subsdk2_abi, &nxmod_sdk_abi};
     for (int i = 0; i < 6; i++) {
@@ -262,12 +322,14 @@ int fefw_run(int argc, char** argv) {
     const std::string main_nso = fs_path("main", main_arg, FEFW_MAIN_DEFAULT);
     const std::string romfs = fs_path("romfs", romfs_arg, FEFW_ROMFS_DEFAULT);
     nxrt::config_set("process", "program_id", "0x04007EF01F8AE000");     // GetInfo(ProgramId); an ini value or the environment still wins
+    // the complete RomFS of update 131072 (base and update merged): 252,686 files. Dumps well short of it crash at boot (#64: 157,847 is the
+    // base game's RomFS, 221,339 a partial copy); services/fs.cpp names the cause in the crash report. 0 turns the check off.
+    if (!nxrt::config_has("fs", "romfs_files")) nxrt::config_set("fs", "romfs_files", "252686");
+    NXLOG_I("boot", "fefw.exe build: %s", fefw_cpu::build_name(g_cpu_needs));
     NXLOG_I("boot", "%s (update %s): exefs '%s', main '%s', romfs '%s'", nxrt::game::info().title, nxrt::game::info().version, exefs.c_str(),
             main_nso.c_str(), romfs.c_str());
-    // A package (.nup, .nx) is a single file that the fs service serves in place, so only a path that is neither a folder nor one of
-    // those is worth a warning here.
-    if (!dir_exists(romfs) && !nxrt::nup::is_nup(romfs) && !nxrt::nx::is_nx(romfs))
-        NXLOG_W("boot", "RomFS folder '%s' not found: set [fs] romfs", romfs.c_str());
+    // a folder, or a .nup package served as the RomFS image; without either the game aborts in its first fs call (issue 142)
+    if (!dir_exists(romfs) && !file_exists(romfs)) die_romfs(romfs);
 
     bool play_started = false;
     if (nxrt::config_get_bool("boot", "nvn", true)) {

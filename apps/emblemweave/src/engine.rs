@@ -811,20 +811,21 @@ fn shader_report(corpus: &Path, spirv: &Path) -> Result<ShaderReport, String> {
     Ok(ShaderReport { expected: expected.len(), translated, failed, missing })
 }
 
-/// Run the translator over the blocks the cache does not have yet. `--only-missing`
-/// skips the ones already written, so a repair costs the missing blocks and not
-/// the whole corpus; the translator merges its report so the earlier lines survive.
+/// Run the translator over the corpus. The harness keeps a per-block journal and
+/// skips the blocks that already have a result, so a repair costs the missing
+/// blocks and not the whole corpus; its report is written from the journal, so the
+/// earlier lines survive a stopped run.
 fn run_translator(ctx: &Ctx, root: &Path, bundled: &Option<PathBuf>, harness: &Path) -> Result<(), String> {
     match bundled {
         Some(exe) => run(
             ctx,
             root,
             &exe.display().to_string(),
-            &["--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val", "--only-missing"],
+            &["--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"],
         ),
         None => {
             let h = harness.display().to_string();
-            run(ctx, root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val", "--only-missing"])
+            run(ctx, root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])
         }
     }
 }
@@ -1096,6 +1097,16 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         }
     }
     build_with_repairs(&builds, fefw, |m| ctx.log(m))?;
+    // The haptics backend is a vendored DLL the runtime loads from beside `fefw.exe` (gfx/haptic.cpp looks
+    // nowhere else), so it is copied in after the build rather than linked. Without it the game still vibrates,
+    // on the standard two-motor rumble.
+    let renhdrum = root.join("runtime").join("third_party").join("renhdrum").join("renhdrum.dll");
+    if renhdrum.is_file() {
+        let beside = builds.join("release").join("renhdrum.dll");
+        if let Err(e) = std::fs::copy(&renhdrum, &beside) {
+            ctx.log(format!("copying renhdrum.dll beside fefw.exe: {e} (standard rumble will be used)"));
+        }
+    }
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
     let _ = brand_game();

@@ -26,6 +26,7 @@
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_spirv_patch.h"
+#include "nvn_residency.h"
 #include "nvn_subgroup.h"
 #include "vk_gauges.h"
 #include "extras/hdr_nvn.h"
@@ -142,9 +143,15 @@ void save_cache() {
     g_cache_dirty.store(false);
     g_new_since_save.store(0);
     size_t n = 0;
-    if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return;
-    std::vector<char> data(n);
-    if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return;
+    std::vector<char> data;
+    {
+        // no compile into the cache while the driver reads it out (Intel only by default: pipeline_cache_locked, #124)
+        std::unique_lock<std::shared_mutex> lk;
+        if (pipeline_cache_locked()) lk = std::unique_lock<std::shared_mutex>(pipeline_cache_mutex());
+        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return;
+        data.resize(n);
+        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return;
+    }
     // written to a temporary file and renamed, so a process that ends in the middle of it leaves the old cache intact
     const std::string tmp = g_cache_path + ".tmp";
     {
@@ -162,6 +169,21 @@ void save_cache() {
 }
 
 }  // namespace
+
+std::shared_mutex& pipeline_cache_mutex() {
+    static std::shared_mutex m;
+    return m;
+}
+// [nvn] pipeline_cache_lock = auto (Intel GPUs) | true | false: see nvn_pipeline.h
+bool pipeline_cache_locked() {
+    static const bool on = [] {
+        const std::string v = config_get_str("nvn", "pipeline_cache_lock", "auto");
+        const bool r = v == "auto" ? gfx::gpu_quirks().intel : config_get_bool("nvn", "pipeline_cache_lock", false);
+        NXLOG_I(kTag, "pipeline cache: compiles and the cache save %s ([nvn] pipeline_cache_lock = %s)", r ? "take turns" : "run together", v.c_str());
+        return r;
+    }();
+    return on;
+}
 
 // A cache of hundreds of MB (the shader preparation's) is rewritten only after thousands of new pipelines: the new ones are few next to it and
 // the write takes seconds. The ordinary small cache is written whenever something new appeared, as before.
@@ -396,6 +418,34 @@ static VkShaderModule producer_module(const ShaderInfo* producer, const ShaderIn
     return m;
 }
 
+// The device's push descriptor limit (0 without VK_KHR_push_descriptor).
+uint32_t push_descriptor_max() {
+    static const uint32_t n = [] {
+        if (!device().features().push_descriptor || !vkCmdPushDescriptorSetKHR) return 0u;
+        VkPhysicalDevicePushDescriptorPropertiesKHR pp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &pp};
+        vkGetPhysicalDeviceProperties2(device().physical(), &p2);
+        return pp.maxPushDescriptors;
+    }();
+    return n;
+}
+
+// [nvn] push_uniforms (default true since 0.1.7, #79): the uniform buffers of a draw are pushed (vkCmdPushDescriptorSetKHR) rather than written into a descriptor
+// set. A crowd draws thousands of times a frame with the same textures and its own uniform offsets; every such draw missed the set cache (the
+// offsets are part of the set) and paid a set allocation, its writes and a bind: about half of the render thread in a crowded town (#79).
+// false: descriptor sets as before. Read once (the pipeline layouts depend on it; changing it rebuilds the pipelines once).
+bool push_uniforms_on() {
+    static const bool on = [] {
+        const bool want = nxrt::config_get_bool("nvn", "push_uniforms", true);
+        const uint32_t max = push_descriptor_max();
+        const bool ok = want && max >= 8;
+        NXLOG_I(kTag, "uniform buffers: %s ([nvn] push_uniforms = %s, VK_KHR_push_descriptor %s, %u push descriptors a set)",
+                ok ? "pushed with each draw" : "descriptor sets", want ? "true" : "false", device().features().push_descriptor ? "yes" : "no", max);
+        return ok;
+    }();
+    return on;
+}
+
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
     LayoutKey key;
     for (int i = 0; i < 6; ++i) key.s[i] = stages[i];
@@ -446,6 +496,30 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
         }
         sig.append("|", 1);
     }
+    // set 0 pushed: every binding a single buffer, no more of them than the device pushes in one set
+    if (pl.has_set[0] && push_uniforms_on()) {
+        bool ok = lbs[0].size() <= push_descriptor_max();
+        for (const VkDescriptorSetLayoutBinding& b : lbs[0])
+            ok = ok && b.descriptorCount == 1 && (b.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        pl.push_set0 = ok;
+        if (!ok) {
+            static int logged = 0;
+            if (logged++ < 4)
+                NXLOG_I(kTag, "a program's uniform set (%zu bindings) is not pushed: more than the device's %u push descriptors, or not only buffers",
+                        lbs[0].size(), push_descriptor_max());
+        }
+        if (ok) sig.append("push0", 5);
+        // a uniform buffer rebind changes nothing outside set 0 unless another set reads a uniform block (a texture handle in one)
+        bool ubo_only = ok;
+        for (const BindingDesc& d : pl.bindings) {
+            if (d.set == 0) continue;
+            const NvnSource src = d.shader->refl.bindings[d.index].nvn.source;
+            if (src == NvnSource::HandleInUniform || src == NvnSource::UniformBlock || src == NvnSource::UniformAsStorage ||
+                src == NvnSource::PushConstants)
+                ubo_only = false;
+        }
+        pl.ubo_only = ubo_only;
+    }
     // the pool arrays: the shared layout of kPoolSet (pool_set_layout), whatever arrays the program's stages use
     for (const BindingDesc& d : pl.bindings) pl.has_set[kPoolSet] |= d.set == kPoolSet;
     VkDescriptorSetLayout pool_layout = VK_NULL_HANDLE;
@@ -475,6 +549,7 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
         SharedLayout nl;
         for (int set = 0; set < 4; ++set) {
             VkDescriptorSetLayoutCreateInfo ci = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+            if (set == 0 && pl.push_set0) ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
             ci.bindingCount = static_cast<uint32_t>(lbs[set].size());
             ci.pBindings = lbs[set].data();
             if (vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &nl.sets[set]) != VK_SUCCESS) {
@@ -822,7 +897,10 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, cons
         configure_guest_subgroup(ci.stage, subgroup_size);
         ci.layout = layout.layout;
         const uint64_t tp0 = nxrt::hitch_ticks();
+        std::shared_lock<std::shared_mutex> cache_lk;   // pipeline_cache_locked (#124)
+        if (g_cache && pipeline_cache_locked()) cache_lk = std::shared_lock<std::shared_mutex>(pipeline_cache_mutex());
         const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
+        if (cache_lk.owns_lock()) cache_lk.unlock();
         if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
         if (cr != VK_SUCCESS) {
             NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
@@ -903,6 +981,7 @@ struct PoolPair {
     std::vector<PoolCopy> copies;
     int cur = -1;
     uint64_t last_use = 0;
+    PoolFeedback* fb = nullptr;                 // [gfx] residency: the marks of this pair's texture ids (binding kPoolFeedback)
 };
 // What pool_textures_to_prepare knows of a texture pool.
 struct PoolRes {
@@ -912,12 +991,29 @@ struct PoolRes {
     std::unordered_map<Texture*, std::pair<Ref<Texture>, uint32_t>> reg;   // registered textures, the number of ids each sits at
     std::vector<Ref<Texture>> watch;            // to look at next time
     uint64_t epoch = 0;                         // g_tex_scan_epoch when every texture was last looked at
+    uint64_t scan_serial = 0;                   // submission of the last full scan made for g_tex_scan_epoch (at most one a submission)
+    uint64_t moves = 0;                         // g_pool_moves when the textures were last looked at
+    uint64_t watch_serial = 0;                  // submission in which the watch list was last looked at
     bool all = true;                            // look at every texture next time
     uint64_t last_use = 0;
 };
 std::vector<std::unique_ptr<PoolPair>> g_pool_pairs;
 std::vector<std::unique_ptr<PoolRes>> g_pool_res;
 std::vector<Ref<Texture>> g_layout_moves;       // pool_note_layout, drained by pool_textures_to_prepare
+constexpr size_t kPoolWatchMax = 4096;          // a longer watch list becomes "look at every texture" (PoolRes::all)
+// Bumped by everything that may change whether a watched texture is ready to be sampled (a layout change, a CPU write). The end of a pass,
+// after which the replay no longer leaves its attachments alone, needs none: end_pass marks every binding dirty, so the next draw looks anyway.
+// pool_state_moved compares it with the value the pool's last look saw: O(1), where polling "is the watch list empty" redid every draw's
+// descriptors for as long as one texture of it stayed not ready (#79).
+std::atomic<uint64_t> g_pool_moves{1};
+// Textures the CPU wrote (pool_note_cpu_write, any thread), drained into the watch lists of the pools they are registered in. Compared only,
+// never dereferenced: the pool's own reference (PoolRes::reg) is what goes into the watch list.
+std::mutex g_cpu_writes_mu;
+std::vector<Texture*> g_cpu_writes;
+bool g_cpu_writes_over = false;                 // more than kPoolWatchMax since the last drain: every pool looks at every texture
+std::atomic<bool> g_cpu_writes_any{false};
+uint64_t g_pool_full_scans = 0, g_pool_looks = 0;   // render thread: replay_stats (pool_scan_counts)
+nxrt::GaugeCounter g_pool_full_scan_gauge{"nvn.pool_full_scans"};
 nxrt::GaugeCounter g_pool_writes{"nvn.pool_descriptors_written"};
 nxrt::GaugeCounter g_pool_sets{"nvn.pool_sets"};
 
@@ -976,7 +1072,10 @@ VkDescriptorImageInfo pool_image(const TexturePool::Entry& e, VkImageViewType ty
             NXLOG_I(kTag, "pool arrays: integer textures (texture %u, %s, first) stay the dummy in the float arrays", t->id, t->fmt->name);
         return ii;
     }
-    if (VkImageView v = tex_sampled_view(t, q)) {
+    g_resid_pool_view = true;   // writing the descriptor is not a use ([gfx] residency: the shaders' marks are)
+    const VkImageView pv = tex_sampled_view(t, q);
+    g_resid_pool_view = false;
+    if (VkImageView v = pv) {
         ii.imageView = v;
         ii.imageLayout = tex_sampled_layout(t);
     }
@@ -1151,12 +1250,13 @@ PoolPair* pool_pair(TexturePool* tp, SamplerPool* sp) {
     auto p = std::make_unique<PoolPair>();
     p->tp = Ref<TexturePool>::share(tp);
     p->sp = Ref<SamplerPool>::share(sp);
-    const VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLER, g_pool_copies * kPoolSamplerCount},
-                                           {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, g_pool_copies * 2 * kPoolTextureCount}};
+    const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_SAMPLER, g_pool_copies * kPoolSamplerCount},
+                                           {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, g_pool_copies * 2 * kPoolTextureCount},
+                                           {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, g_pool_copies}};
     VkDescriptorPoolCreateInfo ci = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     ci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     ci.maxSets = g_pool_copies;
-    ci.poolSizeCount = 2;
+    ci.poolSizeCount = residency_on() ? 3 : 2;
     ci.pPoolSizes = sizes;
     const VkResult r = vkCreateDescriptorPool(vkdev(), &ci, nullptr, &p->dpool);
     if (r != VK_SUCCESS) {
@@ -1164,6 +1264,7 @@ PoolPair* pool_pair(TexturePool* tp, SamplerPool* sp) {
         return nullptr;
     }
     vk_gauge_descriptor_pools().add(1);
+    if (residency_on()) p->fb = feedback_create();
     g_pool_pairs.push_back(std::move(p));
     return g_pool_pairs.back().get();
 }
@@ -1185,8 +1286,9 @@ void pool_prune(uint64_t serial) {
     for (auto it = g_pool_pairs.begin(); it != g_pool_pairs.end();) {
         if (serial - (*it)->last_use < kPoolIdle) { ++it; continue; }
         const VkDescriptorPool dp = (*it)->dpool;
+        PoolFeedback* fb = (*it)->fb;
         g_pool_sets.sub(static_cast<int64_t>((*it)->copies.size()));
-        defer_destroy([dp] { vkDestroyDescriptorPool(vkdev(), dp, nullptr); vk_gauge_descriptor_pools().sub(1); });
+        defer_destroy([dp, fb] { vkDestroyDescriptorPool(vkdev(), dp, nullptr); vk_gauge_descriptor_pools().sub(1); feedback_destroy(fb); });
         it = g_pool_pairs.erase(it);
     }
     g_pool_res.erase(std::remove_if(g_pool_res.begin(), g_pool_res.end(), [&](const std::unique_ptr<PoolRes>& r) { return serial - r->last_use >= kPoolIdle; }),
@@ -1194,6 +1296,24 @@ void pool_prune(uint64_t serial) {
 }
 
 }  // namespace
+
+// [gfx] residency (nvn_residency.h): the finished readbacks stamp the textures their ids hold now, then every pair's marks are copied
+// and cleared again.
+void pool_feedback_tick(Frame& f) {
+    const uint64_t done = poll_completed();
+    for (auto& pp : g_pool_pairs) {
+        if (!pp->fb) continue;
+        if (const uint32_t* m = feedback_take(pp->fb, done)) {
+            if (TexturePool* tp = pp->tp.get()) {
+                std::shared_lock<std::shared_mutex> lk(tp->lock);
+                const size_t n = std::min<size_t>(tp->entries.size(), kPoolTextureCount);
+                for (size_t id = 0; id < n; ++id)
+                    if (m[id] && tp->entries[id].used && tp->entries[id].tex) tex_mark_seen(tp->entries[id].tex.get());
+            }
+        }
+        feedback_record(pp->fb, f);
+    }
+}
 
 VkDescriptorSetLayout pool_set_layout() {
     std::lock_guard<std::mutex> lk(g_pool_layout_mu);
@@ -1220,18 +1340,21 @@ VkDescriptorSetLayout pool_set_layout() {
             p12.maxPerStageDescriptorUpdateAfterBindSamplers, p12.maxPerStageUpdateAfterBindResources, p12.maxUpdateAfterBindDescriptorsInAllPools,
             feats && limits ? "usable" : "NOT usable: programs that sample through the pools are not drawn");
     if (!feats || !limits) return VK_NULL_HANDLE;
-    const VkDescriptorSetLayoutBinding b[kPoolBindingCount] = {
+    // [gfx] residency: binding kPoolFeedback, the marks' storage buffer, written once when a set is made (not update-after-bind)
+    const VkDescriptorSetLayoutBinding b[kPoolBindingCount + 1] = {
         {kPoolSamplers, VK_DESCRIPTOR_TYPE_SAMPLER, kPoolSamplerCount, kPoolStages, nullptr},
         {kPoolTex2D, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kPoolTextureCount, kPoolStages, nullptr},
-        {kPoolTexCube, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kPoolTextureCount, kPoolStages, nullptr}};
+        {kPoolTexCube, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kPoolTextureCount, kPoolStages, nullptr},
+        {kPoolFeedback, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, kPoolStages, nullptr}};
     const VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    const VkDescriptorBindingFlags fl[kPoolBindingCount] = {flags, flags, flags};
+    const VkDescriptorBindingFlags fl[kPoolBindingCount + 1] = {flags, flags, flags, 0};
+    const uint32_t nb = residency_on() ? kPoolBindingCount + 1 : kPoolBindingCount;
     VkDescriptorSetLayoutBindingFlagsCreateInfo bf = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    bf.bindingCount = kPoolBindingCount;
+    bf.bindingCount = nb;
     bf.pBindingFlags = fl;
     VkDescriptorSetLayoutCreateInfo ci = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &bf};
     ci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    ci.bindingCount = kPoolBindingCount;
+    ci.bindingCount = nb;
     ci.pBindings = b;
     if (vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &g_pool_layout) != VK_SUCCESS) {
         NXLOG_E(kTag, "pool arrays: descriptor set layout failed");
@@ -1271,6 +1394,20 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
         ai.pSetLayouts = &g_pool_layout;
         if (vkAllocateDescriptorSets(vkdev(), &ai, &c.set) == VK_SUCCESS) {
             device().set_name(VK_OBJECT_TYPE_DESCRIPTOR_SET, reinterpret_cast<uint64_t>(c.set), "nvn pool arrays");
+            if (residency_on()) {   // the marks' buffer (a pair without one borrows another's: its marks then stay unread)
+                VkBuffer fbuf = feedback_buffer(pp->fb);
+                for (size_t i = 0; !fbuf && i < g_pool_pairs.size(); ++i) fbuf = feedback_buffer(g_pool_pairs[i]->fb);
+                if (fbuf) {
+                    VkDescriptorBufferInfo bi = {fbuf, 0, VK_WHOLE_SIZE};
+                    VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    w.dstSet = c.set;
+                    w.dstBinding = kPoolFeedback;
+                    w.descriptorCount = 1;
+                    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    w.pBufferInfo = &bi;
+                    vkUpdateDescriptorSets(vkdev(), 1, &w, 0, nullptr);
+                }
+            }
             pp->copies.push_back(std::move(c));
             g_pool_sets.add(1);
             pick = static_cast<int>(pp->copies.size() - 1);
@@ -1293,12 +1430,45 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
 }
 
 void pool_note_layout(Texture* t, VkImageLayout layout) {
+    g_pool_moves.fetch_add(1, std::memory_order_relaxed);                      // into its sampled layout too: a watched texture may be ready now
     if (!t || g_pool_res.empty() || layout == tex_sampled_layout(t)) return;   // nothing samples through a pool yet
     if (g_layout_moves.size() >= 4096) {
         for (auto& r : g_pool_res) r->all = true;
         g_layout_moves.clear();
     }
     g_layout_moves.push_back(Ref<Texture>::share(t));
+}
+
+void pool_note_cpu_write(Texture* t) {
+    if (!t) return;
+    {
+        std::lock_guard<std::mutex> lk(g_cpu_writes_mu);
+        if (!g_cpu_writes_over) {
+            if (g_cpu_writes.size() >= kPoolWatchMax) {
+                g_cpu_writes_over = true;
+                g_cpu_writes.clear();
+            } else {
+                g_cpu_writes.push_back(t);
+            }
+        }
+    }
+    g_cpu_writes_any.store(true, std::memory_order_release);
+    g_pool_moves.fetch_add(1, std::memory_order_relaxed);
+}
+
+void pool_scan_counts(uint64_t* full_scans, uint64_t* looks) {
+    if (full_scans) *full_scans = g_pool_full_scans;
+    if (looks) *looks = g_pool_looks;
+}
+
+void pool_registered_textures(std::unordered_set<const Texture*>& out) {
+    for (auto& pp : g_pool_pairs) {
+        TexturePool* tp = pp->tp.get();
+        if (!tp) continue;
+        std::shared_lock<std::shared_mutex> lk(tp->lock);
+        for (const TexturePool::Entry& e : tp->entries)
+            if (e.used && e.tex) out.insert(e.tex.get());
+    }
 }
 
 void pool_texture_remade(Texture* t) {
@@ -1325,10 +1495,47 @@ void pool_texture_remade(Texture* t) {
 void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
     if (!tp) return;
     PoolRes& r = pool_res(tp);
-    r.last_use = current_serial();
+    const uint64_t serial = current_serial();
+    r.last_use = serial;
+    r.moves = g_pool_moves.load(std::memory_order_relaxed);   // first: a move after this is seen by the next pool_state_moved
+    r.watch_serial = serial;
+    ++g_pool_looks;
+    if (g_cpu_writes_any.exchange(false, std::memory_order_acq_rel)) {   // written by the CPU since the last call: the pools they are registered in look at them
+        static std::vector<Texture*> written;
+        bool over = false;
+        {
+            std::lock_guard<std::mutex> lk(g_cpu_writes_mu);
+            written.swap(g_cpu_writes);
+            over = g_cpu_writes_over;
+            g_cpu_writes_over = false;
+        }
+        for (auto& pr : g_pool_res) {
+            if (over) { pr->all = true; pr->watch.clear(); continue; }
+            if (pr->all) continue;
+            for (Texture* t : written) {
+                const auto it = pr->reg.find(t);
+                if (it == pr->reg.end()) continue;
+                if (pr->watch.size() >= kPoolWatchMax) {
+                    pr->all = true;
+                    pr->watch.clear();
+                    break;
+                }
+                pr->watch.push_back(it->second.first);
+            }
+        }
+        written.clear();
+    }
     for (const Ref<Texture>& t : g_layout_moves)        // moved since the last call: the pools they are registered in look at them
-        for (auto& pr : g_pool_res)
-            if (pr->reg.count(t.get())) pr->watch.push_back(t);
+        for (auto& pr : g_pool_res) {
+            if (pr->all || !pr->reg.count(t.get())) continue;   // all: every registered texture is looked at next time anyway
+            // A pool nothing draws with any more is never drained here: its list would grow with every layout change for good.
+            if (pr->watch.size() >= kPoolWatchMax) {
+                pr->all = true;
+                pr->watch.clear();
+                continue;
+            }
+            pr->watch.push_back(t);
+        }
     g_layout_moves.clear();
     {
         std::shared_lock<std::shared_mutex> lk(tp->lock);
@@ -1363,15 +1570,27 @@ void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
             r.version = tp->version;
         }
     }
+    // Textures initialized or registered, or written by the CPU, since the last full scan. The CPU writes are in the watch list already
+    // (pool_note_cpu_write) and registrations come with the pool's version, so the full scan is only the safety net (a new texture over the
+    // storage of a finalized one that is still registered, which pool_image draws through texture_registry_find_alias): at most one a submission.
+    // It used to run whenever the epoch moved, which in a crowded town was many times a submission over thousands of textures.
     const uint64_t ep = g_tex_scan_epoch.load(std::memory_order_relaxed);
-    if (ep != r.epoch) {
+    if (ep != r.epoch && r.scan_serial != serial) {
         r.all = true;
         r.epoch = ep;
+        r.scan_serial = serial;
+    }
+    if (r.all) {
+        ++g_pool_full_scans;
+        g_pool_full_scan_gauge.add(1);
     }
     const size_t first = out.size();
+    static const bool depth_readiness = config_get_bool("nvn", "depth_pool_readiness", true);
     auto look = [&](Texture* t) {
         if ((t->destroyed.load(std::memory_order_relaxed) && !t->gpu && !texture_registry_find_alias(t)) || !tex_gpu(t)) return;
-        if (t->cpu_dirty.load(std::memory_order_relaxed) || tex_layout(t) != tex_sampled_layout(t)) out.push_back(t);
+        const bool pending = depth_readiness ? tex_pool_preparation_pending(t)
+            : t->cpu_dirty.load(std::memory_order_relaxed) || tex_layout(t) != tex_sampled_layout(t);
+        if (pending) out.push_back(t);
     };
     if (r.all) {
         for (auto& [t, e] : r.reg) look(t);
@@ -1379,9 +1598,29 @@ void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out) {
     } else {
         for (const Ref<Texture>& t : r.watch) look(t.get());
     }
-    // not ready now (the replay leaves an attachment of the open pass as it is): looked at again next time
-    r.watch.clear();
-    for (size_t i = first; i < out.size(); ++i) r.watch.push_back(Ref<Texture>::share(out[i]));
+    // Each texture once. A texture that stays not ready (an attachment of the open pass, which the replay leaves as it is) is in the
+    // watch list and is added again by every layout change it goes through; without this the list, and with it the work of every draw
+    // that samples through the pool, grew for as long as the scene kept such a texture (a battle map left idle: 30 fps down to 9 in
+    // two minutes, back at once when the picture changed).
+    std::sort(out.begin() + static_cast<std::ptrdiff_t>(first), out.end());
+    out.erase(std::unique(out.begin() + static_cast<std::ptrdiff_t>(first), out.end()), out.end());
+    // not ready now: looked at again next time. The new list takes its references before the old one lets go: a texture in out may be held
+    // by the old watch list alone (finalized and unregistered, drawn through the live texture now on its storage), and clearing first freed
+    // it under the share below and under the caller, which prepares what out names (#132: heap corruption on the render thread, a double
+    // delete of the Texture the next time round).
+    std::vector<Ref<Texture>> next;
+    next.reserve(out.size() - first);
+    for (size_t i = first; i < out.size(); ++i) {
+        Texture* t = out[i];
+        if (t->refs.load(std::memory_order_relaxed) == 1 && !r.reg.count(t)) {   // the old watch list is its last holder
+            static uint64_t kept = 0;
+            if (++kept <= 5 || kept % 1000 == 0)
+                NXLOG_I(kTag, "pool arrays: texture %u (finalized %d) is kept by the watch list alone (%llu times so far)", t->id,
+                        t->destroyed.load(std::memory_order_relaxed) ? 1 : 0, static_cast<unsigned long long>(kept));
+        }
+        next.push_back(Ref<Texture>::share(t));
+    }
+    r.watch.swap(next);
 }
 
 bool pool_state_moved(TexturePool* tp, SamplerPool* sp) {
@@ -1389,7 +1628,15 @@ bool pool_state_moved(TexturePool* tp, SamplerPool* sp) {
     PoolRes* r = nullptr;
     for (auto& x : g_pool_res)
         if (x->tp.get() == tp) r = x.get();
-    if (tp && (!r || r->all || !r->watch.empty() || r->epoch != g_tex_scan_epoch.load(std::memory_order_relaxed) || r->version != version_of(tp))) return true;
+    if (tp && !r) return true;
+    if (tp) {
+        const uint64_t serial = current_serial();
+        // a watched texture becomes ready (or preparable) only through what bumps g_pool_moves; once a submission it is looked at anyway,
+        // in case a path made it ready without (an upload that left it in its sampled layout needs no preparing, so nothing is lost there)
+        if (r->all || r->moves != g_pool_moves.load(std::memory_order_relaxed) || (!r->watch.empty() && r->watch_serial != serial) ||
+            (r->epoch != g_tex_scan_epoch.load(std::memory_order_relaxed) && r->scan_serial != serial) || r->version != version_of(tp))
+            return true;
+    }
     for (auto& p : g_pool_pairs) {
         if (p->tp.get() != tp || p->sp.get() != sp) continue;
         if (p->cur < 0) return true;
@@ -1403,11 +1650,17 @@ void pool_sets_shutdown() {
     VkDevice d = vkdev();
     for (auto& p : g_pool_pairs) {
         if (p->dpool) { vkDestroyDescriptorPool(d, p->dpool, nullptr); vk_gauge_descriptor_pools().sub(1); }
+        feedback_destroy(p->fb);
         g_pool_sets.sub(static_cast<int64_t>(p->copies.size()));
     }
     g_pool_pairs.clear();
     g_pool_res.clear();
     g_layout_moves.clear();
+    {
+        std::lock_guard<std::mutex> wl(g_cpu_writes_mu);
+        g_cpu_writes.clear();
+        g_cpu_writes_over = false;
+    }
     std::lock_guard<std::mutex> lk(g_pool_layout_mu);
     if (g_pool_layout) vkDestroyDescriptorSetLayout(d, g_pool_layout, nullptr);
     g_pool_layout = VK_NULL_HANDLE;

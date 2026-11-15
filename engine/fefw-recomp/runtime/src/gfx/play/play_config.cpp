@@ -17,6 +17,7 @@
 
 #include "nxrt/config.h"
 #include "nxrt/game.h"
+#include "nxrt/haptic.h"
 
 namespace nxrt::play {
 namespace {
@@ -306,6 +307,9 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "menu_cursor") return set_bool(&s->mouse.menu_cursor);
             if (k == "menu_touch") return true;   // legacy key, dead since it never did anything: accepted and ignored
             if (k == key_wheel_cycles()) return set_bool(&s->mouse.wheel_cycles);
+            if (k == "jc2_speed") return set_real(0.05, 20.0, &s->mouse.jc2_speed);
+            if (k == "jc2_wake") return set_real(0.0, 500.0, &s->mouse.jc2_wake);
+            if (k == "jc2_capture") return set_bool(&s->mouse.jc2_capture);
             break;
         case Sec::Aim:
             if (k == "lock_mode") {
@@ -340,6 +344,16 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "gyro_scale") return set_num(&s->pad.gyro_scale);
             if (k == "rumble") return set_bool(&s->pad.rumble);
             if (k == "rumble_scale") return set_num(&s->pad.rumble_scale);
+            if (k == "haptic") {
+                gfx::haptic::Mode m = gfx::haptic::Mode::Auto;
+                if (!gfx::haptic::mode_from_name(v.c_str(), &m)) {
+                    *msg = "haptic must be auto, off, rumble or dualsense, got '" + v + "'";
+                    return false;
+                }
+                s->pad.haptic = static_cast<int>(m);
+                return true;
+            }
+            if (k == "haptic_strength") return set_int(-1, 100, &s->pad.haptic_strength);
             if (k == key_alt_orbit()) return set_real(0.0, 6.0, &s->pad.alt_orbit);
             break;
         case Sec::Timing:
@@ -464,13 +478,22 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                 s->display.astc_quality = q;
                 return true;
             }
+            if (k == "astc_bc") {
+                const std::string q = lower(v);
+                if (q != "auto" && q != "off" && q != "bc1") {
+                    *msg = "astc_bc must be auto, off or bc1, got " + v;
+                    return false;
+                }
+                s->display.astc_bc = q;
+                return true;
+            }
             if (k == "monitor") {
                 if (lower(v) == "auto") { s->display.monitor = 0; return true; }
                 return set_int(0, 32, &s->display.monitor);
             }
             break;
         case Sec::Audio:
-            if (k == "volume") return set_real(0.0, 1.0, &s->audio.volume);
+            if (k == "volume") return set_real(0.0, 2.0, &s->audio.volume);   // above 1.0: boost (limited)
             if (k == "mute_unfocused") return set_bool(&s->audio.mute_unfocused);
             if (k == "device") {
                 s->audio.device = v.empty() ? "default" : v;
@@ -860,6 +883,9 @@ std::string format_settings(const Settings& s) {
     kv("invert_x", flag(s.mouse.invert_x));
     kv("menu_cursor", flag(s.mouse.menu_cursor));
     kv(key_wheel_cycles(), flag(s.mouse.wheel_cycles));
+    kv("jc2_speed", num(s.mouse.jc2_speed));
+    kv("jc2_wake", num(s.mouse.jc2_wake));
+    kv("jc2_capture", flag(s.mouse.jc2_capture));
 
     o += "\n[aim]\n";
     kv("lock_mode", lock_mode_name(s.aim.lock_mode));
@@ -882,6 +908,8 @@ std::string format_settings(const Settings& s) {
     kv("gyro_scale", num(s.pad.gyro_scale));
     kv("rumble", flag(s.pad.rumble));
     kv("rumble_scale", num(s.pad.rumble_scale));
+    kv("haptic", gfx::haptic::mode_name(static_cast<gfx::haptic::Mode>(s.pad.haptic)));
+    kv("haptic_strength", std::to_string(s.pad.haptic_strength));
     kv(key_alt_orbit(), num(s.pad.alt_orbit));
 
     o += "\n[padmap]\n";
@@ -920,6 +948,7 @@ std::string format_settings(const Settings& s) {
     kv("fewer_gpu_waits", flag(s.display.fewer_gpu_waits));
     kv("shader_prewarm", flag(s.display.shader_prewarm));
     kv("astc_quality", s.display.astc_quality);
+    kv("astc_bc", s.display.astc_bc);
     kv("monitor", s.display.monitor <= 0 ? std::string("auto") : std::to_string(s.display.monitor));
 
     o += "\n[audio]\n";

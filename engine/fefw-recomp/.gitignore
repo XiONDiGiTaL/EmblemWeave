@@ -38,5 +38,3 @@ obj/
 __pycache__/
 /export/
 /saves/
-# Published shader translators (tools/package_release.ps1 builds them); release assets, not sources.
-/tools/shaders/prebuilt/

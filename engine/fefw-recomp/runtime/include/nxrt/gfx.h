@@ -65,7 +65,9 @@ struct ValidationStats {
     std::string first_error;              // text of the first error since the last reset
 };
 
-enum class MemoryUse { GpuOnly, Upload, Readback };   // host-visible memory is mapped persistently
+// Upload: written by the CPU, read by the GPU in place (where the allocator likes: device-local when the usage is more than a copy source).
+// Staging: the same, always in system memory (short-lived copies of data on its way into an image or a device-local buffer).
+enum class MemoryUse { GpuOnly, Upload, Readback, Staging };   // host-visible memory is mapped persistently
 
 struct ImageDesc {
     VkImageType type = VK_IMAGE_TYPE_2D;
@@ -78,6 +80,9 @@ struct ImageDesc {
     VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL;
     bool create_view = true;              // a view of the whole image (2D / 2D array / 3D / cube by flags and layer count)
     const char* name = nullptr;           // debug name
+    // [gfx] residency's demoted textures: placed in a pool of small blocks of their own, so they do not fill the room their whole images
+    // left in the shared blocks (which then empty and go back to the OS)
+    bool small_pool = false;
 };
 
 struct Image {
@@ -135,6 +140,24 @@ struct DeviceFeatures {
     bool low_latency2 = false;            // VK_NV_low_latency2 (NVIDIA Reflex)
     bool anti_lag = false;                // VK_AMD_anti_lag (AMD Anti-Lag 2)
 };
+
+// Video memory workarounds, decided once at device creation (vk_device.cpp; the "gfx: GPU quirks" log line names those in effect).
+// Each key takes auto (the default: on for Intel GPUs, vendor 0x8086), 1 (on for any GPU) or 0 (off).
+struct GpuQuirks {
+    bool intel = false, intel_integrated = false;   // vendor 0x8086; integrated (UHD, Iris Xe, Core Ultra graphics) or discrete (Arc)
+    // [gfx] budget_detail: texture_detail = auto also picks half when the OS video memory budget is under 10 GiB (Intel's Windows driver
+    // gives a process about 80% of the heap: 9.4 GiB of 11.8 on an Arc B580, where texture_detail = auto went by the heap and chose full).
+    bool budget_detail = false;
+    // [gfx] pressure_detail: transcoded textures made while this process uses over 90% of that budget leave out their largest level (as
+    // texture_detail = half does), so scene loads stop pushing video memory past the budget, where Windows moves it to system memory
+    // and the frame rate halves (#49).
+    bool pressure_detail = false;
+};
+const GpuQuirks& gpu_quirks();
+uint64_t video_budget_bytes();      // the OS's video memory budget for this process on the largest device-local heap (0: no device yet)
+bool video_memory_pressure();       // [gfx] pressure_detail is on and the usage is over 90% of that budget (sampled at most every 250 ms)
+int video_usage_percent();          // this process' use of that budget in percent, on every GPU (sampled at most every 250 ms; -1: not known)
+int video_live_percent();           // the same less the room free inside VMA's blocks (reused by the next allocations): [gfx] residency
 
 struct DeviceLimitsExt {
     uint64_t min_imported_host_alignment = 0;   // VK_EXT_external_memory_host (0: not available)
@@ -256,9 +279,7 @@ struct FrameInfo {
 
 struct RendererStats {
     uint64_t frames = 0;                  // frames submitted
-    uint64_t presents = 0;                // vkQueuePresentKHR calls that succeeded or returned SUBOPTIMAL (0 when headless)
-    uint64_t presents_failed = 0;         // vkQueuePresentKHR calls that returned an error, device loss included
-    uint64_t device_lost = 0;             // VK_ERROR_DEVICE_LOST seen on acquire, submit or present
+    uint64_t presents = 0;                // vkQueuePresentKHR calls (0 when headless)
     uint64_t skipped = 0;                 // begin_frame returned false
     uint64_t swapchain_creates = 0;       // swapchains created (first one included)
     uint64_t out_of_date = 0;             // OUT_OF_DATE / SUBOPTIMAL results seen

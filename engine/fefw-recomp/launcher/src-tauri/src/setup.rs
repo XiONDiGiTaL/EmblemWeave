@@ -62,7 +62,7 @@ impl Paths {
     }
     pub fn python(&self) -> PathBuf {
         match &self.package {
-            Some(t) => t.join("python").join("python.exe"),
+            Some(t) => package_python(t),
             None => self.repo.join("tools").join(".venv").join("Scripts").join("python.exe"),
         }
     }
@@ -87,7 +87,7 @@ impl Paths {
     }
     pub fn harness(&self) -> PathBuf {
         match &self.package {
-            Some(t) => t.join("spirv_harness").join("spirv_harness.exe"),
+            Some(t) => t.join("spirv_harness").join(if cfg!(windows) { "spirv_harness.exe" } else { "spirv_harness" }),
             None => self.repo.join("tools").join("shaders").join("build").join("bin").join("Release").join("net10.0").join("spirv_harness.dll"),
         }
     }
@@ -146,10 +146,28 @@ fn package_build_ok(p: &Paths) -> bool {
     }
     let mut cmd = Command::new(p.python());
     cmd.arg("-I").arg(tools.join("build").join("fefw_build.py")).arg("--check").arg("--game").arg(&p.game_dir);
+    // the build for this processor (cpu.rs): a fefw.exe built for the other one is not current, so Set up rebuilds it
+    if let Some(v) = crate::cpu::build_variant() {
+        cmd.args(["--cpu", v]);
+    }
     quiet(&mut cmd);
     let ok = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
     *BUILD_CHECK.lock().unwrap() = Some((key, ok));
     ok
+}
+
+/// The release package's Python: tools/python/python.exe (the embeddable package) on Windows. On Linux tools/python/bin/python3
+/// (a relocatable build) when the package has one, else the system's python3, which then needs the lifter's packages (zbic, lz4,
+/// capstone, zstandard) installed.
+pub(crate) fn package_python(tools: &Path) -> PathBuf {
+    if cfg!(windows) {
+        return tools.join("python").join("python.exe");
+    }
+    let bundled = tools.join("python").join("bin").join("python3");
+    if bundled.is_file() {
+        return bundled;
+    }
+    which("python3").unwrap_or(bundled)
 }
 
 pub fn exe_path(repo: &Path) -> PathBuf {
@@ -234,7 +252,7 @@ fn textures_ok(p: &Paths) -> bool {
     p.repo.join("tools").join("textures").join("third_party").join("astc-encoder").join("Source").join("astcenc.h").is_file()
 }
 
-const SHADER_TRANSLATOR_VERSION: u32 = 2; // portable 32-lane warps (game-build/release/fefw_build.py has the same number)
+const SHADER_TRANSLATOR_VERSION: u32 = 3; // 3: real derivatives for the NVN2 shuffle pattern (#29 eyes); 2: portable 32-lane warps (game-build/release/fefw_build.py has the same number)
 
 fn shaders_ok(p: &Paths) -> bool {
     let stamp = fs::read_to_string(p.shader_stamp()).unwrap_or_default();
@@ -275,12 +293,57 @@ pub fn complete(p: &Paths) -> bool {
     steps(p, None).iter().all(|s| s.state == "done")
 }
 
+/// A program started from the AppImage gets the host's environment, not the AppImage's: its AppRun points PYTHONHOME, GTK_*,
+/// GIO/GST/QT module paths and more into its temporary mount, which breaks Python programs (umu-run, Proton's script) and anything
+/// that outlives the launcher (Steam started again by Add to Steam). Variables naming the mount lose those entries (and go when
+/// nothing is left); the AppImage's own variables go. Nothing changes outside an AppImage.
+pub(crate) fn host_env(cmd: &mut Command) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    for (k, v) in appimage_fixes(&vars) {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+}
+
+/// What host_env changes in `vars` (an environment with an AppImage's APPDIR in it): (name, new value), None removes it.
+pub(crate) fn appimage_fixes(vars: &[(String, String)]) -> Vec<(String, Option<String>)> {
+    // only an AppImage's AppRun: on Windows (';' lists) or with an APPDIR some other program set, nothing is touched
+    if !cfg!(target_os = "linux") || !vars.iter().any(|(k, v)| k == "APPIMAGE" && !v.is_empty()) {
+        return vec![];
+    }
+    let Some(appdir) = vars.iter().find(|(k, _)| k == "APPDIR").map(|(_, d)| d.trim_end_matches('/').to_string()).filter(|d| d.len() > 1) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for (k, v) in vars {
+        if matches!(k.as_str(), "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD" | "PYTHONHOME" | "PYTHONPATH" | "PYTHONDONTWRITEBYTECODE" | "PERLLIB") {
+            out.push((k.clone(), None));
+        } else if v.contains(&appdir) {
+            let kept: Vec<&str> = v.split(':').filter(|p| !p.is_empty() && !p.contains(&appdir)).collect();
+            out.push((k.clone(), (!kept.is_empty()).then(|| kept.join(":"))));
+        }
+    }
+    out
+}
+
 pub(crate) fn quiet(cmd: &mut Command) {
+    host_env(cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS (the compilers it starts inherit it)
         cmd.creation_flags(0x0800_0000 | 0x0000_4000);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // its own process group, so kill_tree ends everything it starts (the lifter's workers, the compilers)
+        cmd.process_group(0);
     }
 }
 
@@ -289,10 +352,18 @@ pub fn kill_tree(pid: u32) {
     if pid == 0 {
         return;
     }
-    let mut cmd = Command::new("taskkill");
-    cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
-    quiet(&mut cmd);
-    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/T", "/F", "/PID", &pid.to_string()]);
+        quiet(&mut cmd);
+        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    #[cfg(unix)]
+    {
+        // quiet() made the process a group leader: a negative pid signals the whole group
+        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
 }
 
 /// ninja's "[12/345] ..." prefix.
@@ -321,6 +392,7 @@ pub struct Runner<'a> {
     pub emit: &'a (dyn Fn(Progress) + Sync),
     pub emit_log: &'a (dyn Fn(Vec<String>) + Sync),
     pub log_file: Mutex<Option<fs::File>>,
+    pub log_path: PathBuf,
 }
 
 impl Runner<'_> {
@@ -426,7 +498,7 @@ impl Runner<'_> {
         } else if let Some(e) = script_error {
             Err(e)
         } else {
-            Err(format!("{} failed ({}). The last lines of the log say why; the full log is work/setup.log.", message, st))
+            Err(format!("{} failed ({}). The last lines of the log say why; the full log is {}.", message, st, crate::dump::fwd(&self.log_path)))
         }
     }
 }
@@ -499,7 +571,16 @@ fn run_package_steps(r: &Runner, p: &Paths, tools: &Path, jobs: usize) -> Result
         let mut c = Command::new(p.python());
         c.arg("-I").arg(tools.join("build").join("fefw_build.py")).arg("--exefs").arg(&p.exefs).arg("--game").arg(game);
         c.args(["--jobs", &jobs.to_string()]);
-        if !r.run("build", "Recompiling the game code from your dump", c, game)? {
+        let variant = crate::cpu::build_variant();
+        if let Some(v) = variant {
+            c.args(["--cpu", v]);
+        }
+        let what = if variant == Some("compat") {
+            "Recompiling the game code from your dump (the compatible build for processors without FMA3)"
+        } else {
+            "Recompiling the game code from your dump"
+        };
+        if !r.run("build", what, c, game)? {
             return Ok(false);
         }
         *BUILD_CHECK.lock().unwrap() = None;
@@ -513,6 +594,37 @@ fn run_package_steps(r: &Runner, p: &Paths, tools: &Path, jobs: usize) -> Result
     Ok(true)
 }
 
+/// Size and modification time of a file ("" when missing): enough to tell that it was replaced.
+fn file_stamp(path: &Path) -> String {
+    fs::metadata(path)
+        .map(|m| {
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            format!("{}:{}", m.len(), t)
+        })
+        .unwrap_or_default()
+}
+
+/// What the shader corpus was extracted from; a corpus whose marker differs is extracted again.
+fn corpus_marker(p: &Paths) -> serde_json::Value {
+    serde_json::json!({
+        "translator_version": SHADER_TRANSLATOR_VERSION,
+        "romfs": crate::dump::fwd(&p.romfs),
+        "exefs": crate::dump::fwd(&p.plain_exefs()),
+        "main": file_stamp(&p.plain_exefs().join("main")),
+        "extractor": file_stamp(&p.extractor()),
+    })
+}
+
+/// Blocks the harness set aside because they crashed the translator (status "crash" in results.tsv).
+fn crashed_shaders(p: &Paths) -> usize {
+    fs::read_to_string(p.spirv().join("results.tsv"))
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter(|l| l.split('\t').nth(4) == Some("crash"))
+        .count()
+}
+
 /// Finds the shaders in the romfs and main and translates them to SPIR-V (both modes).
 fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, String> {
     if shaders_ok(p) {
@@ -522,28 +634,56 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
         return Err(format!("The shader translator is missing ({}).", crate::dump::fwd(&p.harness())));
     }
     let _ = fs::remove_file(p.shader_stamp());
-    let mut c = Command::new(p.python());
-    c.arg("-I").arg(p.extractor()).arg("--romfs").arg(&p.romfs).arg("--main").arg(p.plain_exefs().join("main"));
-    c.arg("--exefs").arg(p.plain_exefs()).arg("--out").arg(p.corpus()).args(["--jobs", &jobs.min(8).to_string(), "--progress"]);
-    if !r.run("shaders", "Finding the shaders in your romfs", c, cwd)? {
-        return Ok(false);
-    }
-    let mut c = if p.package.is_some() {
-        Command::new(p.harness())
+    // The corpus is deleted once the shaders are translated, so one that is still there is from a Set up that stopped in
+    // the translation. Its marker (written only after the extractor finished) says which dump and extractor made it.
+    let marker = p.corpus().join("setup-corpus.json");
+    let want = corpus_marker(p);
+    let have: serde_json::Value = serde_json::from_str(&fs::read_to_string(&marker).unwrap_or_default()).unwrap_or_default();
+    if have == want && p.corpus().join("unique.tsv").is_file() {
+        r.log(vec![format!("Reusing the shaders found earlier in {}", crate::dump::fwd(&p.corpus()))]);
     } else {
-        let mut c = Command::new("dotnet");
-        c.arg(p.harness());
+        let _ = fs::remove_file(&marker);
+        let mut c = Command::new(p.python());
+        c.arg("-I").arg(p.extractor()).arg("--romfs").arg(&p.romfs).arg("--main").arg(p.plain_exefs().join("main"));
+        c.arg("--exefs").arg(p.plain_exefs()).arg("--out").arg(p.corpus()).args(["--jobs", &jobs.min(8).to_string(), "--progress"]);
+        if !r.run("shaders", "Finding the shaders in your romfs", c, cwd)? {
+            return Ok(false);
+        }
+        fs::write(&marker, want.to_string()).map_err(|e| e.to_string())?;
+    }
+    let harness = |jobs: usize| {
+        let mut c = if p.package.is_some() {
+            Command::new(p.harness())
+        } else {
+            let mut c = Command::new("dotnet");
+            c.arg(p.harness());
+            c
+        };
+        c.arg("--batch").arg(p.corpus()).arg("--out").arg(p.spirv()).args(["--jobs", &jobs.to_string()]);
+        // SPIR-V validation needs spirv-val from the Vulkan SDK, which players do not have (the release package never validates)
+        if p.package.is_some() || (std::env::var_os("VULKAN_SDK").is_none() && which("spirv-val.exe").is_none()) {
+            c.arg("--no-val");
+        }
         c
     };
-    c.arg("--batch").arg(p.corpus()).arg("--out").arg(p.spirv()).args(["--jobs", &jobs.to_string()]);
-    // SPIR-V validation needs spirv-val from the Vulkan SDK, which players do not have (the release package never validates)
-    if p.package.is_some() || (std::env::var_os("VULKAN_SDK").is_none() && which("spirv-val.exe").is_none()) {
-        c.arg("--no-val");
+    // The harness survives translator crashes itself (it runs the translation in a child process and sets a crashing
+    // shader aside, GitHub issue #46). If it still fails, once more with one job: it resumes from its journal.tsv.
+    match r.run("shaders", "Translating the shaders to SPIR-V", harness(jobs), cwd) {
+        Ok(true) => {}
+        Ok(false) => return Ok(false),
+        Err(e) => {
+            r.log(vec![format!("The shader translation failed ({}); trying again with one job, from where it stopped.", e.lines().next().unwrap_or(""))]);
+            if !r.run("shaders", "Translating the shaders to SPIR-V (again, one at a time)", harness(1), cwd)? {
+                return Ok(false);
+            }
+        }
     }
-    if !r.run("shaders", "Translating the shaders to SPIR-V", c, cwd)? {
-        return Ok(false);
+    let crashed = crashed_shaders(p);
+    if crashed > 0 {
+        r.log(vec![format!("{crashed} shaders crashed the translator and were left out; the game draws without them (status \"crash\" in {}).",
+                           crate::dump::fwd(&p.spirv().join("results.tsv")))]);
     }
-    let stamp = serde_json::json!({ "complete": true, "translator_version": SHADER_TRANSLATOR_VERSION, "romfs": crate::dump::fwd(&p.romfs) });
+    let stamp = serde_json::json!({ "complete": true, "translator_version": SHADER_TRANSLATOR_VERSION, "romfs": crate::dump::fwd(&p.romfs), "crashed": crashed });
     fs::write(p.shader_stamp(), stamp.to_string()).map_err(|e| e.to_string())?;
     // the corpus is only the extractor's output for the translator: several GB the game never reads
     let _ = fs::remove_dir_all(p.corpus());
@@ -641,7 +781,7 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
 pub fn run(shared: &Arc<Shared>, p: &Paths, jobs: usize, emit: &(dyn Fn(Progress) + Sync), emit_log: &(dyn Fn(Vec<String>) + Sync)) -> Progress {
     let _ = fs::create_dir_all(p.repo.join("work"));
     let file = fs::OpenOptions::new().create(true).append(true).open(p.log()).ok();
-    let r = Runner { shared, emit, emit_log, log_file: Mutex::new(file) };
+    let r = Runner { shared, emit, emit_log, log_file: Mutex::new(file), log_path: p.log() };
     r.log(vec![format!("--- setup: dump exefs {}, romfs {}", crate::dump::fwd(&p.exefs), crate::dump::fwd(&p.romfs))]);
     let end = match run_steps(&r, p, jobs) {
         Ok(true) => Progress { state: "done".into(), message: "Setup finished. Press Play.".into(), ..Default::default() },

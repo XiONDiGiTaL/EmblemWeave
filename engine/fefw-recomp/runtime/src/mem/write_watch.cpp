@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -38,6 +39,7 @@
 namespace nxrt::mem::ww {
 
 struct Region {
+    const char* owner = "unspecified"; // static lifetime name supplied by owner
     uint64_t base = 0;          // address of page 0
     uint64_t npages = 0;
     uint64_t nwords = 0;
@@ -48,15 +50,28 @@ struct Region {
     std::unique_ptr<std::atomic<uint16_t>[]> releasing;   // per page: releasers that saw it armed and have not finished its VirtualProtect (release_page)
 };
 
+// Protection belongs to the physical page, not a Region. Arming must exclude
+// transitions in every overlapping region, including destruction and unguarding.
+// Lock order: this lock, then Region::lock. Guard callbacks run outside both.
+SRWLOCK g_transitions = SRWLOCK_INIT;
 struct SharedLock {
-    explicit SharedLock(Region* r) : r_(r) { AcquireSRWLockShared(&r_->lock); }
-    ~SharedLock() { ReleaseSRWLockShared(&r_->lock); }
+    explicit SharedLock(Region* r) : r_(r) { AcquireSRWLockShared(&g_transitions); AcquireSRWLockShared(&r_->lock); }
+    ~SharedLock() { ReleaseSRWLockShared(&r_->lock); ReleaseSRWLockShared(&g_transitions); }
     Region* r_;
 };
 struct ExclusiveLock {
-    explicit ExclusiveLock(Region* r) : r_(r) { AcquireSRWLockExclusive(&r_->lock); }
-    ~ExclusiveLock() { ReleaseSRWLockExclusive(&r_->lock); }
+    explicit ExclusiveLock(Region* r, bool arming = false) : r_(r), arming_(arming) {
+        if (arming_) AcquireSRWLockExclusive(&g_transitions);
+        else AcquireSRWLockShared(&g_transitions);
+        AcquireSRWLockExclusive(&r_->lock);
+    }
+    ~ExclusiveLock() {
+        ReleaseSRWLockExclusive(&r_->lock);
+        if (arming_) ReleaseSRWLockExclusive(&g_transitions);
+        else ReleaseSRWLockShared(&g_transitions);
+    }
     Region* r_;
+    bool arming_;
 };
 
 namespace {
@@ -91,6 +106,7 @@ struct RegionCursor {
 };
 std::atomic<int> g_busy{0};            // fault handlers and os-write calls looking at the table
 std::atomic<int> g_live{0};
+std::atomic<uint64_t> g_generation{0};
 std::atomic<uint64_t> g_faults{0};
 std::atomic<uint64_t> g_waits{0};      // rounds a fault waited for another releaser (statistics, tests)
 std::atomic<uint64_t> g_guard_faults{0};   // accesses that hit a guarded page
@@ -110,6 +126,22 @@ bool os_write_overlaps(uint64_t lo, uint64_t hi) {
     for (OsRange& o : g_os) {
         const uint64_t h = o.hi.load(std::memory_order_seq_cst);
         if (h && o.lo.load(std::memory_order_seq_cst) < hi && lo < h) return true;
+    }
+    return false;
+}
+
+// Import freezes (ImportFreeze): ranges whose CPU writes wait for a Vulkan import of the same pages. g_scope_mu orders them against
+// OsWriteScope: a file read never starts in a frozen range, and a freeze never starts over a file read in progress.
+constexpr int kFreezeSlots = 16;
+OsRange g_frz[kFreezeSlots];
+std::atomic<int> g_frz_n{0};
+std::mutex g_scope_mu;
+
+bool freeze_overlaps(uint64_t lo, uint64_t hi) {
+    if (!g_frz_n.load(std::memory_order_seq_cst)) return false;
+    for (OsRange& f : g_frz) {
+        const uint64_t h = f.hi.load(std::memory_order_seq_cst);
+        if (h && f.lo.load(std::memory_order_seq_cst) < hi && lo < h) return true;
     }
     return false;
 }
@@ -166,6 +198,30 @@ DWORD page_protect(uint64_t addr) {
     if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi) != sizeof mbi) return 0;
     if (mbi.State != MEM_COMMIT) return 0;
     return mbi.Protect;
+}
+
+// A fault can be delivered after its last owner has gone out of the table.
+// Retain only a bit per retired heap page (384 KiB for the maximum heap), never
+// Region pointers. Retry only if the *current* protection permits the access;
+// foreign read-only/no-access/decommitted pages still pass to the crash handler.
+std::atomic<uint64_t> g_retired[kHeapMax / kPage / 64]{};
+bool retired_retry(uint64_t addr, ULONG_PTR kind) {
+    if (addr < kHeapBase || addr - kHeapBase >= kHeapMax || !test(g_retired, (addr - kHeapBase) / kPage)) return false;
+    const DWORD pr = page_protect(addr);
+    if (pr & PAGE_GUARD) return false;
+    const DWORD p = pr & 0xff;
+    if (p == PAGE_READWRITE || p == PAGE_EXECUTE_READWRITE) return true;
+    return kind == 0 && (p == PAGE_READONLY || p == PAGE_EXECUTE_READ);
+}
+
+// A final rejection must not sample a replacement arm halfway through its
+// protection change (its generation is published before releasing this lock).
+int final_retry(uint64_t addr, ULONG_PTR kind, uint64_t generation) {
+    AcquireSRWLockShared(&g_transitions);
+    const bool accessible = retired_retry(addr, kind);
+    const bool changed = g_generation.load(std::memory_order_seq_cst) != generation;
+    ReleaseSRWLockShared(&g_transitions);
+    return accessible ? 1 : changed ? -1 : 0;
 }
 
 // One page of a region becomes writable and counts as written. True when the page is ours to handle (the faulting write may retry).
@@ -274,8 +330,18 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     const ULONG_PTR kind = rec->ExceptionInformation[0];     // 0 read, 1 write, 8 execute
     if (kind != 0 && kind != 1) return EXCEPTION_CONTINUE_SEARCH;
-    if (g_live.load(std::memory_order_acquire) == 0) return EXCEPTION_CONTINUE_SEARCH;
     const uint64_t addr = static_cast<uint64_t>(rec->ExceptionInformation[1]);
+    // A write into a range an import has frozen (ImportFreeze): wait for the import, then let the write run again (the page is
+    // read-write again, or armed and handled below on the next fault).
+    if (kind == 1 && freeze_overlaps(addr, addr + 1)) {
+        for (int i = 0; freeze_overlaps(addr, addr + 1); ++i) {
+            if (i < 64) YieldProcessor();
+            else Sleep(i < 1000 ? 0 : 1);
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+retry:
+    const uint64_t generation = g_generation.load(std::memory_order_seq_cst);
     nxrt::HitchTimer ht(nxrt::kHpFaults);      // the hitch line: time in this handler (a wait for arm's exclusive lock included)
     // A guarded page (read or write): the owner makes it current first (outside every lock: it may wait for the GPU). A write then faults
     // again on the read-only page and is tracked as usual.
@@ -303,6 +369,9 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
             drop_guard(addr & ~(kPage - 1), kPage);
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+        const int decision = final_retry(addr, kind, generation);
+        if (decision == 1) return EXCEPTION_CONTINUE_EXECUTION;
+        if (decision == -1) goto retry;
         return EXCEPTION_CONTINUE_SEARCH;
     }
     bool ours = false, guarded_now = false;
@@ -330,6 +399,14 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
         if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1));
         drop_guard(addr & ~(kPage - 1), kPage);
         return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (!ours) {
+        const int decision = final_retry(addr, kind, generation);
+        ours = decision == 1;
+        if (decision == -1) {
+            g_busy.fetch_sub(1, std::memory_order_seq_cst);
+            goto retry; // a replacement region may now own the protection
+        }
     }
     if (!ours) {   // a write fault in a tracked region that no region claims: what each one holds for the page (the crash report follows)
         const DWORD pr = page_protect(addr);
@@ -391,11 +468,12 @@ Gauges g_gauges;
 
 }  // namespace
 
-Region* region_create(uint64_t addr, uint64_t size) {
+Region* region_create(uint64_t addr, uint64_t size, const char* owner) {
     if (!size || !heap_exists()) return nullptr;
     const uint64_t start = addr & ~(kPage - 1), end = (addr + size + kPage - 1) & ~(kPage - 1);
     if (start < kHeapBase || end > kHeapBase + heap_reserved()) return nullptr;
     auto r = std::make_unique<Region>();
+    r->owner = owner ? owner : "unspecified";
     r->base = start;
     r->npages = (end - start) / kPage;
     r->nwords = (r->npages + 63) / 64;
@@ -430,6 +508,7 @@ Region* region_create(uint64_t addr, uint64_t size) {
             block = next;
         }
         g_live.fetch_add(1, std::memory_order_seq_cst);
+        g_generation.fetch_add(1, std::memory_order_seq_cst);
     }
     // Pages that another view shows can never be tracked. Published first, so an alias made from now on bans them through ban_section.
     std::vector<std::pair<uint64_t, uint64_t>> views;
@@ -446,10 +525,15 @@ void region_destroy(Region* r) {
     // Writable again first (faults on armed pages wait for the lock and then find the page writable), then out of the table.
     {
     ExclusiveLock lk(r);
+    // Every page this region protects: armed (read-only) or guarded (no access). A guarded page can have lost its armed bit (release_page
+    // on a page that guard() took again after the caller dropped its guard, as before_os_write does outside the lock): skipped here, it
+    // stayed no-access after the region was gone, with nobody to claim the fault when the memory was used again.
+    const auto held = [r](uint64_t i) { return test(r->prot.get(), i) || test(r->guard.get(), i); };
     for (uint64_t p = 0; p < r->npages;) {
-        if (!test(r->prot.get(), p)) { ++p; continue; }
+        if (!held(p)) { ++p; continue; }
         uint64_t q = p;
-        while (q < r->npages && test(r->prot.get(), q)) ++q;
+        while (q < r->npages && held(q)) ++q;
+        set_bits(g_retired, (r->base - kHeapBase) / kPage + p, q - p, true);
         set_bits(r->prot.get(), p, q - p, false);
         set_bits(r->guard.get(), p, q - p, false);
         DWORD was = 0;
@@ -461,9 +545,32 @@ void region_destroy(Region* r) {
         std::lock_guard<std::mutex> lk(g_mu);
         r->slot->store(nullptr, std::memory_order_seq_cst);
         g_live.fetch_sub(1, std::memory_order_seq_cst);
+        g_generation.fetch_add(1, std::memory_order_seq_cst);
     }
     while (g_busy.load(std::memory_order_seq_cst) != 0) std::this_thread::yield();
     delete r;
+}
+
+std::string describe_page(uint64_t addr) {
+    std::string out;
+    g_busy.fetch_add(1, std::memory_order_seq_cst);
+    unsigned matches = 0;
+    for (RegionCursor cursor; Region* r = cursor.next();) {
+        if (addr < r->base || addr - r->base >= r->npages * kPage) continue;
+        const uint64_t pg = (addr - r->base) / kPage;
+        char line[256];
+        std::snprintf(line, sizeof line, "  write-watch owner=%s base=0x%llx pages=%llu page=%llu prot=%d valid=%d guard=%d ban=%d releasing=%u\n",
+            r->owner, (unsigned long long)r->base, (unsigned long long)r->npages, (unsigned long long)pg,
+            test(r->prot.get(), pg), test(r->valid.get(), pg), test(r->guard.get(), pg), test(r->ban.get(), pg),
+            (unsigned)r->releasing[pg].load());
+        out += line;
+        ++matches;
+    }
+    g_busy.fetch_sub(1, std::memory_order_seq_cst);
+    if (!matches) out += "  write-watch owner=none\n";
+    if (addr >= kHeapBase && addr - kHeapBase < kHeapMax && test(g_retired, (addr - kHeapBase) / kPage))
+        out += "  write-watch retired-page history=1\n";
+    return out;
 }
 
 uint64_t region_base(const Region* r) { return r ? r->base : 0; }
@@ -479,11 +586,11 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     // is read before the lock (memory.cpp takes its lock first and region locks inside it); a change since shows in the epoch.
     const uint64_t epoch = heap_epoch();
     const int table = heap_rw_pages(a, n);
-    ExclusiveLock lk(r);
+    ExclusiveLock lk(r, true);
     if (any_set(r->ban.get(), first, count)) return false;
     // A file read (or a mapping change in memory.cpp) into these pages is in progress: leave them alone. Its scope is published before it
     // releases pages under the shared lock, so either this sees it, or its release waits for this arm and undoes it.
-    if (os_write_overlaps(a, a + n)) return false;
+    if (os_write_overlaps(a, a + n) || freeze_overlaps(a, a + n)) return false;
     if (table == 1 && heap_epoch() == epoch) {
         // what the walk below checks besides the table: no page read-guarded here, or read-only because another region armed it
         if (any_set(r->guard.get(), first, count)) return false;
@@ -521,6 +628,7 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
         set_bits(r->prot.get(), first, count, false);
         return false;
     }
+    g_generation.fetch_add(1, std::memory_order_seq_cst);
     return true;
 }
 
@@ -557,7 +665,7 @@ bool guard(Region* r, uint64_t first, uint64_t count) {
     ExclusiveLock lk(r);
     if (!all_set(r->prot.get(), first, count) || any_set(r->ban.get(), first, count)) return false;
     const uint64_t a = r->base + first * kPage, n = count * kPage;
-    if (os_write_overlaps(a, a + n)) return false;
+    if (os_write_overlaps(a, a + n) || freeze_overlaps(a, a + n)) return false;
     set_bits(r->guard.get(), first, count, true);
     DWORD was = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(n), PAGE_NOACCESS, &was)) {
@@ -643,8 +751,73 @@ void os_slot_release(int slot) {
 
 OsWriteScope::OsWriteScope(const void* p, uint64_t n) {
     if (!n) return;
-    slot_ = os_slot_acquire(p, n);
+    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
+    for (int i = 0;; ++i) {      // the operating system's write would fail on a page an import froze: wait for the import
+        {
+            std::lock_guard<std::mutex> lk(g_scope_mu);
+            if (!freeze_overlaps(lo, hi)) {
+                slot_ = os_slot_acquire(p, n);
+                break;
+            }
+        }
+        Sleep(i < 1000 ? 0 : 1);
+    }
     before_os_write(p, n);
+}
+
+ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
+    if (!n || !heap_exists()) return;
+    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
+    if (lo < kHeapBase || hi > kHeapBase + heap_reserved()) return;      // only the heap's primary view (the import goes through another)
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_fault);
+        if (!g_veh) return;
+    }
+    for (int i = 0; slot_ < 0; ++i) {   // after the file reads in progress there; then no new one starts until the end
+        {
+            std::lock_guard<std::mutex> lk(g_scope_mu);
+            if (!os_write_overlaps(lo, hi)) {
+                for (int k = 0; k < kFreezeSlots; ++k) {
+                    uint64_t expect = 0;
+                    if (g_frz[k].hi.load(std::memory_order_relaxed) == 0 && g_frz[k].lo.compare_exchange_strong(expect, lo | 1, std::memory_order_seq_cst)) {
+                        g_frz[k].lo.store(lo, std::memory_order_seq_cst);
+                        g_frz[k].hi.store(hi, std::memory_order_seq_cst);
+                        g_frz_n.fetch_add(1, std::memory_order_seq_cst);
+                        slot_ = k;
+                        break;
+                    }
+                }
+            }
+        }
+        if (slot_ < 0) Sleep(i < 1000 ? 0 : 1);
+    }
+    // Exclusive against arm() and region destruction: the read-write runs found here are ours until the destructor gives them back.
+    AcquireSRWLockExclusive(&g_transitions);
+    for (uint64_t a = lo; a < hi;) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof mbi) != sizeof mbi) break;
+        const uint64_t end = std::min<uint64_t>(hi, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
+        DWORD was = 0;
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & 0xff) == PAGE_READWRITE && !(mbi.Protect & PAGE_GUARD) &&
+            VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(end - a), PAGE_READONLY, &was))
+            runs_.emplace_back(a, end);
+        a = end;
+    }
+    ReleaseSRWLockExclusive(&g_transitions);
+}
+
+ImportFreeze::~ImportFreeze() {
+    if (slot_ < 0) return;
+    AcquireSRWLockExclusive(&g_transitions);
+    for (const auto& r : runs_) {
+        DWORD was = 0;
+        VirtualProtect(reinterpret_cast<void*>(r.first), static_cast<SIZE_T>(r.second - r.first), PAGE_READWRITE, &was);
+    }
+    ReleaseSRWLockExclusive(&g_transitions);
+    g_frz[slot_].hi.store(0, std::memory_order_seq_cst);
+    g_frz[slot_].lo.store(0, std::memory_order_seq_cst);
+    g_frz_n.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 OsWriteScope::~OsWriteScope() { os_slot_release(slot_); }

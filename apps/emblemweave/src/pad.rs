@@ -4,8 +4,10 @@
 //! The game takes player 1 from the first XInput gamepad and reads its pad
 //! settings from the `[pad]` section of `controls.ini` in its play folder
 //! (`engine/fefw-recomp/runtime/docs/CONFIG.md`): `deadzone`, `right_deadzone`,
-//! `stick_max` and `trigger_threshold`. The page shows the pad as it is and
-//! writes those four keys where the game looks for them.
+//! `stick_max`, `trigger_threshold`, and the two haptics keys, `haptic`
+//! (`auto`, `off`, `rumble`, `dualsense`) and `haptic_strength` (a percentage,
+//! or `-1` to follow the rumble strength). The page writes those keys where the
+//! game looks for them.
 
 use std::path::Path;
 
@@ -136,12 +138,25 @@ impl Tuning {
         if let Some(v) = num("trigger_threshold").filter(|v| (0.05..=1.0).contains(v)) {
             t.trigger = v;
         }
-        // Rumble had no reader here, so the page's Vibration slider wrote a launcher preference nothing
-        // used and the game kept its own default (issues: "controller vibration doesn't work").
-        if let Some(v) = value(text, "pad", "rumble").and_then(flag) {
-            t.rumble = v;
+        // Haptics: the engine's own keys are `haptic` (auto, off, rumble, dualsense) and `haptic_strength`
+        // (0 to 100 %, or -1 for "follow the rumble strength"). The older `rumble` and `rumble_scale`, which
+        // this page wrote before the engine had a haptics module, are still read so an existing file keeps
+        // its setting.
+        match value(text, "pad", "haptic").map(|v| v.trim().to_ascii_lowercase()) {
+            Some(m) if !m.is_empty() => t.rumble = !matches!(m.as_str(), "off" | "none" | "0" | "false"),
+            _ => {
+                if let Some(v) = value(text, "pad", "rumble").and_then(flag) {
+                    t.rumble = v;
+                }
+            }
         }
-        if let Some(v) = num("rumble_scale").filter(|v| (0.0..=1.0).contains(v)) {
+        if let Some(v) = num("haptic_strength") {
+            if v < 0.0 {
+                t.rumble_scale = 1.0;
+            } else if (0.0..=100.0).contains(&v) {
+                t.rumble_scale = v / 100.0;
+            }
+        } else if let Some(v) = num("rumble_scale").filter(|v| (0.0..=1.0).contains(v)) {
             t.rumble_scale = v;
         }
         t
@@ -151,7 +166,7 @@ impl Tuning {
     /// player who set it before the game ever wrote a `controls.ini` keeps their setting.
     pub fn from_ini_seeded(text: &str, deadzone: f32, vibration: f32) -> Tuning {
         let mut t = Tuning::from_ini(text, deadzone);
-        if value(text, "pad", "rumble_scale").is_none() {
+        if value(text, "pad", "haptic_strength").is_none() && value(text, "pad", "rumble_scale").is_none() {
             t.rumble_scale = vibration.clamp(0.0, 1.0);
         }
         t
@@ -185,6 +200,23 @@ pub fn write(path: &Path, key: &str, value: f32) -> Result<(), String> {
 /// The same for a `[pad]` switch (`rumble`), written as `1` or `0`: the engine's reader takes both.
 pub fn write_flag(path: &Path, key: &str, on: bool) -> Result<(), String> {
     write_text(path, key, if on { "1" } else { "0" })
+}
+
+/// The haptics switch, as the engine reads it: `[pad] haptic`. Off writes `off`; on keeps a backend the file
+/// already names (`dualsense`, `rumble`) and writes `auto` when there is none or when it reads `off`, so a mode
+/// chosen in the in-game menu survives a trip through this page.
+pub fn write_haptic(path: &Path, on: bool) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mode = value(&text, "pad", "haptic").map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
+    let keep = matches!(mode.as_str(), "auto" | "rumble" | "standard" | "dualsense" | "haptics");
+    let value = if !on { "off" } else if keep { mode.as_str() } else { "auto" };
+    write_text(path, "haptic", value)
+}
+
+/// The haptics strength, as the engine reads it: `[pad] haptic_strength`, a percentage from 0 to 100.
+pub fn write_haptic_strength(path: &Path, scale: f32) -> Result<(), String> {
+    let pct = (scale.clamp(0.0, 1.0) * 100.0).round() as i32;
+    write_text(path, "haptic_strength", &pct.to_string())
 }
 
 fn write_text(path: &Path, key: &str, value: &str) -> Result<(), String> {
@@ -247,12 +279,22 @@ rumble_scale = 0.20
 ", 0.10, 0.55).rumble_scale - 0.20).abs() < 1e-6);
         let path = std::env::temp_dir().join(format!("ew-pad-rumble-{}.ini", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        write_flag(&path, "rumble", false).unwrap();
-        write(&path, "rumble_scale", 0.60).unwrap();
+        write_haptic(&path, false).unwrap();
+        write_haptic_strength(&path, 0.60).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(value(&text, "pad", "haptic"), Some("off"));
+        assert_eq!(value(&text, "pad", "haptic_strength"), Some("60"));
         let t = Tuning::from_ini(&text, 0.10);
         assert!(!t.rumble);
         assert!((t.rumble_scale - 0.60).abs() < 1e-6);
+        // A backend the file names (the in-game menu can set one) is kept when vibration is switched on again,
+        // and a file that was off gets `auto` back, which is the mode the game starts with.
+        write_text(&path, "haptic", "dualsense").unwrap();
+        write_haptic(&path, true).unwrap();
+        assert_eq!(value(&std::fs::read_to_string(&path).unwrap(), "pad", "haptic"), Some("dualsense"));
+        write_haptic(&path, false).unwrap();
+        write_haptic(&path, true).unwrap();
+        assert_eq!(value(&std::fs::read_to_string(&path).unwrap(), "pad", "haptic"), Some("auto"));
         let _ = std::fs::remove_file(&path);
     }
 
