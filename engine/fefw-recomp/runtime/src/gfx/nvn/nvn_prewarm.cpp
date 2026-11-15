@@ -211,6 +211,7 @@ void worker_main() {
             const ProgLayout* pl = nullptr;
             if (stub_key(j->rec, k, pl)) p = build_graphics_pipeline(k, *pl);
         }
+        pace_shader_work();       // late frames get the cores back (nvn_gpl.cpp, [nvn] compile_pace_ms)
         {
             std::lock_guard<std::mutex> lk(g_mu);
             j->state = 2;

@@ -214,9 +214,13 @@ struct GplStats {
     uint64_t prog_single = 0;                        // programs with only one of vertex and fragment shader (Pokopia sets them apart): nothing to queue per program
     uint64_t prebuild_jobs = 0, prebuild_run = 0;    // key-file keys whose parts were queued, run
     double link_ms = 0, draw_part_ms = 0, wait_ms = 0, worker_ms = 0;
+    double paced_ms = 0;                             // time the background threads spent stepped aside for late frames ([nvn] compile_pace_ms)
 };
 GplStats gpl_stats();
 void set_compile_thread_priority(bool background = true);                                  // [nvn] compile_priority for the threads that build pipelines in the background
+// Called by each thread that builds pipelines in the background after a part: once presented frames are late it sleeps for a moment, so a burst of
+// new-area programs does not keep every core busy while the frame in flight needs them ([nvn] compile_pace_ms, 0 = never step aside).
+void pace_shader_work();
 
 // ---- shader preparation (nvn_gpl.cpp, S24) ---------------------------------------------------------------------------------
 // Compiles the shader parts of every program in a list (setup writes it from the player's own game files: <shader cache>/../programs.bin)
