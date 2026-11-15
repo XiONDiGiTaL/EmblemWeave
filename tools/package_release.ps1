@@ -4,11 +4,13 @@
 #   pwsh -File tools/package_release.ps1                 # version from Cargo.toml, builds what is missing
 #   pwsh -File tools/package_release.ps1 -Version 0.1.12
 #   pwsh -File tools/package_release.ps1 -SkipBuild      # reuse target\release\EmblemWeave.exe
+#   pwsh -File tools/package_release.ps1 -SkipConfigureCheck  # do not configure the extracted zip
 #
 # Writes target\pkg\EmblemWeave-v<version>-windows-x64.zip and prints its size and sha256.
 param(
     [string]$Version = '',
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipConfigureCheck
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -134,6 +136,41 @@ try {
     $unpackedCount = (Get-ChildItem -LiteralPath $unpacked -Recurse -File).Count
     if ($unpackedCount -ne $nFiles) { throw "the zip holds $nFiles files but extracted $unpackedCount" }
     Write-Host "zip verified: $nFiles files, extracted and compared in $unpacked"
+
+    # 6. The zip is configured, not only listed. The engine's CMake configure is the first thing that a missing source
+    # tree or a wrong path kills, and it is what issues #16 and #17 hit: dav1d was not in the download, and every
+    # build from a zip stopped at `add_subdirectory ... third_party/dav1d`. Configure only: no lifted libraries, no
+    # game data and no compile, just the step that proves the tree the player gets is the tree the build reads.
+    # Skipped with its reason on a machine that has no Visual Studio C++ tools and LLVM to configure with, because
+    # that says nothing about the zip; -SkipConfigureCheck turns it off deliberately.
+    if ($SkipConfigureCheck) {
+        Write-Host 'configure check: skipped (-SkipConfigureCheck)'
+    } else {
+        $engine = Join-Path $unpacked "$name\engine\fefw-recomp"
+        $src = Join-Path $engine 'game-build\fefw'
+        $envCmd = Join-Path $engine 'runtime\scripts\env.cmd'
+        $bd = Join-Path $unpacked "$name\configure-check"
+        $checkLog = Join-Path $repo 'target\pkg\configure-check.log'
+        $envDump = & cmd /c "call `"$envCmd`" >nul 2>&1 && set" 2>$null
+        $envOk = $LASTEXITCODE -eq 0
+        $llvm = @($envDump | Where-Object { $_ -like 'NX_LLVM_BIN=*' })
+        $llvm = if ($llvm.Count -gt 0) { $llvm[0].Substring('NX_LLVM_BIN='.Length) } else { '' }
+        if (-not $envOk -or -not $llvm -or -not (Test-Path (Join-Path $llvm 'clang-cl.exe'))) {
+            Write-Warning 'configure check skipped: runtime\scripts\env.cmd found no Visual Studio C++ tools and LLVM on this machine (that says nothing about the zip)'
+        } else {
+            # One child shell, so the configure sees the same INCLUDE, LIB and clang-cl the engine's own build script gives it.
+            $clang = (Join-Path $llvm 'clang-cl.exe').Replace('\', '/')
+            $cfg = "call `"$envCmd`" >nul 2>&1 && cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`""
+            & cmd /c $cfg *> $checkLog
+            if ($LASTEXITCODE -ne 0) {
+                $tail = @(Get-Content -LiteralPath $checkLog -Tail 30)
+                Write-Host ($tail -join [Environment]::NewLine)
+                throw "the zip does not configure: $bd (log: $checkLog). A source tree the build reads is missing from the package, or a path in it is wrong; do not publish this zip."
+            }
+            Write-Host "configure check: the extracted zip configures (engine CMake, log: $checkLog)"
+            Remove-Item -Recurse -Force $bd -ErrorAction SilentlyContinue
+        }
+    }
 
     $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
     $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
