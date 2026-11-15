@@ -21,6 +21,9 @@
  *   - call any lifted guest function (call_guest) from a hook or the frame callback, on the thread and Ctx it was given.
  *   - read and write guest memory directly: guest addresses are host addresses (main is at main_base); is_mapped checks a range first.
  *   - run once per presented frame (on_frame), on the main thread with its Ctx.
+ *   - (version 2) give the game a function of its own to call (make_function): an address that works wherever the game keeps a
+ *     function pointer, such as a slot of a vtable copy or a callback. With make_writable, which lifts the write protection of
+ *     the game's read-only data, a mod can add entries to the game's own menus without a hook site.
  *
  * Loading can be turned off with [fs] dll_mods = false. A DLL runs with the same rights as the game: install only mods you trust.
  */
@@ -35,11 +38,12 @@
 extern "C" {
 #endif
 
-#define NXMOD_API_VERSION 1u
+#define NXMOD_API_VERSION 2u
 
 typedef void (*NxModInlineFn)(Ctx* c, uint64_t addr, void* user);
 typedef int (*NxModSiteFn)(Ctx* c, uint64_t addr, void* user);   /* midhook / entry hook: nonzero = handled (nxrt/hooks.h) */
 typedef void (*NxModFrameFn)(Ctx* c, void* user);
+typedef void (*NxModFunctionFn)(Ctx* c, void* user);   /* a function the game calls: arguments in c->x[0..7], the result goes in c->x[0] */
 
 typedef struct NxModApi {
     uint32_t version;            /* NXMOD_API_VERSION of the runtime */
@@ -71,6 +75,18 @@ typedef struct NxModApi {
 
     /* 1 when addr is the entry of a lifted guest function (or a host import thunk), i.e. something call_guest can call */
     int (*is_function)(uint64_t addr);
+
+    /* ---- version 2 (check api->version >= 2 before use) ---- */
+
+    /* Makes fn callable by the game and returns its guest address, 0 on failure (the runtime has a fixed number of these). When the
+     * game calls that address, fn(c, user) runs on the calling thread with the guest registers in c: the arguments are c->x[0..7],
+     * the function answers by writing c->x[0] and returning. It may use call_guest. The address stays valid for the whole run; if the
+     * mod declines in nxmod_init, calls to it do nothing and answer 0. */
+    uint64_t (*make_function)(NxModFunctionFn fn, void* user);
+
+    /* Lifts the write protection of the pages holding [addr, addr + size) of guest memory (the game's vtables and other constant
+     * data are read-only). 1 on success, 0 when the range is not mapped or the protection cannot be changed. */
+    int (*make_writable)(uint64_t addr, uint64_t size);
 } NxModApi;
 
 typedef int (*NxModInitFn)(const NxModApi* api, const char* mod_dir);

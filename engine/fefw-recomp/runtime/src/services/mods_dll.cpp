@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "nxrt/abi.h"
@@ -49,8 +50,16 @@ struct FrameFn {
     const Mod* owner;            // the mod whose nxmod_init registered it (removed if that mod declines), or null
 };
 
+// A function a mod gave the game (make_function): the thunk "mod.fn.<n>" runs mod_function, which finds this by the thunk's name.
+struct ModFn {
+    NxModFunctionFn fn;
+    void* user;
+    const Mod* owner;            // the mod whose nxmod_init made it (switched off if that mod declines), or null
+};
+
 struct State {
     std::mutex mu;
+    std::unordered_map<std::string, ModFn> fns;   // by thunk name
     std::vector<Mod*> mods;      // never freed: hooks and frame callbacks may still point into the DLLs
     std::vector<FrameFn> frame;
     Mod* in_init = nullptr;      // the mod whose nxmod_init is running (main thread)
@@ -116,6 +125,41 @@ void api_on_frame(NxModFrameFn fn, void* user) {
     st().frame.push_back({fn, user, st().in_init});
 }
 
+// The handler of every make_function thunk: the runtime names the thunk it is running (hle_current_name), the name finds the mod's
+// function. A function of a mod that declined, or an unknown name, answers 0.
+void mod_function(::Ctx* c) {
+    ModFn f{};
+    if (const char* name = hle_current_name()) {
+        std::lock_guard<std::mutex> lk(st().mu);
+        if (auto it = st().fns.find(name); it != st().fns.end()) f = it->second;
+    }
+    if (f.fn) f.fn(c, f.user);
+    else c->x[0] = 0;
+}
+
+uint64_t api_make_function(NxModFunctionFn fn, void* user) {
+    if (!fn) return 0;
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lk(st().mu);
+        name = "mod.fn." + std::to_string(st().fns.size());
+        st().fns.emplace(name, ModFn{fn, user, st().in_init});
+    }
+    const uint64_t addr = hle_register(name.c_str(), &mod_function);
+    if (!addr) {   // out of thunks (logged by the runtime)
+        std::lock_guard<std::mutex> lk(st().mu);
+        st().fns[name].fn = nullptr;
+    }
+    return addr;
+}
+
+int api_make_writable(uint64_t addr, uint64_t size) {
+    if (!addr || !size || !mem::is_mapped(addr, size)) return 0;
+    const uint64_t first = addr & ~uint64_t{mem::kPage - 1};
+    const uint64_t end = (addr + size + mem::kPage - 1) & ~uint64_t{mem::kPage - 1};
+    return mem::protect(first, end - first, mem::Prot::RW) ? 1 : 0;
+}
+
 // nxmod_init of every loaded mod, in load order: at the first frame boundary, once the game's modules are mapped and relocated
 void start_all() {
     std::vector<Mod*> mods;
@@ -132,6 +176,8 @@ void start_all() {
             m->hooks.clear();
             std::lock_guard<std::mutex> lk(st().mu);
             std::erase_if(st().frame, [m](const FrameFn& f) { return f.owner == m; });
+            for (auto& [name, f] : st().fns)   // the thunks stay (the game may hold their addresses): they answer 0 from now on
+                if (f.owner == m) f.fn = nullptr;
             NXLOG_W(kTag, "%s: declined to start (nxmod_init returned %d); its hooks are removed", m->name.c_str(), rc);
             continue;   // the DLL stays loaded: it may still own memory the runtime saw
         }
@@ -188,6 +234,8 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
     m->api.is_mapped = &api_is_mapped;
     m->api.on_frame = &api_on_frame;
     m->api.is_function = &api_is_function;
+    m->api.make_function = &api_make_function;
+    m->api.make_writable = &api_make_writable;
     m->init = init;
     m->dir = u8(mod_dir);
     std::lock_guard<std::mutex> lk(st().mu);
