@@ -1136,21 +1136,39 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             root.join("tools").join("shaders").join("prebuilt").join(pdir).join(pfile).display()
         ));
         // MSBuild reads item transforms written as @(Item->'...'): a path with an apostrophe in it ends the quoted string
-        // early, and the build fails with the transform printed as a file name (error MSB3021). The game's own build does
-        // not care; this one cannot be talked out of it, so say it before thirty seconds of dotnet output does not.
-        if root.display().to_string().contains('\'') {
-            return Err(format!(
-                "the shader translator is built with MSBuild, which cannot take a folder path containing an apostrophe, \
-                 and this one has one: {}. Move the unzipped folder somewhere without one (C:\\EmblemWeave, for \
-                 example) and press Build the game again; the rest of the build is not affected.",
-                root.display()
+        // early and the build fails with the transform printed as a file name (errors MSB3191 and MSB3021), which is what
+        // issue #18 hit in `D:\Games\Fire Emblem Fortune's Weave\...`. Non-ASCII characters are handled differently by
+        // every tool in the chain, so they take the same detour. Nothing about the translator needs to live under that
+        // path: it is built from a copy under the launcher's own work folder and the result is copied back, so a folder
+        // named after the game, or after whoever unzipped it, builds like any other without being renamed.
+        let shaders = root.join("tools").join("shaders");
+        let awkward_path = root.display().to_string().chars().any(|c| c == '\'' || !c.is_ascii());
+        let staged = if awkward_path {
+            let to = crate::config::Config::work_dir()
+                .ok_or_else(|| "the launcher's work folder is not set, so the translator cannot be built outside this path".to_string())?
+                .join("shaders-src");
+            if to.exists() {
+                let _ = std::fs::remove_dir_all(&to);
+            }
+            let files = crate::saves::copy_tree(&shaders, &to)?;
+            ctx.log(format!(
+                "this folder's path cannot be handed to MSBuild (an apostrophe or non-ASCII character in it), so the \
+                 shader translator is built from {} instead ({files} files) and its output is copied back",
+                to.display()
             ));
-        }
+            Some(to)
+        } else {
+            None
+        };
+        let build_shaders = staged.clone().unwrap_or_else(|| shaders.clone());
         ensure_ryubing_refs(ctx, &root)?;
-        run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\shaders\\scripts\\setup_ryujinx.ps1", "-Ryubing", "work\\refs\\ryubing"])?;
+        let setup = build_shaders.join("scripts").join("setup_ryujinx.ps1").display().to_string();
+        let refs = root.join("work").join("refs").join("ryubing").display().to_string();
+        run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &setup, "-Ryubing", &refs])?;
         // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
         // .NET runtime alone satisfies `dotnet.exe` but cannot build a net10.0 project.
-        run(ctx, &root, "dotnet", &["build", "tools\\shaders\\harness\\SpirvHarness.csproj", "-c", "Release"]).map_err(|e| {
+        let csproj = build_shaders.join("harness").join("SpirvHarness.csproj").display().to_string();
+        run(ctx, &root, "dotnet", &["build", &csproj, "-c", "Release"]).map_err(|e| {
             let lower = e.to_lowercase();
             if lower.contains("sdk-not-found") || e.contains("0x8000809b") || lower.contains("sdk not found") {
                 format!(
@@ -1168,6 +1186,12 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
                 e
             }
         })?;
+        if let Some(staged) = &staged {
+            let from = staged.join("build").join("bin").join("Release").join("net10.0");
+            let to = shaders.join("build").join("bin").join("Release").join("net10.0");
+            let files = crate::saves::copy_tree(&from, &to)?;
+            ctx.log(format!("copied {files} translator files back into {}", to.display()));
+        }
         ctx.end(5, StageStatus::Done, "spirv_harness built");
     }
 

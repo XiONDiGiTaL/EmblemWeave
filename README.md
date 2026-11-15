@@ -329,12 +329,12 @@ saves and its own build cache away from any other copy on the PC. Delete the mar
 
 ### Where the folder can live
 
-Spaces are fine. An apostrophe is not: the shader translator is built with MSBuild, which reads its own item transforms
-as `@(Item->'…')`, and a `'` in the path ends that quoting early. Every release ships the translator prebuilt, so this
-only bites when the engine folder came from a different release and the translator has to be compiled; the launcher now
-says so before it starts. Non-ASCII folders (`Ø`, Cyrillic, CJK) work for the game itself but are worth avoiding for the
-unzipped folder, because Python and the C toolchain each handle them differently. Long paths, past about 120 characters,
-make CMake warn about object file paths; a shorter folder avoids the question. `C:\EmblemWeave` is a good home.
+Spaces are fine. An apostrophe used to be a trap: the shader translator is built with MSBuild, which reads its own item
+transforms as `@(Item->'…')`, and a `'` in the path ends that quoting early (`MSB3191` and `MSB3021`). That only matters
+when the translator has to be compiled, which a release zip never needs, and the launcher now builds it from a copy under
+its own work folder when the path has an apostrophe or a non-ASCII character, so a folder named after the game can stay as
+it is. Long paths, past about 120 characters, make CMake warn about object file paths; a shorter folder avoids the
+question. `C:\EmblemWeave` is a good home.
 
 ## Preparing your game data
 

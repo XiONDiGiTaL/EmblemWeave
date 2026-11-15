@@ -83,7 +83,7 @@ pub fn summary(dir: &Path) -> (usize, Option<std::time::SystemTime>) {
     (files, newest)
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<usize, String> {
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<usize, String> {
     std::fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
     let mut copied = 0;
     for e in std::fs::read_dir(from).map_err(|e| format!("reading {}: {e}", from.display()))?.flatten() {
