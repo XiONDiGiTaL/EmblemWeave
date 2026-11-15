@@ -38,7 +38,7 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 
 ## Size
 
-Roughly 49 MB, of which about 40 MB is `spirv_harness.exe`: the shader translator published as a single self-contained
+About 46 MB, of which about 38 MB is `spirv_harness.exe`: the shader translator published as a single self-contained
 executable so the build needs no .NET SDK and no .NET runtime. The launcher itself is about 13 MB, the engine sources a
 few MB.
 
