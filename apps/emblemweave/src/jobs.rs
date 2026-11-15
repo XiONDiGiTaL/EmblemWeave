@@ -50,6 +50,8 @@ pub enum JobResult {
     Boot(Box<ew_boot::BootReport>, u128),
     /// The engine built the game; the run folder holding fefw.ini.
     Engine(PathBuf),
+    /// Game Setup's folder check: the overlay written for a packed package, when one was needed.
+    Repaired(Option<PathBuf>),
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +76,8 @@ pub enum JobKind {
     Pipeline,
     Boot,
     Engine,
+    /// The one-click check on Game Setup: reads the package and writes the files it cannot serve in place.
+    Repair,
 }
 
 impl JobKind {
@@ -84,6 +88,7 @@ impl JobKind {
             JobKind::Pipeline => "Recompilation pipeline",
             JobKind::Boot => "Running the game",
             JobKind::Engine => "Building the game",
+            JobKind::Repair => "Checking the game folder",
         }
     }
 
@@ -94,6 +99,7 @@ impl JobKind {
             JobKind::Pipeline => "pipeline",
             JobKind::Boot => "boot",
             JobKind::Engine => "engine",
+            JobKind::Repair => "repair",
         }
     }
 }

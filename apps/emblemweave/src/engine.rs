@@ -961,6 +961,101 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
     )
 }
 
+/// Game Setup's "Check my game folder": what the build does for a package it cannot read in place, done on its own so a game folder that
+/// was built by an older release can be fixed without compiling anything. It reads the package, writes the files that are packed with
+/// zstd into `work/romfs-overlay`, and points the existing `fefw.ini` at that folder.
+pub const REPAIR_STAGES: &[&'static str] = &["Read the package", "Write the files it cannot serve", "Point the game at them"];
+
+pub fn repair(ctx: &Ctx, romfs: PathBuf) -> Result<JobResult, String> {
+    let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
+    ctx.start(0);
+    let Some((count, bytes)) = crate::gamedata::packed_romfs(&romfs) else {
+        let said = if romfs.is_dir() {
+            "the game files are a folder, which is read as it is".to_string()
+        } else {
+            "the package holds only stored files, which are read as it is".to_string()
+        };
+        ctx.end(0, StageStatus::Done, said);
+        ctx.end(1, StageStatus::Skipped, "nothing to write");
+        ctx.end(2, StageStatus::Skipped, "nothing to change");
+        return Ok(JobResult::Repaired(None));
+    };
+    ctx.end(0, StageStatus::Done, format!("{count} files are packed with zstd ({:.1} GB)", bytes as f64 / (1024.0 * 1024.0 * 1024.0)));
+
+    ctx.start(1);
+    let dest = root.join("work").join("romfs-overlay");
+    let stamp = dest.join(".written");
+    let key = format!("{}|{count} files|{bytes} bytes", romfs.display());
+    if std::fs::read_to_string(&stamp).map(|t| t.trim() == key.trim()).unwrap_or(false) {
+        ctx.end(1, StageStatus::Skipped, format!("already written in {}", dest.display()));
+    } else {
+        std::fs::create_dir_all(&dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
+        let (written, total) = crate::gamedata::unpack_packed_romfs(&romfs, &dest, &mut |m| ctx.log(format!("game files: {m}")))?;
+        std::fs::write(&stamp, &key).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
+        ctx.end(1, StageStatus::Done, format!("{written} files, {:.1} GB in {}", total as f64 / (1024.0 * 1024.0 * 1024.0), dest.display()));
+    }
+
+    ctx.start(2);
+    let Some(dir) = run_dir() else {
+        ctx.end(2, StageStatus::Skipped, "no run folder yet");
+        return Ok(JobResult::Repaired(Some(dest)));
+    };
+    let ini_path = dir.join("fefw.ini");
+    if !ini_path.is_file() {
+        ctx.end(2, StageStatus::Skipped, "the game has not been built yet: the next build writes it");
+        return Ok(JobResult::Repaired(Some(dest)));
+    }
+    let text = std::fs::read_to_string(&ini_path).map_err(|e| format!("reading {}: {e}", ini_path.display()))?;
+    let updated = set_ini_value(&text, "fs", "romfs_overlay", &dest.display().to_string().replace('\\', "/"));
+    if updated != text {
+        std::fs::write(&ini_path, updated).map_err(|e| format!("writing {}: {e}", ini_path.display()))?;
+    }
+    ctx.end(2, StageStatus::Done, ini_path.display().to_string());
+    Ok(JobResult::Repaired(Some(dest)))
+}
+
+/// Sets `key` in `[section]`, replacing the one that is there or adding it under the section's other keys. The ini is a flat text file the
+/// engine reads in order, so the section header has to be found before the key can be written into it.
+fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
+    let header = format!("[{section}]");
+    let mut out: Vec<String> = Vec::new();
+    let (mut in_section, mut written) = (false, false);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_section && !written {
+                out.push(format!("{key} = {value}"));
+                written = true;
+            }
+            in_section = trimmed.eq_ignore_ascii_case(&header);
+            out.push(line.to_string());
+            continue;
+        }
+        if in_section {
+            let name = line.split('=').next().unwrap_or("").trim();
+            if name.eq_ignore_ascii_case(key) {
+                if !written {
+                    out.push(format!("{key} = {value}"));
+                    written = true;
+                }
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    if in_section && !written {
+        out.push(format!("{key} = {value}"));
+        written = true;
+    }
+    if !written {
+        out.push(header);
+        out.push(format!("{key} = {value}"));
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
 /// The build job's work: every step in order.
 pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, String> {
     // The engine is compiled by the Windows toolchain; a platform without it gets a sentence, not
@@ -2240,6 +2335,24 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_repair_writes_its_key_into_the_section_it_belongs_to() {
+        let before = "[log]\npath = fefw.log\n[fs]\nexefs = C:/e\nromfs = E:/g.nup\nsave_dir = C:/s\n[nvn]\nshader_cache = C:/c\n";
+        let after = set_ini_value(before, "fs", "romfs_overlay", "C:/w/romfs-overlay");
+        // Anywhere inside [fs] is a key the engine reads; the file stays a flat list of lines.
+        let fs = after.split("[nvn]").next().unwrap_or_default();
+        assert!(fs.contains("romfs_overlay = C:/w/romfs-overlay"), "{after}");
+        assert!(after.starts_with("[log]\npath = fefw.log\n[fs]\n"), "{after}");
+        assert!(after.contains("[nvn]\nshader_cache = C:/c\n"), "{after}");
+        // A second run replaces the line instead of adding another one.
+        let again = set_ini_value(&after, "fs", "romfs_overlay", "D:/other");
+        assert_eq!(again.matches("romfs_overlay").count(), 1, "{again}");
+        assert!(again.contains("romfs_overlay = D:/other"), "{again}");
+        // A file with no [fs] section at all gets one.
+        let plain = set_ini_value("[log]\npath = fefw.log\n", "fs", "romfs_overlay", "C:/w");
+        assert!(plain.contains("[fs]\nromfs_overlay = C:/w\n"), "{plain}");
+    }
 
     #[test]
     fn the_reason_is_the_error_and_not_the_summary_after_it() {

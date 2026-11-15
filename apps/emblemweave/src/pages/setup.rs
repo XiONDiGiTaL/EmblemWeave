@@ -118,6 +118,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.start(JobKind::Detect);
     }
 
+    // One click for the failure that otherwise shows up two seconds into play: a package that packs some of its files with zstd, or a game
+    // folder built by an older release that points at such a package without the overlay of files it cannot serve in place (issue #24).
+    if app.game.romfs.is_some() {
+        widgets::section(ui, &p, "Game folder check", |ui| {
+            ui.label(
+                RichText::new(
+                    "Reads the package and writes out the files it cannot serve in place, then points the game at them. Nothing is rebuilt \
+                     and the package itself is only read. Do this once after updating, or if Play says the game was built against a packed \
+                     package.",
+                )
+                .size(13.0)
+                .color(p.body),
+            );
+            ui.add_space(theme::SPACE_S);
+            let busy = app.running(JobKind::Repair).is_some();
+            if widgets::button(ui, &p, "Check my game folder", !busy)
+                .on_hover_text("Writes the packed files into the engine's work folder and records them in fefw.ini. Nothing is compiled.")
+                .clicked()
+            {
+                app.start(JobKind::Repair);
+            }
+        });
+    }
+
     widgets::section(ui, &p, "Validation", |ui| {
         if app.game.checks.is_empty() {
             ui.label(RichText::new("No game folder chosen yet.").color(p.muted));

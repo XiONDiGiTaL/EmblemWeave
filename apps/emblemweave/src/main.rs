@@ -262,6 +262,10 @@ impl App {
                 (Some(exefs), Some(romfs)) => jobs::spawn(JobKind::Engine, &engine::STAGES, move |ctx| engine::build(ctx, exefs, romfs)),
                 _ => return self.notify("Choose the game data on Game Setup before building", Tone::Warn),
             },
+            JobKind::Repair => match self.game.nup.clone().or_else(|| self.game.romfs.clone()) {
+                Some(romfs) => jobs::spawn(JobKind::Repair, engine::REPAIR_STAGES, move |ctx| engine::repair(ctx, romfs)),
+                None => return self.notify("Choose the game data on Game Setup before checking it", Tone::Warn),
+            },
         };
         if kind != JobKind::Detect {
             self.note(format!("{} started", kind.title()), Tone::Accent);
@@ -324,6 +328,14 @@ impl App {
                 Some(JobResult::Engine(dir)) => {
                     drop(p);
                     self.notify(format!("The game is built and ready to play ({})", dir.display()), Tone::Ok);
+                }
+                Some(JobResult::Repaired(overlay)) => {
+                    drop(p);
+                    let text = match overlay {
+                        Some(dir) => format!("Game folder ready: the packed files are read from {}", dir.display()),
+                        None => "Game folder ready: the package is read where it lies, nothing to prepare".to_string(),
+                    };
+                    self.notify(text, Tone::Ok);
                 }
                 Some(JobResult::Boot(report, ms)) => {
                     drop(p);
