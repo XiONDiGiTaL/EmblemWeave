@@ -10,8 +10,37 @@ What EmblemWeave needs, and what the launcher means when it stops.
 | A decoded `main` module | Recompilation, always | **Game Setup > Decode main module**: the launcher writes `%APPDATA%\EmblemWeave\work\decoded\main` with Python and the `zbic` package (`pip install zbic`) |
 | A C compiler | Recompilation only, for the verification stage | `ziglang` (`pip install ziglang`, used as `zig cc`) or LLVM's `clang`, found on `PATH` or in its usual install folder (`C:\Program Files\LLVM\bin`, or the clang Visual Studio installs). Without one the pipeline still lifts the game; it skips the native check |
 | A Vulkan 1.3 driver | Play | Your graphics driver. The engine presents through Vulkan and has no other renderer |
-| LLVM 23, CMake, Ninja, .NET 10, uv, Git, PowerShell 7, VS 2022 Build Tools or newer with "Desktop development for C++" | Only when building `fefw.exe` from source: **Game Setup > Build the game** | winget (see the README's system requirements). The launcher names whichever are missing |
 | Disk space | Everywhere | About 30 GB for the decoded data, plus build output under `%APPDATA%\EmblemWeave\work` |
+
+## Tools for building the game
+
+Only **Game Setup > Build the game** needs these. Each row is one entry of the launcher's dependency registry: the
+Requirements page, this table and the pre-build check read the same definition, so they cannot disagree. A bundled
+translator is not a dependency: the release carries it with its own runtime, and the .NET SDK row applies only to a build
+that compiles the translator from source.
+
+<!-- requirements:start -->
+| Dependency | Needed for | Version | Missing it |
+| --- | --- | --- | --- |
+| Visual Studio C++ tools | Build the game | 2022 (17) or newer | `winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-package-agreements --accept-source-agreements` |
+| Windows 10/11 SDK | Build the game | 10.0 | `Add Windows 11 SDK under Individual components in the Visual Studio Installer, or install the standalone SDK, then press Check again.` |
+| LLVM (clang-cl and lld-link) | Build the game | 23 | `winget install --id LLVM.LLVM --exact --accept-package-agreements --accept-source-agreements` |
+| CMake | Build the game | 3.25 | `winget install --id Kitware.CMake --exact --accept-package-agreements --accept-source-agreements` |
+| Ninja | Build the game | any | `winget install --id Ninja-build.Ninja --exact --accept-package-agreements --accept-source-agreements` |
+| NASM | Build the game | 2.14 | `winget install --id NASM.NASM --exact --accept-package-agreements --accept-source-agreements` |
+| Git | Build the game | any | `winget install --id Git.Git --exact --accept-package-agreements --accept-source-agreements` |
+| PowerShell 7 | Build the game | 7 | `winget install --id Microsoft.PowerShell --exact --accept-package-agreements --accept-source-agreements` |
+| uv | Build the game | any | `winget install --id astral-sh.uv --exact --accept-package-agreements --accept-source-agreements` |
+| .NET 10 SDK | Build the game (only without the bundled translator) | 10 | `winget install --id Microsoft.DotNet.SDK.10 --exact --accept-package-agreements --accept-source-agreements` |
+| .NET runtime | Shaders (optional) | 10 | `winget install --id Microsoft.DotNet.Runtime.10 --exact --accept-package-agreements --accept-source-agreements` |
+| Shader translator | Shaders | any | Turns the game's shaders into SPIR-V. The release zip carries it, published with its own .NET runtime. |
+| Python | Decode | 3.9 | `winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements` |
+| zbic (Python package) | Decode | any | `py -m pip install zbic` |
+| C compiler | Recompilation | any | `py -m pip install ziglang` |
+<!-- requirements:end -->
+
+`EmblemWeave.exe --check-toolchain` runs the same checks in a console (exit 0 ready, 1 missing something, 2 the check
+itself could not run), and `EmblemWeave.exe --print-requirements` prints the table above.
 
 ## Running straight from a `.nup`
 

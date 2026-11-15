@@ -217,6 +217,11 @@ pub fn tool_path() -> String {
     dirs.push(r"C:\Program Files\dotnet".to_string());
     dirs.push(format!(r"{local}\Microsoft\WinGet\Links"));
     dirs.push(format!(r"{local}\bin\NASM"));
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        // `uv` and `uvx` install here, and nothing puts it on PATH for the
+        // launcher's own process.
+        dirs.push(format!(r"{home}\.local\bin"));
+    }
     let mut path: Vec<String> = dirs.into_iter().filter(|d| Path::new(d).is_dir()).collect();
     path.push(std::env::var("PATH").unwrap_or_default());
     path.join(";")
@@ -767,6 +772,30 @@ pub fn clear_cache(build: &Path) {
     let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
 }
 
+/// The environment `vcvars64.bat` produces, read once per process. The
+/// Requirements page asks for it as well as the build, and running vcvars twice
+/// would cost a second each time.
+pub struct DevEnv {
+    /// The raw `set` dump, for the values that are not passed to children
+    /// (`WindowsSdkDir`, `VCToolsInstallDir`).
+    pub vars: BTreeMap<String, String>,
+    /// What a child process gets: `INCLUDE`, `LIB`, `LIBPATH`, `PATH` and the rest.
+    pub env: Vec<(String, String)>,
+}
+
+pub fn dev_env() -> Result<&'static DevEnv, String> {
+    static CACHE: OnceLock<Result<DevEnv, String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let tc = probe();
+            let vs = tc.vs.as_ref().ok_or_else(|| "Visual Studio's C++ tools were not found".to_string())?;
+            let vars = vcvars_env(&vs.vcvars())?;
+            Ok(DevEnv { env: env_from_vcvars(&vars), vars })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// The toolchain the build uses, set up once per process: the probe, the
 /// `vcvars` environment, and the folder `clang-cl` is in.
 pub fn init() -> Result<&'static Resolved, String> {
@@ -786,13 +815,13 @@ fn resolve() -> Result<Resolved, String> {
     if let Some(problem) = toolchain.problems.first() {
         return Err(problem.clone());
     }
-    let vs = toolchain.vs.as_ref().ok_or("Visual Studio's C++ tools were not found")?;
     let clang = toolchain.clang.clone().ok_or("clang-cl was not found")?;
     // Now the part that needs the environment: the MSVC toolset and the SDK that
     // `vcvars64.bat` selects are what the build will actually use, and they are
     // not always in the folders a scan would guess.
-    let vars = vcvars_env(&vs.vcvars())?;
-    if let Some(m) = msvc_from_vars(&vars) {
+    let dev = dev_env()?;
+    let vars = &dev.vars;
+    if let Some(m) = msvc_from_vars(vars) {
         toolchain.msvc = Some(m);
     } else if toolchain.msvc.as_ref().is_none_or(|m| !m.has_bit()) {
         return Err(toolchain
@@ -801,11 +830,11 @@ fn resolve() -> Result<Resolved, String> {
             .map(|m| format!("the MSVC toolset {} has no `bit` header in {}", m.version, m.include().display()))
             .unwrap_or_else(|| "Visual Studio sets up no MSVC toolset".to_string()));
     }
-    match sdk_from_vars(&vars).or_else(sdk_selected) {
+    match sdk_from_vars(vars).or_else(sdk_selected) {
         Some(sdk) => toolchain.sdk = Some(sdk),
         None => return Err(no_sdk_problem()),
     }
-    let mut env = env_from_vcvars(&vars);
+    let mut env = dev.env.clone();
     // PATH from vcvars, with the LLVM and CMake folders in front of it.
     let path = format!("{};{}", tool_path(), vars.get("PATH").cloned().unwrap_or_default());
     if let Some(slot) = env.iter_mut().find(|(k, _)| k == "PATH") {

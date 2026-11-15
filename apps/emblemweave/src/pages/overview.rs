@@ -102,7 +102,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         if widgets::button(ui, &p, label, winget)
                             .on_hover_text(if winget {
                                 format!(
-                                    "Runs winget in a new window for: {}. Visual Studio is a few GB, the others are small. Accept the Windows permission prompt, then restart EmblemWeave.",
+                                    "Runs winget in a new window for: {}. Visual Studio is a few GB, the others are small. Accept the Windows permission prompt, then press Check again on Requirements; a restart is only needed if a tool still is not found.",
                                     missing.join(", ")
                                 )
                             } else {

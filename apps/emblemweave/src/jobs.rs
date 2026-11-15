@@ -450,6 +450,11 @@ fn cc_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The command that compiles C for the recompiler, for the Requirements page.
+pub fn cc_command() -> Option<Vec<String>> {
+    find_cc()
+}
+
 fn find_cc() -> Option<Vec<String>> {
     let works = |program: &str, args: &[&str]| {
         let mut cmd = std::process::Command::new(program);

@@ -10,6 +10,7 @@ pub mod media;
 pub mod mods;
 pub mod overview;
 pub mod recompile;
+pub mod requirements;
 pub mod saves;
 pub mod setup;
 
@@ -31,10 +32,11 @@ pub enum Page {
     Diagnostics,
     Log,
     About,
+    Requirements,
 }
 
 impl Page {
-    pub const ALL: [Page; 13] = [
+    pub const ALL: [Page; 14] = [
         Page::Overview,
         Page::Setup,
         Page::Saves,
@@ -48,6 +50,7 @@ impl Page {
         Page::Diagnostics,
         Page::Log,
         Page::About,
+        Page::Requirements,
     ];
 
     pub fn label(self) -> &'static str {
@@ -65,6 +68,7 @@ impl Page {
             Page::Diagnostics => "Diagnostics",
             Page::Log => "Game Log",
             Page::About => "About",
+            Page::Requirements => "Requirements",
         }
     }
 
@@ -84,6 +88,7 @@ impl Page {
             Page::Diagnostics => "🔍",
             Page::Log => "📄",
             Page::About => "ℹ",
+            Page::Requirements => "🧩",
         }
     }
 }
@@ -103,5 +108,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::Diagnostics => diagnostics::show(app, ui),
         Page::Log => log::show(app, ui),
         Page::About => about::show(app, ui),
+        Page::Requirements => requirements::show(app, ui),
     }
 }

@@ -149,33 +149,14 @@ fn sdk_major_from(listing: &str) -> Option<u32> {
         .max()
 }
 
-/// The tools the build needs, and whether each was found.
+/// The dependencies that stop the build, by registry name. It reads the
+/// report the background thread warms at start-up instead of running the checks
+/// itself: the Overview draws this every frame, and `vswhere`, `dotnet` and
+/// `vcvars64.bat` are not free. Until the first report exists this is empty,
+/// which claims nothing.
 pub fn missing_tools() -> Vec<&'static str> {
-    let path = tool_path();
-    let found = |exe: &str| path.split(';').any(|d| Path::new(d).join(exe).is_file());
-    // `dotnet.exe` alone is not enough: the harness targets net10.0, and an
-    // older or absent SDK fails the build after a long wait.
-    // A published translator inside the zip carries its own runtime, so the
-    // SDK is only needed on a copy that has to build the translator itself.
-    let dotnet_ok = bundled_harness().is_some()
-        || (found("dotnet.exe") && dotnet_sdk_major().is_some_and(|major| major >= 10));
-    let mut missing: Vec<&'static str> = [
-        ("clang-cl.exe", "LLVM 23 (clang-cl)"),
-        ("cmake.exe", "CMake"),
-        ("ninja.exe", "Ninja"),
-        ("dotnet.exe", ".NET 10 SDK"),
-        ("uv.exe", "uv"),
-        ("git.exe", "Git"),
-        ("pwsh.exe", "PowerShell 7"),
-    ]
-    .into_iter()
-    .filter(|(exe, name)| if *name == ".NET 10 SDK" { !dotnet_ok } else { !found(exe) })
-    .map(|(_, name)| name)
-    .collect();
-    if vc_tools().is_none() {
-        missing.insert(0, "Visual Studio 2022 Build Tools with the C++ workload");
-    }
-    missing
+    let rows = crate::deps::cached().unwrap_or_default();
+    crate::deps::blocking_for(&rows, crate::deps::Stage::Build).into_iter().map(|r| r.dep.name).collect()
 }
 
 /// The winget line that installs Visual Studio's C++ tools. It is the one tool
@@ -188,58 +169,70 @@ pub fn have_winget() -> bool {
     tool_path().split(';').any(|d| Path::new(d).join("winget.exe").is_file())
 }
 
-/// The installer script for a list of missing tools, kept separate so a test
-/// can read exactly what it will run. Each tool is one winget line, and a tool
-/// that fails does not stop the ones after it: the summary at the end names it.
-pub fn install_script_for(tools: &[&str]) -> String {
-    let mut s = String::from("@echo off\r\ntitle EmblemWeave: build tools\r\n");
-    s.push_str("echo Installing the build tools EmblemWeave needs.\r\n");
-    s.push_str("echo.\r\n");
-    s.push_str("echo Accept the administrator prompt when Windows shows it.\r\n");
-    s.push_str("echo Visual Studio is a few GB; the others are small.\r\n");
-    s.push_str("echo.\r\n");
+/// The runnable install lines for a list of registry names.
+pub fn install_lines_for(tools: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     for tool in tools {
-        let hint = install_hint(tool);
-        if !hint.starts_with("winget ") {
+        let Some(install) = crate::deps::DEPS.iter().find(|d| d.name == *tool).and_then(|d| d.install) else { continue };
+        if !install.runnable() {
             continue;
         }
-        // Non-interactive: every line accepts the source and package
-        // agreements, or winget stops on a prompt the script never answers.
-        let line = if hint.contains("--accept-package-agreements") {
-            hint.to_string()
-        } else {
-            format!("{hint} --accept-package-agreements --accept-source-agreements")
+        let line = match install {
+            crate::deps::Install::Winget(l) if !l.contains("--accept-package-agreements") => {
+                format!("{l} --accept-package-agreements --accept-source-agreements")
+            }
+            other => other.line().to_string(),
         };
-        s.push_str(&format!("echo === {tool} ===\r\n{line}\r\nif errorlevel 1 echo That one did not finish: {tool}\r\n"));
+        if !out.contains(&line) {
+            out.push(line);
+        }
     }
-    s.push_str("echo.\r\necho Done. Close this window, restart EmblemWeave, then press Build the game again.\r\npause\r\n");
+    out
+}
+
+/// A script that runs the given lines one after another in one console, so the
+/// user answers one permission prompt per installer instead of hunting for each
+/// command. A failing line does not stop the rest.
+pub fn install_script_lines(lines: &[String]) -> String {
+    let mut s = String::from("@echo off\r\ntitle EmblemWeave: build tools\r\n");
+    s.push_str("echo Installing what EmblemWeave needs. Accept the administrator prompt when Windows shows it.\r\n");
+    s.push_str("echo.\r\n");
+    for line in lines {
+        s.push_str(&format!("echo === {line} ===\r\n{line}\r\nif errorlevel 1 echo That one did not finish.\r\necho.\r\n"));
+    }
+    s.push_str("echo Done. Close this window, then press Check again on Requirements.\r\npause\r\n");
     s
 }
 
-/// What the button on Overview runs: every tool the preflight says is absent.
-pub fn install_script() -> String {
-    install_script_for(&missing_tools())
-}
-
-/// Write the installer script and run it in its own console, where winget can
-/// show progress and raise the permission prompts it needs.
-pub fn start_install() -> Result<PathBuf, String> {
-    if !have_winget() {
-        return Err("winget is not available on this PC, so the installer cannot be started. Install App Installer from the Microsoft Store, or install the tools by hand from https://aka.ms/vs/17/release/vs_buildtools.exe and the links in docs/TROUBLESHOOTING.md.".into());
+/// Write a one-off installer script for these lines and run it in its own
+/// console, where winget can show progress and raise its prompts.
+pub fn start_install_lines(lines: &[String]) -> Result<PathBuf, String> {
+    if lines.is_empty() {
+        return Ok(PathBuf::new());
     }
     let dir = Config::work_dir().ok_or("APPDATA is not set")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let script = dir.join("install-build-tools.cmd");
-    std::fs::write(&script, install_script()).map_err(|e| format!("writing {}: {e}", script.display()))?;
+    std::fs::write(&script, install_script_lines(lines)).map_err(|e| format!("writing {}: {e}", script.display()))?;
     let mut cmd = Command::new("cmd");
     cmd.args(["/C", "start", "", &script.display().to_string()]).stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, so only winget's console shows
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, so only the installer console shows
     }
     cmd.spawn().map_err(|e| format!("starting the installer: {e}"))?;
     Ok(script)
+}
+
+/// What the button on Overview runs: the registry's install lines for every
+/// dependency the preflight says is absent or too old.
+pub fn start_install() -> Result<PathBuf, String> {
+    if !have_winget() {
+        return Err("winget is not available on this PC, so the installer cannot be started. Install App Installer from the Microsoft Store, or follow the install lines in docs/TROUBLESHOOTING.md.".into());
+    }
+    let lines = install_lines_for(&missing_tools());
+    start_install_lines(&lines)
 }
 
 /// The CMake version this PC has, as (major, minor). The engine's projects ask
@@ -251,21 +244,15 @@ pub fn cmake_version() -> Option<(u32, u32)> {
     Some((*parts.first()?, *parts.get(1)?))
 }
 
-/// What to install for a tool the build did not find: an error that only says
-/// something is missing sends the user to a search engine (or to the issue
-/// tracker, as it did).
+/// What installs a dependency, by registry name: the same line the Requirements
+/// page shows, so the message in a log and the button in the interface agree.
 pub fn install_hint(tool: &str) -> &'static str {
-    match tool {
-        "Visual Studio 2022 Build Tools with the C++ workload" => VS_INSTALL,
-        "LLVM 23 (clang-cl)" => "winget install LLVM.LLVM",
-        "CMake" => "winget install Kitware.CMake",
-        "Ninja" => "winget install Ninja-build.Ninja",
-        ".NET 10 SDK" => "winget install Microsoft.DotNet.SDK.10",
-        "uv" => "winget install astral-sh.uv",
-        "Git" => "winget install Git.Git",
-        "PowerShell 7" => "winget install Microsoft.PowerShell",
-        _ => "see docs/TROUBLESHOOTING.md",
-    }
+    crate::deps::DEPS
+        .iter()
+        .find(|d| d.name == tool)
+        .and_then(|d| d.install)
+        .map(|i| i.line())
+        .unwrap_or("see docs/TROUBLESHOOTING.md")
 }
 
 /// Run one command in `cwd`, its output (stdout and stderr) into the job
@@ -1852,13 +1839,15 @@ mod tests {
     }
 
     #[test]
-    fn the_installer_script_installs_every_missing_tool() {
-        let s = install_script_for(&[
-            "Visual Studio 2022 Build Tools with the C++ workload",
-            "LLVM 23 (clang-cl)",
+    fn the_installer_script_installs_every_missing_dependency() {
+        let lines = install_lines_for(&[
+            "Visual Studio C++ tools",
+            "LLVM (clang-cl and lld-link)",
             "CMake",
             "PowerShell 7",
+            "zbic (Python package)",
         ]);
+        let s = install_script_lines(&lines);
         // A plain cmd script, or the console closes before anything is read.
         assert!(s.starts_with("@echo off"));
         assert!(s.contains("Microsoft.VisualStudio.2022.BuildTools"), "{s}");
@@ -1867,15 +1856,19 @@ mod tests {
         assert!(s.contains("--accept-package-agreements"));
         assert!(s.contains("--accept-source-agreements"));
         // Every tool in the list is run, not just the first.
-        assert!(s.contains("winget install LLVM.LLVM"), "{s}");
-        assert!(s.contains("winget install Kitware.CMake"), "{s}");
-        assert!(s.contains("winget install Microsoft.PowerShell"), "{s}");
+        assert!(s.contains("--id LLVM.LLVM"), "{s}");
+        assert!(s.contains("--id Kitware.CMake"), "{s}");
+        assert!(s.contains("--id Microsoft.PowerShell"), "{s}");
+        // A dependency installed by a command rather than winget runs too.
+        assert!(lines.iter().any(|l| l == "py -m pip install zbic"), "{lines:?}");
         assert!(s.trim_end().ends_with("pause"));
     }
 
     #[test]
-    fn a_tool_without_an_install_line_is_left_out() {
-        let s = install_script_for(&["Some tool nobody knows"]);
+    fn a_dependency_without_an_install_line_is_left_out() {
+        let lines = install_lines_for(&["Shader translator", "Some tool nobody knows"]);
+        assert!(lines.is_empty(), "{lines:?}");
+        let s = install_script_lines(&lines);
         assert!(!s.contains("winget "), "{s}");
         assert!(s.contains("Done."));
     }

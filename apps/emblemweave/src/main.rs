@@ -20,6 +20,7 @@ mod pages;
 mod cheats;
 mod ingame;
 mod crash;
+mod deps;
 mod mods;
 mod pad;
 mod perf;
@@ -150,6 +151,10 @@ impl App {
         std::thread::spawn(|| {
             let _ = crate::engine::brand_game();
         });
+        // The dependency report takes a second (vswhere, dotnet, one vcvars
+        // run); warming it here is what lets the Overview and Requirements
+        // pages draw it without waiting.
+        std::thread::spawn(|| crate::deps::warm());
         let mut app = App {
             applied: config.theme,
             config,
@@ -528,7 +533,7 @@ impl App {
             ("Play", &[Page::Overview, Page::Setup]),
             ("Library", &[Page::Saves, Page::Mods, Page::Cheats]),
             ("Runtime", &[Page::Recompile, Page::Graphics, Page::Audio, Page::Controls]),
-            ("System", &[Page::Appearance, Page::Diagnostics, Page::Log, Page::About]),
+            ("System", &[Page::Appearance, Page::Diagnostics, Page::Requirements, Page::Log, Page::About]),
         ];
         let p = self.config.theme.palette();
         egui::SidePanel::left("nav")
@@ -988,33 +993,70 @@ fn verify_log_cli(path: Option<&str>) -> i32 {
 /// Exit codes: 0 ready, 1 a piece is missing or too old, 2 the pieces are there
 /// but they cannot compile and link the test file.
 fn check_toolchain_cli() -> i32 {
+    // The registry first: it is what the Requirements page and the pre-build
+    // check read, and it names every log the player can act on.
+    let rows = crate::deps::check();
+    println!("requirements:");
+    for row in &rows {
+        println!(
+            "  {:<30} {:<11} {:<8} {}",
+            row.dep.name,
+            row.status.label(),
+            if row.required { "required" } else { "optional" },
+            row.status.detail()
+        );
+    }
+    let blocking = crate::deps::blocking(&rows);
+    for row in &blocking {
+        let install = match row.dep.install {
+            Some(i) => i.line().to_string(),
+            None => row.dep.note.to_string(),
+        };
+        println!(
+            "
+missing: {} (needs {})
+  detection: {}
+  install: {install}",
+            row.dep.name,
+            row.dep.min.unwrap_or("any version"),
+            row.status.detail()
+        );
+    }
     let tc = crate::toolchain::probe();
-    println!("toolchain: {}", tc.summary());
-    println!("fingerprint: {}", tc.fingerprint());
     for (name, value) in crate::toolchain::stale_env() {
         println!("ignoring the inherited {name}={value}");
     }
+    if !blocking.is_empty() {
+        return 1;
+    }
     if !tc.problems.is_empty() {
         for p in &tc.problems {
-            println!("\nproblem: {p}");
+            println!("
+problem: {p}");
         }
         return 1;
     }
     let resolved = match crate::toolchain::init() {
         Ok(r) => r,
         Err(e) => {
-            println!("\nproblem: {e}");
+            println!("
+problem: {e}");
             return 1;
         }
     };
+    println!("
+toolchain: {}", resolved.toolchain.summary());
+    println!("fingerprint: {}", resolved.toolchain.fingerprint());
     let dir = std::env::temp_dir().join("emblemweave-toolchain-probe");
     match crate::toolchain::probe_build(&resolved.compiler, &resolved.env, &dir) {
         Ok(()) => {
-            println!("\nthe toolchain compiled and linked its test file with its own headers, libraries and SDK; the build can start");
+            println!("
+the toolchain compiled and linked its test file with its own headers, libraries and SDK; the build can start");
             0
         }
         Err(e) => {
-            println!("\nproblem: {e}");
+            println!("
+problem: {e}");
             2
         }
     }
@@ -1025,6 +1067,12 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--check-toolchain") {
         std::process::exit(check_toolchain_cli());
+    }
+    // The dependency table the docs carry, from the registry the build checks:
+    // the same text goes into README.md and docs/TROUBLESHOOTING.md.
+    if args.iter().any(|a| a == "--print-requirements") {
+        print!("{}", crate::deps::markdown());
+        std::process::exit(0);
     }
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
         let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);
