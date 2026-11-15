@@ -81,13 +81,6 @@ Two things keep it that way, and both run on every release:
   name is built with `/`, each folder gets its own entry, and the tree's executable bits are set on the entries
   that need them. It then runs the verifier below against the file it just wrote and fails the release if the
   verifier does.
-Before it publishes, `tools/package_release.ps1` also extracts the zip and runs the engine's own CMake configure
-  from the extracted tree: the first step a missing source folder kills, and the one that caught the release without
-  `runtime/third_party`. It needs the same Visual Studio C++ tools and LLVM the game build needs, and fetches the
-  graphics dependencies a build fetches (into `%LOCALAPPDATA%
-xrt\deps`, so only the first run needs the network).
-  It skips with that reason when the tools are absent, and `-SkipConfigureCheck` turns it off.
-
 * `tools/verify_archive.py` reads an archive back and refuses it when an entry is absolute (`/x`, `C:/x`), carries
   a drive letter, climbs out with `..`, starts with `./` or `.\`, uses a backslash, contains a control character,
   or collides with another entry's name or case (which is how a Windows build produces a zip that drops a file on
@@ -106,7 +99,15 @@ unzip -q EmblemWeave-vX.Y.Z-windows-x64.zip -d EmblemWeave
 python3 -c "import zipfile;print(zipfile.ZipFile('EmblemWeave-vX.Y.Z-windows-x64.zip').namelist()[:3])"
 ```
 
-Both print names like `EmblemWeave-vX.Y.Z/docs/PACKAGE.md` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
+Before it publishes, `tools/package_release.ps1` also extracts the zip and runs the engine's own CMake configure
+from the extracted tree: the first step a missing source folder kills, and the one that caught the release without
+`runtime/third_party`. It needs the same Visual Studio C++ tools and LLVM the game build needs, and fetches the
+graphics dependencies a build fetches (into `%LOCALAPPDATA%\nxrt\deps`, so only the first run needs
+the network). It skips, with that reason, when those tools are absent, and `-SkipConfigureCheck` turns it off.
+
+Both print names like `EmblemWeave-vX.Y.Z/docs/PACKAGE.md` with `/`.
+
+The symptom of files landing in one flat pile with `\` in their names comes
 from re-packing the folder on Windows with a tool that writes backslashes (Windows PowerShell 5.1's `Compress-Archive`
 does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes - if it differs,
 you are extracting a re-zipped copy, not the download.
