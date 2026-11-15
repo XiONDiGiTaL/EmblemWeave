@@ -18,15 +18,14 @@ That archive is the only known copy of the 0.2.0 package.
 
 ## What this repository keeps
 
-- **The engine** in `engine/fefw-recomp`: the last upstream commit taken in
-  (`501f7c0`, 9 November 2026) plus EmblemWeave's own changes, such as serving
-  zstd-packed `.nup` entries from a decompressed cache. It is committed here as
-  ordinary files rather than as a submodule, since a submodule would point at a
-  repository that no longer exists: a fresh clone is complete and needs no fetch
-  step, and the vendored tree keeps its own `.gitignore` so game data and build
-  output stay out. The copy carries the files, not the upstream commit history,
-  which went with the repository; `git log` of EmblemWeave records when and why
-  it was brought in.
+- **The engine** in `engine/fefw-recomp`: the later tree Obersteinn kept, taken
+  in whole (see [What the first audit got wrong](#what-the-first-audit-got-wrong)).
+  It is committed here as ordinary files rather than as a submodule, since a
+  submodule would point at a repository that no longer exists: a fresh clone is
+  complete and needs no fetch step, and the vendored tree keeps its own
+  `.gitignore` so game data and build output stay out. The copy carries the
+  files, not the upstream commit history, which went with the repository;
+  `git log` of EmblemWeave records when and why it was brought in.
 - **`apps/emblemweave/data/dump_hashes.json`**, copied unchanged from the 0.2.0
   package's `tools/build/dump_hashes.json`. Game Setup hashes the user's ExeFS
   modules against it and reports whether they are the build the engine was tested
@@ -38,10 +37,13 @@ That archive is the only known copy of the 0.2.0 package.
 
 ## What it does not ship
 
-The packaged `fefw-launcher.exe`, `fefw_rt.dll`, `renhdrum.dll`, the bundled
-Python and Zig runtimes and the translation files stay out of this repository.
-EmblemWeave has its own launcher and its own runtime; nothing from the package
-is redistributed here, and the archive itself contains no game data.
+The packaged `fefw-launcher.exe`, `fefw_rt.dll`, the bundled Python and Zig
+runtimes and the launcher's translation files stay out of this repository.
+EmblemWeave has its own launcher, and the runtime is built from source here.
+One library is the exception: `renhdrum.dll` is vendored with its licences at
+`engine/fefw-recomp/runtime/third_party/renhdrum` (MIT OR Apache-2.0), because
+the haptics backends load it from beside `fefw.exe` and there is no source
+build of it in this repository. The archive itself contains no game data.
 
 ## Credit
 
@@ -68,6 +70,36 @@ One delta is worth recording: the package's `recomp/games/fefw/main.sites` is th
 this repository's, and its three extra lines point at two features the runtime does not implement yet, a real-time map
 cursor step (`cursor_real_time`) and a stat radar chart. Copying the sites without the hooks would do nothing, so they
 wait for whoever ports those two features.
+
+## What the first audit got wrong
+
+That audit compared the archive's **build tools** with this repository, not the
+two runtimes with each other, and so declared the engine complete when it was an
+earlier state of the same project. Compared properly, the folder Obersteinn kept
+had 43 source files this repository did not, and 138 more had moved since:
+
+- haptics (`gfx/haptic.cpp`, `nxrt/haptic.h`, the vendored `renhdrum.dll`): DualSense haptics and Switch Pro HD Rumble,
+  with the standard two-motor rumble as the fallback,
+- GPU ASTC decode and BC1 encode (`nvn_astc_gpu.cpp`, three compute shaders, a generator), and texture residency
+  (`nvn_residency.cpp`), which ends the minutes-long CPU transcode on entering an area and gives video memory back,
+- the CPU-variant build (`fefw_cpu.h`, `fefw_fma.c`, `launcher/src-tauri/src/cpu.rs`, the `CPU_VARIANTS` in
+  `fefw_build.py`), which builds the lifted code for FMA3 processors or for older ones, and refuses to start a build
+  the processor cannot run,
+- the F1 live render state, the Overwolf Vulkan layer filter, FidelityFX DLL discovery, XeSS, F1 menu translation
+  (`locales/zh.ini`), and the Linux packaging script.
+
+So `fefw_fma.c` was not a release-only artefact to leave out; it is part of the
+compatible build that pre-Haswell processors need. In November 2026 that folder
+was compared again and became the engine in this repository, with our launcher
+unchanged: the Controls page now writes `[pad] haptic` and `[pad] haptic_strength`
+instead of the `rumble` and `rumble_scale` keys nothing reads, the build copies
+`renhdrum.dll` beside `fefw.exe` where the runtime looks for it, and the shader
+step relies on the harness's per-block journal instead of `--only-missing`.
+
+The one thing that did not carry over is this repository's `.nx` archive reader
+(`runtime/src/loader/nx.cpp` and `nxrt/nx.h`), because the later tree reads
+`.nup` only. It is kept in `target/engine-keep` for a port if `.nx` support is
+wanted back.
 
 ## The FE3H Recomp, inspected
 
