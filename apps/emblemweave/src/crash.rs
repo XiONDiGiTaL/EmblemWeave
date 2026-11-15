@@ -148,10 +148,18 @@ pub fn environment_text() -> String {
         if let Some(path) = newest {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 let all: Vec<&str> = text.lines().collect();
-                let from = all.len().saturating_sub(40);
+                let from = all.len().saturating_sub(60);
                 s.push_str(&format!("\n== last log: {} ==\n", path.file_name().unwrap_or_default().to_string_lossy()));
                 s.push_str(&all[from..].join("\n"));
                 s.push('\n');
+                // The error that stopped the build can be thousands of lines above the tail: CMake keeps configuring
+                // after an error in one directory and prints "Configuring incomplete" at the end, which is all a
+                // report used to contain.
+                if let Some(block) = crate::engine::first_error_block(&text) {
+                    s.push_str("\n== first error in that log ==\n");
+                    s.push_str(&block);
+                    s.push('\n');
+                }
             }
         }
     }

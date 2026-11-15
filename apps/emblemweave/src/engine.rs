@@ -20,7 +20,7 @@
 
 use crate::config::Config;
 use crate::jobs::{Ctx, JobResult, StageStatus};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -346,26 +346,68 @@ fn run(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str]) -> Result<(), String
 /// The line of a failed run that explains it. Build tools end with a summary
 /// ("CMake Generate step failed. Build files cannot be regenerated correctly")
 /// that hides the error several lines above it.
-fn reason_from(lines: &[String]) -> String {
+/// Whether a line of build output is an error rather than a progress note.
+fn error_line(l: &str) -> bool {
     // "-- Configuring incomplete, errors occurred!" mentions errors without
     // being one, so a plain substring search finds the wrong line.
-    let is_error = |l: &&String| {
-        let t = l.trim();
-        let lower = t.to_lowercase();
-        // cmd wraps "'git' is not recognized …" onto a second line, so the last
-        // two lines of such a run are "…subcommand failed. | operable program
-        // or batch file." — the name of the missing tool would be lost.
-        !t.starts_with("--")
-            && (lower.starts_with("error")
-                || lower.contains("cmake error")
-                || lower.contains("error:")
-                || lower.contains(": error")
-                || lower.contains("is not recognized as an internal or external command")
-                || lower.contains("is not recognized as the name of a cmdlet"))
-    };
-    match lines.iter().find(is_error) {
+    let t = l.trim();
+    let lower = t.to_lowercase();
+    // cmd wraps "'git' is not recognized …" onto a second line, so the last
+    // two lines of such a run are "…subcommand failed. | operable program
+    // or batch file." — the name of the missing tool would be lost.
+    !t.starts_with("--")
+        && (lower.starts_with("error")
+            || lower.contains("cmake error")
+            || lower.contains("error:")
+            || lower.contains(": error")
+            || lower.contains("fatal error")
+            || lower.contains("is not recognized as an internal or external command")
+            || lower.contains("is not recognized as the name of a cmdlet"))
+}
+
+fn reason_from(lines: &[String]) -> String {
+    match lines.iter().find(|l| error_line(l)) {
         Some(err) => err.clone(),
         None => lines.iter().rev().take(2).cloned().collect::<Vec<_>>().join(" | "),
+    }
+}
+
+/// The first error in a whole log, with the lines that follow it. CMake keeps
+/// configuring after an error in one directory and prints "Configuring
+/// incomplete" thousands of lines later, so the tail of a failed build often
+/// names the summary and nothing else. This finds the message itself.
+pub fn first_error_block(text: &str) -> Option<String> {
+    let mut lines = text.lines().skip_while(|l| !error_line(l));
+    let head = lines.next()?.trim().to_string();
+    let mut block = vec![head];
+    for l in lines.take(6) {
+        if !l.trim().is_empty() && block.len() < 7 {
+            block.push(l.trim_end().to_string());
+        }
+        if block.len() >= 7 {
+            break;
+        }
+    }
+    Some(block.join("\n"))
+}
+
+/// Lines from a child's pipe, tolerating bytes that are not UTF-8. `BufRead::lines`
+/// stops at the first bad byte and every line after it is lost — which is how a
+/// CMake error block disappears from a log whose summary line still arrives.
+fn stream_lines(reader: impl std::io::Read, mut each: impl FnMut(String)) {
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match std::io::BufRead::read_until(&mut reader, b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+                    buf.pop();
+                }
+                each(String::from_utf8_lossy(&buf).into_owned());
+            }
+        }
     }
 }
 
@@ -413,43 +455,39 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
     ctx.log(format!("> {program} {}", args.join(" ")));
     // The last lines a failed step printed: the log has everything, but the
     // message is what the user reads, and "exit code 1" alone is not a reason.
-    let tail: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>> = Default::default();
+    let tail: Tail = Default::default();
+    // The first error anywhere in the run, with its context. A configure that
+    // fails in one directory and prints the summary at the end hides the message
+    // far above the tail, which is exactly how "Configuring incomplete, errors
+    // occurred!" ends up being the only thing a report says.
+    let first_error: FirstError = Default::default();
     let mut child = cmd.spawn().map_err(|e| format!("starting {program}: {e}"))?;
     let err = child.stderr.take().map(|e| {
         let ctx = ctx.clone();
         let tail = tail.clone();
+        let first = first_error.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(e).lines().map_while(Result::ok) {
+            stream_lines(e, |line| {
                 ctx.log(line.clone());
-                if let Ok(mut t) = tail.lock() {
-                    t.push_back(line);
-                    while t.len() > 400 {
-                        t.pop_front();
-                    }
-                }
-            }
+                remember(&tail, &first, &line);
+            });
         })
     });
     if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
+        let ctx = ctx.clone();
+        let tail = tail.clone();
+        let first = first_error.clone();
+        stream_lines(out, |line| {
             ctx.log(line.clone());
-            if let Ok(mut t) = tail.lock() {
-                t.push_back(line);
-                while t.len() > 400 {
-                    t.pop_front();
-                }
-            }
-            if ctx.cancelled() {
-                let _ = child.kill();
-                return Err("cancelled".into());
-            }
-        }
+            remember(&tail, &first, &line);
+        });
     }
     if let Some(t) = err {
         let _ = t.join();
     }
     let status = child.wait().map_err(|e| format!("waiting for {program}: {e}"))?;
     if ctx.cancelled() {
+        let _ = child.kill();
         return Err("cancelled".into());
     }
     if status.success() {
@@ -463,6 +501,14 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
             .map(|t| t.iter().filter(|l| !l.trim().is_empty()).cloned().collect())
             .unwrap_or_default();
         let said = reason_from(&lines);
+        let block: Vec<String> = first_error
+            .lock()
+            .ok()
+            .and_then(|b| b.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         let name = step_name(program, args);
         if said.is_empty() {
             // Nothing at all was printed. A script that security software or a
@@ -473,15 +519,63 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
                  machine policy or security software stops it before its first line; the log has the command and the \
                  lines around it"
             ))
-        } else if let Some(missing) = missing_program(&said) {
+        } else if let Some(missing) = missing_program(&block.join(" ")).or_else(|| missing_program(&said)) {
             Err(format!(
                 "the build called `{missing}`, which is not installed or not on PATH ({program} {name} failed ({status})). \
                  Install it, restart the launcher, then press Build the game again"
             ))
+        } else if !block.is_empty() {
+            // The error that was printed, wherever in the run it was printed.
+            Err(format!("{program} {name} failed ({status}): {}", block.join(" | ")))
         } else {
             Err(format!("{program} {name} failed ({status}): {said}"))
         }
     }
+}
+
+type Tail = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+type FirstError = std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>;
+
+/// Keep the last lines, and the first error with the lines that follow it.
+fn remember(tail: &Tail, first: &FirstError, line: &str) {
+    if let Ok(mut t) = tail.lock() {
+        t.push_back(line.to_string());
+        while t.len() > 4000 {
+            t.pop_front();
+        }
+    }
+    if let Ok(mut f) = first.lock() {
+        match f.as_mut() {
+            None => {
+                if error_line(line) {
+                    *f = Some(vec![line.to_string()]);
+                }
+            }
+            Some(block) => {
+                if block.len() < 8 {
+                    block.push(line.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// A fetch that stopped halfway leaves sources CMake then fails on: it names the
+/// `_deps` folder, the patch check, or the stale image patch.
+fn half_written_deps(reason: &str) -> bool {
+    reason.contains("_deps")
+        || reason.contains("imgui_checked.cmake")
+        || reason.contains("failure patch no longer matches pinned source")
+}
+
+/// CMake refusing to work in a build folder it did not create: a compiler or a
+/// generator that is gone, or a cache from a different CMake.
+fn stale_build_cache(reason: &str) -> bool {
+    reason.contains("CMakeCache.txt")
+        || reason.contains("does not match the generator used previously")
+        || reason.contains("CMAKE_CXX_COMPILER")
+        || reason.contains("CMAKE_C_COMPILER")
+        || reason.contains("is not a full path")
 }
 
 fn has_files(dir: &Path) -> bool {
@@ -639,28 +733,46 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         None => Vec::new(),
     };
     let fefw = || run_env(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
-    if let Err(e) = fefw() {
-        // The runtime fetches its graphics dependencies into the build folder, and
-        // a fetch that was interrupted leaves the source folder half written. CMake
-        // then fails on a file that is not there, or says the patch no longer
-        // matches the pinned source, and it never repairs itself: the download
-        // stamps are still in place. Throw the fetched sources away and fetch once
-        // more before giving up. What was downloaded is kept in %LOCALAPPDATA%\nxrt
-        // \deps, so this costs an unpack, not a download.
-        // The message names the CMake file that tripped, not the missing source,
-        // so the check has to look for the patch check and the imgui file too.
-        let half = e.contains("_deps")
-            || e.contains("imgui_checked.cmake")
-            || e.contains("failure patch no longer matches pinned source");
-        if !half {
-            return Err(e);
+    // Two failures the launcher can repair on its own, each once:
+    //
+    // - The runtime fetches its graphics dependencies into the build folder, and a
+    //   fetch that was interrupted leaves the source folder half written. CMake then
+    //   fails on a file that is not there, or says the patch no longer matches the
+    //   pinned source, and it never repairs itself: the download stamps are still in
+    //   place. Throw the fetched sources away and fetch once more. What was downloaded
+    //   is kept in %LOCALAPPDATA%\nxrt\deps, so this costs an unpack, not a download.
+    //
+    // - A build folder left by an older launcher names a compiler, generator or CMake
+    //   that is no longer installed, and CMake refuses to configure in it until its
+    //   cache goes. The downloads and the fetched sources stay.
+    let builds = root.join("game-build").join("fefw").join("build");
+    let mut repaired_deps = false;
+    let mut repaired_cache = false;
+    loop {
+        let e = match fefw() {
+            Ok(()) => break,
+            Err(e) => e,
+        };
+        // The message names the CMake file that tripped, not the missing source, so
+        // the check has to look for the patch check and the imgui file too.
+        if !repaired_deps && half_written_deps(&e) {
+            repaired_deps = true;
+            ctx.log("a fetched dependency is incomplete; clearing it and fetching again");
+            for config in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
+                let _ = std::fs::remove_dir_all(config.path().join("_deps"));
+            }
+            continue;
         }
-        ctx.log("a fetched dependency is incomplete; clearing it and fetching again");
-        let builds = root.join("game-build").join("fefw").join("build");
-        for config in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
-            let _ = std::fs::remove_dir_all(config.path().join("_deps"));
+        if !repaired_cache && stale_build_cache(&e) {
+            repaired_cache = true;
+            ctx.log("the build folder was made by a different toolchain; clearing its CMake cache and configuring again");
+            for config in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
+                let _ = std::fs::remove_file(config.path().join("CMakeCache.txt"));
+                let _ = std::fs::remove_dir_all(config.path().join("CMakeFiles"));
+            }
+            continue;
         }
-        fefw()?;
+        return Err(e);
     }
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
@@ -1673,6 +1785,60 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         std::fs::write(slot.join(file_name), b"x").unwrap();
         assert_eq!(super::bundled_harness_in(&dir), Some(slot.join(file_name)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_two_repairs_recognise_their_own_failures() {
+        // Half-written fetch: the CMake file that tripped, or the _deps folder.
+        assert!(super::half_written_deps("CMake Error at _deps/imgui-src/CMakeLists.txt:3"));
+        assert!(super::half_written_deps("ImGui Vulkan failure patch no longer matches pinned source"));
+        assert!(!super::half_written_deps("clang-cl: error: unknown argument '-fno-exceptions'"));
+        // A cache from another toolchain.
+        assert!(super::stale_build_cache("CMakeCache.txt is different than the one used previously"));
+        assert!(super::stale_build_cache("CMAKE_CXX_COMPILER points at a path that does not exist"));
+        assert!(!super::stale_build_cache("Configuring incomplete, errors occurred!"));
+    }
+
+    #[test]
+    fn a_log_reader_keeps_the_lines_after_a_bad_byte() {
+        // `BufRead::lines` returns Err at the 0xFF and stops: every line after it, the CMake error block included, was
+        // dropped from the log while the summary on stdout still arrived.
+        let mut got = Vec::new();
+        super::stream_lines(&b"first\n\xff broken\ncmake: last\n"[..], |l| got.push(l));
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0], "first");
+        assert!(got[1].contains("broken"), "{}", got[1]);
+        assert_eq!(got[2], "cmake: last");
+    }
+
+    #[test]
+    fn the_first_error_is_kept_with_its_context_from_anywhere_in_the_log() {
+        let mut text = String::new();
+        for i in 0..5000 {
+            text.push_str(&format!("-- populating dependency {i}\n"));
+        }
+        text.push_str("CMake Error at cmake/gfx_deps.cmake:41 (message):\n");
+        text.push_str("  no ASTC transcoder: neither the ISPC build\n");
+        for i in 0..5000 {
+            text.push_str(&format!("-- more output {i}\n"));
+        }
+        text.push_str("-- Configuring incomplete, errors occurred!\n");
+        let block = super::first_error_block(&text).expect("the error is in the log");
+        assert!(block.starts_with("CMake Error at cmake/gfx_deps.cmake:41"), "{block}");
+        assert!(block.contains("no ASTC transcoder"), "{block}");
+        assert!(!block.contains("Configuring incomplete"), "the summary is not the error: {block}");
+    }
+
+    #[test]
+    fn a_run_remembers_the_first_error_and_not_a_later_one() {
+        let tail: super::Tail = Default::default();
+        let first: super::FirstError = Default::default();
+        for line in ["-- step", "error: first thing", "  detail", "error: second thing"] {
+            super::remember(&tail, &first, line);
+        }
+        let block = first.lock().unwrap().clone().expect("a block was recorded");
+        assert_eq!(block[0], "error: first thing");
+        assert_eq!(block.len(), 3);
     }
 
     #[test]

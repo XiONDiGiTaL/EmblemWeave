@@ -37,7 +37,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.11, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.12, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
 > opening movie and cutscenes. 0.1.11 puts the shader translator in the zip with its own .NET runtime, so the build no
 > longer needs the .NET SDK at all. 0.1.10 fixes the build failures behind most of the reports so far: PowerShell's
@@ -62,6 +62,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.12](#whats-new-in-0112)
 - [What's new in 0.1.11](#whats-new-in-0111)
 - [What's new in 0.1.10](#whats-new-in-0110)
 - [What's new in 0.1.9](#whats-new-in-019)
@@ -120,6 +121,19 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.12
+
+- **A failed build now reports the error itself, not the summary.** CMake keeps configuring after an error in one
+directory and prints `-- Configuring incomplete, errors occurred!` at the very end, thousands of lines later, so the
+launcher was quoting the summary and nothing else — the report that reads like a mystery. It now keeps the first error
+line it sees with the six lines after it, wherever in the run they appear, and quotes that. The diagnostics export gained
+a **first error in that log** section for the same reason.
+- **Two failures repair themselves.** A fetched dependency left half written by an interrupted download is cleared and
+fetched again; a build folder left by an older launcher, whose CMake cache names a compiler or generator that no longer
+exists, has that cache cleared and is configured again. Each once, and only for its own kind of failure.
+- **A byte that is not UTF-8 no longer truncates the log.** Lines are read as bytes and decoded leniently, so one odd
+character cannot swallow everything after it — which is one way an error block went missing while its summary arrived.
 
 ## What's new in 0.1.11
 
