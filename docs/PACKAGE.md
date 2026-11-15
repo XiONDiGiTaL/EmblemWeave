@@ -85,7 +85,8 @@ does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256`
 you are extracting a re-zipped copy, not the download.
 
 The `.exe` inside is a Windows program: it runs under Wine or Proton, not natively, and the launcher's build step installs
-its tools with `winget` and runs PowerShell scripts, so it expects Windows.
+its tools with `winget` and runs PowerShell scripts, so it expects Windows. [STEAMDECK.md](STEAMDECK.md) is the Proton
+route step by step: add the launcher as a non-Steam game, find the prefix, and re-point `fefw.ini`.
 
 ## Verifying a download
 

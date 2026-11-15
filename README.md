@@ -76,6 +76,7 @@ carries that engine forward as the launcher around it, and
 - [Security and what the launcher runs](#security-and-what-the-launcher-runs)
 - [Installation](#installation)
 - [What's in the release zip](docs/PACKAGE.md)
+- [Running on a Steam Deck](docs/STEAMDECK.md)
 - [Preparing your game data](#preparing-your-game-data)
 - [Using the launcher](#using-the-launcher)
 - [How the recompilation works](#how-the-recompilation-works)
@@ -334,7 +335,9 @@ Visual Studio 2022 Build Tools with "Desktop development with C++"
 NASM (`NASM.NASM`) is optional and speeds up movie decoding. The .NET 10 SDK is **not** needed: the release zip carries the
 shader translator published with its own runtime, so the shader step runs on a PC with no .NET at all. The same sources also
 publish for Linux (`EmblemWeave-vX.Y.Z-shader-translator-linux-x64.tar.gz`), and the build looks for the translator under
-`tools/shaders/prebuilt/<platform>/`, so a Linux build picks the ELF binary on its own. Every tool is checked
+`tools/shaders/prebuilt/<platform>/`, so a Linux build picks the ELF binary on its own. For a Steam Deck, build on Windows
+and run the result under Proton: [docs/STEAMDECK.md](docs/STEAMDECK.md) has the steps, the prefix paths and the `fefw.ini`
+edits. Every tool is checked
 before the build starts, and the launcher names each missing one with the command that installs it.
 
 To build the launcher from source you also need the tools listed in [Building from source](#building-from-source).
