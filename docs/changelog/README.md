@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.25](0.1.25.md) | 2026-11-15 | The Graphics page now shows which upscaler files are on disk, where they go, and can find them for you |
 | [0.1.24](0.1.24.md) | 2026-11-15 | A failed build now says so with the button that runs it again |
 | [0.1.23](0.1.23.md) | 2026-11-15 | A build folder left behind by an older release no longer breaks the build with clang++'s "unknown argument" |
 | [0.1.22](0.1.22.md) | 2026-11-15 | Play prepares a packed package and starts the game itself, so nobody has to know about the check first |
