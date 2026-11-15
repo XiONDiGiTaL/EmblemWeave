@@ -45,6 +45,10 @@ fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone)
             format!("{what} only patches the game's code (exefs), which cannot apply to a recompiled game. Nothing was installed."),
             Tone::Warn,
         ),
+        Ok(i) if i.needs_build => (
+            format!("Installed {}. It adds hook sites to the game's code: press Build the game before playing, or its code mod cannot work.", i.mods.join(", ")),
+            Tone::Warn,
+        ),
         Ok(i) if i.mods.len() > 1 => (format!("Installed {what} as {} variants; only the first is switched on: {}", i.mods.len(), i.mods.join(", ")), Tone::Ok),
         Ok(i) => (format!("Installed {}", i.mods.join(", ")), Tone::Ok),
         Err(e) => (format!("Could not install {what}: {e}"), Tone::Bad),
@@ -108,6 +112,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if list.is_empty() {
             ui.label(RichText::new("No mods installed.").color(p.muted));
         }
+        // Code mods whose hook sites the built game lacks (installed or updated since the last build).
+        let engine = crate::engine::root();
+        let stale = list.iter().any(|m| m.has_code) && engine.as_deref().and_then(|r| crate::sites::stale(r, &dir)) == Some(true);
+        if stale {
+            ui.label(
+                RichText::new("Code mods need hook sites the built game does not have yet: press Build the game again, or their code will not run.")
+                    .size(12.5)
+                    .color(p.warn),
+            );
+        }
         for m in &list {
             ui.horizontal(|ui| {
                 let mut on = m.enabled;
@@ -128,8 +142,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if !m.has_romfs {
                         bits.push("no romfs folder: the game will not see it".into());
                     }
-                    if m.has_exefs {
-                        bits.push("its exefs patches cannot apply".into());
+                    if m.has_code {
+                        let missing = engine.as_deref().is_some_and(|r| crate::sites::mod_missing(r, &m.path));
+                        bits.push(if missing { "code mod: needs Build the game".into() } else { "code mod".into() });
+                    }
+                    if m.has_patches {
+                        bits.push("its .ips / .pchtxt patches cannot apply".into());
                     }
                     ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted));
                 });
@@ -374,7 +392,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.mods_ui.listing = Some(spawn(move || mods::gb_list(n)));
         }
         ui.add_space(4.0);
-        ui.label(RichText::new("Mods are made by their authors and installed as they are; mods that patch the game's code (exefs) cannot apply.").size(12.5).color(p.muted));
+        ui.label(RichText::new("Mods are made by their authors and installed as they are; code mods made for this engine (a DLL in exefs) load at start, but .ips / .pchtxt patches cannot apply.").size(12.5).color(p.muted));
     });
 
     if let Some((text, tone)) = message {
