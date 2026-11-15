@@ -452,23 +452,32 @@ the page, so the two always agree unless you have changed the page yourself and 
 
 The engine upscales the picture itself, and **Graphics > Upscaling** chooses how: **FSR 1.0** (AMD's spatial upscaler,
 any GPU), **NVIDIA Image Scaling** (spatial, any GPU, up to 2× per side), **FSR 3.1** (AMD's temporal upscaler through the
-FidelityFX API) and **DLSS** / **DLAA** (NVIDIA's temporal upscaler through Streamline). The launcher writes the choice,
-and the folder it found the DLLs in, into the run folder's `fefw.ini` before it starts the game, so it applies at the
-game's next start.
+FidelityFX API), **DLSS** / **DLAA** (NVIDIA's temporal upscaler through Streamline) and **XeSS** (Intel's temporal
+upscaler, on any GPU with DP4a). The launcher writes the choice, and the folder it found the DLLs in, into the run
+folder's `fefw.ini` before it starts the game, so it applies at the game's next start.
 
 **Graphics > Sharpening** sets how crisp the final picture is: **Off**, **Low**, **Default** (the engine's own 0.8) or
 **High**. It is the engine's `[upscale] sharpness`, it applies live rather than at the next start, and the game's own
 F1 menu sees the same value.
 
-AMD's and NVIDIA's files cannot be shipped, so those two upscalers need you to add them, in the run folder:
+AMD's, NVIDIA's and Intel's files cannot be shipped, so those upscalers need you to add them, in the run folder:
 
 - **FSR 3.1**: `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from the FidelityFX SDK (v2.4.0,
-  Vulkan), in `%APPDATA%\EmblemWeave\play\upscalers\fsr3`.
+  Vulkan), in `%APPDATA%\EmblemWeave\play\upscalers\fsr` (an `fsr3` folder is read as well). FSR 3 frame generation
+  needs the v1.1.4 `amd_fidelityfx_vk.dll` there too, so the loader pair alone cannot make frames.
 - **DLSS / DLAA**: `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll` and `nvngx_dlss.dll` from NVIDIA's
   [Streamline SDK](https://github.com/NVIDIAGameWorks/Streamline) release `bin/x64`, in
-  `%APPDATA%\EmblemWeave\play\upscalers\streamline`.
+  `%APPDATA%\EmblemWeave\play\upscalers\streamline`. DLSS Frame Generation adds `sl.dlss_g.dll`, `sl.reflex.dll`,
+  `sl.pcl.dll`, `nvngx_dlssg.dll` and `NvLowLatencyVk.dll` to the same folder, and wants an RTX 40 class GPU and
+  Windows' hardware-accelerated GPU scheduling.
+- **XeSS**: `libxess.dll` from Intel's XeSS SDK, in `%APPDATA%\EmblemWeave\play\upscalers\xess`, with the Visual C++
+  2015-2022 runtime installed.
 
-The Graphics page checks those folders and names the one it found, or what is missing. **FSR 4** is not offered: it runs
+**Graphics > Upscaler files** shows one row per upscaler: the folder its files were found in, or the exact files that are
+missing. **Open the upscalers folder** creates those three folders and opens them; **Look for the files** searches the
+launcher's folder, the engine folder, Downloads and the Desktop one folder deep, copies what it finds into the run
+folder and says what is still missing, so a ZIP that landed in Downloads does not have to be arranged by hand. The game's
+own F1 menu, Graphics tab, reports the same under `Files found`. **FSR 4** is not offered: it runs
 through AMD's DirectX 12 FidelityFX runtime on RDNA 4 cards, and this engine presents through Vulkan, so there is no
 FSR 4 pass to call. **OptiScaler** works by swapping the upscaler a DirectX game already calls, and there is no DirectX
 device here for it to hook. FSR 3.1 is the newest upscaler the engine runs itself.
