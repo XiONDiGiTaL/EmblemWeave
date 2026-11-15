@@ -62,7 +62,12 @@ try {
         (Join-Path $repo 'engine\fefw-recomp\launcher'),
         # The Linux translator ships as its own tarball: a Windows player cannot run 41 MB of ELF.
         (Join-Path $repo 'engine\fefw-recomp\tools\shaders\prebuilt\linux-x64'),
-        'build', 'third_party', 'node_modules', 'shader_cache', 'bc7_cache', '.venv', 'refs', '.git', 'obj', 'bin',
+        # The bare name `third_party` stripped `runtime/third_party` too (dav1d, FSR 1, NIS, Streamline, the
+        # ffx API): every build from a zip then died at `add_subdirectory .../runtime/cmake/../third_party/dav1d`
+        # (issues #16 and #17). The two fetched trees are named instead, and the runtime's own is shipped.
+        (Join-Path $repo 'engine\fefw-recomp\tools\textures\third_party'),
+        (Join-Path $repo 'engine\fefw-recomp\tools\shaders\third_party'),
+        'build', 'node_modules', 'shader_cache', 'bc7_cache', '.venv', 'refs', '.git', 'obj', 'bin',
         '.github', '.vscode', '.pytest_cache', '.mypy_cache', '__pycache__', '*.egg-info'
     )
     $xf = @('*.obj', '*.pdb', '*.lib', '*.ilk', '*.exp', '*.map', '*.iobj', '*.ipdb', '*.pyc', '*.pyo')
@@ -78,16 +83,22 @@ try {
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $rootLen = $pkg.TrimEnd('\').Length + 1
+    # Every entry sits inside `EmblemWeave-v<version>/`: the folder every release zip has extracted to since
+    # 0.1.5. Dropping it would scatter the tree into whatever folder a player unpacks beside an older one.
+    $prefix = "$name/"
     $nFiles = 0
     $za = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
+        # The wrapper itself gets an entry too, so an extractor creates it in order.
+        $e = $za.CreateEntry($prefix, [System.IO.Compression.CompressionLevel]::NoCompression)
+        $e.LastWriteTime = Get-Item -LiteralPath $pkg | Select-Object -ExpandProperty LastWriteTime
         foreach ($d in (Get-ChildItem -LiteralPath $pkg -Recurse -Directory | Sort-Object FullName)) {
-            $rel = $d.FullName.Substring($rootLen).Replace('\', '/') + '/'
+            $rel = $prefix + $d.FullName.Substring($rootLen).Replace('\', '/') + '/'
             $e = $za.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::NoCompression)
             $e.LastWriteTime = $d.LastWriteTime
         }
         foreach ($f in (Get-ChildItem -LiteralPath $pkg -Recurse -File | Sort-Object FullName)) {
-            $rel = $f.FullName.Substring($rootLen).Replace('\', '/')
+            $rel = $prefix + $f.FullName.Substring($rootLen).Replace('\', '/')
             $e = $za.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
             $e.LastWriteTime = $f.LastWriteTime
             $out = $e.Open()
@@ -109,13 +120,15 @@ try {
         'EmblemWeave.exe', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/changelog/README.md',
         'engine/fefw-recomp/runtime/CMakeLists.txt', 'engine/fefw-recomp/game-build/fefw/CMakeLists.txt',
         'engine/fefw-recomp/recomp/requirements.txt', 'engine/fefw-recomp/tools/shaders/harness/Program.cs',
+        # The CMake configure reads this before it builds anything; a zip without it failed every build (issues #16, #17).
+        'engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt',
         'engine/fefw-recomp/tools/shaders/ampere/extract_corpus.py',
         'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/spirv_harness.exe'
     )
     $unpacked = Join-Path $repo 'target\pkg\verify-unpacked'
     if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked }
     $verify = @('tools/verify_archive.py', $zip, '--extract', $unpacked)
-    foreach ($r in $required) { $verify += @('--require', $r) }
+    foreach ($r in $required) { $verify += @('--require', "$name/$r") }
     & $py.Source @verify
     if ($LASTEXITCODE -ne 0) { throw "the zip failed verification: $nFiles files written, tools/verify_archive.py is unhappy" }
     $unpackedCount = (Get-ChildItem -LiteralPath $unpacked -Recurse -File).Count

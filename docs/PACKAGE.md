@@ -32,7 +32,7 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 | --- | --- |
 | `game/`, `work/` | Your dump and everything generated from it. Never shipped, never uploaded. |
 | `build/`, any `*.obj`, `*.pdb`, `*.lib`, `*.exe` under `engine/` | Build output. The only executable in the zip is `EmblemWeave.exe` and the translator above. |
-| `tools/textures/third_party/`, `tools/shaders/third_party/`, `work/refs/` | Fetched from their upstreams during **Build the game**, pinned by URL and hash in `runtime/cmake/gfx_deps.cmake` and `tools/textures/scripts/fetch_third_party.ps1`. |
+| `tools/textures/third_party/`, `tools/shaders/third_party/`, `work/refs/` (not `runtime/third_party/`, which the build needs) | Fetched from their upstreams during **Build the game**, pinned by URL and hash in `runtime/cmake/gfx_deps.cmake` and `tools/textures/scripts/fetch_third_party.ps1`. |
 | `launcher/` | The engine's own Tauri launcher. EmblemWeave has its own launcher and never runs this one; it was only carrying a second updater and 1 MB of dead weight. It remains in the repository. |
 | `node_modules/`, `dist/`, `.git/`, `.github/`, editor folders | Development leftovers, never part of a player package. `.github/` holds the engine's issue templates, which belong to the repository, not to a download. |
 | `.venv/`, `__pycache__/`, `*.pyc`, `.pytest_cache/` | The engine's Python environment and byte-compiled caches, created on your PC by **Build the game**. |
@@ -71,9 +71,9 @@ few MB.
 
 ## Extracting on Linux or macOS
 
-The archive is a plain zip: every entry is a relative path with forward slashes, rooted at the zip itself, so
-`EmblemWeave.exe`, `docs/` and `engine/` are the top of the tree. Extract it into a folder of its own rather than
-over your Downloads folder, and the launcher sits beside the `docs/` and `engine/` folders it expects.
+The archive is a plain zip: every entry is a relative path with forward slashes, and everything sits inside one
+`EmblemWeave-vX.Y.Z/` folder, as every release has since 0.1.5. Extract it anywhere; the folder becomes the install
+folder, with `EmblemWeave.exe` beside the `docs/` and `engine/` folders it expects.
 
 Two things keep it that way, and both run on every release:
 
@@ -91,7 +91,7 @@ Two things keep it that way, and both run on every release:
   before extracting it:
 
 ```sh
-python3 tools/verify_archive.py EmblemWeave-vX.Y.Z-windows-x64.zip --require docs/PACKAGE.md --require EmblemWeave.exe
+python3 tools/verify_archive.py EmblemWeave-vX.Y.Z-windows-x64.zip --require EmblemWeave-vX.Y.Z/docs/PACKAGE.md
 ```
 
 ```sh
@@ -99,7 +99,7 @@ unzip -q EmblemWeave-vX.Y.Z-windows-x64.zip -d EmblemWeave
 python3 -c "import zipfile;print(zipfile.ZipFile('EmblemWeave-vX.Y.Z-windows-x64.zip').namelist()[:3])"
 ```
 
-Both print names like `docs/PACKAGE.md` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
+Both print names like `EmblemWeave-vX.Y.Z/docs/PACKAGE.md` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
 from re-packing the folder on Windows with a tool that writes backslashes (Windows PowerShell 5.1's `Compress-Archive`
 does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes - if it differs,
 you are extracting a re-zipped copy, not the download.
