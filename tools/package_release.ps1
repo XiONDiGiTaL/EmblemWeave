@@ -65,6 +65,19 @@ try {
     # 4. The zip.
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Compress-Archive -Path $pkg -DestinationPath $zip -CompressionLevel Optimal
+
+    # Every entry must be a relative path with `/` separators. Windows' own zippers can write `\`, and an archive full of
+    # `engine\recomp\foo.cpp` extracts as a flat pile of oddly named files on Linux and macOS.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $bad = @()
+    $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        foreach ($e in $za.Entries) {
+            if ($e.FullName.Contains('\') -or $e.FullName.StartsWith('/') -or $e.FullName -match '^[A-Za-z]:') { $bad += $e.FullName }
+        }
+    } finally { $za.Dispose() }
+    if ($bad.Count -gt 0) { throw "$($bad.Count) zip entries are not plain forward-slash relative paths, e.g. $($bad[0])" }
+
     $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
     $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
     Write-Host "$zip ($mb MB)"

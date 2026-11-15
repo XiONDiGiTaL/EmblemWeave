@@ -59,6 +59,25 @@ About 46 MB, of which about 38 MB is `spirv_harness.exe`: the shader translator 
 executable so the build needs no .NET SDK and no .NET runtime. The launcher itself is about 13 MB, the engine sources a
 few MB.
 
+## Extracting on Linux or macOS
+
+The archive is a plain zip: every entry is a relative path with forward slashes, and everything sits inside one
+`EmblemWeave-vX.Y.Z/` folder. `tools/package_release.ps1` refuses to write a zip whose entries use backslashes or
+absolute paths, and every release is checked with a second, non-Windows reader:
+
+```sh
+unzip -q EmblemWeave-vX.Y.Z-windows-x64.zip -d EmblemWeave
+python3 -c "import zipfile;print(zipfile.ZipFile('EmblemWeave-vX.Y.Z-windows-x64.zip').namelist()[:3])"
+```
+
+Both print `EmblemWeave-vX.Y.Z/…` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
+from re-packing the folder on Windows with a tool that writes backslashes (Windows PowerShell 5.1's `Compress-Archive`
+does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes — if it differs,
+you are extracting a re-zipped copy, not the download.
+
+The `.exe` inside is a Windows program: it runs under Wine or Proton, not natively, and the launcher's build step installs
+its tools with `winget` and runs PowerShell scripts, so it expects Windows.
+
 ## Verifying a download
 
 Each release note carries the `sha256` of its zip. On Windows:
