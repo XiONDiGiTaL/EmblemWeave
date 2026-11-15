@@ -37,9 +37,10 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.10, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.11, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.10 fixes the build failures behind most of the reports so far: PowerShell's
+> opening movie and cutscenes. 0.1.11 puts the shader translator in the zip with its own .NET runtime, so the build no
+> longer needs the .NET SDK at all. 0.1.10 fixes the build failures behind most of the reports so far: PowerShell's
 > execution policy no longer refuses the build's own scripts, a broken C compiler is caught on the first shard
 > instead of rejecting 118, a failed step names the program it could not find, and a launch that never draws says
 > so instead of showing a black window. It also reads `.nx` archives directly and adds the Sharpening control.
@@ -61,6 +62,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.11](#whats-new-in-0111)
 - [What's new in 0.1.10](#whats-new-in-0110)
 - [What's new in 0.1.9](#whats-new-in-019)
 - [What's new in 0.1.8](#whats-new-in-018)
@@ -116,6 +118,19 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.11
+
+- **The shader translator is in the zip.** It is now published as one self-contained executable
+  (`tools/shaders/prebuilt/win-x64/spirv_harness.exe`) that carries its own .NET runtime, so the build no longer needs the
+  .NET 10 SDK, a `dotnet` install or a NuGet restore. That was the `dotnet build failed … sdk-not-found` report and the
+  `0x8000809b` one before it. When the bundled translator is present the launcher skips building it and runs it directly;
+  the old path — clone the pinned sources, build the project, run it through `dotnet` — is still there for a copy that has
+  to compile its own, and **Install the missing build tools** simply no longer lists the SDK.
+- **A successful launch is reported too.** The launch watcher now records "presented its first frame after N s (X fps)" as
+  well as the failures, so a report shows whether the game drew anything before anyone has to ask.
+- **Diagnostics carry the game's own log.** The exported report now includes the tail of `play/fefw.log` — the GPU chosen,
+  the pipelines built, the frames presented — which is the half of a black-screen report the launcher could not supply.
 
 ## What's new in 0.1.10
 
@@ -312,11 +327,12 @@ The screenshots are the launcher's own rendering, saved with `EmblemWeave.exe --
 | Game | Your own legally obtained copy of *Fire Emblem: Fortune's Weave* |
 
 Building the game needs these tools (all from winget): LLVM 23 (`LLVM.LLVM`), CMake (`Kitware.CMake`), Ninja
-(`Ninja-build.Ninja`), the .NET 10 SDK (`Microsoft.DotNet.SDK.10`), uv (`astral-sh.uv`), Git and PowerShell 7, plus
+(`Ninja-build.Ninja`), uv (`astral-sh.uv`), Git and PowerShell 7, plus
 Visual Studio 2022 Build Tools with "Desktop development with C++"
 (`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`).
-NASM (`NASM.NASM`) is optional and speeds up movie decoding. Every one of them is checked before the build starts, and the
-launcher names each missing tool with the command that installs it.
+NASM (`NASM.NASM`) is optional and speeds up movie decoding. The .NET 10 SDK is **not** needed: the release zip carries the
+shader translator published with its own runtime, so the shader step runs on a PC with no .NET at all. Every tool is checked
+before the build starts, and the launcher names each missing one with the command that installs it.
 
 To build the launcher from source you also need the tools listed in [Building from source](#building-from-source).
 
@@ -332,7 +348,8 @@ Everything the launcher starts, and why:
 | --- | --- | --- |
 | `vswhere.exe` | start-up, build | finds Visual Studio's C++ tools |
 | `dotnet --list-sdks` | start-up, build | reads the installed SDK version |
-| `dotnet build` | Build the game | builds the shader translator from the staged sources |
+| `spirv_harness.exe` | Build the game | the shader translator bundled in the zip; it carries its own .NET runtime and opens no network connection |
+| `dotnet build` | Build the game, only when the zip has no translator | builds the translator from the staged sources |
 | `git clone`, `git checkout` | Build the game | fetches the pinned Ryubing revision the shader translator is ported from |
 | `pwsh` | Build the game | runs the engine's build scripts (`-NoProfile -ExecutionPolicy Bypass`) |
 | `cmd /C recomp\scripts\build_game.cmd` | Build the game | drives the engine's own build |

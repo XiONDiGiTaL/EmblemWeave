@@ -214,7 +214,10 @@ pub fn missing_tools() -> Vec<&'static str> {
     let found = |exe: &str| path.split(';').any(|d| Path::new(d).join(exe).is_file());
     // `dotnet.exe` alone is not enough: the harness targets net10.0, and an
     // older or absent SDK fails the build after a long wait.
-    let dotnet_ok = found("dotnet.exe") && dotnet_sdk_major().is_some_and(|major| major >= 10);
+    // A published translator inside the zip carries its own runtime, so the
+    // SDK is only needed on a copy that has to build the translator itself.
+    let dotnet_ok = bundled_harness().is_some()
+        || (found("dotnet.exe") && dotnet_sdk_major().is_some_and(|major| major >= 10));
     let mut missing: Vec<&'static str> = [
         ("clang-cl.exe", "LLVM 23 (clang-cl)"),
         ("cmake.exe", "CMake"),
@@ -667,7 +670,10 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // 6. Shader translator.
     ctx.start(5);
     let harness = root.join("tools").join("shaders").join("build").join("bin").join("Release").join("net10.0").join("spirv_harness.dll");
-    if harness.is_file() {
+    let bundled = bundled_harness_in(&root);
+    if let Some(exe) = &bundled {
+        ctx.end(5, StageStatus::Skipped, format!("using the one in the zip: {}", exe.display()));
+    } else if harness.is_file() {
         ctx.end(5, StageStatus::Skipped, "already built");
     } else {
         let refs = root.join("work").join("refs").join("ryubing");
@@ -703,8 +709,18 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         let dump = root.join("game").join("dump").join("exefs").display().to_string();
         run(ctx, &root, &py, &["-I", "tools\\shaders\\ampere\\extract_corpus.py", "--romfs", &rom, "--main", &main, "--exefs", &dump, "--out", "work\\shaders\\corpus", "--jobs", "4"])?;
         // Without the Vulkan SDK there is no spirv-val; the shaders are used unvalidated.
-        let h = harness.display().to_string();
-        run(ctx, &root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])?;
+        // The published translator carries its own .NET runtime, so a player
+        // whose PC has no .NET SDK still gets shaders; without it, build the
+        // project and run it through `dotnet` as before.
+        match &bundled {
+            Some(exe) => {
+                run(ctx, &root, &exe.display().to_string(), &["--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])?;
+            }
+            None => {
+                let h = harness.display().to_string();
+                run(ctx, &root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])?;
+            }
+        }
         ctx.end(6, StageStatus::Done, "shaders translated to SPIR-V");
     }
 
@@ -731,6 +747,19 @@ pub fn upscale_mode(label: &str) -> &'static str {
         "DLAA" => "dlaa",
         _ => "off",
     }
+}
+
+/// The shader translator published as one self-contained executable, shipped in
+/// the release zip at `tools/shaders/prebuilt/win-x64/spirv_harness.exe`. It
+/// carries its own .NET runtime: no SDK, no runtime and no NuGet restore on the
+/// player's PC.
+pub fn bundled_harness() -> Option<PathBuf> {
+    bundled_harness_in(&root()?)
+}
+
+fn bundled_harness_in(root: &Path) -> Option<PathBuf> {
+    let p = root.join("tools").join("shaders").join("prebuilt").join("win-x64").join("spirv_harness.exe");
+    p.is_file().then_some(p)
 }
 
 /// The SDK folders the engine looks for the upscaler DLLs in, and which of them
@@ -1606,6 +1635,20 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
             None,
             "a run that never presented has no present line"
         );
+    }
+
+    #[test]
+    fn the_bundled_translator_is_found_only_when_the_zip_has_it() {
+        let dir = std::env::temp_dir().join(format!("ew-harness-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tools/shaders/prebuilt/win-x64")).unwrap();
+        assert_eq!(super::bundled_harness_in(&dir), None, "an empty slot is not a translator");
+        std::fs::write(dir.join("tools/shaders/prebuilt/win-x64/spirv_harness.exe"), b"x").unwrap();
+        assert_eq!(
+            super::bundled_harness_in(&dir),
+            Some(dir.join("tools/shaders/prebuilt/win-x64/spirv_harness.exe"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
