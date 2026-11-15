@@ -1,13 +1,13 @@
 # Running on a Steam Deck
 
-EmblemWeave is a Windows program. The Steam Deck runs it under Proton, the same way it runs any Windows game — but one step
+EmblemWeave is a Windows program. The Steam Deck runs it under Proton, the same way it runs any Windows game, but one step
 Proton cannot do for you is **the build**. Building needs `winget`, PowerShell 7 and Visual Studio's C++ compiler, and the
 launcher looks for them in their Windows folders, so a Deck cannot build the game. Build it once on a Windows PC, then copy
 the result over.
 
-This page has not been run on a Deck by the maintainer. The engine's own configuration carries a SteamOS path — `[memory]
+This page has not been run on a Deck by the maintainer. The engine's own configuration carries a SteamOS path: `[memory]
 heap_section = auto` switches to private memory under Wine because with a shared section "no memory pool reached the GPU
-(every draw read the dummy buffer: a black picture)", per `runtime/docs/CONFIG.md` — and a deck report in
+(every draw read the dummy buffer: a black picture)", per `runtime/docs/CONFIG.md`, and a deck report in
 [issue #7](https://github.com/XiONDiGiTaL/EmblemWeave/issues/7) says a recompiled game of this kind runs under Proton. Treat
 the steps as a route that should work, not as a tested recipe, and see [What to send back](#what-to-send-back).
 
@@ -27,7 +27,7 @@ The dump goes too, unless it is already on the Deck. exFAT on a USB stick is the
 
 ## 2. Put it on the Deck
 
-Desktop Mode, and either copy the folder straight across, or — if you are starting from the release zip — extract it and
+Desktop Mode, and either copy the folder straight across, or - if you are starting from the release zip - extract it and
 then move your Windows-built `engine\` into place:
 
 ```sh
@@ -46,7 +46,7 @@ Put the dump somewhere stable, for example `~/Games/fefw-dump/` with `exefs/`, `
 1. Steam → **Games** → **Add a Non-Steam Game** → **Browse** → `EmblemWeave.exe`.
 2. Library → right-click it → **Properties** → **Compatibility** → tick **Force the use of a specific Steam Play
    compatibility tool** → **Proton Experimental** (a recent GE-Proton works too).
-3. Launch it once and close it. That creates the Proton prefix — the fake `C:` drive both programs see.
+3. Launch it once and close it. That creates the Proton prefix - the fake `C:` drive both programs see.
 
 Do the setup below in **Desktop Mode**: Game Setup's file picker and the diagnostics export use Windows dialogs, which are
 awkward on a touchscreen. Playing itself is fine from Game Mode.
@@ -61,7 +61,7 @@ ls "$PREFIX/drive_c/users/steamuser/AppData/Roaming/"
 
 Inside the prefix, `%APPDATA%` is `$PREFIX/drive_c/users/steamuser/AppData/Roaming`, so the launcher's settings and the
 game's run folder live at `…/Roaming/EmblemWeave/play/`. Copy the `play` and `save` folders from Windows into
-`…/Roaming/EmblemWeave/`. Without `play/fefw.ini` the launcher says *the game is not built yet* — it checks for both
+`…/Roaming/EmblemWeave/`. Without `play/fefw.ini` the launcher says *the game is not built yet* - it checks for both
 `fefw.exe` and `fefw.ini`.
 
 ## 5. Re-point `fefw.ini`
@@ -85,7 +85,7 @@ bc7_cache = Z:/home/deck/EmblemWeave/EmblemWeave-v0.1.11/engine/fefw-recomp/work
 ```
 
 The launcher itself writes these paths with forward slashes, and the runtime accepts them that way, so keep `/` rather than
-`\`. The About page in the F1 menu prints the paths the runtime actually resolved — the quickest way to spot a typo.
+`\`. The About page in the F1 menu prints the paths the runtime actually resolved - the quickest way to spot a typo.
 
 Any key can also be given as an environment variable instead of editing the file: `NXRT_` plus the upper-case section, an
 underscore, and the upper-case key. Steam → Properties → **Launch Options**:
@@ -115,7 +115,7 @@ watches the first frames. The log is `…/EmblemWeave/play/fefw.log`.
 | The window opens and stays black | Read `play/fefw.log`: it names the GPU it chose and the pipelines it built. Diagnostics → Export collects it too. |
 | Complaints about a missing shader or a missing `spirv_harness` | The tree came from a launcher older than 0.1.11, or `engine/fefw-recomp/work/shaders/spirv` did not come across. Copy it from the Windows machine, or start from a current release zip and move the build over. |
 | The launcher's window is tiny or blurry | Game Mode scaling; open it in Desktop Mode. |
-| A Vulkan error or a crash on start | Note the Proton version — the Deck uses RADV — and include `play/fefw.log`. |
+| A Vulkan error or a crash on start | Note the Proton version - the Deck uses RADV - and include `play/fefw.log`. |
 
 ## What to send back
 

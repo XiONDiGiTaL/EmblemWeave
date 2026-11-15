@@ -6,10 +6,11 @@ translator).
 
 ```
 EmblemWeave-vX.Y.Z-windows-x64.zip
-├── EmblemWeave.exe        the launcher (Rust, Release build) — this is the program you run
+├── EmblemWeave.exe        the launcher (Rust, Release build) - this is the program you run
 ├── LICENSE                EmblemWeave's own licence
 ├── README.md              the README from the tag the zip was built from
 ├── PACKAGE.md             this file
+├── docs/changelog/        what changed in each release, newest first, linked from the README
 └── engine/
     └── fefw-recomp/       the engine, in full source form (GPL-3.0-or-later, its own LICENSE and notices inside)
         ├── LEGAL.md, LICENSE, README.md, SECURITY.md
@@ -47,8 +48,8 @@ but not in the zip is one of the rows above.
 
 Generated documentation and examples use generic drive paths (`C:\Program Files\LLVM\bin`, `D:\dumps\fefw\…`), never
 a contributor's home folder, and the package carries no credentials, no `.env`, no keys and no logs. The two test
-`.elf` fixtures and `recomp/oracle/difftest/corpus.json` are synthetic — hand-built instruction fixtures and AArch64
-instruction encodings — and `tools/shaders/corpus/sascha_dksh/` is Sascha Willems' MIT-licensed Vulkan sample shaders
+`.elf` fixtures and `recomp/oracle/difftest/corpus.json` are synthetic (hand-built instruction fixtures and AArch64 instruction
+encodings), and `tools/shaders/corpus/sascha_dksh/` is Sascha Willems' MIT-licensed Vulkan sample shaders
 rewritten into the Maxwell dialect, shipped with its licence. `runtime/assets/prompts/prompt_icons.pak` is built from
 Kenney's CC0 Input Prompts by `runtime/scripts/build_prompt_pack.py`, again with its licence beside it. No file in the
 zip is derived from a game dump: those live in `game/` and `work/` and never leave your PC.
@@ -57,8 +58,8 @@ zip is derived from a game dump: those live in `game/` and `work/` and never lea
 
 `EmblemWeave-vX.Y.Z-shader-translator-linux-x64.tar.gz` (about 41 MB) holds `linux-x64/spirv_harness`, the same sources
 published for `linux-x64`. It is not inside the Windows zip because a Windows player cannot run it: 41 MB of ELF would
-double the download for nothing. The launcher looks for the translator under `tools/shaders/prebuilt/<platform>/` —
-`win-x64` on Windows (including Wine and Proton, which run the Windows binary) and `linux-x64` elsewhere — so untarring
+double the download for nothing. The launcher looks for the translator under `tools/shaders/prebuilt/<platform>/` -
+`win-x64` on Windows (including Wine and Proton, which run the Windows binary) and `linux-x64` elsewhere - so untarring
 the asset into `engine/fefw-recomp/tools/shaders/prebuilt/` is all a Linux build needs. The archive keeps the executable
 bit when it is made on Linux; if it arrives without one, `chmod +x linux-x64/spirv_harness`.
 
@@ -81,7 +82,7 @@ python3 -c "import zipfile;print(zipfile.ZipFile('EmblemWeave-vX.Y.Z-windows-x64
 
 Both print `EmblemWeave-vX.Y.Z/…` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
 from re-packing the folder on Windows with a tool that writes backslashes (Windows PowerShell 5.1's `Compress-Archive`
-does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes — if it differs,
+does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes - if it differs,
 you are extracting a re-zipped copy, not the download.
 
 The `.exe` inside is a Windows program: it runs under Wine or Proton, not natively, and the launcher's build step installs

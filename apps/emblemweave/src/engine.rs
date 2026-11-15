@@ -599,6 +599,43 @@ fn remember(tail: &Tail, first: &FirstError, line: &str) {
     }
 }
 
+/// Run the fefw build, repairing each of the two failures it can repair once:
+/// a dependency fetched half written, and a build folder whose CMake cache names
+/// a toolchain that is not installed any more.
+fn build_with_repairs(
+    builds: &Path,
+    mut build: impl FnMut() -> Result<(), String>,
+    mut log: impl FnMut(&str),
+) -> Result<(), String> {
+    let mut repaired_deps = false;
+    let mut repaired_cache = false;
+    loop {
+        let e = match build() {
+            Ok(()) => break,
+            Err(e) => e,
+        };
+        if !repaired_deps && half_written_deps(&e) {
+            repaired_deps = true;
+            log("a fetched dependency is incomplete; clearing it and fetching again");
+            for config in std::fs::read_dir(builds).into_iter().flatten().flatten() {
+                let _ = std::fs::remove_dir_all(config.path().join("_deps"));
+            }
+            continue;
+        }
+        if !repaired_cache && stale_build_cache(&e) {
+            repaired_cache = true;
+            log("the build folder was made by a different toolchain; clearing its CMake cache and configuring again");
+            for config in std::fs::read_dir(builds).into_iter().flatten().flatten() {
+                let _ = std::fs::remove_file(config.path().join("CMakeCache.txt"));
+                let _ = std::fs::remove_dir_all(config.path().join("CMakeFiles"));
+            }
+            continue;
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// A fetch that stopped halfway leaves sources CMake then fails on: it names the
 /// `_deps` folder, the patch check, or the stale image patch.
 fn half_written_deps(reason: &str) -> bool {
@@ -785,34 +822,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     //   that is no longer installed, and CMake refuses to configure in it until its
     //   cache goes. The downloads and the fetched sources stay.
     let builds = root.join("game-build").join("fefw").join("build");
-    let mut repaired_deps = false;
-    let mut repaired_cache = false;
-    loop {
-        let e = match fefw() {
-            Ok(()) => break,
-            Err(e) => e,
-        };
-        // The message names the CMake file that tripped, not the missing source, so
-        // the check has to look for the patch check and the imgui file too.
-        if !repaired_deps && half_written_deps(&e) {
-            repaired_deps = true;
-            ctx.log("a fetched dependency is incomplete; clearing it and fetching again");
-            for config in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
-                let _ = std::fs::remove_dir_all(config.path().join("_deps"));
-            }
-            continue;
-        }
-        if !repaired_cache && stale_build_cache(&e) {
-            repaired_cache = true;
-            ctx.log("the build folder was made by a different toolchain; clearing its CMake cache and configuring again");
-            for config in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
-                let _ = std::fs::remove_file(config.path().join("CMakeCache.txt"));
-                let _ = std::fs::remove_dir_all(config.path().join("CMakeFiles"));
-            }
-            continue;
-        }
-        return Err(e);
-    }
+    build_with_repairs(&builds, fefw, |m| ctx.log(m))?;
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
     let _ = brand_game();
@@ -1840,6 +1850,79 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let quiet = super::verify_log_text("-- building\n-- done\n");
         assert!(quiet.contains("no error line in this log"), "{quiet}");
         assert!(quiet.contains("no automatic repair"), "{quiet}");
+    }
+
+    #[test]
+    fn a_half_written_fetch_is_cleared_and_the_build_retried_once() {
+        let dir = std::env::temp_dir().join(format!("ew-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let deps = dir.join("release").join("_deps").join("imgui-src");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(deps.join("CMakeLists.txt"), b"half").unwrap();
+
+        let mut calls = 0;
+        let mut said: Vec<String> = Vec::new();
+        let out = super::build_with_repairs(
+            &dir,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err("pwsh build_fefw.ps1 failed (exit code: 1): CMake Error at _deps/imgui-src/CMakeLists.txt:3".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            |m| said.push(m.to_string()),
+        );
+        assert!(out.is_ok(), "the retry succeeds: {out:?}");
+        assert_eq!(calls, 2, "exactly one retry");
+        assert!(!dir.join("release").join("_deps").exists(), "the half-written sources are gone");
+        assert!(said.iter().any(|m| m.contains("dependency is incomplete")), "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_cache_is_cleared_and_a_third_failure_is_reported() {
+        let dir = std::env::temp_dir().join(format!("ew-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rel = dir.join("release");
+        std::fs::create_dir_all(rel.join("CMakeFiles")).unwrap();
+        std::fs::write(rel.join("CMakeCache.txt"), b"cache").unwrap();
+
+        let mut calls = 0;
+        let out = super::build_with_repairs(
+            &dir,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err("CMakeCache.txt is different than the one used previously".to_string())
+                } else {
+                    Err("clang-cl: error: unknown argument '-fno-exceptions'".to_string())
+                }
+            },
+            |_| {},
+        );
+        assert!(out.is_err(), "the second failure is the real one");
+        assert_eq!(calls, 2, "one retry, then give up");
+        assert!(!rel.join("CMakeCache.txt").exists() && !rel.join("CMakeFiles").exists(), "the cache is gone");
+        assert!(out.unwrap_err().contains("unknown argument"), "the message is the second failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unrelated_failure_is_not_retried() {
+        let dir = std::env::temp_dir().join(format!("ew-norepair-{}", std::process::id()));
+        let mut calls = 0;
+        let out = super::build_with_repairs(
+            &dir,
+            || {
+                calls += 1;
+                Err("clang-cl: error: unknown argument '-fno-exceptions'".to_string())
+            },
+            |_| {},
+        );
+        assert!(out.is_err());
+        assert_eq!(calls, 1, "no retry for a failure that has no repair");
     }
 
     #[test]

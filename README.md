@@ -37,18 +37,15 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.13, playable through the baseline engine.** Build the game once
-> from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
-> opening movie and cutscenes. 0.1.11 puts the shader translator in the zip with its own .NET runtime, so the build no
-> longer needs the .NET SDK at all. 0.1.10 fixes the build failures behind most of the reports so far: PowerShell's
-> execution policy no longer refuses the build's own scripts, a broken C compiler is caught on the first shard
-> instead of rejecting 118, a failed step names the program it could not find, and a launch that never draws says
-> so instead of showing a black window. It also reads `.nx` archives directly and adds the Sharpening control.
-> EmblemWeave's own
-> Rust runtime is being completed to take over running the game: it
-> now executes the game's code natively, serves NVN on the host GPU through Vulkan, opens a window and presents the
-> swap chain, and carries out the command buffer's buffer and texture clears and copies. It does not yet draw the
-> game's own geometry; see [Development status](#development-status) and [docs/ENGINE.md](docs/ENGINE.md).
+> **Current status: 0.1.14, playable through the baseline engine.** Build the game once from your dump, press **Play**,
+> and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the opening movie and cutscenes. The build
+> needs Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with
+> its own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
+>
+> EmblemWeave's own Rust runtime is being completed to take over running the game. It executes the game's code natively,
+> serves NVN on the host GPU through Vulkan, opens a window and presents the swap chain, and carries out the command
+> buffer's buffer and texture clears and copies. It does not yet draw the game's own geometry; see
+> [Development status](#development-status) and [docs/ENGINE.md](docs/ENGINE.md).
 
 > **AI-assisted development.** EmblemWeave is designed and directed by [XiØN](https://github.com/XiONDiGiTaL) and developed
 > with the help of AI coding tools. Every change is tested against the real game and the project's own test suite before it
@@ -62,15 +59,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
-- [What's new in 0.1.13](#whats-new-in-0113)
-- [What's new in 0.1.12](#whats-new-in-0112)
-- [What's new in 0.1.11](#whats-new-in-0111)
-- [What's new in 0.1.10](#whats-new-in-0110)
-- [What's new in 0.1.9](#whats-new-in-019)
-- [What's new in 0.1.8](#whats-new-in-018)
-- [What's new in 0.1.7](#whats-new-in-017)
-- [What's new in 0.1.6](#whats-new-in-016)
-- [What's new in 0.1.5](#whats-new-in-015)
+- [Changelog](docs/changelog/README.md)
 - [Development status](#development-status)
 - [Screenshots](#screenshots)
 - [Key capabilities](#key-capabilities)
@@ -123,149 +112,10 @@ feature as working before it is.
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
 
-## What's new in 0.1.13
+## Changelog
 
-- **`--verify-log` reads a build log without running a build.** `EmblemWeave.exe --verify-log` takes the newest log from
-`%APPDATA%\EmblemWeave\logs`, or the file you name — including one pasted from another machine — and prints the first error
-in it with its context, the line it ended on, and which repair the launcher would try. It runs without a window, so a
-report can be answered with one command instead of a rebuild. Exit code 0 found an error, 3 found none, 2 could not read
-the file.
-- **The error block stops at the error.** When the text after an error is progress output, the quote now ends instead of
-dragging an unrelated last line into the message.
-
-## What's new in 0.1.12
-
-- **A failed build now reports the error itself, not the summary.** CMake keeps configuring after an error in one
-directory and prints `-- Configuring incomplete, errors occurred!` at the very end, thousands of lines later, so the
-launcher was quoting the summary and nothing else — the report that reads like a mystery. It now keeps the first error
-line it sees with the six lines after it, wherever in the run they appear, and quotes that. The diagnostics export gained
-a **first error in that log** section for the same reason.
-- **Two failures repair themselves.** A fetched dependency left half written by an interrupted download is cleared and
-fetched again; a build folder left by an older launcher, whose CMake cache names a compiler or generator that no longer
-exists, has that cache cleared and is configured again. Each once, and only for its own kind of failure.
-- **A byte that is not UTF-8 no longer truncates the log.** Lines are read as bytes and decoded leniently, so one odd
-character cannot swallow everything after it — which is one way an error block went missing while its summary arrived.
-
-## What's new in 0.1.11
-
-- **The shader translator is in the zip.** It is now published as one self-contained executable
-  (`tools/shaders/prebuilt/win-x64/spirv_harness.exe`) that carries its own .NET runtime, so the build no longer needs the
-  .NET 10 SDK, a `dotnet` install or a NuGet restore. That was the `dotnet build failed … sdk-not-found` report and the
-  `0x8000809b` one before it. When the bundled translator is present the launcher skips building it and runs it directly;
-  the old path — clone the pinned sources, build the project, run it through `dotnet` — is still there for a copy that has
-  to compile its own, and **Install the missing build tools** simply no longer lists the SDK.
-- **A successful launch is reported too.** The launch watcher now records "presented its first frame after N s (X fps)" as
-  well as the failures, so a report shows whether the game drew anything before anyone has to ask.
-- **Diagnostics carry the game's own log.** The exported report now includes the tail of `play/fefw.log` — the GPU chosen,
-  the pipelines built, the frames presented — which is the half of a black-screen report the launcher could not supply.
-
-## What's new in 0.1.10
-
-- **The build runs under any PowerShell execution policy.** 0.1.9 started its own build scripts with `-NoProfile`
-  only, so a machine that allows signed scripts alone refused `fetch_third_party.ps1` before anything was built —
-  the `… is not digitally signed` error in several reports. Every script now runs with `-ExecutionPolicy Bypass`,
-  and the same preference is handed to any PowerShell a script starts in turn. Your machine's policy is untouched.
-- **A broken C compiler is caught on one shard, not 118.** The recompile stage compiles one real shard with the
-  exact flags the batch uses and stops with the compiler's own first error line if it fails, instead of reporting
-  "117 of 118 rejected". Every failure names the log file, and a settings folder that cannot be written falls back
-  to the temp folder, so a failed build always leaves something to read.
-- **A launch that never draws says so.** The launcher watches each start with the engine's own per-second present
-  line: a game that exits early is reported with its exit code and last error line, and a run that plays sound for
-  90 seconds without presenting a frame is reported with the graphics card it picked. FSR 3.1 and DLSS are only
-  requested when their DLLs are actually present, which was a silent black picture on its own.
-- **A missing tool is named.** A ninja step that calls a program that is not installed ended with `operable program
-  or batch file.`, because cmd wraps `'X' is not recognized` onto two lines and the window kept the wrong one. It
-  now reads "the build called `X`, which is not installed or not on PATH".
-- **`.nx` archives are read directly.** Point Game Setup at the file: ExeFS is copied once and the RomFS is served
-  out of the archive in place, with NXFormat credited for the format and its conformance fixtures.
-- **Sharpening.** Graphics has a Sharpening control (Default, Sharp, Soft, Off) matching the engine's own steps,
-  and the float mixer in the recompiler now applies FPCR rounding mode, flush-to-zero and default-NaN the way the
-  console does.
-- **A half-fetched dependency repairs itself.** An interrupted graphics-dependency fetch used to leave CMake
-  failing on a file that was never written; the launcher now clears the fetched sources and fetches once more.
-
-## What's new in 0.1.9
-
-- **The sidebar agrees with the card.** A finished build showed "Setup incomplete" in the status column while the
-  Overview card under it said "Ready to play", because the two asked different questions. Once the game is built the
-  sidebar says "Ready to play" too, and Play, Rebuild and the status bar all follow the same answer.
-- **"Needs attention" says what needs it.** The Game data card reported a warning over a line of version numbers,
-  which left you guessing. It now shows the check that is not satisfied, with the version line under it, and hovering
-  the Game data row in the status column lists every open check. The three cards share one height, so a card with
-  more to say no longer makes the row ragged.
-- **Build logs are quiet.** Every build printed `'vswhere.exe' is not recognized` even on a machine with Visual Studio
-  installed, because Visual Studio's own `vcvars64.bat` looks for vswhere by name and the installer folder was not on
-  the PATH the launcher hands the build. Both environment scripts put that folder on PATH first, and the launcher
-  passes the `vcvars64.bat` its preflight already found, so the recompile and `fefw.exe` steps now build without the
-  warning.
-
-## What's new in 0.1.8
-
-- **A failed step says why.** Build tools end a failed run with a summary, like `CMake Generate step failed.
-  Build files cannot be regenerated correctly`, while the line that names the cause sits above it. Step output
-  is now kept as a window rather than the last few lines, and the failure message and the exported report carry
-  the first line that is an error, so the cause arrives with the summary.
-- **CMake is checked before the build.** The engine's projects need CMake 3.25 or newer, and an older one fails
-  as a generate error without mentioning its version. The launcher now reads the version first and says plainly
-  that it is too old, with the command that updates it.
-- **A stale build folder fixes itself.** A CMake cache left by an earlier attempt, or by a different compiler,
-  cannot be reused and turns every later build into the same failure. The launcher clears that cache and
-  configures once more before giving up.
-
-## What's new in 0.1.7
-
-- **A button for the build tools.** When anything the build needs is missing, **Overview** shows
-  **Install the missing build tools** under the list, naming what it will install on hover. Pressing it opens a
-  Windows installer window that runs one winget line for each missing tool, Visual Studio with the C++ workload
-  first, accepting the licence prompts so nothing stops on a question. The download and its progress happen in
-  that window, where the user can watch them and accept the administrator prompt. Restart the launcher
-  afterwards, because a new PATH is only read by a new process, then press **Build the game**. If winget itself
-  is missing, the button says so instead of failing silently.
-
-## What's new in 0.1.6
-
-- **The native build finishes.** The emitter could write the same C label twice in one function when a branch
-  landed in the middle of a block, and clang rejects a file like that outright: on real game text nearly every
-  shard was refused. Every label is unique now, and a full lift of the retail module compiles cleanly with clang 23.
-- **Decoding works from the download.** The ZBIC bridge used to be looked up beside the executable, which a release
-  zip does not contain. It is compiled into the launcher and written to the work folder when it runs; the only
-  requirement left is Python with the `zbic` package, and the message says the install line.
-- **Building the game says what it needs.** Visual Studio's C++ tools are part of the check now — the engine's
-  scripts call `vcvars64.bat`, and without it the build died with a bare exit code twenty minutes in. Every missing
-  tool is named with its install command, a failed step quotes its own last output lines, and a recompile that
-  writes no libraries is reported where it happens.
-- **A report that explains itself.** **Diagnostics > Export report** now ends with the build-tool status and the
-  tail of the newest log, so a failure arrives with its reason attached.
-- **The dump is checked against the tested build.** Game Setup hashes your ExeFS modules against the manifest from
-  the preserved fefw-recomp 0.2.0 package and says whether this is update 131072 (all seven hashes agree) or a
-  different build, which still recompiles but is not the tested one.
-- **The engine is part of the repository.** With upstream removed, the submodule pointed at nothing. The engine is
-  committed here in full, so a clone builds with no fetch step, and it carries EmblemWeave's own work: zstd-packed
-  `.nup` entries served from a decompression cache, alongside Goldoire's baseline.
-- **Credits.** Obersteinn preserved the final fefw-recomp 0.2.0 release; [docs/UPSTREAM.md](docs/UPSTREAM.md)
-  records the handover and exactly what was kept.
-
-## What's new in 0.1.5
-
-- **A refined shell.** Every button is now one material: a liquid-glass body in the scheme's
-  accent under a strip of specular light, a white and accent rim and a soft glow underneath,
-  with the same shell at low opacity for secondary actions. Every button is 32 points tall
-  with one type size and one pill radius, so the formerly oversized hero **Play** now matches
-  the buttons beside it.
-- **Sliders of the launcher's own.** A glass track, a glowing accent fill and a glass-bead
-  handle with its own halo, with the value in monospace beside it. They replace the stock
-  sliders on **Graphics**, **Audio**, **Game Setup**, **Recompilation** and **Controls**, and
-  they take the colour and glow of the scheme like everything else.
-- **A layout that scales.** 1440×900 by default, 1120×720 at the smallest. The page column is
-  capped and centred, the status column steps aside below 1240 wide, the rail fits all
-  thirteen pages at the minimum height, and the lists inside pages grow with the window
-  instead of sitting in fixed boxes.
-- **Six schemes, lit the same way.** Frost's primary button carries dark ink on its glacier
-  cyan so it reads at a glance, Arcade's neon grid is quieter and named on **Appearance**, and
-  buttons, sliders, switches and card rims all take each scheme's palette.
-- **Under the hood.** The runtime's command buffer now carries out the texture clears and
-  texture-to-texture copies that write render targets and swap textures, and the baseline
-  engine is built against libvpx 1.16.0 for the title's VP9/VP8 codecs.
+Each release is written up in [`docs/changelog/`](docs/changelog/README.md), newest first, with the version number and
+what changed. The README keeps the current state; the changelog keeps the history.
 
 ## Development status
 
@@ -467,7 +317,7 @@ recompiles, since the pipeline works from your own modules.
 
 An **`.nsp` package** works too, when it is a plaintext repack: NSP Box writes
 those without keys, as unsigned program, control and meta NCAs. Pick it with
-**Choose package…** as well. EmblemWeave unpacks it itself — once — into
+**Choose package…** as well. EmblemWeave unpacks it itself, once, into
 `%APPDATA%\EmblemWeave\work\nsp`, then uses that folder like an extracted dump,
 so the game boots from it and the recompiler reads it. The unpack is repeated
 only when the package's size or modification time changes, and the folder can be
@@ -505,7 +355,7 @@ column on the right shows where the game data, the recompiler and the runtime st
 The launcher opens at 1440×900 and works down to 1120×720. The page column stops at a fixed measure and is centred, so
 a wide window does not stretch the text; below 1240 wide the status column steps aside so the page keeps its width; the
 rail fits all thirteen pages at the smallest height; and the lists inside pages grow and shrink with the window. Every
-button is the same size, and every control — buttons, sliders, switches, cards — is one liquid-glass material that
+button is the same size, and every control (buttons, sliders, switches, cards) is one liquid-glass material that
 takes the chosen scheme's accent, glow and rim.
 
 | Page | Purpose |
@@ -518,7 +368,7 @@ takes the chosen scheme's accent, glow and rim.
 | **In-game menu** | While the game runs, F10 (or Back + RB on a controller) opens EmblemWeave's menu on top of it: pause and resume, a screenshot of the game window (saved to Pictures\EmblemWeave), restart at the title screen, stop and return to the launcher, quick cheats, cheat codes and tables, display settings (window mode, picture size, frame rate counter) and the controls in use. |
 | **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). The same switches are on the launcher's Cheats page and the in-game menu's Quick tab (F10); search again after a map loads. |
 | **Recompilation** | Run the nine-stage pipeline (parse, decompress, decode, recover, analyse, emit C, compile, verify, prepare) with live progress. |
-| **Graphics, Audio, Controls** | **Graphics** hands the engine what it can act on — the picture size and render scale, window mode, vsync, aspect ratio, frame-rate cap and the upscaler (Off, FSR 1.0, FSR 3.1, NVIDIA Image Scaling, DLSS or DLAA) — by writing them into `fefw.ini` and `controls.ini` before every start — only the values that changed since the last start, so a setting changed in the game's own F1 menu stands until you change that setting here — with the folder the upscaler DLLs were found in beside the choice, or what is missing; quality and shader precompiling are saved now and marked until EmblemWeave's own renderer is in place. **Audio**'s master volume goes to the same file; music, effects and voice wait for mixing. While playing, the display settings are in the in-game menu and full rebinding is in the game engine's F1 menu. |
+| **Graphics, Audio, Controls** | **Graphics** writes the settings the engine can act on into `fefw.ini` and `controls.ini` before every start: picture size and render scale, window mode, vsync, aspect ratio, frame-rate cap and the upscaler (Off, FSR 1.0, FSR 3.1, NVIDIA Image Scaling, DLSS or DLAA). Only values that changed since the last start are written, so a setting changed in the game's own F1 menu stands until you change it here. The upscaler row shows the folder its DLLs were found in, or what is missing. Quality and shader precompiling are saved and marked until EmblemWeave's own renderer arrives. **Audio**'s master volume goes to the same file; music, effects and voice wait for mixing. While playing, display settings are in the in-game menu and full rebinding is in the engine's F1 menu. |
 | **Appearance** | Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (XiØN's own palette, from xiondigital.net), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme, and every control takes its accent, its glow and its rim from it. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. Its **Log** tab lists the log files: every task writes its own under `%APPDATA%\EmblemWeave\logs`, with the compiler or script it ran, that tool's whole output, and why it stopped, so a failure can be sent on instead of described. |
 | **Game Log** | The game engine's log, followed live while the game runs: info, warnings and errors (each counted and filterable), search, copy, this run or the previous one, and **Pop out** to keep it in a window of its own. |
@@ -543,8 +393,8 @@ each start, so they apply the next time the game opens. **Audio**'s **Master** v
 same file; **Music**, **Effects** and **Voice** are the game's own mix and have no key there yet.
 
 Both pages read the files back. A **What the game will start with** panel lists what the engine will actually do on
-the next start — upscaler, output, window and picture size, frame limit, vsync and aspect ratio on **Graphics**, the
-master volume on **Audio** — and names the settings still waiting for that start, so a value changed after the last run
+the next start (upscaler, output, window and picture size, frame limit, vsync and aspect ratio on **Graphics**; master
+volume on **Audio**) and names the settings still waiting for that start, so a value changed after the last run
 is never mistaken for one already in force, and a setting the game's own F1 menu changed since is taken back onto
 the page, so the two always agree unless you have changed the page yourself and not started the game yet.
 

@@ -30,7 +30,7 @@ That archive is the only copy of the 0.2.0 package we know of.
 - **`apps/emblemweave/data/dump_hashes.json`**, copied unchanged from the 0.2.0
   package's `tools/build/dump_hashes.json`. Game Setup hashes the user's ExeFS
   modules against it and reports whether they are the build the engine was tested
-  with — update 131072, `main` build `db93b0125f48…` — or a different one.
+  with - update 131072, `main` build `db93b0125f48…` - or a different one.
 - **Its build notes.** The 0.2.0 first-run build (verify the dump against the
   manifest, write an uncompressed copy of the ZBIC `main`, lift and compile with
   a resumable stamp) is the reference the launcher's own pipeline and its
@@ -117,8 +117,8 @@ Three mechanisms are worth knowing about:
   after the module image (`@page:x<n>` encodes `adrp` to it). Our `load_sites` has `patch <addr> <orig> <new>`, which is
   compile-time only, and so is the only feature in it we cannot express.
 - **Spin-wait detection.** `tools/spin_waits.py` (adapted from nxnative, MIT, Copyright (c) 2026 seedds) proves a loop
-  cannot leave by itself — only loads, register and flag arithmetic, direct branches and barriers on every path back,
-  nothing live at the head written — and names its back-edges. Those are lifted as `rt_spin_gate(c, head); goto head`,
+  cannot leave by itself - only loads, register and flag arithmetic, direct branches and barriers on every path back,
+  nothing live at the head written - and names its back-edges. Those are lifted as `rt_spin_gate(c, head); goto head`,
   which slows the poll and hands the virtual core to a waiting thread. Our kernel already blocks in
   `kernel/busy_mutex.cpp`, but we have no static detector to find loops that burn a core without one.
 - **Static jump-table resolution.** `recomp/jumptables.py` (1,345 lines) walks back from the `br` over its block and

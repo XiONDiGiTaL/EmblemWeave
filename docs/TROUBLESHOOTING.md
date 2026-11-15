@@ -21,7 +21,7 @@ A package may store its files as they are or pack each one as a zstd frame. Stor
 
 ## Running straight from a `.nsp`
 
-**Game Setup > Choose package…** takes a plaintext `.nsp` too: the unsigned program, control and meta NCAs that NSP Box writes for emulators. Nothing in one is encrypted, so the launcher unpacks it itself with no keys and no outside tool — the program NCA's ExeFS and RomFS, and `control.nacp` from the control NCA — into `%APPDATA%\EmblemWeave\work\nsp\<title>-<bytes>`. It records what it wrote in `dump.txt` and then treats that folder exactly like an extracted dump, so the game boots from it and the recompiler reads it. Game Setup shows the unpack while it runs: a bar, the bytes copied of the total, and `Unpacking the package: 8.3 GB of 27.1 GB copied` in the job's line. **Cancel** beside **Detect again** stops it at the next file and deletes the half-written copy, so a partial unpack can never be mistaken for a complete one; nothing else is touched. The unpack is repeated only when the package's size or modification time changes, and the folder can be deleted to reclaim the space.
+**Game Setup > Choose package…** takes a plaintext `.nsp` too: the unsigned program, control and meta NCAs that NSP Box writes for emulators. Nothing in one is encrypted, so the launcher unpacks it itself with no keys and no outside tool - the program NCA's ExeFS and RomFS, and `control.nacp` from the control NCA - into `%APPDATA%\EmblemWeave\work\nsp\<title>-<bytes>`. It records what it wrote in `dump.txt` and then treats that folder exactly like an extracted dump, so the game boots from it and the recompiler reads it. Game Setup shows the unpack while it runs: a bar, the bytes copied of the total, and `Unpacking the package: 8.3 GB of 27.1 GB copied` in the job's line. **Cancel** beside **Detect again** stops it at the next file and deletes the half-written copy, so a partial unpack can never be mistaken for a complete one; nothing else is touched. The unpack is repeated only when the package's size or modification time changes, and the folder can be deleted to reclaim the space.
 
 A retail NSP stays encrypted: its NCAs are sealed with the console's own keys, which this project neither ships nor asks for. The Game Setup check names the first NCA it cannot read. Convert the package to a plaintext one (NSP Box's NSP → NUP and NUP → NSP do that without keys) or point EmblemWeave at an extracted folder instead.
 
@@ -96,7 +96,7 @@ Before sending it, ask the launcher what the log says. This needs no window, no 
 ```
 
 It prints the first error in the file with the lines that follow it, the last line, and which automatic repair the
-launcher would try — `_deps` fetched half written, or a build folder whose CMake cache belongs to another toolchain. Exit
+launcher would try - `_deps` fetched half written, or a build folder whose CMake cache belongs to another toolchain. Exit
 code 0 means an error was found, 3 means the log has no error line (the step was stopped before it printed one), 2 means
 the file could not be read.
 

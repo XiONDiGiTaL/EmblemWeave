@@ -48,6 +48,9 @@ try {
     New-Item -ItemType Directory -Force $pkg | Out-Null
     Copy-Item $exe (Join-Path $pkg 'EmblemWeave.exe')
     foreach ($f in 'LICENSE', 'README.md', 'docs\PACKAGE.md') { Copy-Item (Join-Path $repo $f) $pkg }
+    # The README links the changelog, so it travels with it.
+    New-Item -ItemType Directory -Force (Join-Path $pkg 'docs') | Out-Null
+    Copy-Item (Join-Path $repo 'docs\changelog') (Join-Path $pkg 'docs\changelog') -Recurse
 
     # The dump, the build output, the fetched third-party sources and the engine's own unused launcher stay out.
     $xd = @(

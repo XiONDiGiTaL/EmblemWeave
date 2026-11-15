@@ -119,6 +119,12 @@ pub fn diagnostics_text() -> String {
 /// Shared by the crash bundle and the report the Diagnostics page writes, so
 /// both arrive with the same evidence.
 pub fn environment_text() -> String {
+    environment_text_with(crate::jobs::newest_log())
+}
+
+/// The same text for a named build log, so the section can be checked against a
+/// log that reproduces a report without touching the logs folder.
+fn environment_text_with(newest: Option<std::path::PathBuf>) -> String {
     let mut s = String::new();
     s.push_str("\n== build tools ==\n");
     // The versions matter as much as the presence: a Visual Studio too old for C++20 or a .NET runtime without a matching SDK
@@ -137,7 +143,7 @@ pub fn environment_text() -> String {
     // The tail of the newest job log, where a failed step's own output is. A
     // report with no log leaves a failure as unexplained as before.
     {
-        if let Some(path) = crate::jobs::newest_log() {
+        if let Some(path) = newest {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 let all: Vec<&str> = text.lines().collect();
                 let from = all.len().saturating_sub(60);
@@ -183,6 +189,30 @@ mod tests {
         let r = RECENT.lock().unwrap();
         assert_eq!(r.len(), KEEP);
         assert!(r.last().unwrap().ends_with(&format!("line {}", KEEP + 9)));
+    }
+
+    #[test]
+    fn the_export_carries_the_error_that_is_buried_in_the_log() {
+        // A log shaped like the 0.1.11 report: no error in the tail, the summary at the end, and the reason thousands of
+        // lines above it.
+        let mut text = String::from("-- populating imgui\n");
+        for i in 0..2000 {
+            text.push_str(&format!("-- step {i}\n"));
+        }
+        text.push_str("CMake Error at _deps/imgui-src/CMakeLists.txt:3 (message):\n  the sources are incomplete\n");
+        for i in 0..2000 {
+            text.push_str(&format!("-- later {i}\n"));
+        }
+        text.push_str("-- Configuring incomplete, errors occurred!\n");
+        let path = std::env::temp_dir().join(format!("ew-diagnostics-{}.log", std::process::id()));
+        std::fs::write(&path, &text).unwrap();
+
+        let out = environment_text_with(Some(path.clone()));
+        assert!(out.contains("== first error in that log =="), "{out}");
+        assert!(out.contains("CMake Error at _deps/imgui-src/CMakeLists.txt:3"), "{out}");
+        assert!(out.contains("the sources are incomplete"), "{out}");
+        assert!(out.contains("== last log: "), "the tail is still there");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
