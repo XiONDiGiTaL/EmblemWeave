@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.19](0.1.19.md) | 2026-11-15 | New areas compile about four fifths fewer shader parts, the compilers step aside when the picture is late, and a fresh copy keeps everything in its own folder |
 | [0.1.18](0.1.18.md) | 2026-11-15 | The build survives spaced and apostrophe folders, the pipeline stops opening hundreds of console windows, and the launcher finally has a portable mode |
 | [0.1.17](0.1.17.md) | 2026-11-15 | The engine is Obersteinn's preserved 0.2.0 tree, it builds from an empty folder on this PC, and the game was played to the menu and back to check it |
 | [0.1.16](0.1.16.md) | 2026-11-15 | The release that finds its own toolchain, ships a zip that builds, and stops calling a half-built shader cache translated |
