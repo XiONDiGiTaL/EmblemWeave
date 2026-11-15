@@ -71,7 +71,7 @@ namespace SpirvHarness
                 Console.Error.WriteLine(e.Message);
             }
             Console.Error.WriteLine("usage: spirv_harness <code.bin> <ctrl.bin> [-o out.spv] [--glsl] [--glslc <GLSLC output, NVN2>]\n" +
-                                    "       spirv_harness --batch <extracted dir> --out <dir> [--jobs N] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--target-env E] [--host desktop|moltenvk] [--spirv-val PATH] [--reflect <Ampere corpus>]");
+                                    "       spirv_harness --batch <extracted dir> --out <dir> [--jobs N] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--target-env E] [--host desktop|moltenvk] [--spirv-val PATH] [--reflect <Ampere corpus>] [--only-missing]");
             return 2;
         }
 
@@ -495,7 +495,16 @@ namespace SpirvHarness
             string spirvVal = Opt(args, "--spirv-val", FindSpirvVal());
             Directory.CreateDirectory(outDir);
 
+            bool onlyMissing = args.Contains("--only-missing");
             List<Job> jobs = LoadJobs(root);
+            if (onlyMissing)
+            {
+                // A run that was interrupted leaves the blocks it finished in --out
+                // and no report. Redoing them costs minutes; asking for the rest does not.
+                int before = jobs.Count;
+                jobs = jobs.Where(j => !File.Exists(Path.Combine(outDir, j.Hash + ".spv"))).ToList();
+                Console.WriteLine($"{before - jobs.Count} blocks already translated in {outDir}, {jobs.Count} to do");
+            }
             if (limit > 0) jobs = jobs.Take(limit).ToList();
             Console.WriteLine($"{jobs.Count} distinct code blocks, {jobsN} jobs, validation {(validate ? targetEnv : "off")}");
 
@@ -533,7 +542,10 @@ namespace SpirvHarness
             });
 
             List<Result> all = results.OrderBy(r => r.Group).ThenBy(r => r.Hash).ToList();
-            WriteResults(Path.Combine(outDir, "results.tsv"), all);
+            // Always merge: a resumed run must not erase what an earlier one
+            // recorded, because the runtime reads results.tsv for the storage
+            // buffer offsets of every block, translated in this run or not.
+            WriteResults(Path.Combine(outDir, "results.tsv"), all, merge: true);
             string summary = Summarize(all, total.Elapsed, targetEnv);
             File.WriteAllText(Path.Combine(outDir, "summary.txt"), summary);
             Console.Write(summary);
@@ -556,16 +568,28 @@ namespace SpirvHarness
             return first.Trim();
         }
 
-        static void WriteResults(string path, List<Result> all)
+        static string ResultLine(Result r)
         {
+            string err = (r.Error + " " + r.ValError).Trim().Replace('\t', ' ').Replace('\n', ' ');
+            return $"{r.Hash}\t{r.Group}\t{r.Stage}\t{r.Stages}\t{r.Status}\t{r.Ms:F1}\t{r.SpvBytes}\t{r.Resources}\t" +
+                   $"{string.Join(" | ", r.Messages).Replace('\t', ' ')}\t{err}\t{r.Queries}\t{r.Reflection}";
+        }
+
+        static void WriteResults(string path, List<Result> all, bool merge = false)
+        {
+            const string header = "hash\tgroup\tstage\tstages_using\tstatus\tms\tspv_bytes\tresources\ttranslator_messages\terror\tdraw_time_queries\tglslc_reflection";
+            Dictionary<string, string> rows = new(StringComparer.Ordinal);
+            if (merge && File.Exists(path))
+                foreach (string line in File.ReadLines(path).Skip(1))
+                {
+                    int tab = line.IndexOf('\t');
+                    if (tab > 0) rows[line[..tab]] = line;
+                }
+            foreach (Result r in all) rows[r.Hash] = ResultLine(r);
             using StreamWriter w = new(path) { NewLine = "\n" };  // LF on Windows too: same bytes as on macOS
-            w.WriteLine("hash\tgroup\tstage\tstages_using\tstatus\tms\tspv_bytes\tresources\ttranslator_messages\terror\tdraw_time_queries\tglslc_reflection");
-            foreach (Result r in all)
-            {
-                string err = (r.Error + " " + r.ValError).Trim().Replace('\t', ' ').Replace('\n', ' ');
-                w.WriteLine($"{r.Hash}\t{r.Group}\t{r.Stage}\t{r.Stages}\t{r.Status}\t{r.Ms:F1}\t{r.SpvBytes}\t{r.Resources}\t" +
-                            $"{string.Join(" | ", r.Messages).Replace('\t', ' ')}\t{err}\t{r.Queries}\t{r.Reflection}");
-            }
+            w.WriteLine(header);
+            foreach (string line in rows.Values.OrderBy(l => l.Split('\t')[1], StringComparer.Ordinal).ThenBy(l => l.Split('\t')[0], StringComparer.Ordinal))
+                w.WriteLine(line);
         }
 
         // Group messages that differ only in numbers ("Attribute offset 0x3A0 ..." etc.) so the summary stays short.

@@ -186,6 +186,7 @@ struct Renderer::Impl {
     uint32_t cur_slot = 0, cur_image = 0;
     uint64_t frame_number = 0;
     bool in_frame = false;
+    bool first_frame = false;      // a vkQueuePresentKHR has succeeded at least once (the log line is written then)
     FrameInfo info;
 
     std::function<void(const FrameInfo&)> overlay;
@@ -684,6 +685,12 @@ bool Renderer::begin_frame(FrameInfo* out) {
             s.st.skipped++;
             return false;
         }
+        if (r == VK_ERROR_DEVICE_LOST) {
+            s.st.device_lost++;
+            s.st.skipped++;
+            NXLOG_E(kTag, "vkAcquireNextImageKHR: VK_ERROR_DEVICE_LOST, the GPU was reset or removed; no frame is presented until the game restarts");
+            return false;
+        }
         if (r == VK_SUBOPTIMAL_KHR) {
             s.dirty = true;     // finish this frame, rebuild before the next
             s.st.out_of_date++;
@@ -807,7 +814,11 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     {
         std::lock_guard<std::mutex> lk(s.dev->queue_mutex());
         VkResult r = vkQueueSubmit2(s.dev->queue(), 1, &si, slot.fence);
-        if (r != VK_SUCCESS) NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+        if (r != VK_SUCCESS) {
+            if (r == VK_ERROR_DEVICE_LOST) s.st.device_lost++;
+            NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)%s", static_cast<int>(r),
+                    r == VK_ERROR_DEVICE_LOST ? ": VK_ERROR_DEVICE_LOST, the GPU was reset or removed" : "");
+        }
         else if (probe_value) s.probe_published.store(probe_value);
         if (prefix) prefix->submitted = r == VK_SUCCESS;
         if (!s.headless) {
@@ -824,12 +835,30 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 pi.pNext = &pid;
             }
             r = vkQueuePresentKHR(s.dev->queue(), &pi);
-            s.st.presents++;
-            if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
-                s.dirty = true;
-                s.st.out_of_date++;
-            } else if (r != VK_SUCCESS) {
-                NXLOG_E(kTag, "vkQueuePresentKHR failed (%d)", static_cast<int>(r));
+            if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
+                // A present that failed is not a frame on the display. Counting
+                // every call as a present made a black window report 60 fps of
+                // presents while nothing reached the screen.
+                s.st.presents++;
+                if (!s.first_frame) {
+                    s.first_frame = true;
+                    // st.frames counts a frame when end_frame() returns, after this, so the
+                    // frame being shown is the next number. The line read "0 frames
+                    // submitted" when it claimed the first frame was presented.
+                    NXLOG_I(kTag, "first frame presented: %ux%u, format %d, present mode %s, frame %llu", s.extent.width, s.extent.height,
+                            static_cast<int>(s.format), present_mode_name(s.active), static_cast<unsigned long long>(s.st.frames + 1));
+                }
+            } else {
+                s.st.presents_failed++;
+                if (r == VK_ERROR_DEVICE_LOST) s.st.device_lost++;
+                if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
+                    s.dirty = true;
+                    s.st.out_of_date++;
+                    NXLOG_W(kTag, "vkQueuePresentKHR: %s, the swapchain is rebuilt", r == VK_ERROR_SURFACE_LOST_KHR ? "surface lost" : "out of date");
+                } else {
+                    NXLOG_E(kTag, "vkQueuePresentKHR failed (%d)%s", static_cast<int>(r),
+                            r == VK_ERROR_DEVICE_LOST ? ": VK_ERROR_DEVICE_LOST, the GPU was reset or removed; the window keeps its last frame" : "");
+                }
             }
         }
     }

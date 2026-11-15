@@ -105,6 +105,20 @@ std::string lower(std::string s) {
     return s;
 }
 
+/// The driver version as its vendor numbers it: NVIDIA packs major, minor,
+/// third and build into 10/8/8/6 bits; everyone else follows the Vulkan
+/// variant, major, minor, patch layout. Printed with the raw value, so a report
+/// can be matched against a vendor's release notes without guessing.
+std::string driver_text(const VkPhysicalDeviceProperties& p) {
+    char b[64];
+    if (p.vendorID == 0x10de)
+        std::snprintf(b, sizeof b, "%u.%u.%u.%u", (p.driverVersion >> 22) & 0x3ff, (p.driverVersion >> 14) & 0xff, (p.driverVersion >> 6) & 0xff,
+                      p.driverVersion & 0x3f);
+    else
+        std::snprintf(b, sizeof b, "%u.%u.%u", VK_API_VERSION_MAJOR(p.driverVersion), VK_API_VERSION_MINOR(p.driverVersion), VK_API_VERSION_PATCH(p.driverVersion));
+    return b;
+}
+
 const char* type_name(int t) {
     static const char* const names[] = {"other", "integrated", "discrete", "virtual", "cpu"};
     return t >= 0 && t <= 4 ? names[t] : "?";
@@ -556,9 +570,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         gi.can_present = c.eligible;
         gpus_.push_back(gi);
         cands.push_back(c);
-        NXLOG_I(kTag, "GPU %u: %s (%s, Vulkan %u.%u.%u, driver 0x%08x, %.1f GiB)%s%s", i, p.deviceName, type_name(gi.type),
-                VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion),
-                p.driverVersion, static_cast<double>(gi.vram_bytes) / (1024.0 * 1024.0 * 1024.0),
+        NXLOG_I(kTag, "GPU %u: %s (%s, vendor 0x%04x, device 0x%04x, Vulkan %u.%u.%u, driver %s [0x%08x], %.1f GiB)%s%s", i, p.deviceName, type_name(gi.type),
+                p.vendorID, p.deviceID, VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion),
+                driver_text(p).c_str(), p.driverVersion, static_cast<double>(gi.vram_bytes) / (1024.0 * 1024.0 * 1024.0),
                 c.eligible ? "" : " NOT USABLE: ", c.eligible ? "" : c.why.c_str());
     }
 
@@ -839,7 +853,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
 
-    NXLOG_I(kTag, "device ready: %s, queue family %u, validation %s, %s", props_.deviceName, queue_family_, validation_ ? "on" : "off",
+    NXLOG_I(kTag, "device ready: %s (vendor 0x%04x, device 0x%04x, Vulkan %u.%u.%u, driver %s [0x%08x]), queue family %u, validation %s, %s",
+            props_.deviceName, props_.vendorID, props_.deviceID, VK_API_VERSION_MAJOR(props_.apiVersion), VK_API_VERSION_MINOR(props_.apiVersion),
+            VK_API_VERSION_PATCH(props_.apiVersion), driver_text(props_).c_str(), props_.driverVersion, queue_family_, validation_ ? "on" : "off",
             headless ? "headless" : "window surface");
     return true;
 }

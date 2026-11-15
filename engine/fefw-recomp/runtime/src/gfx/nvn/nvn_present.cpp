@@ -2,6 +2,8 @@
 // nvnQueuePresentTexture: the window texture is drawn into the Renderer's frame (swapchain or headless image) and presented.
 // The shell's FrameLimiter, when given, paces the frame (begin_frame before the image is acquired).
 #include <cmath>
+
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -20,6 +22,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_shaders.h"
 
 namespace nxrt::nvn::be::gpu {
 
@@ -152,6 +155,22 @@ void present_on_render_thread(Window* w, int index, bool again) {
     gfx::FrameInfo fi;
     { NXFT("present.acquire"); nxrt::HitchTimer ht(nxrt::kHpRenderAcquire); if (!rend->begin_frame(&fi)) return; }
     ft::frame();
+    {   // A frame can reach the display with nothing drawn on it, and the engine
+        // used to say nothing about that: a cache with no translated SPIR-V links
+        // no program, so every draw is skipped and the present pass copies a black
+        // texture at 60 fps. Name it at the first frame, with the number and where
+        // the shaders belong, instead of leaving it in 600 identical warnings.
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+            const size_t gone = shader_cache().missing();
+            if (gone > 0) {
+                NXLOG_E("nvn",
+                        "the first presented frame has %zu shader blocks with no SPIR-V, so the programs that use them are skipped and the picture stays black while the \
+audio plays. The cache is %s: translate it with Build the game (the shader step now repairs an interrupted cache).",
+                        gone, shader_cache().dir().c_str());
+            }
+        }
+    }
     Frame f;
     f.cb = fi.cmd;
     f.serial = current_serial();

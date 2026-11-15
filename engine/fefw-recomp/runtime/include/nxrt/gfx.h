@@ -256,7 +256,9 @@ struct FrameInfo {
 
 struct RendererStats {
     uint64_t frames = 0;                  // frames submitted
-    uint64_t presents = 0;                // vkQueuePresentKHR calls (0 when headless)
+    uint64_t presents = 0;                // vkQueuePresentKHR calls that succeeded or returned SUBOPTIMAL (0 when headless)
+    uint64_t presents_failed = 0;         // vkQueuePresentKHR calls that returned an error, device loss included
+    uint64_t device_lost = 0;             // VK_ERROR_DEVICE_LOST seen on acquire, submit or present
     uint64_t skipped = 0;                 // begin_frame returned false
     uint64_t swapchain_creates = 0;       // swapchains created (first one included)
     uint64_t out_of_date = 0;             // OUT_OF_DATE / SUBOPTIMAL results seen

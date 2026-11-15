@@ -478,6 +478,12 @@ def main():
             if (low.endswith(('.fdata', '.file')) and p.startswith(ktgl)) or low_nz.endswith(BNSH_FILES):
                 paths.append(p)
     paths.sort(key=lambda p: os.path.relpath(p, a.romfs).replace(os.sep, '/'))
+    # A --romfs that is a file (a .nup passed by mistake) walks to nothing, and the corpus
+    # would be only the shaders inside main: a few hundred blocks, every scene shader
+    # missing, every program unlinked, black frames with audio (issues #12 and #15).
+    if not paths:
+        sys.exit(f'extract_corpus: no shader archive under {a.romfs!r} (looked for {", ".join(BNSH_FILES)}'
+                 f'{" and *.fdata/*.file" if ktgl else ""}). Pass the extracted RomFS folder, not a .nup or .nsp file.')
     for sub in ('code', 'ctrl', 'glslc'):
         os.makedirs(os.path.join(a.out, sub), exist_ok=True)
     exefs = []

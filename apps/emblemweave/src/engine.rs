@@ -692,8 +692,136 @@ fn stale_build_cache(reason: &str) -> bool {
         || reason.contains("is not a full path")
 }
 
-fn has_files(dir: &Path) -> bool {
-    std::fs::read_dir(dir).map(|mut d| d.next().is_some()).unwrap_or(false)
+/// What the shader translation has actually produced, block by block.
+///
+/// The corpus lists every distinct code block the game has (12 088 for this
+/// dump); the translator writes `<hash>.spv` for each it can translate and one
+/// line per block in `results.tsv`, at the end of the run. A folder that holds a
+/// few hundred files and no report is a run that was interrupted, not a finished
+/// cache, and a game started on it draws nothing.
+struct ShaderReport {
+    expected: usize,
+    translated: usize,
+    /// Attempted, and the translator says it cannot handle the block (compute
+    /// shaders with instructions it does not cover). These never get a .spv and
+    /// are not a reason to translate again.
+    failed: usize,
+    /// No .spv and no line in results.tsv: the work that is still to do.
+    missing: Vec<String>,
+}
+
+impl ShaderReport {
+    fn failed_summary(&self) -> String {
+        if self.failed == 0 {
+            String::new()
+        } else {
+            format!("; {} blocks are beyond the translator (listed in results.tsv)", self.failed)
+        }
+    }
+}
+
+/// The folder the shader corpus is read from.
+///
+/// Setup accepts a `.nup` and the game reads its RomFS in place from it, so
+/// `romfs` is a file. The extractor walks a folder: given a file it finds nothing
+/// and the corpus comes out as only the shaders inside `main`, a few hundred
+/// blocks. That is what 0.1.10 shipped to the players in issues #12 and #15, whose
+/// logs show 151 cache records and 598 programs with no translated shader. The
+/// archives that carry shaders are copied out of the `.nup` instead, once per game
+/// version, and the extractor gets a folder.
+fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u64)>), String> {
+    if romfs.is_dir() {
+        return Ok((romfs.to_path_buf(), None));
+    }
+    let nup = ew_format::nup::Nup::open(romfs).map_err(|e| format!("reading {} as a .nup: {e}", romfs.display()))?;
+    let Some(pkg) = nup.program_package().cloned() else {
+        return Err(format!("{} holds no base game or update, so its shaders cannot be read", romfs.display()));
+    };
+    let out = root.join("work").join("shaders").join("romfs");
+    let stamp = out.join(".source");
+    let want = format!("{}|{} files|v{}", romfs.display(), nup.files.len(), pkg.version);
+    if stamp.is_file() && std::fs::read_to_string(&stamp).map(|t| t.trim().to_string()).ok().as_deref() == Some(want.as_str()) {
+        return Ok((out, None));
+    }
+    // The extractor looks for these by name; every other romfs file is skipped, so
+    // the copy is 1.4 GiB of archives, not the game's 30 GB.
+    const EXTS: [&str; 5] = [".bfsha", ".ptcl", ".arc", ".sarc", ".bnsh"];
+    let _ = std::fs::remove_dir_all(&out);
+    let mut copied = 0usize;
+    let mut bytes = 0u64;
+    for (rel, index) in nup.walk(pkg.romfs) {
+        let low = rel.to_ascii_lowercase();
+        let base = low.strip_suffix(".zst").unwrap_or(&low);
+        if !EXTS.iter().any(|e| base.ends_with(e)) {
+            continue;
+        }
+        // `read` decompresses, so the copy keeps the real name and the extractor sees
+        // the archive instead of a .zst it would have to decompress again.
+        let rel = if low.ends_with(".zst") { rel[..rel.len() - 4].to_string() } else { rel };
+        let dst = out.join(&rel);
+        if let Some(dir) = dst.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        }
+        let data = nup.read(index).map_err(|e| format!("reading {rel} from {}: {e}", romfs.display()))?;
+        bytes += data.len() as u64;
+        std::fs::write(&dst, &data).map_err(|e| format!("writing {}: {e}", dst.display()))?;
+        copied += 1;
+    }
+    if copied == 0 {
+        return Err(format!("{} holds no shader archive ({EXTS:?}), so no shaders can be translated", romfs.display()));
+    }
+    std::fs::write(&stamp, &want).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
+    Ok((out, Some((copied, bytes))))
+}
+
+fn shader_report(corpus: &Path, spirv: &Path) -> Result<ShaderReport, String> {
+    let unique = corpus.join("unique.tsv");
+    let text = std::fs::read_to_string(&unique).map_err(|e| format!("reading {}: {e}", unique.display()))?;
+    let expected: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split('\t').next())
+        .filter(|h| !h.is_empty())
+        .collect();
+    // hash -> status, from the translator's own report.
+    let results = std::fs::read_to_string(spirv.join("results.tsv")).unwrap_or_default();
+    let mut status: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in results.lines().skip(1) {
+        let mut f = line.split('\t');
+        if let (Some(h), Some(_group), Some(_stage), Some(_uses), Some(st)) = (f.next(), f.next(), f.next(), f.next(), f.next()) {
+            status.insert(h, st);
+        }
+    }
+    let (mut translated, mut failed, mut missing) = (0usize, 0usize, Vec::new());
+    for hash in &expected {
+        // A report line saying ok with no .spv beside it is work to do again: the
+        // file was deleted, or the run that wrote the line was cut short before it.
+        match status.get(hash) {
+            Some(&st) if st == "ok" && spirv.join(format!("{hash}.spv")).is_file() => translated += 1,
+            Some(&st) if st == "ok" => missing.push((*hash).to_string()),
+            Some(_) => failed += 1,
+            None => missing.push((*hash).to_string()),
+        }
+    }
+    Ok(ShaderReport { expected: expected.len(), translated, failed, missing })
+}
+
+/// Run the translator over the blocks the cache does not have yet. `--only-missing`
+/// skips the ones already written, so a repair costs the missing blocks and not
+/// the whole corpus; the translator merges its report so the earlier lines survive.
+fn run_translator(ctx: &Ctx, root: &Path, bundled: &Option<PathBuf>, harness: &Path) -> Result<(), String> {
+    match bundled {
+        Some(exe) => run(
+            ctx,
+            root,
+            &exe.display().to_string(),
+            &["--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val", "--only-missing"],
+        ),
+        None => {
+            let h = harness.display().to_string();
+            run(ctx, root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val", "--only-missing"])
+        }
+    }
 }
 
 /// The texture build's sources, each checked by the file the build opens. A
@@ -991,29 +1119,83 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     }
 
     // 7. Shaders.
+    //
+    // "Some .spv files exist" is not "the shaders are translated": a run that is
+    // interrupted (the launcher closed, the machine shut down, the translator
+    // killed) leaves a folder with a few hundred of the 12 000 blocks and no
+    // results.tsv, because results.tsv is written once, at the end. Treating
+    // that as done is what produced the black screens in issues #12 and #15: the
+    // game found no translated shader for 598 programs, skipped every draw and
+    // presented black frames at 60 fps with the audio playing.
     ctx.start(6);
+    let corpus = root.join("work").join("shaders").join("corpus");
     let spirv = root.join("work").join("shaders").join("spirv");
-    if has_files(&spirv) {
-        ctx.end(6, StageStatus::Skipped, "already translated");
-    } else {
-        let rom = romfs.display().to_string();
+    let (romfs_dir, copied) = shader_romfs(&root, &romfs)?;
+    if let Some((files, bytes)) = copied {
+        ctx.log(format!(
+            "copied {files} shader archives ({:.1} GiB) out of the .nup: the shader extractor walks a folder, and a .nup is a file",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
+    // The corpus remembers which RomFS it came from. One built from a path that is
+    // not that folder (a .nup passed as --romfs, an older launcher) is not reused:
+    // it holds a handful of blocks and would translate a handful of shaders.
+    let corpus_stamp = corpus.join(".romfs");
+    let romfs_id = romfs_dir.display().to_string();
+    let corpus_current = corpus.join("unique.tsv").is_file()
+        && std::fs::read_to_string(&corpus_stamp).map(|t| t.trim().to_string()).ok().as_deref() == Some(romfs_id.as_str());
+    if !corpus_current {
+        let rom = romfs_id.clone();
         let main = root.join("game").join("dump").join("exefs").join("main").display().to_string();
         let dump = root.join("game").join("dump").join("exefs").display().to_string();
         run(ctx, &root, &py, &["-I", "tools\\shaders\\ampere\\extract_corpus.py", "--romfs", &rom, "--main", &main, "--exefs", &dump, "--out", "work\\shaders\\corpus", "--jobs", "4"])?;
-        // Without the Vulkan SDK there is no spirv-val; the shaders are used unvalidated.
-        // The published translator carries its own .NET runtime, so a player
-        // whose PC has no .NET SDK still gets shaders; without it, build the
-        // project and run it through `dotnet` as before.
-        match &bundled {
-            Some(exe) => {
-                run(ctx, &root, &exe.display().to_string(), &["--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])?;
+        std::fs::write(&corpus_stamp, &romfs_id).map_err(|e| format!("writing {}: {e}", corpus_stamp.display()))?;
+    }
+    let mut report = shader_report(&corpus, &spirv)?;
+    if report.expected == 0 {
+        return Err(format!("{} lists no shader blocks, so the dump could not be read for shaders. Send a diagnostics report; the game cannot draw without them.", corpus.join("unique.tsv").display()));
+    }
+    if report.missing.is_empty() {
+        ctx.end(6, StageStatus::Skipped, format!("all {} shaders translated{}", report.expected, report.failed_summary()));
+    } else {
+        ctx.log(format!(
+            "{} of {} shaders have no SPIR-V ({} translated, {} the translator cannot handle); translating the missing ones",
+            report.missing.len(),
+            report.expected,
+            report.translated,
+            report.failed
+        ));
+        // The translator writes one file per block and its report at the end, so
+        // a crash or an interrupt loses only the block it was on. Re-run while
+        // each attempt makes progress, and only a run that stops making any is
+        // a failure.
+        let mut last = report.missing.len();
+        for attempt in 1..=3 {
+            // --only-missing: the 12 000 blocks already translated are not redone.
+            if let Err(e) = run_translator(ctx, &root, &bundled, &harness) {
+                ctx.log(format!("translator attempt {attempt} ended early: {e}"));
             }
-            None => {
-                let h = harness.display().to_string();
-                run(ctx, &root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])?;
+            report = shader_report(&corpus, &spirv)?;
+            if report.missing.is_empty() {
+                break;
             }
+            if report.missing.len() >= last {
+                break;      // no progress: another run would fail the same way
+            }
+            last = report.missing.len();
         }
-        ctx.end(6, StageStatus::Done, "shaders translated to SPIR-V");
+        if !report.missing.is_empty() {
+            let first: Vec<&str> = report.missing.iter().take(5).map(String::as_str).collect();
+            return Err(format!(
+                "{} of {} shaders still have no SPIR-V (first: {}). Without them the game links no program, skips every draw and presents black frames \
+                 with the audio still playing. The translator's report is {}; send it with a diagnostics report.",
+                report.missing.len(),
+                report.expected,
+                first.join(", "),
+                spirv.join("results.tsv").display()
+            ));
+        }
+        ctx.end(6, StageStatus::Done, format!("{} shaders translated{}", report.expected, report.failed_summary()));
     }
 
     // 8. fefw.ini.
@@ -1888,6 +2070,36 @@ mod tests {
         assert!(ini.contains("watchdog_seconds = 30"));
         // The upscaler section is written up front; Play patches its mode.
         assert!(ini.contains("[upscale]\nmode = off"));
+    }
+
+    /// Issues #12 and #15: Setup accepts a `.nup`, the game reads its RomFS in place
+    /// from it, and the shader extractor walks a folder and found nothing, so the
+    /// corpus held only the shaders inside `main`. Run by hand against a real
+    /// package: `EW_TEST_NUP=<game>.nup cargo test -p emblemweave a_nup -- --ignored`.
+    #[test]
+    #[ignore]
+    fn a_nup_hands_the_extractor_a_folder_of_shader_archives() {
+        let Some(nup) = std::env::var_os("EW_TEST_NUP").map(PathBuf::from) else {
+            panic!("set EW_TEST_NUP to the game's .nup");
+        };
+        // EW_TEST_ROOT keeps the copy, so the extractor can be run on it by hand.
+        let keep = std::env::var_os("EW_TEST_ROOT").map(PathBuf::from);
+        let root = keep.clone().unwrap_or_else(|| std::env::temp_dir().join("ew-nup-shader-romfs"));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dir, copied) = shader_romfs(&root, &nup).expect("the .nup yields a folder");
+        let (files, bytes) = copied.expect("a .nup is copied, not used as it is");
+        assert!(dir.is_dir(), "{}", dir.display());
+        assert!(files > 0 && bytes > 0, "{files} files, {bytes} bytes");
+        // A second call reuses the copy instead of reading 1.4 GiB out of the package again.
+        let (again, copied_again) = shader_romfs(&root, &nup).expect("the copy is reused");
+        assert_eq!(again, dir);
+        assert!(copied_again.is_none(), "the copy was made twice");
+        let count = std::fs::read_dir(&dir).expect("the folder").count();
+        assert!(count > 0, "the folder is empty");
+        println!("{files} shader archives ({bytes} bytes) below {}", dir.display());
+        if keep.is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
