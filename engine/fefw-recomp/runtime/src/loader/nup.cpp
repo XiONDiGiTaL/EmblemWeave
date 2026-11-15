@@ -69,11 +69,12 @@ bool walk(const Toc& t, uint32_t dir, const std::string& prefix, int depth, std:
         f.offset = u64(t.b, fr + 0x10);
         const uint64_t stored = u64(t.b, fr + 0x18);
         const uint8_t codec = t.b[fr + 0x40];
-        if (f.size > 0 && codec != 0)
-            return fail(err, f.path + " is compressed in the .nup; the game reads packages directly and needs stored files. Repack without "
-                             "compression (nup pack with the zstandard module unavailable writes stored files)");
-        if (f.size > 0 && (stored != f.size || f.offset > t.file_size || f.size > t.file_size - f.offset))
+        // A compressed entry is listed with its decompressed size and its compressed extent: only read_file can serve it. The caller
+        // decides whether that is a problem, so a package whose ExeFS is packed still boots from the extracted exefs folder.
+        f.compressed = f.size > 0 && codec != 0;
+        if (f.size > 0 && (f.offset > t.file_size || stored > t.file_size - f.offset))
             return fail(err, f.path + " points outside the .nup file");
+        if (f.size > 0 && !f.compressed && stored != f.size) return fail(err, f.path + " has a size its package does not match");
         out.push_back(std::move(f));
     }
     return true;
@@ -133,10 +134,13 @@ bool open(const std::string& path, Content& out, std::string* err) {
     if (exe_dir == kNoDir && rom_dir == kNoDir) return fail(err, path + " holds no base game or update");
     if (exe_dir != kNoDir && !walk(t, exe_dir, "", 0, out.exefs, err)) return false;
     if (rom_dir != kNoDir && !walk(t, rom_dir, "", 0, out.romfs, err)) return false;
+    // A compressed RomFS entry is listed and left out of the served tree (fs_romfs.cpp); the launcher writes the package's packed files
+    // into a folder and passes it as [fs] romfs_overlay, so a packed package plays without anyone repacking it.
     return true;
 }
 
 bool read_file(const std::string& path, const File& file, std::vector<uint8_t>& out, std::string* err) {
+    if (file.compressed) return fail(err, file.path + " is compressed in the .nup; unpack the package's ExeFS instead");
     std::ifstream f(fs_path(path), std::ios::binary);
     out.resize(static_cast<size_t>(file.size));
     f.seekg(static_cast<std::streamoff>(file.offset));

@@ -1077,6 +1077,22 @@ fn main() -> eframe::Result<()> {
         print!("{}", crate::deps::markdown());
         std::process::exit(0);
     }
+    // Unpack a package whose RomFS is packed with zstd, the step the build does on its own, so it can be run by hand on a package.
+    if let Some(i) = args.iter().position(|a| a == "--unpack-romfs") {
+        let src = args.get(i + 1).cloned().unwrap_or_default();
+        let dest = args.get(i + 2).cloned().unwrap_or_else(|| "romfs-unpacked".to_string());
+        let r = gamedata::unpack_packed_romfs(std::path::Path::new(&src), std::path::Path::new(&dest), &mut |m| println!("{m}"));
+        match r {
+            Ok((files, bytes)) => {
+                println!("{files} files, {:.1} GB written to {dest}", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("unpack-romfs: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
         let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });

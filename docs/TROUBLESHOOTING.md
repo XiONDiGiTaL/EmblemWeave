@@ -137,6 +137,8 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `You have changed variables that require your cache to be deleted`, then `clang++: error: unknown argument: '-clang:-fmacro-prefix-map=…'` | 0.1.17 set the resource compiler after CMake had configured, so CMake wiped the cache and configured again with its defaults: Debug, and the `clang++` driver, which does not take a `-clang:` argument | Fixed in the next release. Until then, delete `engine\fefw-recomp\game-build\fefw\build` and build again |
 | `Title metadata: control.nacp not found` | The dump has no `control.nacp`, so the title name and display version are unknown. The build and the game do not need it | Nothing to fix unless you want the version line: extracted `.nsp` dumps keep it at `data\control\control.nacp` |
 
+| `main.npdm is compressed in the .nup`, `... is compressed in the .nup; the game reads RomFS files in place`, or the game exits two seconds after Play | 0.1.19 and older refused any `.nup` that packs some of its files with zstd (#24) | 0.1.20 writes those files into `engine\fefw-recomp\work\romfs-overlay` at build time and the engine reads them from there, so press Build the game once. A compressed ExeFS no longer matters at all |
+
 ## Console windows during the recompilation pipeline
 
 The pipeline compiles the C it emits, one shard per process, using zig's clang (`python -m ziglang cc`), `zig`, or LLVM's

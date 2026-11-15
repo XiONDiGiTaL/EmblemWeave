@@ -2,7 +2,8 @@
 // Reader for .nup game packages (https://github.com/a55uka/nup, SPEC.md format 1): one file holding a title's ExeFS and RomFS trees.
 // The game is served straight from it: RomFS reads and ExeFS module loads become positioned reads of the package file, so nothing is
 // unpacked. Only stored (codec 0, "raw") files can be served that way; a zstd file is one frame for the whole file, with no random
-// access into it, so a package packed with compression is refused with a message saying how to repack it.
+// access into it. A RomFS entry packed that way is refused when the package opens, because the game reads the RomFS by offset; a
+// compressed ExeFS entry does not matter, because the modules are loaded from the extracted `exefs` folder.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -12,8 +13,9 @@ namespace nxrt::nup {
 
 struct File {
     std::string path;           // inside its subtree, '/'-separated, no leading slash ("data/a.bin")
-    uint64_t size = 0;
+    uint64_t size = 0;          // the file's size once decompressed
     uint64_t offset = 0;        // absolute offset of the data in the package file
+    bool compressed = false;    // a zstd entry: one frame for the whole file, so it can only be read whole (read_file)
 };
 
 struct Content {

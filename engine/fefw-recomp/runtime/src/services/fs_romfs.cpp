@@ -188,7 +188,14 @@ bool scan_nup(const std::string& nup_path, Node& root, std::string& msg) {
         msg = nup_path + " has no RomFS";
         return false;
     }
+    size_t packed = 0;
     for (const nup::File& f : c.romfs) {
+        // A zstd entry has no random access into it, so it cannot be served from the package: the launcher writes those files into a folder
+        // and passes it as [fs] romfs_overlay, which merges over this tree by path.
+        if (f.compressed) {
+            ++packed;
+            continue;
+        }
         Node* d = &root;
         size_t at = 0;
         for (size_t slash; (slash = f.path.find('/', at)) != std::string::npos; at = slash + 1) {
@@ -216,6 +223,7 @@ bool scan_nup(const std::string& nup_path, Node& root, std::string& msg) {
         }
         d->kids.push_back(std::move(k));
     }
+    if (packed) NXLOG_I("fs", "RomFS: %zu of %zu files are packed with zstd and are read from [fs] romfs_overlay", packed, c.romfs.size());
     sort_tree(root);
     return true;
 }

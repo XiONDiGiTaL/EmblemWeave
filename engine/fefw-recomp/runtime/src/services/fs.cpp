@@ -441,6 +441,18 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
             overlays.push_back(m.romfs);
         }
     }
+    // [fs] romfs_overlay: what the launcher writes for a package whose RomFS is packed with zstd, since those files cannot be served from the
+    // package itself. Semi-colon separated, so more than one folder can be laid over it.
+    for (std::string list = config_get_str("fs", "romfs_overlay", ""); !list.empty();) {
+        const size_t at = list.find(';');
+        const std::string one = list.substr(0, at);
+        if (!one.empty()) {
+            NXLOG_I("fs", "RomFS overlay for packed files: %s", one.c_str());
+            overlays.push_back(one);
+        }
+        if (at == std::string::npos) break;
+        list.erase(0, at + 1);
+    }
     if (!img->build(dir, &err, overlays)) {
         NXLOG_E("fs", "RomFS folder '%s' cannot be served: %s (set [fs] romfs)", dir.c_str(), err.c_str());
         st().rom_failed = true;

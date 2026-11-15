@@ -737,6 +737,40 @@ impl ShaderReport {
 /// logs show 151 cache records and 598 programs with no translated shader. The
 /// archives that carry shaders are copied out of the `.nup` instead, once per game
 /// version, and the extractor gets a folder.
+/// The RomFS the game can actually read. A `.nup` of stored files is served from the package itself; one packed with zstd cannot be,
+/// because a zstd entry is a single frame with no random access into it, so its RomFS is written out into `work/romfs` once and the game
+/// reads that folder. Without this a packed package built, then died two seconds into play on `main.npdm is compressed in the .nup`
+/// (issue #24); the work is done here, where there is a job to report it, instead of being left to the player.
+fn romfs_folder_for_play(root: &Path, romfs: &Path, ctx: &Ctx) -> Result<Option<PathBuf>, String> {
+    if romfs.is_dir() {
+        return Ok(None);
+    }
+    let Some((count, bytes)) = crate::gamedata::packed_romfs(romfs) else {
+        return Ok(None);
+    };
+    let dest = root.join("work").join("romfs-overlay");
+    let stamp = dest.join(".written");
+    let key = format!("{}|{count} files|{bytes} bytes", romfs.display());
+    if std::fs::read_to_string(&stamp).map(|t| t.trim() == key.trim()).unwrap_or(false) {
+        ctx.log(format!("game files: {count} packed files; using the overlay already written in {}", dest.display()));
+        return Ok(Some(dest));
+    }
+    ctx.log(format!(
+        "game files: {count} files of this package ({:.1} GB) are packed with zstd, which the engine cannot read in place, so those files are written once into {} and read from there; the package is used as it is for everything else",
+        bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        dest.display()
+    ));
+    std::fs::create_dir_all(&dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
+    let (written, total) = crate::gamedata::unpack_packed_romfs(romfs, &dest, &mut |m| ctx.log(format!("game files: {m}")))?;
+    std::fs::write(&stamp, &key).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
+    ctx.log(format!(
+        "game files: {written} packed files written ({:.1} GB) to {}; the package supplies the rest",
+        total as f64 / (1024.0 * 1024.0 * 1024.0),
+        dest.display()
+    ));
+    Ok(Some(dest))
+}
+
 fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u64)>), String> {
     if romfs.is_dir() {
         return Ok((romfs.to_path_buf(), None));
@@ -900,15 +934,19 @@ pub struct RunConfig {
     pub exefs: PathBuf,
     pub romfs: PathBuf,
     pub save_dir: PathBuf,
+    /// Files the package cannot serve in place (its zstd entries), written out by the build; the engine lays this folder over the package.
+    pub romfs_overlay: Option<PathBuf>,
 }
 
 /// The engine's configuration for the launcher's run folder.
 pub fn ini_text(root: &Path, run: &RunConfig) -> String {
     let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
+    // Only written when the package has files the engine cannot read in place: the folder the build wrote them into.
+    let overlay = run.romfs_overlay.as_ref().map(|p| format!("romfs_overlay = {}\n", fwd(p))).unwrap_or_default();
     format!(
         "; Written by EmblemWeave. Every key is described in engine/fefw-recomp/runtime/docs/CONFIG.md.\n\
          [log]\npath = fefw.log\n\
-         [fs]\nexefs = {}\nromfs = {}\nsave_dir = {}\nmods = mods\n\
+         [fs]\nexefs = {}\nromfs = {}\n{}\nsave_dir = {}\nmods = mods\n\
          [nvn]\nshader_cache = {}\nbc7_cache = {}\n\
          [upscale]\nmode = off\n\
          [dlss]\nupscaler = auto\n\
@@ -916,6 +954,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
          [fefw]\nfps60 = 1\n",
         fwd(&run.exefs),
         fwd(&run.romfs),
+        overlay.trim_end(),
         fwd(&run.save_dir),
         fwd(&root.join("work").join("shaders").join("spirv")),
         fwd(&root.join("work").join("bc7_cache")),
@@ -1207,6 +1246,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     ctx.start(6);
     let corpus = root.join("work").join("shaders").join("corpus");
     let spirv = root.join("work").join("shaders").join("spirv");
+    let overlay = romfs_folder_for_play(&root, &romfs, ctx)?;
     let (romfs_dir, copied) = shader_romfs(&root, &romfs)?;
     if let Some((files, bytes)) = copied {
         ctx.log(format!(
@@ -1280,7 +1320,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let save_dir = Config::save_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     std::fs::create_dir_all(dir.join("mods")).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let ini = ini_text(&root, &RunConfig { exefs: root.join("game").join("dump").join("exefs"), romfs, save_dir });
+    let ini = ini_text(&root, &RunConfig { exefs: root.join("game").join("dump").join("exefs"), romfs, save_dir, romfs_overlay: overlay });
     std::fs::write(dir.join("fefw.ini"), ini).map_err(|e| format!("writing fefw.ini: {e}"))?;
     ctx.end(7, StageStatus::Done, format!("{}", dir.join("fefw.ini").display()));
     Ok(JobResult::Engine(dir))
@@ -2150,6 +2190,15 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     if !exe.is_file() || !dir.join("fefw.ini").is_file() {
         return Err("the game is not built yet: run Build the game on Game Setup".into());
     }
+    // A build from an earlier release can point the game at a packed .nup, which the engine refuses a second into boot. Name that here,
+    // with the one action that fixes it, instead of letting the game die on `main.npdm is compressed in the .nup` (issue #24).
+    let written = ini_map(&dir.join("fefw.ini"));
+    if let Some(romfs) = written.get("fs.romfs") {
+        let path = PathBuf::from(romfs);
+        if path.is_file() && written.get("fs.romfs_overlay").is_none() && crate::gamedata::packed_romfs(&path).is_some() {
+            return Err("this game was built against a package whose files are packed with zstd, which the engine cannot read in place: press Build the game once and those files are written into your work folder for good".into());
+        }
+    }
     // The haptics backend is loaded from beside `fefw.exe` and is not part of a game folder that was built by an earlier
     // release, so it is put there on the way in as well as after a build: updating the launcher should not quietly drop
     // rumble to the standard two motors (issue #10). A running game holds the file, and a copy that fails leaves the one
@@ -2282,7 +2331,7 @@ mod tests {
     fn the_ini_points_at_the_dump_saves_and_shaders() {
         let ini = ini_text(
             Path::new(r"C:\x\engine\fefw-recomp"),
-            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s") },
+            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s"), romfs_overlay: None },
         );
         assert!(ini.contains("romfs = E:/g.nup"));
         assert!(ini.contains("save_dir = C:/s"));
@@ -2329,7 +2378,7 @@ mod tests {
     fn the_upscaler_replaces_its_own_key_and_keeps_the_rest() {
         let ini = ini_text(
             Path::new(r"C:\x\engine\fefw-recomp"),
-            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s") },
+            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s"), romfs_overlay: None },
         );
         let patched = set_ini_key(&ini, "upscale", "mode", "fsr3");
         assert!(patched.contains("[upscale]\nmode = fsr3"));

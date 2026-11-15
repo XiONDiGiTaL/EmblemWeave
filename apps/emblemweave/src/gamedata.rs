@@ -247,6 +247,52 @@ fn file_len(p: &Path) -> Option<u64> {
     std::fs::metadata(p).ok().map(|m| m.len())
 }
 
+/// The zstd entries of a `.nup`'s RomFS cannot be read in place by the engine (one zstd frame per file, no random access), so they are
+/// written out as files once, into the folder the game reads as `[fs] romfs_overlay` over the package. Returns how many files were written
+/// and how many bytes; a file already at its full size is left alone, so an interrupted run resumes where it stopped. `say` gets progress.
+pub fn unpack_packed_romfs(
+    nup_path: &Path,
+    dest: &Path,
+    say: &mut dyn FnMut(String),
+) -> Result<(usize, u64), String> {
+    let nup = ew_format::nup::Nup::open(nup_path).map_err(|e| format!("reading {}: {e}", nup_path.display()))?;
+    let pkg = nup.program_package().ok_or("the .nup holds no base game or update")?;
+    let entries = nup.walk(pkg.romfs);
+    std::fs::create_dir_all(dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
+    let (mut written, mut bytes) = (0usize, 0u64);
+    for (n, (rel, index)) in entries.iter().enumerate() {
+        let file = &nup.files[*index as usize];
+        if !file.compressed {
+            continue;                     // the engine serves stored files from the package itself
+        }
+        let out = dest.join(rel);
+        if std::fs::metadata(&out).map(|m| m.len()).ok() == Some(file.size) {
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        let data = nup.read(*index).map_err(|e| format!("reading {rel} from {}: {e}", nup_path.display()))?;
+        std::fs::write(&out, &data).map_err(|e| format!("writing {}: {e}", out.display()))?;
+        written += 1;
+        bytes += file.size;
+        if n % 500 == 0 {
+            say(format!("{n} of {} unpacked", entries.len()));
+        }
+    }
+    Ok((written, bytes))
+}
+
+/// The zstd entries of a `.nup`'s RomFS: how many, and how many bytes they carry. `None` when the package has none, which means the
+/// engine can serve it where it lies.
+pub fn packed_romfs(nup_path: &Path) -> Option<(usize, u64)> {
+    let nup = ew_format::nup::Nup::open(nup_path).ok()?;
+    let pkg = nup.program_package()?;
+    let packed: Vec<&ew_format::nup::FileEntry> =
+        nup.walk(pkg.romfs).iter().map(|(_, i)| &nup.files[*i as usize]).filter(|f| f.compressed).collect();
+    (!packed.is_empty()).then(|| (packed.len(), packed.iter().map(|f| f.size).sum()))
+}
+
 /// Open a `.nup` dump: copy its ExeFS out once (it is small) and use its
 /// RomFS in place. Returns the ExeFS folder and the title metadata.
 fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
@@ -289,8 +335,8 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
             }
         }
     }
-    // The engine decompresses a zstd entry into its cache the first time the game
-    // reads it, so the package runs as it is; say what that cache will take.
+    // The engine serves stored files straight from the package and cannot read into a zstd frame, so a packed package is unpacked
+    // into the work folder once, at build time, and the game reads that. Say how much disk that takes before it starts.
     let listed: Vec<u32> = nup.walk(pkg.exefs).into_iter().chain(nup.walk(pkg.romfs)).map(|(_, i)| i).collect();
     let packed: Vec<&ew_format::nup::FileEntry> =
         listed.iter().map(|i| &nup.files[*i as usize]).filter(|f| f.compressed).collect();
@@ -300,7 +346,7 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
             Severity::Warn,
             "Game file",
             format!(
-                "{} of {} files are zstd-compressed: each is decompressed the first time the game reads it, so the first start is slower (about {:.1} GB of them, and the package itself is never rewritten)",
+                "{} of {} files are zstd-compressed: the engine reads packages in place and cannot read into a zstd frame, so the game's files are unpacked into your work folder once, on the next build (about {:.1} GB of disk, and the package itself is never rewritten)",
                 packed.len(),
                 listed.len(),
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)
