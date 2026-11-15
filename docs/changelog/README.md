@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.17](0.1.17.md) | 2026-11-15 | The engine is Obersteinn's preserved 0.2.0 tree, it builds from an empty folder on this PC, and the game was played to the menu and back to check it |
 | [0.1.16](0.1.16.md) | 2026-11-15 | The release that finds its own toolchain, ships a zip that builds, and stops calling a half-built shader cache translated |
 | [0.1.15](0.1.15.md) | 2026-11-14 | Releases are published from the changelog, and this one was published that way |
 | [0.1.14](0.1.14.md) | 2026-11-14 | History moved here, the repair paths proven, and every write-up shortened |
