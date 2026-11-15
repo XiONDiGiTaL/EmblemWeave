@@ -941,12 +941,54 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
     }
 }
 
+/// `--verify-log [path]`: read an engine build log — the newest one, or the one
+/// named — and print the error that explains a failed build, the repair the
+/// launcher would try, and nothing else. It runs without the window, so a log
+/// pasted from another machine can be diagnosed with one command.
+///
+/// Exit codes: 0 an error was found and printed, 3 the log has no error line,
+/// 2 the file could not be read and no log was given or found.
+fn verify_log_cli(path: Option<&str>) -> i32 {
+    let file = match path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match crate::jobs::newest_log() {
+            Some(p) => p,
+            None => {
+                eprintln!("no log file: name one, or build the game once so a log exists in %APPDATA%\\EmblemWeave\\logs");
+                return 2;
+            }
+        },
+    };
+    let bytes = match std::fs::read(&file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{}: {e}", file.display());
+            return 2;
+        }
+    };
+    // A log that came through a mail client or a chat window can carry bytes that are not UTF-8; the error is still
+    // readable, so decode leniently instead of refusing the file.
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let found = crate::engine::first_error_block(&text).is_some();
+    println!("log: {}", file.display());
+    print!("{}", crate::engine::verify_log_text(&text));
+    if found {
+        0
+    } else {
+        3
+    }
+}
+
 fn main() -> eframe::Result<()> {
     crash::install();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
         let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
+    }
+    if let Some(i) = args.iter().position(|a| a == "--verify-log") {
+        let path = args.get(i + 1).map(|s| s.as_str());
+        std::process::exit(verify_log_cli(path));
     }
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1440.0, 900.0])

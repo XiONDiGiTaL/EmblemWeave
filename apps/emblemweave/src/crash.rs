@@ -136,16 +136,8 @@ pub fn environment_text() -> String {
     }
     // The tail of the newest job log, where a failed step's own output is. A
     // report with no log leaves a failure as unexplained as before.
-    if let Some(dir) = crate::jobs::log_dir() {
-        let newest = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
-            .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
-            .max_by_key(|(t, _)| *t)
-            .map(|(_, p)| p);
-        if let Some(path) = newest {
+    {
+        if let Some(path) = crate::jobs::newest_log() {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 let all: Vec<&str> = text.lines().collect();
                 let from = all.len().saturating_sub(60);

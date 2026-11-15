@@ -37,7 +37,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: released as 0.1.12, playable through the baseline engine.** Build the game once
+> **Current status: released as 0.1.13, playable through the baseline engine.** Build the game once
 > from your dump, press **Play**, and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the
 > opening movie and cutscenes. 0.1.11 puts the shader translator in the zip with its own .NET runtime, so the build no
 > longer needs the .NET SDK at all. 0.1.10 fixes the build failures behind most of the reports so far: PowerShell's
@@ -62,6 +62,7 @@ carries that engine forward as the launcher around it, and
 
 - [What EmblemWeave does](#what-emblemweave-does)
 - [Features](#features)
+- [What's new in 0.1.13](#whats-new-in-0113)
 - [What's new in 0.1.12](#whats-new-in-0112)
 - [What's new in 0.1.11](#whats-new-in-0111)
 - [What's new in 0.1.10](#whats-new-in-0110)
@@ -121,6 +122,16 @@ feature as working before it is.
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
 | **Launcher** | A rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
+
+## What's new in 0.1.13
+
+- **`--verify-log` reads a build log without running a build.** `EmblemWeave.exe --verify-log` takes the newest log from
+`%APPDATA%\EmblemWeave\logs`, or the file you name — including one pasted from another machine — and prints the first error
+in it with its context, the line it ended on, and which repair the launcher would try. It runs without a window, so a
+report can be answered with one command instead of a rebuild. Exit code 0 found an error, 3 found none, 2 could not read
+the file.
+- **The error block stops at the error.** When the text after an error is progress output, the quote now ends instead of
+dragging an unrelated last line into the message.
 
 ## What's new in 0.1.12
 

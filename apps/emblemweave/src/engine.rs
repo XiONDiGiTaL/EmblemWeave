@@ -381,6 +381,10 @@ pub fn first_error_block(text: &str) -> Option<String> {
     let head = lines.next()?.trim().to_string();
     let mut block = vec![head];
     for l in lines.take(6) {
+        // Stop at the next progress line: the error's own text never starts with `--`.
+        if l.trim_start().starts_with("--") {
+            break;
+        }
         if !l.trim().is_empty() && block.len() < 7 {
             block.push(l.trim_end().to_string());
         }
@@ -389,6 +393,41 @@ pub fn first_error_block(text: &str) -> Option<String> {
         }
     }
     Some(block.join("\n"))
+}
+
+/// What `--verify-log` prints for one log: how long it is, the first error with
+/// its context, the summary it ended with, and which repair the launcher would
+/// try for it. Text in, text out, so it can be checked without a build.
+pub fn verify_log_text(text: &str) -> String {
+    let mut out = format!("{} lines\n", text.lines().count());
+    match first_error_block(text) {
+        Some(block) => {
+            out.push_str("\nfirst error:\n");
+            out.push_str(&block);
+            out.push('\n');
+        }
+        None => out.push_str("\nno error line in this log: either it finished, or the step was stopped before it printed anything\n"),
+    }
+    let all: Vec<String> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+    if !all.is_empty() {
+        out.push_str(&format!("\nlast line: {}\n", all[all.len() - 1].trim()));
+    }
+    let mut repairs: Vec<&str> = Vec::new();
+    if half_written_deps(text) {
+        repairs.push("a fetched graphics dependency is half written; the launcher clears _deps and fetches again");
+    }
+    if stale_build_cache(text) {
+        repairs.push("the build folder holds a CMake cache from another toolchain; the launcher clears it and configures again");
+    }
+    if repairs.is_empty() {
+        out.push_str("\nno automatic repair matches this log\n");
+    } else {
+        out.push_str("\nrepair:\n");
+        for r in repairs {
+            out.push_str(&format!("- {r}\n"));
+        }
+    }
+    out
 }
 
 /// Lines from a child's pipe, tolerating bytes that are not UTF-8. `BufRead::lines`
@@ -1785,6 +1824,22 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         std::fs::write(slot.join(file_name), b"x").unwrap();
         assert_eq!(super::bundled_harness_in(&dir), Some(slot.join(file_name)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_report_names_the_error_and_the_repair() {
+        let text = "-- populating imgui\nCMake Error at _deps/imgui-src/CMakeLists.txt:12 (message):\n  the source is not there\n-- Configuring incomplete, errors occurred!\n";
+        let report = super::verify_log_text(text);
+        assert!(report.contains("first error:"), "{report}");
+        assert!(report.contains("CMake Error at _deps/imgui-src/CMakeLists.txt:12"), "{report}");
+        assert!(report.contains("the source is not there"), "{report}");
+        assert!(report.contains("half written"), "{report}");
+        assert!(!report.contains("another toolchain"), "{report}");
+
+        // A log with nothing in it that looks like an error says so, instead of quoting a summary.
+        let quiet = super::verify_log_text("-- building\n-- done\n");
+        assert!(quiet.contains("no error line in this log"), "{quiet}");
+        assert!(quiet.contains("no automatic repair"), "{quiet}");
     }
 
     #[test]

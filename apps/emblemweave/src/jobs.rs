@@ -106,6 +106,20 @@ pub fn log_dir() -> Option<PathBuf> {
     Some(base.join("logs"))
 }
 
+/// The newest engine log, the one the last build wrote. `--verify-log` reads it
+/// when it is given no path; the diagnostics export quotes it.
+pub fn newest_log() -> Option<std::path::PathBuf> {
+    let dir = log_dir()?;
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+        .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+}
+
 /// A UTC stamp for the file name: `2026-11-14 18.42.07`.
 fn stamp() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

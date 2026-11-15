@@ -88,4 +88,16 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 ## When none of this matches
 
+Before sending it, ask the launcher what the log says. This needs no window, no build and no game files:
+
+```powershell
+.\EmblemWeave.exe --verify-log                       # the newest log
+.\EmblemWeave.exe --verify-log "C:\path\to\some.log"  # a log from another machine
+```
+
+It prints the first error in the file with the lines that follow it, the last line, and which automatic repair the
+launcher would try — `_deps` fetched half written, or a build folder whose CMake cache belongs to another toolchain. Exit
+code 0 means an error was found, 3 means the log has no error line (the step was stopped before it printed one), 2 means
+the file could not be read.
+
 Send the newest log from `%APPDATA%\EmblemWeave\logs`, together with the stage the recompilation page showed. **Diagnostics > Export report** writes the page's measurements to a file next to it.
