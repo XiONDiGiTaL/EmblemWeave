@@ -1,8 +1,9 @@
 # Publishes a release from one source: docs/changelog/<version>.md.
 #
 # That file is the prose. This script packages the build (tools/package_release.ps1), writes the release notes from the
-# changelog file plus the install steps and the asset hashes it just measured, updates the changelog index, and creates the
-# GitHub release with both assets. Nothing is typed twice.
+# changelog file plus the install steps and the asset hashes it just measured, updates the changelog index, commits the
+# changelog and the index row, pushes, and creates the GitHub release with both assets, its tag on that commit. Nothing
+# is typed twice.
 #
 #   pwsh -File tools/release.ps1 -Version 0.1.15                  # build, package, write notes, publish
 #   pwsh -File tools/release.ps1 -Version 0.1.15 -SkipBuild       # reuse target\release\EmblemWeave.exe
@@ -97,6 +98,31 @@ $body
         Write-Host "local only: not touching GitHub"
         return
     }
+
+    # 5a. The tag has to point at a tree that already carries this release. Commit the changelog file and the index
+    # row just written, push, and name that commit as the tag's target. 0.1.16 was tagged a commit behind its own
+    # index row and had to be repointed by hand. Files left uncommitted are named after the commit, so a tag that
+    # does not carry them is visible rather than a surprise.
+    $relFiles = @($changelog, $index)
+    $dirty = @(git status --porcelain -- $relFiles)
+    if ($LASTEXITCODE -ne 0) { throw "git status failed ($LASTEXITCODE)" }
+    if ($dirty.Count -gt 0) {
+        git add -- $relFiles
+        if ($LASTEXITCODE -ne 0) { throw "git add failed ($LASTEXITCODE)" }
+        # Only these two paths: anything else already staged stays staged, for the next commit and out of this tag.
+        git commit -q -m "Release $Version`n`nThe changelog and the index row tools/release.ps1 wrote for it." -- $relFiles
+        if ($LASTEXITCODE -ne 0) { throw "git commit failed ($LASTEXITCODE)" }
+        Write-Host 'committed the changelog and its index row'
+    }
+    git push
+    if ($LASTEXITCODE -ne 0) { throw "git push failed ($LASTEXITCODE): the tag would point at a tree without this release's notes" }
+    $target = (git rev-parse HEAD).Trim()
+    $left = @(git status --porcelain)
+    if ($left.Count -gt 0) {
+        Write-Warning "not in the tag, because they are not committed: $($left -join '; ')"
+    }
+    Write-Host "tag target: $target"
+
     $tag = "v$Version"
     $assets = @((Join-Path $pkgDir $manifest.zip))
     if ($manifest.tar) { $assets += (Join-Path $pkgDir $manifest.tar) }
@@ -121,7 +147,7 @@ $body
             gh release upload $tag $a
         }
     } else {
-        gh release create $tag $assets --title "EmblemWeave $Version" --notes-file $notesPath
+        gh release create $tag $assets --title "EmblemWeave $Version" --notes-file $notesPath --target $target
     }
     if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }
     gh release view $tag --json tagName,isDraft,isPrerelease,assets --jq '{tag: .tagName, draft: .isDraft, pre: .isPrerelease, assets: [.assets[] | {name, digest}]}'

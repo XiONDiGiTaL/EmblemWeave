@@ -24,8 +24,9 @@ One file is the source of everything:
 
 1. Write `docs/changelog/<version>.md` with the title, a `> one line` summary under it, and the sections the release needs.
 2. Run `pwsh -File tools/release.ps1 -Version <version>`. It builds and packages, writes the release notes from that file
-   plus the install steps and the hashes it measured, updates the table above, and publishes the GitHub release with both
-   assets.
+   plus the install steps and the hashes it measured, updates the table above, commits that file and the table, pushes,
+   and publishes the GitHub release with both assets, its tag on the commit it just pushed. Files you had not committed
+   are named in a warning, because the tag cannot carry them.
 3. Bump the version in `Cargo.toml` and the status line in the README.
 
 `-Local` stops after the notes and the index, without touching GitHub. `-SkipBuild` reuses the launcher already in
