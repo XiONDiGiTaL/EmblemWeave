@@ -98,7 +98,7 @@ pub fn set_enabled(m: &Mod, on: bool) -> Result<PathBuf, String> {
 
 /// Move a mod out of the mods folder into `mods-removed`.
 pub fn remove(m: &Mod) -> Result<PathBuf, String> {
-    let bin = removed_dir().ok_or("APPDATA is not set")?;
+    let bin = removed_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     let mut to = bin.join(&m.name);
     let mut n = 1;
@@ -289,7 +289,7 @@ pub fn install_from(staged: &Path, mods: &Path, info: &Info) -> Result<Installed
 }
 
 fn staging() -> Result<PathBuf, String> {
-    let base = crate::engine::run_dir().ok_or("APPDATA is not set")?.join("mods-incoming");
+    let base = crate::engine::run_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("mods-incoming");
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let d = base.join(stamp.to_string());
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;

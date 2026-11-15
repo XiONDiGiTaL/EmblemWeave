@@ -18,6 +18,7 @@ mod jobs;
 mod logo;
 mod pages;
 mod cheats;
+mod platform;
 mod ingame;
 mod crash;
 mod deps;

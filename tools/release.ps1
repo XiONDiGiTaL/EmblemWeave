@@ -100,6 +100,18 @@ $body
     $tag = "v$Version"
     $assets = @((Join-Path $pkgDir $manifest.zip))
     if ($manifest.tar) { $assets += (Join-Path $pkgDir $manifest.tar) }
+    # Checked again here, immediately before upload: the same tool package_release.ps1 ran for the zip, so a stale or
+    # hand-made asset cannot be published either, and the hashes in the notes are the files that go out.
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $py) { throw 'python is needed to verify the release assets (tools/verify_archive.py)' }
+    & $py.Source (@('tools/verify_archive.py') + $assets)
+    if ($LASTEXITCODE -ne 0) { throw 'a release asset failed archive verification; nothing was uploaded' }
+    foreach ($a in $assets) {
+        $sha = (Get-FileHash $a -Algorithm SHA256).Hash.ToLower()
+        $want = if ($a -eq $assets[0]) { $manifest.zipSha } else { $manifest.tarSha }
+        if ($want -and $sha -ne $want) { throw "$([System.IO.Path]::GetFileName($a)) hashes to $sha, the manifest says $want" }
+    }
     gh release view $tag *> $null
     if ($LASTEXITCODE -eq 0) {
         # An existing release is edited rather than refused, so a corrected note can be republished.

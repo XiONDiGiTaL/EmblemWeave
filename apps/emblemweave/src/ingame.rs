@@ -121,7 +121,7 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
     if now.duration_since(app.ingame.last_check) > Duration::from_millis(700) {
         app.ingame.last_check = now;
         let was = app.ingame.running;
-        app.ingame.running = crate::cheats::process::find(crate::cheats::GAME_EXE).is_some();
+        app.ingame.running = crate::platform::game_running();
         #[cfg(windows)]
         if app.ingame.running {
             if let Some(pid) = game_pid().filter(|p| app.ingame.branded != Some(*p)) {

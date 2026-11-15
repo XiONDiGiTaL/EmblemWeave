@@ -47,9 +47,12 @@ try {
     if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
     New-Item -ItemType Directory -Force $pkg | Out-Null
     Copy-Item $exe (Join-Path $pkg 'EmblemWeave.exe')
-    foreach ($f in 'LICENSE', 'README.md', 'docs\PACKAGE.md') { Copy-Item (Join-Path $repo $f) $pkg }
-    # The README links the changelog, so it travels with it.
+    foreach ($f in 'LICENSE', 'README.md') { Copy-Item (Join-Path $repo $f) $pkg }
+    # The README links docs/PACKAGE.md and the changelog, so both travel at the paths it names. Copying
+    # `docs\PACKAGE.md` into the package root used to leave it as `PACKAGE.md`, where nothing looks for it;
+    # tools/verify_archive.py is what noticed.
     New-Item -ItemType Directory -Force (Join-Path $pkg 'docs') | Out-Null
+    Copy-Item (Join-Path $repo 'docs\PACKAGE.md') (Join-Path $pkg 'docs\PACKAGE.md')
     Copy-Item (Join-Path $repo 'docs\changelog') (Join-Path $pkg 'docs\changelog') -Recurse
 
     # The dump, the build output, the fetched third-party sources and the engine's own unused launcher stay out.
@@ -67,21 +70,57 @@ try {
     robocopy 'engine\fefw-recomp' $dst /E /NFL /NDL /NJH /NJS /NP /XD @xd /XF @xf | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 
-    # 4. The zip.
+    # 4. The zip, written entry by entry. `Compress-Archive` decides its own separators, and Windows' own zippers have
+    # written `engine\recomp\foo.cpp` for years: an archive of those unpacks on Linux and macOS as a flat pile of files
+    # whose names contain backslashes. Every name here is relative, made from the package tree, with `/` separators;
+    # folders get their own entries so an empty one survives and an extractor can create the tree in order.
     if (Test-Path $zip) { Remove-Item -Force $zip }
-    Compress-Archive -Path $pkg -DestinationPath $zip -CompressionLevel Optimal
-
-    # Every entry must be a relative path with `/` separators. Windows' own zippers can write `\`, and an archive full of
-    # `engine\recomp\foo.cpp` extracts as a flat pile of oddly named files on Linux and macOS.
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $bad = @()
-    $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    $rootLen = $pkg.TrimEnd('\').Length + 1
+    $nFiles = 0
+    $za = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
-        foreach ($e in $za.Entries) {
-            if ($e.FullName.Contains('\') -or $e.FullName.StartsWith('/') -or $e.FullName -match '^[A-Za-z]:') { $bad += $e.FullName }
+        foreach ($d in (Get-ChildItem -LiteralPath $pkg -Recurse -Directory | Sort-Object FullName)) {
+            $rel = $d.FullName.Substring($rootLen).Replace('\', '/') + '/'
+            $e = $za.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::NoCompression)
+            $e.LastWriteTime = $d.LastWriteTime
+        }
+        foreach ($f in (Get-ChildItem -LiteralPath $pkg -Recurse -File | Sort-Object FullName)) {
+            $rel = $f.FullName.Substring($rootLen).Replace('\', '/')
+            $e = $za.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
+            $e.LastWriteTime = $f.LastWriteTime
+            $out = $e.Open()
+            try {
+                $in = [System.IO.File]::OpenRead($f.FullName)
+                try { $in.CopyTo($out) } finally { $in.Dispose() }
+            } finally { $out.Dispose() }
+            $nFiles++
         }
     } finally { $za.Dispose() }
-    if ($bad.Count -gt 0) { throw "$($bad.Count) zip entries are not plain forward-slash relative paths, e.g. $($bad[0])" }
+
+    # 5. The archive is checked, not assumed: plain relative `/` paths, no `..`, no drive letters, no two names that
+    # differ only in case, every file the launcher needs at the path it looks for, and a round-trip extraction whose
+    # sizes match. tools/verify_archive.py is the same check a Linux release step runs, so both agree on what "ok" is.
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $py) { throw 'python is needed to verify the release archive (tools/verify_archive.py)' }
+    $required = @(
+        'EmblemWeave.exe', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/changelog/README.md',
+        'engine/fefw-recomp/runtime/CMakeLists.txt', 'engine/fefw-recomp/game-build/fefw/CMakeLists.txt',
+        'engine/fefw-recomp/recomp/requirements.txt', 'engine/fefw-recomp/tools/shaders/harness/Program.cs',
+        'engine/fefw-recomp/tools/shaders/ampere/extract_corpus.py',
+        'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/spirv_harness.exe'
+    )
+    $unpacked = Join-Path $repo 'target\pkg\verify-unpacked'
+    if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked }
+    $verify = @('tools/verify_archive.py', $zip, '--extract', $unpacked)
+    foreach ($r in $required) { $verify += @('--require', $r) }
+    & $py.Source @verify
+    if ($LASTEXITCODE -ne 0) { throw "the zip failed verification: $nFiles files written, tools/verify_archive.py is unhappy" }
+    $unpackedCount = (Get-ChildItem -LiteralPath $unpacked -Recurse -File).Count
+    if ($unpackedCount -ne $nFiles) { throw "the zip holds $nFiles files but extracted $unpackedCount" }
+    Write-Host "zip verified: $nFiles files, extracted and compared in $unpacked"
 
     $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
     $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
@@ -95,23 +134,30 @@ try {
         $tar = Join-Path (Split-Path $zip) "$name-shader-translator-linux-x64.tar.gz"
         if (Test-Path $tar) { Remove-Item -Force $tar }
         # Run from the target folder and name the archive bare: GNU tar reads `C:\...` as a remote host otherwise.
+        # The files are named one by one rather than `-C dir .`, which would write `./spirv_harness`: every entry is a
+        # plain relative path, the same rule the zip follows, so one spelling extracts everywhere.
+        $items = @(Get-ChildItem -LiteralPath $linuxDir -Force | ForEach-Object { $_.Name })
         Push-Location (Split-Path $zip)
         try {
             # Windows has no executable bit to record, so stamp one in: `--mode` is GNU tar, and bsdtar (which lacks it)
             # gets a plain archive with the `chmod +x` note in PACKAGE.md.
-            tar --mode=u+rwx,go+rx -czf (Split-Path $tar -Leaf) -C $linuxDir '.'
-            if ($LASTEXITCODE -ne 0) { tar -czf (Split-Path $tar -Leaf) -C $linuxDir '.' }
+            tar --mode=u+rwx,go+rx -czf (Split-Path $tar -Leaf) -C $linuxDir @items
+            if ($LASTEXITCODE -ne 0) { tar -czf (Split-Path $tar -Leaf) -C $linuxDir @items }
             if ($LASTEXITCODE -ne 0) { throw "tar failed ($LASTEXITCODE)" }
         }
         finally { Pop-Location }
+        # The tarball gets the same check: relative `/` names, no `..`, the translator at the root and executable (the
+        # bit a Windows-built tar has to be given, since NTFS has none to record).
+        & $py.Source @('tools/verify_archive.py', $tar, '--require', 'spirv_harness')
+        if ($LASTEXITCODE -ne 0) { throw 'the translator tarball failed verification (tools/verify_archive.py)' }
         $tmb = [math]::Round((Get-Item $tar).Length / 1MB, 1)
-        Write-Host "$tar ($tmb MB)"
+        Write-Host "$tar ($tmb MB), verified"
         Write-Host "sha256: $((Get-FileHash $tar -Algorithm SHA256).Hash.ToLower())"
     } else {
         Write-Host "no linux-x64 translator published; skipping its tarball"
     }
 
-    # 6. What was built, for the release script: names and hashes, so the notes and the upload cannot disagree.
+    # 7. What was built, for the release script: names and hashes, so the notes and the upload cannot disagree.
     $tarPath = Join-Path (Split-Path $zip) "$name-shader-translator-linux-x64.tar.gz"
     $manifest = [ordered]@{
         version = $Version

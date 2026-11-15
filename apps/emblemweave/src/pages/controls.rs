@@ -124,19 +124,21 @@ fn percent(ui: &mut egui::Ui, p: &theme::Palette, value: f32, range: std::ops::R
 /// they change.
 fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     let Some(ini) = crate::ingame::controls_ini() else {
-        widgets::status_line(ui, p, Tone::Warn, "No settings folder", "APPDATA is not set, so the launcher cannot write the game's controls.ini.");
+        widgets::status_line(ui, p, Tone::Warn, "No settings folder", "The launcher's data folder is not set (APPDATA on Windows, XDG_CONFIG_HOME or HOME elsewhere), so it cannot write the game's controls.ini.");
         return;
     };
     let seed = app.config.input.deadzone;
     let mut t = match app.tuning {
         Some(t) => t,
         None => {
-            let t = pad::Tuning::load(&ini, seed);
+            let text = std::fs::read_to_string(&ini).unwrap_or_default();
+            let t = pad::Tuning::from_ini_seeded(&text, seed, app.config.input.vibration);
             app.tuning = Some(t);
             t
         }
     };
     let mut save: Option<(&'static str, f32)> = None;
+    let mut save_flag: Option<(&'static str, bool)> = None;
 
     widgets::setting_row(ui, p, "Left stick dead zone", "Movement below this is ignored.", |ui| {
         if let Some(pct) = percent(ui, p, t.left_deadzone, 0..=50) {
@@ -162,14 +164,28 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             save = Some(("trigger_threshold", t.trigger));
         }
     });
-    widgets::setting_row(ui, p, "Vibration", "Kept by the launcher; the game's own rumble level is in its F1 menu.", |ui| {
-        let mut pct = (app.config.input.vibration * 100.0).round();
+    widgets::setting_row(ui, p, "Rumble", "Whether the game may shake the pad. Written to controls.ini as [pad] rumble.", |ui| {
+        let mut on = t.rumble;
+        if widgets::toggle(ui, p, &mut on).changed() {
+            t.rumble = on;
+            save_flag = Some(("rumble", on));
+        }
+    });
+    widgets::setting_row(ui, p, "Rumble strength", "Multiplies the game's own amplitude, 0 to 100 %. [pad] rumble_scale.", |ui| {
+        let mut pct = (t.rumble_scale * 100.0).round();
         if widgets::Slider::new(&mut pct, 0.0..=100.0).suffix(" %").show(ui, p).changed() {
+            t.rumble_scale = pct / 100.0;
             app.config.input.vibration = pct / 100.0;
+            save = Some(("rumble_scale", t.rumble_scale));
         }
     });
 
-    if let Some((key, v)) = save {
+    if let Some((key, on)) = save_flag {
+        match pad::write_flag(&ini, key, on) {
+            Ok(()) => app.tuning = Some(t),
+            Err(e) => app.notify(e, Tone::Bad),
+        }
+    } else if let Some((key, v)) = save {
         match pad::write(&ini, key, v) {
             Ok(()) => {
                 if key == "deadzone" {

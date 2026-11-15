@@ -210,7 +210,12 @@ pub fn start_install_lines(lines: &[String]) -> Result<PathBuf, String> {
     if lines.is_empty() {
         return Ok(PathBuf::new());
     }
-    let dir = Config::work_dir().ok_or("APPDATA is not set")?;
+    // The lines are winget commands and a .cmd script. Off Windows the launcher refuses instead of
+    // running them, so a build for another platform cannot install anything by accident.
+    if !crate::platform::install_supported() {
+        return Err(crate::platform::install_unsupported_reason());
+    }
+    let dir = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let script = dir.join("install-build-tools.cmd");
     std::fs::write(&script, install_script_lines(lines)).map_err(|e| format!("writing {}: {e}", script.display()))?;
@@ -915,6 +920,11 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
 
 /// The build job's work: every step in order.
 pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, String> {
+    // The engine is compiled by the Windows toolchain; a platform without it gets a sentence, not
+    // ninety steps that fail at CMake configure.
+    if !crate::platform::build_supported() {
+        return Err(crate::platform::build_unsupported_reason());
+    }
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
     // One probe decides whether the build can start, and what it found is what
     // the build uses from here: the compiler it validated, the SDK beside it,
@@ -1200,8 +1210,8 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
 
     // 8. fefw.ini.
     ctx.start(7);
-    let dir = run_dir().ok_or("APPDATA is not set")?;
-    let save_dir = Config::save_dir().ok_or("APPDATA is not set")?;
+    let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
+    let save_dir = Config::save_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     std::fs::create_dir_all(dir.join("mods")).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let ini = ini_text(&root, &RunConfig { exefs: root.join("game").join("dump").join("exefs"), romfs, save_dir });
     std::fs::write(dir.join("fefw.ini"), ini).map_err(|e| format!("writing fefw.ini: {e}"))?;
@@ -1593,8 +1603,110 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     if let Some(dir) = &sdk.dlss {
         d.insert("upscale.dlss_dll".into(), fwd(dir));
     }
+    // The rest of the Rendering page: the preset the temporal upscalers scale by, the scene buffer's
+    // share of the output, and what makes the frames between two rendered ones.
+    d.insert("upscale.quality".into(), upscale_quality_word(&g.upscale_quality).into());
+    d.insert("upscale.scene_scale".into(), g.scene_scale.clamp(25, 100).to_string());
+    d.insert("dlss.frame_gen".into(), frame_gen_word(&g.frame_gen).into());
+    d.insert("dlss.upscaler".into(), dlss_upscaler_word(&g.dlss_upscaler).into());
+    d.insert("display.astc_quality".into(), g.astc_quality.to_ascii_lowercase());
+    d.insert("gfx.gpu".into(), gpu_word(&g.gpu).into());
+    // Shader compilation while playing: the engine's own default is min(4, cpus / 6) background threads,
+    // which on a 24-thread laptop is 4 threads at full clock. A player who hears the fans can cap them and
+    // push them down the priority ladder; 0 is "leave the engine alone".
+    if g.compile_threads > 0 {
+        d.insert("nvn.gpl_threads".into(), g.compile_threads.min(16).to_string());
+    }
+    d.insert("nvn.compile_priority".into(), compile_priority_word(&g.compile_priority).into());
+    d.insert("nvn.compile_eco".into(), if g.compile_eco { "1" } else { "0" }.into());
     d.insert("audio.volume".into(), format!("{:.2}", a.master.clamp(0.0, 1.0)));
     d
+}
+
+/// The page's label for the engine's `[upscale] quality`.
+fn upscale_quality_word(label: &str) -> &'static str {
+    match label {
+        "Quality" => "quality",
+        "Balanced" => "balanced",
+        "Performance" => "performance",
+        "Ultra performance" => "ultra_performance",
+        _ => "native",
+    }
+}
+
+fn upscale_quality_label(word: &str) -> Option<&'static str> {
+    Some(match word.trim().to_ascii_lowercase().as_str() {
+        "native" => "Native",
+        "quality" => "Quality",
+        "balanced" => "Balanced",
+        "performance" => "Performance",
+        "ultra_performance" | "ultraperformance" => "Ultra performance",
+        _ => return None,
+    })
+}
+
+fn frame_gen_word(label: &str) -> &'static str {
+    match label {
+        "DLSS Frame Generation" => "1",
+        "FSR 3 Frame Generation" => "fsr3",
+        _ => "0",
+    }
+}
+
+fn frame_gen_label(word: &str) -> Option<&'static str> {
+    Some(match word.trim().to_ascii_lowercase().as_str() {
+        "0" | "off" | "false" => "Off",
+        "1" | "dlss" | "on" | "true" => "DLSS Frame Generation",
+        "2" => "DLSS Frame Generation",
+        "fsr3" => "FSR 3 Frame Generation",
+        _ => return None,
+    })
+}
+
+fn dlss_upscaler_word(label: &str) -> &'static str {
+    match label {
+        "TAAU" => "taau",
+        "DLSS" => "dlss",
+        "FSR 3" => "fsr3",
+        "Bilinear" => "bilinear",
+        _ => "auto",
+    }
+}
+
+fn dlss_upscaler_label(word: &str) -> Option<&'static str> {
+    Some(match word.trim().to_ascii_lowercase().as_str() {
+        "auto" | "" => "Automatic",
+        "taau" => "TAAU",
+        "dlss" => "DLSS",
+        "fsr3" => "FSR 3",
+        "bilinear" => "Bilinear",
+        _ => return None,
+    })
+}
+
+fn gpu_word(label: &str) -> &'static str {
+    match label {
+        "Discrete" => "discrete",
+        "Integrated" => "integrated",
+        _ => "",
+    }
+}
+
+fn gpu_label(word: &str) -> Option<&'static str> {
+    Some(match word.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" => "Automatic",
+        "discrete" => "Discrete",
+        "integrated" => "Integrated",
+        _ => return None,
+    })
+}
+
+fn compile_priority_word(label: &str) -> &'static str {
+    match label {
+        "Normal" => "normal",
+        "Idle" => "idle",
+        _ => "below",
+    }
 }
 
 /// The page's label for the engine's `[fefw] output`.
@@ -1669,6 +1781,41 @@ fn adopt_from(
         // list of ratios intact.
         if !v.is_empty() && !v.eq_ignore_ascii_case("auto") {
             changed |= put(&mut g.aspect, v.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "upscale.quality") {
+        if let Some(label) = upscale_quality_label(v) {
+            changed |= put(&mut g.upscale_quality, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "upscale.scene_scale") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut g.scene_scale, n.clamp(25, 100));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "dlss.frame_gen") {
+        if let Some(label) = frame_gen_label(v) {
+            changed |= put(&mut g.frame_gen, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "dlss.upscaler") {
+        if let Some(label) = dlss_upscaler_label(v) {
+            changed |= put(&mut g.dlss_upscaler, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "display.astc_quality") {
+        // The engine's own words are lower case; the page capitalises them.
+        let mut label = v.trim().to_ascii_lowercase();
+        if let Some(c) = label.get_mut(0..1) {
+            c.make_ascii_uppercase();
+        }
+        if matches!(label.as_str(), "High" | "Fast" | "Uncompressed") {
+            changed |= put(&mut g.astc_quality, label);
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "gfx.gpu") {
+        if let Some(label) = gpu_label(v) {
+            changed |= put(&mut g.gpu, label.to_string());
         }
     }
     if let Some(v) = take_back(desired, applied, on_file, "display.vsync") {
@@ -1755,6 +1902,7 @@ fn write_settings(
         let (in_fefw, in_ctl) = match section {
             "fefw" => (true, false),
             "display" | "audio" => (false, true),
+            "nvn" | "dlss" | "gfx" => (true, false),
             _ => (true, true),
         };
         let current = if in_fefw { on_disk.0.get(&id) } else { on_disk.1.get(&id) };
@@ -1930,7 +2078,7 @@ It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card
 /// stays open.
 pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) -> Result<(), String> {
     let root = root().ok_or("the engine was not found")?;
-    let dir = run_dir().ok_or("APPDATA is not set")?;
+    let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let exe = game_exe(&root);
     if !exe.is_file() || !dir.join("fefw.ini").is_file() {
         return Err("the game is not built yet: run Build the game on Game Setup".into());
@@ -2183,6 +2331,44 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         std::fs::write(slot.join(file_name), b"x").unwrap();
         assert_eq!(super::bundled_harness_in(&dir), Some(slot.join(file_name)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_rendering_page_reaches_the_engines_own_keys() {
+        let audio = crate::config::Audio::default();
+        let mut g = crate::config::Graphics::default();
+        let d = super::desired_values(&g, &audio);
+        assert_eq!(d.get("upscale.quality").map(String::as_str), Some("native"));
+        assert_eq!(d.get("upscale.scene_scale").map(String::as_str), Some("100"));
+        assert_eq!(d.get("dlss.frame_gen").map(String::as_str), Some("0"));
+        assert_eq!(d.get("dlss.upscaler").map(String::as_str), Some("auto"));
+        assert_eq!(d.get("display.astc_quality").map(String::as_str), Some("high"));
+        assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("below"));
+        assert_eq!(d.get("nvn.compile_eco").map(String::as_str), Some("1"));
+        assert!(!d.contains_key("nvn.gpl_threads"), "automatic leaves the engine's own min(4, cpus / 6)");
+
+        g.upscale_quality = "Performance".into();
+        g.scene_scale = 70;
+        g.frame_gen = "FSR 3 Frame Generation".into();
+        g.dlss_upscaler = "TAAU".into();
+        g.astc_quality = "Fast".into();
+        g.gpu = "Integrated".into();
+        g.compile_threads = 2;
+        g.compile_priority = "Idle".into();
+        g.compile_eco = false;
+        let d = super::desired_values(&g, &audio);
+        assert_eq!(d.get("upscale.quality").map(String::as_str), Some("performance"));
+        assert_eq!(d.get("upscale.scene_scale").map(String::as_str), Some("70"));
+        assert_eq!(d.get("dlss.frame_gen").map(String::as_str), Some("fsr3"));
+        assert_eq!(d.get("dlss.upscaler").map(String::as_str), Some("taau"));
+        assert_eq!(d.get("display.astc_quality").map(String::as_str), Some("fast"));
+        assert_eq!(d.get("gfx.gpu").map(String::as_str), Some("integrated"));
+        assert_eq!(d.get("nvn.gpl_threads").map(String::as_str), Some("2"));
+        assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("idle"));
+        assert_eq!(d.get("nvn.compile_eco").map(String::as_str), Some("0"));
+        // A scene scale outside the engine's 25..100 is clamped rather than passed on to be rejected.
+        g.scene_scale = 5;
+        assert_eq!(super::desired_values(&g, &audio).get("upscale.scene_scale").map(String::as_str), Some("25"));
     }
 
     #[test]

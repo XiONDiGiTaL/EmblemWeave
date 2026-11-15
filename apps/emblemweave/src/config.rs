@@ -72,6 +72,26 @@ pub struct Graphics {
     pub sharpening: String,
     pub quality: String,
     pub shader_precompile: bool,
+    /// The temporal upscalers' render scale preset: the game's `[upscale] quality`.
+    pub upscale_quality: String,
+    /// Percent of the output the scene is drawn at, `[upscale] scene_scale`: the game's own scene buffer,
+    /// separate from the launcher's render scale.
+    pub scene_scale: u32,
+    /// `[dlss] frame_gen`: off, DLSS Frame Generation or FSR 3 Frame Generation.
+    pub frame_gen: String,
+    /// `[dlss] upscaler`: what renders frames the game asks its console's DLSS to make.
+    pub dlss_upscaler: String,
+    /// `[display] astc_quality`: how the game's ASTC textures reach the GPU.
+    pub astc_quality: String,
+    /// `[gfx] gpu`: which Vulkan device the engine picks.
+    pub gpu: String,
+    /// Threads the engine may use to compile shader parts while playing; 0 leaves the engine's own
+    /// `min(4, cpus / 6)`.
+    pub compile_threads: u32,
+    /// `[nvn] compile_priority` for those threads.
+    pub compile_priority: String,
+    /// `[nvn] compile_eco`: run them in Windows efficiency mode.
+    pub compile_eco: bool,
 }
 
 impl Default for Graphics {
@@ -87,6 +107,15 @@ impl Default for Graphics {
             sharpening: "Default".into(),
             quality: "Original".into(),
             shader_precompile: true,
+            upscale_quality: "Native".into(),
+            scene_scale: 100,
+            frame_gen: "Off".into(),
+            dlss_upscaler: "Automatic".into(),
+            astc_quality: "High".into(),
+            gpu: "Automatic".into(),
+            compile_threads: 0,
+            compile_priority: "Below normal".into(),
+            compile_eco: true,
         }
     }
 }
@@ -214,7 +243,10 @@ pub struct Config {
 
 impl Config {
     pub fn dir() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("EmblemWeave"))
+        // %APPDATA%\EmblemWeave on Windows, $XDG_CONFIG_HOME/EmblemWeave (else ~/.config/EmblemWeave)
+        // elsewhere: platform.rs is the one place that decides, so a build for another platform reads
+        // and writes a folder it can actually reach.
+        crate::platform::data_root()
     }
 
     pub fn path() -> Option<PathBuf> {
@@ -226,7 +258,7 @@ impl Config {
     /// by defaults so the launcher still starts.
     pub fn load() -> (Config, Option<String>) {
         let Some(path) = Self::path() else {
-            return (Config::default(), Some("APPDATA is not set; settings will not persist".into()));
+            return (Config::default(), Some("the launcher's data folder is not set; settings will not persist".into()));
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str(&text) {
@@ -242,7 +274,7 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path().ok_or("APPDATA is not set")?;
+        let path = Self::path().ok_or(crate::platform::NO_DATA_DIR)?;
         let dir = path.parent().ok_or("config path has no parent")?;
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;

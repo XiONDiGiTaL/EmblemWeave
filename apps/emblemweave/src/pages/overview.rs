@@ -258,7 +258,7 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
     let profiles = save_dir.as_deref().map(crate::saves::profiles).unwrap_or_default();
     let mods_on = crate::mods::dir().map(|d| crate::mods::list(&d).iter().filter(|m| m.enabled).count()).unwrap_or(0);
     let cheats_on: usize = crate::cheats::dir().map(|d| crate::cheats::load_enabled(&d).values().map(|v| v.len()).sum()).unwrap_or(0);
-    let running = crate::cheats::process::find(crate::cheats::GAME_EXE).is_some();
+    let running = crate::platform::game_running();
     let mut load: Option<crate::saves::Profile> = None;
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Save").color(p.muted));

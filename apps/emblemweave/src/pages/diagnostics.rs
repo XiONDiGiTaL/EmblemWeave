@@ -228,7 +228,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Tab::Log => {
             widgets::section(ui, &p, "Log files", |ui| {
                 let dir = crate::jobs::log_dir();
-                let folder = dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "APPDATA is not set".into());
+                let folder = dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| crate::platform::NO_DATA_DIR.into());
                 widgets::kv(ui, &p, "Folder", &folder);
                 if let Some(path) = &app.last_job_log_path {
                     widgets::kv(ui, &p, "Last task", &path.display().to_string());

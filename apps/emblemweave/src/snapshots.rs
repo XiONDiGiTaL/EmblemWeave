@@ -106,7 +106,7 @@ fn trim() {
 /// Copy a snapshot's files back over the live ones.
 pub fn restore(s: &Snapshot) -> Result<Vec<String>, String> {
     let mut done = Vec::new();
-    let mut targets: Vec<(String, PathBuf)> = vec![("config.json".into(), Config::dir().ok_or("APPDATA is not set")?.join("config.json"))];
+    let mut targets: Vec<(String, PathBuf)> = vec![("config.json".into(), Config::dir().ok_or(crate::platform::NO_DATA_DIR)?.join("config.json"))];
     if let Some(play) = crate::engine::run_dir() {
         targets.push(("controls.ini".into(), play.join("controls.ini")));
         targets.push(("fefw.ini".into(), play.join("fefw.ini")));

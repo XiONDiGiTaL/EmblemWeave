@@ -365,7 +365,7 @@ fn write_bridge(dir: &Path) -> Result<PathBuf, String> {
 
 /// The bridge in the work folder, with the interpreter that runs it.
 fn bridge() -> Result<(PathBuf, PathBuf), String> {
-    let dir = Config::work_dir().ok_or("APPDATA is not set")?.join("tools");
+    let dir = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("tools");
     Ok((interpreter(), write_bridge(&dir)?))
 }
 
@@ -374,7 +374,7 @@ pub fn decode(exefs: PathBuf) -> Job {
         ctx.start(0);
         let (python, script) = bridge()?;
         ctx.end(0, StageStatus::Done, format!("{} with {}", script.display(), python.display()));
-        let out = Config::work_dir().ok_or("APPDATA is not set")?.join("decoded");
+        let out = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("decoded");
         std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
         ctx.start(1);
         let output = std::process::Command::new(&python)
@@ -546,7 +546,7 @@ pub fn pipeline(game: GameData, limit: usize) -> Job {
         check(ctx)?;
 
         ctx.start(5);
-        let out = Config::work_dir().ok_or("APPDATA is not set")?.join("lift");
+        let out = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("lift");
         std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
         // Shards of a few hundred functions compile in parallel and fail
         // independently, where one translation unit of the whole lift takes

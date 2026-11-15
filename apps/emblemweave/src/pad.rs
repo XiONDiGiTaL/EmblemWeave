@@ -80,12 +80,16 @@ pub struct Tuning {
     pub right_deadzone: f32,
     pub stick_max: f32,
     pub trigger: f32,
+    /// `rumble`: whether the game may shake the pad at all.
+    pub rumble: bool,
+    /// `rumble_scale`: 0 to 1, multiplied into the game's own amplitude.
+    pub rumble_scale: f32,
 }
 
 impl Default for Tuning {
     /// The engine's own defaults (`play_types.h`).
     fn default() -> Self {
-        Tuning { left_deadzone: 0.10, right_deadzone: 0.10, stick_max: 1.0, trigger: 0.35 }
+        Tuning { left_deadzone: 0.10, right_deadzone: 0.10, stick_max: 1.0, trigger: 0.35, rumble: true, rumble_scale: 1.0 }
     }
 }
 
@@ -132,6 +136,24 @@ impl Tuning {
         if let Some(v) = num("trigger_threshold").filter(|v| (0.05..=1.0).contains(v)) {
             t.trigger = v;
         }
+        // Rumble had no reader here, so the page's Vibration slider wrote a launcher preference nothing
+        // used and the game kept its own default (issues: "controller vibration doesn't work").
+        if let Some(v) = value(text, "pad", "rumble").and_then(flag) {
+            t.rumble = v;
+        }
+        if let Some(v) = num("rumble_scale").filter(|v| (0.0..=1.0).contains(v)) {
+            t.rumble_scale = v;
+        }
+        t
+    }
+
+    /// `from_ini`, with the launcher's saved vibration used for `rumble_scale` when the file has none: a
+    /// player who set it before the game ever wrote a `controls.ini` keeps their setting.
+    pub fn from_ini_seeded(text: &str, deadzone: f32, vibration: f32) -> Tuning {
+        let mut t = Tuning::from_ini(text, deadzone);
+        if value(text, "pad", "rumble_scale").is_none() {
+            t.rumble_scale = vibration.clamp(0.0, 1.0);
+        }
         t
     }
 
@@ -145,13 +167,31 @@ impl Tuning {
     }
 }
 
+/// `0`, `1`, `true`, `false`, `on` or `off`, as the engine's own reader takes them.
+fn flag(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Some(true),
+        "0" | "false" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// Write one `[pad]` value into the game's `controls.ini`, keeping every other
 /// line of the file as it was.
 pub fn write(path: &Path, key: &str, value: f32) -> Result<(), String> {
+    write_text(path, key, &format!("{value:.2}"))
+}
+
+/// The same for a `[pad]` switch (`rumble`), written as `1` or `0`: the engine's reader takes both.
+pub fn write_flag(path: &Path, key: &str, on: bool) -> Result<(), String> {
+    write_text(path, key, if on { "1" } else { "0" })
+}
+
+fn write_text(path: &Path, key: &str, value: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     }
-    crate::ingame::ini_set(path, "pad", key, &format!("{value:.2}"))
+    crate::ingame::ini_set(path, "pad", key, value)
 }
 
 #[cfg(test)]
@@ -189,6 +229,31 @@ mod tests {
         assert_eq!(value(text, "pad", "deadzone"), Some("0.20"));
         assert_eq!(value(text, "pad", "missing"), None);
         assert_eq!(value("[mouse]\ndeadzone = 0.1\n", "pad", "deadzone"), None);
+    }
+
+    #[test]
+    fn rumble_is_read_and_written_where_the_game_reads_it() {
+        let t = Tuning::from_ini("[pad]
+rumble = 0
+rumble_scale = 0.40
+", 0.10);
+        assert!(!t.rumble);
+        assert!((t.rumble_scale - 0.40).abs() < 1e-6);
+        assert_eq!(Tuning::from_ini("", 0.10), Tuning::default());
+        // The launcher's own saved vibration seeds the scale only when the file has none.
+        assert!((Tuning::from_ini_seeded("", 0.10, 0.55).rumble_scale - 0.55).abs() < 1e-6);
+        assert!((Tuning::from_ini_seeded("[pad]
+rumble_scale = 0.20
+", 0.10, 0.55).rumble_scale - 0.20).abs() < 1e-6);
+        let path = std::env::temp_dir().join(format!("ew-pad-rumble-{}.ini", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        write_flag(&path, "rumble", false).unwrap();
+        write(&path, "rumble_scale", 0.60).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let t = Tuning::from_ini(&text, 0.10);
+        assert!(!t.rumble);
+        assert!((t.rumble_scale - 0.60).abs() < 1e-6);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -131,6 +131,46 @@ pub mod process {
     }
 }
 
+/// The game's memory, read from outside the process, is the Win32 API's job: ReadProcessMemory,
+/// WriteProcessMemory and the snapshot that lists processes have no equivalent here. A build for another
+/// platform still compiles the launcher and its Cheats page, which then finds no game and writes nothing.
+/// The page's promises (codes, tables) are documented as Windows-only in docs/PLATFORMS.md.
+#[cfg(not(windows))]
+pub mod process {
+    use super::Memory;
+
+    pub struct Process {
+        pub pid: u32,
+    }
+
+    /// No process list on this platform, so no game is found.
+    pub fn find(_exe: &str) -> Option<u32> {
+        None
+    }
+
+    impl Process {
+        pub fn open(_pid: u32) -> Option<Process> {
+            None
+        }
+
+        pub fn alive(&self) -> bool {
+            false
+        }
+    }
+
+    impl Memory for Process {
+        fn read(&self, _addr: u64, _buf: &mut [u8]) -> bool {
+            false
+        }
+        fn write(&self, _addr: u64, _data: &[u8]) -> bool {
+            false
+        }
+        fn regions(&self, _lo: u64, _hi: u64) -> Vec<(u64, u64)> {
+            Vec::new()
+        }
+    }
+}
+
 /// Find `pattern` (None = wildcard) in readable memory within `[lo, hi)`.
 pub fn aob_scan(mem: &dyn Memory, lo: u64, hi: u64, pattern: &[Option<u8>]) -> Option<u64> {
     if pattern.is_empty() {
@@ -597,6 +637,13 @@ pub mod keys {
 
 /// Buttons held on the first Xbox-style controller, as Switch buttons by
 /// position (the east face button is A).
+/// The keys held down, for codes that test buttons: read through the Win32 API, so off Windows this is 0
+/// and a code that tests a button sees it up.
+#[cfg(not(windows))]
+pub fn held_keys() -> u32 {
+    0
+}
+
 #[cfg(windows)]
 pub fn held_keys() -> u32 {
     use windows_sys::Win32::UI::Input::XboxController::*;
@@ -1002,13 +1049,12 @@ pub struct Shared {
 
 pub type Handle = std::sync::Arc<std::sync::Mutex<Shared>>;
 
-#[cfg(windows)]
 thread_local! {
     static OPEN: std::cell::RefCell<Option<std::sync::Arc<process::Process>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The game's process, opened for reading and writing, while it runs.
-#[cfg(windows)]
+/// The game's process, opened for reading and writing, while it runs. Off Windows the process list does
+/// not exist, so this is always None and every caller treats the game as not running.
 pub fn game() -> Option<std::sync::Arc<process::Process>> {
     OPEN.with(|o| {
         let mut o = o.borrow_mut();
@@ -1024,7 +1070,6 @@ pub fn game() -> Option<std::sync::Arc<process::Process>> {
 
 /// Start the thread that applies codes and freezes about 60 times a second
 /// while the game runs.
-#[cfg(windows)]
 pub fn start() -> Handle {
     let h: Handle = Default::default();
     let shared = h.clone();

@@ -28,6 +28,15 @@ fn stamp() -> String {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string()
 }
 
+/// Bytes as the page shows them: KB under a megabyte, then one decimal.
+fn megabytes(bytes: u64) -> String {
+    if bytes < 1 << 20 {
+        format!("{} KB", bytes.div_ceil(1024).max(1))
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 fn ago(t: Option<std::time::SystemTime>) -> String {
     let Some(secs) = t.and_then(|t| std::time::SystemTime::now().duration_since(t).ok()).map(|d| d.as_secs()) else {
         return String::new();
@@ -72,7 +81,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .title_id
         .or_else(|| app.game.nacp.as_deref().and_then(crate::saves::nacp_save_owner))
         .unwrap_or(crate::saves::FALLBACK_TITLE_ID);
-    let running = cfg!(windows) && crate::cheats::process::find(crate::cheats::GAME_EXE).is_some();
+    let running = crate::platform::game_running();
     let mut message: Option<(String, Tone)> = None;
 
     if running {
@@ -87,6 +96,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if profiles.is_empty() {
             ui.label(RichText::new("No profiles yet.").color(p.muted));
         }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Profile name").font(theme::semibold(13.0)).color(p.ink));
+            ui.add(egui::TextEdit::singleline(&mut app.saves_ui.profile_name).hint_text("Run A, before the choice").desired_width(220.0));
+            let ok = !app.saves_ui.profile_name.trim().is_empty();
+            if widgets::button(ui, &p, "Keep current save as profile", ok).clicked() {
+                let name = app.saves_ui.profile_name.trim().to_string();
+                message = Some(match crate::saves::store_profile(&save_dir, &name, &stamp()) {
+                    Ok(n) => (format!("Kept the current save ({n} files) as profile {name}"), Tone::Ok),
+                    Err(e) => (format!("Could not keep the save: {e}"), Tone::Bad),
+                });
+                app.saves_ui.profile_name.clear();
+            }
+        });
+        ui.label(
+            RichText::new("The same name is what Rename and Copy use on a profile below: type a new one, then press the button on that row.")
+                .size(12.0)
+                .color(p.muted),
+        );
+        let typed = app.saves_ui.profile_name.trim().to_string();
         for pr in &profiles {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&pr.name).font(theme::semibold(14.0)).color(p.ink));
@@ -96,6 +125,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         message = Some(match crate::saves::remove_profile(&save_dir, pr, &stamp()) {
                             Ok(b) => (format!("Moved profile {} to {}", pr.name, b.display()), Tone::Ok),
                             Err(e) => (format!("Could not remove the profile: {e}"), Tone::Bad),
+                        });
+                    }
+                    // Rename and copy take the name in the field above, so one input serves the three
+                    // things a player does with a profile: keep, rename, branch.
+                    let named = !typed.is_empty() && typed != pr.name;
+                    if widgets::button(ui, &p, "Copy", named)
+                        .on_hover_text("Keeps a second copy under the name in the field above, for a branch of the story")
+                        .clicked()
+                    {
+                        message = Some(match crate::saves::duplicate_profile(&save_dir, pr, &typed) {
+                            Ok(c) => (format!("Copied {} to {}", pr.name, c.name), Tone::Ok),
+                            Err(e) => (format!("Could not copy the profile: {e}"), Tone::Bad),
+                        });
+                    }
+                    if widgets::button(ui, &p, "Rename", named).on_hover_text("Renames this profile to the name in the field above").clicked() {
+                        message = Some(match crate::saves::rename_profile(&save_dir, pr, &typed) {
+                            Ok(r) => (format!("Renamed {} to {}", pr.name, r.name), Tone::Ok),
+                            Err(e) => (format!("Could not rename the profile: {e}"), Tone::Bad),
                         });
                     }
                     if widgets::button(ui, &p, "Load", !running).clicked() {
@@ -110,36 +157,48 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
             });
         }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut app.saves_ui.profile_name).hint_text("Profile name").desired_width(220.0));
-            let ok = !app.saves_ui.profile_name.trim().is_empty();
-            if widgets::button(ui, &p, "Keep current save as profile", ok).clicked() {
-                let name = app.saves_ui.profile_name.trim().to_string();
-                message = Some(match crate::saves::store_profile(&save_dir, &name, &stamp()) {
-                    Ok(n) => (format!("Kept the current save ({n} files) as profile {name}"), Tone::Ok),
-                    Err(e) => (format!("Could not keep the save: {e}"), Tone::Bad),
-                });
-                app.saves_ui.profile_name.clear();
-            }
-        });
+
     });
 
     widgets::section(ui, &p, "Slots in the current save", |ui| {
-        let slots = crate::saves::slots(&save_dir);
+        let account = crate::saves::account_dir(&save_dir);
+        let slots = crate::saves::slots_with_sizes(&save_dir);
+        ui.label(
+            RichText::new(format!(
+                "The save the game reads is {}: {} slot{}, {} in total.",
+                account.display(),
+                slots.len(),
+                if slots.len() == 1 { "" } else { "s" },
+                megabytes(slots.iter().map(|s| s.2).sum())
+            ))
+            .size(12.5)
+            .color(p.muted),
+        );
         if slots.is_empty() {
             ui.label(RichText::new("No save yet. Play the game or import a save below.").color(p.muted));
         }
-        egui::Grid::new("slots").num_columns(3).spacing([18.0, 6.0]).striped(true).show(ui, |ui| {
-            for (path, when) in &slots {
+        egui::Grid::new("slots").num_columns(4).spacing([18.0, 6.0]).striped(true).show(ui, |ui| {
+            for (path, when, size) in &slots {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 ui.label(RichText::new(&name).font(theme::mono(13.0)).color(p.ink));
-                ui.label(RichText::new(ago(*when)).color(p.muted));
+                ui.label(RichText::new(format!("{}, {}", megabytes(*size), ago(*when))).color(p.muted));
                 let open = app.saves_ui.editor.as_ref().is_some_and(|e| &e.slot.path == path);
                 if widgets::button(ui, &p, if open { "Editing" } else { "Edit" }, !open).clicked() {
                     if let Err(e) = open_slot(app, path) {
                         message = Some((format!("{name}: {e}"), Tone::Bad));
                     }
+                }
+                if widgets::button(ui, &p, "Move to backups", !running)
+                    .on_hover_text("The game offers a new game in this slot again; the file is kept in the backups folder")
+                    .clicked()
+                {
+                    message = Some(match crate::saves::archive_slot(&save_dir, path, &stamp()) {
+                        Ok(to) => {
+                            app.saves_ui.editor = None;
+                            (format!("Moved {name} to {}", to.display()), Tone::Ok)
+                        }
+                        Err(e) => (format!("Could not move {name}: {e}"), Tone::Bad),
+                    });
                 }
                 ui.end_row();
             }

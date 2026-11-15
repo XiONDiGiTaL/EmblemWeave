@@ -68,6 +68,7 @@ carries that engine forward as the launcher around it, and
 - [Installation](#installation)
 - [What's in the release zip](docs/PACKAGE.md)
 - [Running on a Steam Deck](docs/STEAMDECK.md)
+- [Platforms, and the plan for Linux](docs/PLATFORMS.md)
 - [Preparing your game data](#preparing-your-game-data)
 - [Using the launcher](#using-the-launcher)
 - [How the recompilation works](#how-the-recompilation-works)

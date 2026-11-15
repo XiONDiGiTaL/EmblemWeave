@@ -42,6 +42,24 @@ fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
     });
 }
 
+const UPSCALE_QUALITIES: &[&str] = &["Native", "Quality", "Balanced", "Performance", "Ultra performance"];
+const FRAME_GENERATION: &[&str] = &["Off", "DLSS Frame Generation", "FSR 3 Frame Generation"];
+const DLSS_UPSCALERS: &[&str] = &["Automatic", "TAAU", "DLSS", "FSR 3", "Bilinear"];
+const ASTC_QUALITIES: &[&str] = &["High", "Fast", "Uncompressed"];
+const GPU_CHOICES: &[&str] = &["Automatic", "Discrete", "Integrated"];
+const COMPILE_THREADS: &[(u32, &str)] = &[(0, "Automatic"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (6, "6"), (8, "8")];
+const COMPILE_PRIORITIES: &[&str] = &["Below normal", "Normal", "Idle"];
+
+/// A combo for a number field (the compile thread count), labelled rather than typed.
+fn combo_num(ui: &mut egui::Ui, id: &str, value: &mut u32, options: &[(u32, &str)]) {
+    let labels: Vec<&str> = options.iter().map(|(_, l)| *l).collect();
+    let mut label = options.iter().find(|(v, _)| v == value).map(|(_, l)| l.to_string()).unwrap_or_else(|| labels[0].to_string());
+    combo(ui, id, &mut label, &labels);
+    if let Some((v, _)) = options.iter().find(|(_, l)| *l == label) {
+        *value = *v;
+    }
+}
+
 pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     widgets::page_header(ui, &p, "Graphics", "Display and rendering options, for the game's engine and for EmblemWeave's own renderer.");
@@ -90,12 +108,74 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
                 combo(ui, "sharpening", &mut g.sharpening, SHARPENING);
             },
         );
-        widgets::setting_row(ui, &p, "Quality", "Original keeps the console's rendering exactly.", |ui| {
+        widgets::setting_row(
+            ui,
+            &p,
+            "Upscaler quality",
+            "The temporal upscalers' preset: the share of the output they reconstruct from. Native renders every pixel and only replaces the console's own anti-aliasing.",
+            |ui| {
+                combo(ui, "uq", &mut g.upscale_quality, UPSCALE_QUALITIES);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Scene scale",
+            "The game's own scene buffer as a percentage of the output, below the launcher's render scale. Lower fills more of the picture from history: cheaper, and softer where motion vectors are wrong.",
+            |ui| {
+                let mut pct = g.scene_scale as f32;
+                if widgets::Slider::new(&mut pct, 25.0..=100.0).suffix(" %").show(ui, &p).changed() {
+                    g.scene_scale = pct.round() as u32;
+                }
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Frame generation",
+            "Generates the frames between two rendered ones. DLSS Frame Generation needs Windows' hardware-accelerated GPU scheduling, an RTX 40 or newer card and the Streamline files; FSR 3 needs amd_fidelityfx_vk.dll. Keep vsync and latency mode off.",
+            |ui| {
+                combo(ui, "fg", &mut g.frame_gen, FRAME_GENERATION);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "DLSS replacement",
+            "What renders the frames the game asks its console's DLSS hardware for: the engine's own temporal upscaler, NVIDIA's, AMD's, or a plain bilinear stretch. Automatic uses whichever DLLs are found.",
+            |ui| {
+                combo(ui, "du", &mut g.dlss_upscaler, DLSS_UPSCALERS);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Quality",
+            "Original keeps the console's rendering exactly.",
+            |ui| {
             combo(ui, "quality", &mut g.quality, &["Original", "Enhanced"]);
         });
         widgets::setting_row(ui, &p, "Precompile shaders", "Translate the game's shaders before play to avoid stutter.", |ui| {
             widgets::toggle(ui, &p, &mut g.shader_precompile);
         });
+        widgets::setting_row(
+            ui,
+            &p,
+            "Texture quality",
+            "How the game's ASTC textures reach a GPU that cannot sample them. High transcodes once in the background for a sharper picture; Fast is quicker to start and uses less disk; Uncompressed costs four times the video memory.",
+            |ui| {
+                combo(ui, "astc", &mut g.astc_quality, ASTC_QUALITIES);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "GPU",
+            "Which Vulkan device the engine opens. Automatic takes the discrete GPU with the most video memory.",
+            |ui| {
+                combo(ui, "gpu", &mut g.gpu, GPU_CHOICES);
+            },
+        );
         widgets::setting_row(ui, &p, "Renderer", "", |ui| {
             ui.label(RichText::new("Vulkan").font(theme::semibold(14.0)).color(p.ink));
         });
@@ -108,6 +188,46 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             )
             .size(12.5)
             .color(p.muted),
+        );
+    });
+
+    widgets::section(ui, &p, "Shader compilation (CPU)", |ui| {
+        ui.label(
+            RichText::new(
+                "While a new area loads, the engine compiles the shader parts and whole pipelines its cache has \
+                 never seen, on background threads. The defaults keep them below normal priority in Windows' \
+                 efficiency mode; on a laptop that still raises clocks and fans, so the count and the priority \
+                 are here.",
+            )
+            .size(12.5)
+            .color(p.muted),
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Compile threads",
+            "Background threads that compile shaders while playing. Automatic leaves the engine's own count, min(4, cpus / 6), which on a 24-thread laptop is 4. Applies at the next start.",
+            |ui| {
+                combo_num(ui, "cthreads", &mut g.compile_threads, COMPILE_THREADS);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Compile priority",
+            "Thread priority for those compiles. Idle keeps them off the fast cores entirely; Normal brings back the stutter-free first draw but competes with the game.",
+            |ui| {
+                combo(ui, "cprio", &mut g.compile_priority, COMPILE_PRIORITIES);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Efficiency mode",
+            "Runs those threads in Windows' efficiency mode (EcoQoS), so a burst of compiles does not take the fast cores from the game.",
+            |ui| {
+                widgets::toggle(ui, &p, &mut g.compile_eco);
+            },
         );
     });
 

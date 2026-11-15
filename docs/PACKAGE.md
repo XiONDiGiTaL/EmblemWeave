@@ -71,19 +71,43 @@ few MB.
 
 ## Extracting on Linux or macOS
 
-The archive is a plain zip: every entry is a relative path with forward slashes, and everything sits inside one
-`EmblemWeave-vX.Y.Z/` folder. `tools/package_release.ps1` refuses to write a zip whose entries use backslashes or
-absolute paths, and every release is checked with a second, non-Windows reader:
+The archive is a plain zip: every entry is a relative path with forward slashes, rooted at the zip itself, so
+`EmblemWeave.exe`, `docs/` and `engine/` are the top of the tree. Extract it into a folder of its own rather than
+over your Downloads folder, and the launcher sits beside the `docs/` and `engine/` folders it expects.
+
+Two things keep it that way, and both run on every release:
+
+* `tools/package_release.ps1` writes the zip entry by entry instead of handing the folder to a compressor. Each
+  name is built with `/`, each folder gets its own entry, and the tree's executable bits are set on the entries
+  that need them. It then runs the verifier below against the file it just wrote and fails the release if the
+  verifier does.
+* `tools/verify_archive.py` reads an archive back and refuses it when an entry is absolute (`/x`, `C:/x`), carries
+  a drive letter, climbs out with `..`, starts with `./` or `.\`, uses a backslash, contains a control character,
+  or collides with another entry's name or case (which is how a Windows build produces a zip that drops a file on
+  Linux). With `--require` it also checks that the files a player needs are at the paths the launcher reads:
+  `docs/PACKAGE.md`, `docs/changelog/`, `engine/fefw-recomp/`, `tools/` and the translator. With `--extract` it
+  unpacks the archive into a temporary folder, checks nothing landed outside it, and checks the executable bit.
+  It runs on Windows and on Linux with only the Python standard library, so a Linux user can check a download
+  before extracting it:
+
+```sh
+python3 tools/verify_archive.py EmblemWeave-vX.Y.Z-windows-x64.zip --require docs/PACKAGE.md --require EmblemWeave.exe
+```
 
 ```sh
 unzip -q EmblemWeave-vX.Y.Z-windows-x64.zip -d EmblemWeave
 python3 -c "import zipfile;print(zipfile.ZipFile('EmblemWeave-vX.Y.Z-windows-x64.zip').namelist()[:3])"
 ```
 
-Both print `EmblemWeave-vX.Y.Z/…` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
+Both print names like `docs/PACKAGE.md` with `/`. The symptom of files landing in one flat pile with `\` in their names comes
 from re-packing the folder on Windows with a tool that writes backslashes (Windows PowerShell 5.1's `Compress-Archive`
 does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes - if it differs,
 you are extracting a re-zipped copy, not the download.
+
+The release workflow extracts the built zip under Linux before publishing it: `unzip` and Python's `zipfile`
+both produce the same tree, the translator's ELF runs, and `docs/PACKAGE.md`, `docs/changelog/` and
+`engine/fefw-recomp/` are where the launcher looks for them. The `--shader-translator-linux-x64.tar.gz` asset is
+checked the same way, with its executable bit.
 
 The `.exe` inside is a Windows program: it runs under Wine or Proton, not natively, and the launcher's build step installs
 its tools with `winget` and runs PowerShell scripts, so it expects Windows. [STEAMDECK.md](STEAMDECK.md) is the Proton

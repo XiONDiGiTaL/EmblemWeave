@@ -112,14 +112,38 @@ pub const DEFAULT_USER: &str = "0100000000000000706d635257464546";
 /// Save data and journal size the game asks for: 64 MiB each.
 const SAVE_SIZE: u64 = 64 << 20;
 
-/// The account save folder in the engine's save folder: the one the game
-/// created, else the default user's.
+/// The account save folder in the engine's save folder: the one the game last wrote, else the default
+/// user's.
+///
+/// The engine names that folder after the save's owner, and more than one can be present: its built-in
+/// user, a console user id, or a folder an earlier import left empty. Picking the first by name put a
+/// loaded profile into a folder the game never reads, which is why loading a profile looked like it did
+/// nothing (the save in the game was unchanged). The one the game last wrote is the one it reads.
 pub fn account_dir(save_dir: &Path) -> PathBuf {
     let account = save_dir.join("account");
-    std::fs::read_dir(&account)
-        .ok()
-        .and_then(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_dir()).min())
-        .unwrap_or_else(|| account.join(DEFAULT_USER))
+    let mut best: Option<(std::time::SystemTime, usize, String, PathBuf)> = None;
+    if let Ok(entries) = std::fs::read_dir(&account) {
+        for e in entries.flatten() {
+            let path = e.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let (files, modified) = summary(&path);
+            if files == 0 {
+                continue;
+            }
+            let when = modified.unwrap_or(std::time::UNIX_EPOCH);
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let better = match &best {
+                None => true,
+                Some((t, f, n, _)) => (when, files, &name) > (*t, *f, n),
+            };
+            if better {
+                best = Some((when, files, name, path));
+            }
+        }
+    }
+    best.map(|(_, _, _, p)| p).unwrap_or_else(|| account.join(DEFAULT_USER))
 }
 
 /// The `.meta` the engine writes for an account save of `title_id`.
@@ -252,6 +276,66 @@ pub fn remove_profile(save_dir: &Path, p: &Profile, stamp: &str) -> Result<PathB
     Ok(b)
 }
 
+/// A slot in the current save, with the size the page shows beside it.
+pub fn slots_with_sizes(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64)> {
+    slots(save_dir)
+        .into_iter()
+        .map(|(p, t)| {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            (p, t, size)
+        })
+        .collect()
+}
+
+/// Move one slot file into `<save folder>/backups/<stamp>-<file>`: the game offers a new game there
+/// again, and the old slot is still on disk if it was the wrong one.
+pub fn archive_slot(save_dir: &Path, slot: &Path, stamp: &str) -> Result<PathBuf, String> {
+    let name = slot.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name.is_empty() {
+        return Err(format!("{} is not a save slot", slot.display()));
+    }
+    if !slot.is_file() {
+        return Err(format!("{} is not there any more", slot.display()));
+    }
+    let to = save_dir.join("backups").join(format!("{stamp}-{name}"));
+    std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
+    std::fs::rename(slot, &to).map_err(|e| format!("moving {} to {}: {e}", slot.display(), to.display()))?;
+    Ok(to)
+}
+
+/// Rename a profile: its folder is moved, so a name that sorts better does not need a copy and a delete.
+pub fn rename_profile(save_dir: &Path, p: &Profile, new_name: &str) -> Result<Profile, String> {
+    let name = crate::mods::clean_name(new_name);
+    if name.is_empty() {
+        return Err("a profile needs a name".into());
+    }
+    if name == p.name {
+        return Ok(p.clone());
+    }
+    let to = save_dir.join("profiles").join(&name);
+    if to.exists() {
+        return Err(format!("there is already a profile called {name}"));
+    }
+    std::fs::rename(&p.path, &to).map_err(|e| format!("renaming the profile: {e}"))?;
+    let (files, modified) = summary(&to);
+    Ok(Profile { name, path: to, files, modified })
+}
+
+/// Keep a second copy of a profile under another name, for a branch in the story.
+pub fn duplicate_profile(save_dir: &Path, p: &Profile, new_name: &str) -> Result<Profile, String> {
+    let name = crate::mods::clean_name(new_name);
+    if name.is_empty() {
+        return Err("a profile needs a name".into());
+    }
+    let to = save_dir.join("profiles").join(&name);
+    if to.exists() {
+        return Err(format!("there is already a profile called {name}"));
+    }
+    copy_tree(&p.path, &to)?;
+    let (files, modified) = summary(&to);
+    Ok(Profile { name, path: to, files, modified })
+}
+
 /// The save slots in the current save: files directly in its folders, newest first.
 pub fn slots(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
     let mut out = Vec::new();
@@ -365,6 +449,62 @@ mod tests {
         assert_eq!(slots(&save).len(), 1);
         remove_profile(&save, &ps[0], "3").unwrap();
         assert!(profiles(&save).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_account_folder_is_the_one_the_game_last_wrote() {
+        let root = temp("account");
+        let save = root.join("save");
+        // The built-in user's folder sorts first but is older; the game writes the other one.
+        let older = save.join("account").join(DEFAULT_USER);
+        let newer = save.join("account").join("0A3C5F00000000000000000000000001");
+        write(&older.join("000/Auto"), "old");
+        write(&newer.join("000/Auto"), "new");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        let new = old + std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(older.join("000/Auto")).unwrap().set_modified(old).unwrap();
+        std::fs::File::options().write(true).open(newer.join("000/Auto")).unwrap().set_modified(new).unwrap();
+        assert_eq!(account_dir(&save), newer);
+        // With nothing in either, the default user's folder is the answer (a first save goes there).
+        let empty = temp("account-empty");
+        let s2 = empty.join("save");
+        std::fs::create_dir_all(s2.join("account").join("0A3C5F00000000000000000000000001")).unwrap();
+        assert_eq!(account_dir(&s2), s2.join("account").join(DEFAULT_USER));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    #[test]
+    fn a_slot_moves_to_the_backups_and_can_come_back() {
+        let root = temp("slot");
+        let save = root.join("save");
+        let slot = save.join("account").join(DEFAULT_USER).join("000/Auto");
+        write(&slot, "save");
+        let listed = slots_with_sizes(&save);
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].2 > 0, "the slot has a size the page can show");
+        let to = archive_slot(&save, &slot, "7").unwrap();
+        assert!(!slot.exists());
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "save");
+        assert!(slots(&save).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profiles_rename_and_duplicate() {
+        let root = temp("profiles2");
+        let save = root.join("save");
+        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "a");
+        store_profile(&save, "Run A", "1").unwrap();
+        let p = profiles(&save).into_iter().next().unwrap();
+        let renamed = rename_profile(&save, &p, "Run B").unwrap();
+        assert_eq!(renamed.name, "Run B");
+        assert_eq!(profiles(&save).len(), 1);
+        let copy = duplicate_profile(&save, &renamed, "Run B copy").unwrap();
+        assert_eq!(profiles(&save).len(), 2);
+        assert!(copy.path.join("000/Auto").is_file());
+        assert!(duplicate_profile(&save, &renamed, "Run B copy").is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 
