@@ -110,6 +110,20 @@ try {
     } else {
         Write-Host "no linux-x64 translator published; skipping its tarball"
     }
+
+    # 6. What was built, for the release script: names and hashes, so the notes and the upload cannot disagree.
+    $tarPath = Join-Path (Split-Path $zip) "$name-shader-translator-linux-x64.tar.gz"
+    $manifest = [ordered]@{
+        version = $Version
+        zip     = [System.IO.Path]::GetFileName($zip)
+        zipSha  = $hash
+        zipSize = (Get-Item $zip).Length
+        tar     = if (Test-Path $tarPath) { [System.IO.Path]::GetFileName($tarPath) } else { $null }
+        tarSha  = if (Test-Path $tarPath) { (Get-FileHash $tarPath -Algorithm SHA256).Hash.ToLower() } else { $null }
+        tarSize = if (Test-Path $tarPath) { (Get-Item $tarPath).Length } else { $null }
+    }
+    $manifest | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path (Split-Path $zip) 'manifest.json')
+    Write-Host "manifest: $(Join-Path (Split-Path $zip) 'manifest.json')"
 } finally {
     Pop-Location
 }

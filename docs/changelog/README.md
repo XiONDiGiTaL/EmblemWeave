@@ -5,7 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
-| [0.1.14](0.1.14.md) | 2026-11-15 | History moved here, the repair paths proven, and every write-up shortened |
+| [0.1.14](0.1.14.md) | 2026-11-14 | History moved here, the repair paths proven, and every write-up shortened |
 | [0.1.13](0.1.13.md) | 2026-11-14 | `--verify-log` reads a build log without a rebuild |
 | [0.1.12](0.1.12.md) | 2026-11-14 | The build reports its real error, and repairs two failures itself |
 | [0.1.11](0.1.11.md) | 2026-11-14 | The shader translator ships in the zip, with its own .NET runtime |
@@ -18,5 +18,14 @@ description of the current state instead of a wall of history.
 
 ## Adding a release
 
-Write `docs/changelog/<version>.md` with the same text as the release notes, add its row to the table above, and keep the
-README's status line pointing at the version that is current. Nothing else in the README needs to change.
+One file is the source of everything:
+
+1. Write `docs/changelog/<version>.md` with the title, a `> one line` summary under it, and the sections the release needs.
+2. Run `pwsh -File tools/release.ps1 -Version <version>`. It builds and packages, writes the release notes from that file
+   plus the install steps and the hashes it measured, updates the table above, and publishes the GitHub release with both
+   assets.
+3. Bump the version in `Cargo.toml` and the status line in the README.
+
+`-Local` stops after the notes and the index, without touching GitHub. `-SkipBuild` reuses the launcher already in
+`target\release`. The generated notes are left in `target\pkg\release-notes-<version>.md`, and nothing has to be typed
+twice.
