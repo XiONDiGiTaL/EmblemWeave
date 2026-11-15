@@ -75,6 +75,7 @@ carries that engine forward as the launcher around it, and
 - [System requirements](#system-requirements)
 - [Security and what the launcher runs](#security-and-what-the-launcher-runs)
 - [Installation](#installation)
+- [What's in the release zip](docs/PACKAGE.md)
 - [Preparing your game data](#preparing-your-game-data)
 - [Using the launcher](#using-the-launcher)
 - [How the recompilation works](#how-the-recompilation-works)
@@ -403,6 +404,9 @@ Overview page (once; it lists any build tools you still need) and **Play**. To b
 Settings are saved to `%APPDATA%\EmblemWeave\config.json`. Decoded modules and
 build output go to `%APPDATA%\EmblemWeave\work`, and save data to
 `%APPDATA%\EmblemWeave\save`. Your game folder is never written to.
+
+The zip and what it deliberately leaves out are listed in [docs/PACKAGE.md](docs/PACKAGE.md), and
+`tools/package_release.ps1` builds it reproducibly.
 
 ## Preparing your game data
 
