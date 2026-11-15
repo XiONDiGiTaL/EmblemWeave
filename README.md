@@ -37,7 +37,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.14, playable through the baseline engine.** Build the game once from your dump, press **Play**,
+> **Current status: 0.1.15, playable through the baseline engine.** Build the game once from your dump, press **Play**,
 > and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the opening movie and cutscenes. The build
 > needs Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with
 > its own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
