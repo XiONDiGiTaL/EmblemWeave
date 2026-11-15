@@ -8,10 +8,11 @@ cmake_minimum_required(VERSION 3.25)
 if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
-project(fefw_game C CXX)
 # The resource compiler: llvm-rc, next to the clang-cl this build already requires. The Windows SDK's rc.exe under a newer SDK
 # folder has been seen to hang on the preprocessed .rc this project feeds it (it wrote its temp files and never returned), and
-# llvm-rc compiles the same file at once. A value already in the cache is replaced when it names that rc.exe.
+# llvm-rc compiles the same file at once. Set before project(), because the resource language is not enabled yet there: setting
+# the cache afterwards makes CMake announce "you have changed variables that require your cache to be deleted", wipe the cache
+# and configure again with its defaults, which is how a Release clang-cl build turned into a Debug clang++ one.
 if(NOT CMAKE_RC_COMPILER OR CMAKE_RC_COMPILER MATCHES "[Rr][Cc]\\.exe$")
     get_filename_component(_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
     foreach(_llvm_rc "${_llvm_bin}/llvm-rc.exe" "${_llvm_bin}/llvm-rc")
@@ -28,6 +29,7 @@ if(NOT CMAKE_RC_COMPILER OR CMAKE_RC_COMPILER MATCHES "[Rr][Cc]\\.exe$")
         endif()
     endif()
 endif()
+project(fefw_game C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -40,7 +42,13 @@ set(FEFW_ROMFS_DEFAULT "game/dump/romfs" CACHE PATH "default [fs] romfs")
 set(FEFW_MAIN_DEFAULT "" CACHE FILEPATH "default [fs] main: main as an uncompressed NSO (empty: <exefs>/main)")
 configure_file(src/fefw_paths.h.in "${CMAKE_CURRENT_BINARY_DIR}/fefw_paths.h" @ONLY)
 
-add_compile_options("-clang:-fmacro-prefix-map=${FEFW_ROOT}=.")
+# clang-cl takes a clang argument through -clang:, the other drivers take it as it is. A cache that had fallen back to clang++ used to
+# stop here with "unknown argument: '-clang:-fmacro-prefix-map=...'".
+if(CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    add_compile_options("-clang:-fmacro-prefix-map=${FEFW_ROOT}=.")
+else()
+    add_compile_options("-fmacro-prefix-map=${FEFW_ROOT}=.")
+endif()
 set(FEFW_RUNTIME_DIR "${FEFW_ROOT}/runtime" CACHE PATH "runtime source tree compiled into fefw.exe")
 set(NXRT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(NXRT_GAMES "fefw" CACHE STRING "" FORCE)            # runtime/games/fefw only

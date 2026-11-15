@@ -329,12 +329,11 @@ saves and its own build cache away from any other copy on the PC. Delete the mar
 
 ### Where the folder can live
 
-Spaces are fine. An apostrophe used to be a trap: the shader translator is built with MSBuild, which reads its own item
-transforms as `@(Item->'…')`, and a `'` in the path ends that quoting early (`MSB3191` and `MSB3021`). That only matters
-when the translator has to be compiled, which a release zip never needs, and the launcher now builds it from a copy under
-its own work folder when the path has an apostrophe or a non-ASCII character, so a folder named after the game can stay as
-it is. Long paths, past about 120 characters, make CMake warn about object file paths; a shorter folder avoids the
-question. `C:\EmblemWeave` is a good home.
+Spaces are fine, including in a folder named after the game: a build was run from a path with spaces to check it. An
+apostrophe and a non-ASCII character each used to be a trap for the shader translator, which MSBuild builds with item
+transforms written as `@(Item->'…')`; when the path has either, the launcher builds the translator from a copy under its
+own work folder and copies the result back, so the folder can be named anything without being renamed. Long paths, past
+about 120 characters, still make CMake warn about object file paths; a shorter folder avoids the question.
 
 ## Preparing your game data
 
