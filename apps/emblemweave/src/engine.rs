@@ -749,16 +749,29 @@ pub fn upscale_mode(label: &str) -> &'static str {
     }
 }
 
-/// The shader translator published as one self-contained executable, shipped in
-/// the release zip at `tools/shaders/prebuilt/win-x64/spirv_harness.exe`. It
-/// carries its own .NET runtime: no SDK, no runtime and no NuGet restore on the
-/// player's PC.
+/// The shader translator published as one self-contained executable under
+/// `tools/shaders/prebuilt/<platform>/`, named by `harness_platform`. It carries
+/// its own .NET runtime: no SDK, no runtime and no NuGet restore on the player's
+/// PC, and the same sources publish for Linux, so a build that runs there
+/// translates shaders with the matching binary instead of through `dotnet`.
 pub fn bundled_harness() -> Option<PathBuf> {
     bundled_harness_in(&root()?)
 }
 
+/// The directory and file name of the translator for the platform this build
+/// runs on. Wine runs the Windows launcher as a Windows program and executes the
+/// Windows binary; a native build takes the ELF one.
+pub fn harness_platform() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        ("win-x64", "spirv_harness.exe")
+    } else {
+        ("linux-x64", "spirv_harness")
+    }
+}
+
 fn bundled_harness_in(root: &Path) -> Option<PathBuf> {
-    let p = root.join("tools").join("shaders").join("prebuilt").join("win-x64").join("spirv_harness.exe");
+    let (dir, file) = harness_platform();
+    let p = root.join("tools").join("shaders").join("prebuilt").join(dir).join(file);
     p.is_file().then_some(p)
 }
 
@@ -1638,16 +1651,27 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
     }
 
     #[test]
-    fn the_bundled_translator_is_found_only_when_the_zip_has_it() {
+    fn the_bundled_translator_is_found_only_where_this_platform_expects_it() {
+        let (dir_name, file_name) = super::harness_platform();
+        assert!(dir_name == "win-x64" || dir_name == "linux-x64");
+        assert!(file_name == "spirv_harness.exe" || file_name == "spirv_harness");
+        assert_eq!(dir_name.ends_with("win-x64"), cfg!(windows), "the platform folder matches the host");
+
         let dir = std::env::temp_dir().join(format!("ew-harness-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("tools/shaders/prebuilt/win-x64")).unwrap();
+        let slot = dir.join("tools").join("shaders").join("prebuilt").join(dir_name);
+        std::fs::create_dir_all(&slot).unwrap();
         assert_eq!(super::bundled_harness_in(&dir), None, "an empty slot is not a translator");
-        std::fs::write(dir.join("tools/shaders/prebuilt/win-x64/spirv_harness.exe"), b"x").unwrap();
-        assert_eq!(
-            super::bundled_harness_in(&dir),
-            Some(dir.join("tools/shaders/prebuilt/win-x64/spirv_harness.exe"))
-        );
+
+        // Another platform's binary is not ours to run.
+        let other = if cfg!(windows) { "linux-x64" } else { "win-x64" };
+        let other_file = if cfg!(windows) { "spirv_harness" } else { "spirv_harness.exe" };
+        std::fs::create_dir_all(dir.join("tools").join("shaders").join("prebuilt").join(other)).unwrap();
+        std::fs::write(dir.join("tools").join("shaders").join("prebuilt").join(other).join(other_file), b"x").unwrap();
+        assert_eq!(super::bundled_harness_in(&dir), None, "the other platform's file is ignored");
+
+        std::fs::write(slot.join(file_name), b"x").unwrap();
+        assert_eq!(super::bundled_harness_in(&dir), Some(slot.join(file_name)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

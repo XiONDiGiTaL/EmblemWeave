@@ -54,6 +54,8 @@ try {
         (Join-Path $repo 'engine\fefw-recomp\game'),
         (Join-Path $repo 'engine\fefw-recomp\work'),
         (Join-Path $repo 'engine\fefw-recomp\launcher'),
+        # The Linux translator ships as its own tarball: a Windows player cannot run 41 MB of ELF.
+        (Join-Path $repo 'engine\fefw-recomp\tools\shaders\prebuilt\linux-x64'),
         'build', 'third_party', 'node_modules', 'shader_cache', 'bc7_cache', '.venv', 'refs', '.git', 'obj', 'bin',
         '.github', '.vscode', '.pytest_cache', '.mypy_cache', '__pycache__', '*.egg-info'
     )
@@ -82,6 +84,29 @@ try {
     $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
     Write-Host "$zip ($mb MB)"
     Write-Host "sha256: $hash"
+
+    # 5. The Linux translator, published from the same sources, as a release asset of its own. The archive keeps the
+    # executable bit when it is made on Linux; the notes say `chmod +x` for archives built elsewhere.
+    $linuxDir = Join-Path $repo 'engine\fefw-recomp\tools\shaders\prebuilt\linux-x64'
+    if (Test-Path (Join-Path $linuxDir 'spirv_harness')) {
+        $tar = Join-Path (Split-Path $zip) "$name-shader-translator-linux-x64.tar.gz"
+        if (Test-Path $tar) { Remove-Item -Force $tar }
+        # Run from the target folder and name the archive bare: GNU tar reads `C:\...` as a remote host otherwise.
+        Push-Location (Split-Path $zip)
+        try {
+            # Windows has no executable bit to record, so stamp one in: `--mode` is GNU tar, and bsdtar (which lacks it)
+            # gets a plain archive with the `chmod +x` note in PACKAGE.md.
+            tar --mode=u+rwx,go+rx -czf (Split-Path $tar -Leaf) -C $linuxDir '.'
+            if ($LASTEXITCODE -ne 0) { tar -czf (Split-Path $tar -Leaf) -C $linuxDir '.' }
+            if ($LASTEXITCODE -ne 0) { throw "tar failed ($LASTEXITCODE)" }
+        }
+        finally { Pop-Location }
+        $tmb = [math]::Round((Get-Item $tar).Length / 1MB, 1)
+        Write-Host "$tar ($tmb MB)"
+        Write-Host "sha256: $((Get-FileHash $tar -Algorithm SHA256).Hash.ToLower())"
+    } else {
+        Write-Host "no linux-x64 translator published; skipping its tarball"
+    }
 } finally {
     Pop-Location
 }

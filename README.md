@@ -332,7 +332,9 @@ Building the game needs these tools (all from winget): LLVM 23 (`LLVM.LLVM`), CM
 Visual Studio 2022 Build Tools with "Desktop development with C++"
 (`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`).
 NASM (`NASM.NASM`) is optional and speeds up movie decoding. The .NET 10 SDK is **not** needed: the release zip carries the
-shader translator published with its own runtime, so the shader step runs on a PC with no .NET at all. Every tool is checked
+shader translator published with its own runtime, so the shader step runs on a PC with no .NET at all. The same sources also
+publish for Linux (`EmblemWeave-vX.Y.Z-shader-translator-linux-x64.tar.gz`), and the build looks for the translator under
+`tools/shaders/prebuilt/<platform>/`, so a Linux build picks the ELF binary on its own. Every tool is checked
 before the build starts, and the launcher names each missing one with the command that installs it.
 
 To build the launcher from source you also need the tools listed in [Building from source](#building-from-source).

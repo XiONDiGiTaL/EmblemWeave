@@ -53,6 +53,15 @@ rewritten into the Maxwell dialect, shipped with its licence. `runtime/assets/pr
 Kenney's CC0 Input Prompts by `runtime/scripts/build_prompt_pack.py`, again with its licence beside it. No file in the
 zip is derived from a game dump: those live in `game/` and `work/` and never leave your PC.
 
+## The Linux translator
+
+`EmblemWeave-vX.Y.Z-shader-translator-linux-x64.tar.gz` (about 41 MB) holds `linux-x64/spirv_harness`, the same sources
+published for `linux-x64`. It is not inside the Windows zip because a Windows player cannot run it: 41 MB of ELF would
+double the download for nothing. The launcher looks for the translator under `tools/shaders/prebuilt/<platform>/` —
+`win-x64` on Windows (including Wine and Proton, which run the Windows binary) and `linux-x64` elsewhere — so untarring
+the asset into `engine/fefw-recomp/tools/shaders/prebuilt/` is all a Linux build needs. The archive keeps the executable
+bit when it is made on Linux; if it arrives without one, `chmod +x linux-x64/spirv_harness`.
+
 ## Size
 
 About 46 MB, of which about 38 MB is `spirv_harness.exe`: the shader translator published as a single self-contained
