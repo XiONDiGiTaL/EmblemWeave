@@ -137,6 +137,21 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `You have changed variables that require your cache to be deleted`, then `clang++: error: unknown argument: '-clang:-fmacro-prefix-map=…'` | 0.1.17 set the resource compiler after CMake had configured, so CMake wiped the cache and configured again with its defaults: Debug, and the `clang++` driver, which does not take a `-clang:` argument | Fixed in the next release. Until then, delete `engine\fefw-recomp\game-build\fefw\build` and build again |
 | `Title metadata: control.nacp not found` | The dump has no `control.nacp`, so the title name and display version are unknown. The build and the game do not need it | Nothing to fix unless you want the version line: extracted `.nsp` dumps keep it at `data\control\control.nacp` |
 
+## Console windows during the recompilation pipeline
+
+The pipeline compiles the C it emits, one shard per process, using zig's clang (`python -m ziglang cc`), `zig`, or LLVM's
+`clang`. The launcher is a GUI program, so a compiler started without `CREATE_NO_WINDOW` gets a console window of its own,
+and a large module is hundreds of shards: that is the wall of blank windows in issue #23, and it was a bug in how the
+stages started their children, not anything else. Every spawn in `jobs.rs` now sets the flag, so the next release opens
+none. They are compiler processes: the launcher's log names the compiler, its version and one line per shard, and the
+`Recompilation` page shows the same count.
+
+There is no PHP in this project (no `.php` file, no PHP runtime, no PHP install step), no shell is started to run
+anything, nothing in the pipeline touches the network, and the launcher uploads nothing: the only connections it makes are
+the ones listed in the README's network table, for an update check, mods you ask for, a `git` clone of the shader
+sources and `uv` installing the pinned packages. `%APPDATA%\EmblemWeave\logs` holds every command each stage ran, with
+its whole output, which is what to read instead of the process list.
+
 ## Can this PC build the game at all
 
 One command answers that without opening the window and without starting a build:

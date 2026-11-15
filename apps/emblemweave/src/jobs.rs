@@ -377,7 +377,8 @@ pub fn decode(exefs: PathBuf) -> Job {
         let out = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("decoded");
         std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
         ctx.start(1);
-        let output = std::process::Command::new(&python)
+        let mut decode = std::process::Command::new(&python);
+        let output = hidden(&mut decode)
             .arg("-I")
             .arg(&script)
             .arg(&exefs)
@@ -455,16 +456,27 @@ pub fn cc_command() -> Option<Vec<String>> {
     find_cc()
 }
 
+/// Run a child without giving it a console window. The launcher is a GUI program, so a console child started without this
+/// flag gets a window of its own: the compile stage starts one compiler per shard and the verification stages compile and
+/// run more, which on a large dump opened hundreds of blank windows and kept them open after the launcher closed (issue
+/// #23). Every spawn in this file goes through here or sets the flag itself.
+fn hidden(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 fn find_cc() -> Option<Vec<String>> {
     let works = |program: &str, args: &[&str]| {
         let mut cmd = std::process::Command::new(program);
         cmd.args(args).env("PATH", crate::engine::tool_path()).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        cmd.status().map(|s| s.success()).unwrap_or(false)
+        hidden(&mut cmd)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     };
     let mut pythons = vec![interpreter()];
     pythons.push(PathBuf::from("python"));
@@ -673,7 +685,8 @@ fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path, shard: Option<&Path>) ->
     let probe = out.join("ew_cc_probe.c");
     std::fs::write(&probe, "int ew_cc_probe(void) { return 0; }
 ").map_err(|e| format!("writing {}: {e}", probe.display()))?;
-    let output = std::process::Command::new(&cc[0])
+    let mut probe_cmd = std::process::Command::new(&cc[0]);
+    let output = hidden(&mut probe_cmd)
         .args(&cc[1..])
         .args(["-std=c99", "-c", "-o"])
         .arg(probe.with_extension("o"))
@@ -689,7 +702,8 @@ fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path, shard: Option<&Path>) ->
         let hdr = out.join("ew_header_probe.c");
         std::fs::write(&hdr, "#include <ew_aarch64.h>\n#include <ew_dispatch.h>\nint ew_header_probe(void) { return 0; }\n")
             .map_err(|e| format!("writing {}: {e}", hdr.display()))?;
-        let second = std::process::Command::new(&cc[0])
+        let mut header_cmd = std::process::Command::new(&cc[0]);
+        let second = hidden(&mut header_cmd)
             .args(&cc[1..])
             .args(["-std=c99", "-c", "-I"])
             .arg(out)
@@ -713,7 +727,8 @@ fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path, shard: Option<&Path>) ->
         // One real shard, with the exact flags the rest use: a header that
         // compiles on its own is not proof that the lifted code does.
         if let Some(shard) = shard {
-            let probe = std::process::Command::new(&cc[0])
+            let mut shard_cmd = std::process::Command::new(&cc[0]);
+            let probe = hidden(&mut shard_cmd)
                 .args(&cc[1..])
                 .args(CC_FLAGS)
                 .arg(out)
@@ -749,7 +764,8 @@ fn check_compiler(ctx: &Ctx, cc: &[String], out: &Path, shard: Option<&Path>) ->
 fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> Result<(usize, usize, usize, Option<String>), String> {
     // What will be run, and which version of it: a failing build is usually one
     // of these two lines.
-    let version = std::process::Command::new(&cc[0])
+    let mut version_cmd = std::process::Command::new(&cc[0]);
+    let version = hidden(&mut version_cmd)
         .args(&cc[1..])
         .arg("--version")
         .output()
@@ -771,7 +787,8 @@ fn compile_shards(ctx: &Ctx, cc: &[String], out: &Path, shards: &[PathBuf]) -> R
         }
         while running.len() < threads {
             let Some(src) = pending.pop_front() else { break };
-            let child = std::process::Command::new(&cc[0])
+            let mut shard = std::process::Command::new(&cc[0]);
+            let child = hidden(&mut shard)
                 .args(&cc[1..])
                 // -O0: this stage proves the translation builds natively. The
                 // largest lifted functions take many minutes at -O1, which is
@@ -866,7 +883,8 @@ fn verify(ctx: &Ctx, cc: &[String], funcs: &[ew_lift::LiftedFunction], out: &Pat
     let src = out.join("campaign.c");
     std::fs::write(&src, ew_lift::emit_campaign("app", &chosen)).map_err(|e| e.to_string())?;
     let exe = out.join("campaign.exe");
-    let built = std::process::Command::new(&cc[0])
+    let mut campaign_cmd = std::process::Command::new(&cc[0]);
+    let built = hidden(&mut campaign_cmd)
         .args(&cc[1..])
         .args(["-std=c99", "-O1", "-w", "-I"])
         .arg(out)
@@ -879,7 +897,8 @@ fn verify(ctx: &Ctx, cc: &[String], funcs: &[ew_lift::LiftedFunction], out: &Pat
         ctx.log(String::from_utf8_lossy(&built.stderr).into_owned());
         return Err("the verification program did not compile".into());
     }
-    let ran = std::process::Command::new(&exe).output().map_err(|e| e.to_string())?;
+    let mut campaign = std::process::Command::new(&exe);
+    let ran = hidden(&mut campaign).output().map_err(|e| e.to_string())?;
     let native = String::from_utf8_lossy(&ran.stdout).replace('\r', "");
     let native: Vec<&str> = native.lines().filter(|l| l.starts_with("fn=")).collect();
     let ok = expected.iter().zip(&native).filter(|(a, b)| a.as_str() == **b).count();
