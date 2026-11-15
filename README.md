@@ -319,6 +319,23 @@ build output go to `%APPDATA%\EmblemWeave\work`, and save data to
 The zip and what it deliberately leaves out are listed in [docs/PACKAGE.md](docs/PACKAGE.md), and
 `tools/package_release.ps1` builds it reproducibly.
 
+### Portable mode
+
+Put an empty file named `portable.txt` next to `EmblemWeave.exe` and every folder the launcher writes moves beside it,
+into `data`: `play` (the run folder and its `fefw.ini`), `work` (decoded modules and build output), `save` and `logs`.
+The unzipped folder can then be moved, copied or carried on a stick as one piece, and a portable copy keeps its own
+saves and its own build cache away from any other copy on the PC. Delete the marker to go back to
+`%APPDATA%\EmblemWeave`. The game's own dump is read where it is, in either mode.
+
+### Where the folder can live
+
+Spaces are fine. An apostrophe is not: the shader translator is built with MSBuild, which reads its own item transforms
+as `@(Item->'…')`, and a `'` in the path ends that quoting early. Every release ships the translator prebuilt, so this
+only bites when the engine folder came from a different release and the translator has to be compiled; the launcher now
+says so before it starts. Non-ASCII folders (`Ø`, Cyrillic, CJK) work for the game itself but are worth avoiding for the
+unzipped folder, because Python and the C toolchain each handle them differently. Long paths, past about 120 characters,
+make CMake warn about object file paths; a shorter folder avoids the question. `C:\EmblemWeave` is a good home.
+
 ## Preparing your game data
 
 The simplest way is a **`.nup` dump** of your own copy of the game. On the

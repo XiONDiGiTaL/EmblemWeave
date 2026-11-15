@@ -126,6 +126,16 @@ A bug report with the failing task's log attached is worth more than any descrip
 | ``extract_corpus: no shader archive under …`` | The shader corpus was about to be built from a path that holds no `*.bfsha`/`*.ptcl`/`*.arc`/`*.sarc`/`*.bnsh` archive, which is what a `.nup`/`.nsp` file looks like to a folder walk | Nothing: **Build the game** copies the archives out of the package and builds the corpus from that folder. The message only appears if that copy found none |
 | `…fetch_third_party.ps1 cannot be loaded because running scripts is disabled on this system` | PowerShell's execution policy refused the build's own script. Launcher 0.1.9 and older did not pass `-ExecutionPolicy Bypass` | Update the launcher: current builds run their scripts under a bypassed policy, and hand the same preference to any `pwsh` those scripts start |
 
+**Building the game from a folder the tools dislike** (issues #17, #18 and #20):
+
+| Message | Meaning | Fix |
+| --- | --- | --- |
+| `this engine folder has no translator at …\\prebuilt\\win-x64\\spirv_harness.exe; building one from source` | Every release zip carries that file. An engine folder without it is not from this release, usually because a new `EmblemWeave.exe` was dropped into an older unzipped folder | Unzip the release into a folder of its own and point the launcher at that. Mixing a launcher from one release with another release's engine folder is what produced the `dav1d` and `control.nacp` messages in #17 |
+| `the shader translator is built with MSBuild, which cannot take a folder path containing an apostrophe` | The path has a `'` in it, and MSBuild ends its `@(Item->'…')` quoting there, printing the transform as a file name (error `MSB3021`) | Move the unzipped folder to a path without an apostrophe, for example `C:\EmblemWeave`. The game's own build is not affected |
+| `apply_patch: source file not found` / the patch step fails | The translator's patch step could not find its input, or a patch did not apply | The input is under `tools\shaders\third_party\ryubing`; the build stages it with `setup_ryujinx.ps1`. Delete `tools\shaders\build` and build again |
+| `add_subdirectory given source "…/third_party/dav1d" which is not an existing directory` | The engine folder is from 0.1.15 or older, which did not ship that tree (#17) | Use 0.1.16 or newer. Every release since carries `runtime/third_party/dav1d` |
+| `Title metadata: control.nacp not found` | The dump has no `control.nacp`, so the title name and display version are unknown. The build and the game do not need it | Nothing to fix unless you want the version line: extracted `.nsp` dumps keep it at `data\control\control.nacp` |
+
 ## Can this PC build the game at all
 
 One command answers that without opening the window and without starting a build:

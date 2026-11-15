@@ -694,7 +694,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
         None => g.checks.push(Check::new(
             Severity::Warn,
             "Title metadata",
-            "control.nacp not found; the game's display version cannot be reported to it",
+            "control.nacp not found: the title name and display version stay blank, and neither the build nor the game needs it. An extracted .nsp keeps it at data\\control\\control.nacp",
         )),
     }
 

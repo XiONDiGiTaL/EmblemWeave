@@ -1124,6 +1124,28 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     } else if harness.is_file() {
         ctx.end(5, StageStatus::Skipped, "already built");
     } else {
+        // Every release zip carries the published translator, so reaching this point means the engine folder came from a
+        // different release than the launcher (a 0.1.17 launcher over a 0.1.10 engine folder is what issues #17 and #18
+        // reported) or the zip was unpacked without its `prebuilt` folder. Say which folder and which file, instead of
+        // silently building a translator the release meant to ship.
+        let (pdir, pfile) = harness_platform();
+        ctx.log(format!(
+            "this engine folder has no translator at {}; building one from source, which needs the .NET 10 SDK. A release \
+             zip carries that file already, so an engine folder without it is from another release: unzip the current \
+             release into a folder of its own rather than mixing the two.",
+            root.join("tools").join("shaders").join("prebuilt").join(pdir).join(pfile).display()
+        ));
+        // MSBuild reads item transforms written as @(Item->'...'): a path with an apostrophe in it ends the quoted string
+        // early, and the build fails with the transform printed as a file name (error MSB3021). The game's own build does
+        // not care; this one cannot be talked out of it, so say it before thirty seconds of dotnet output does not.
+        if root.display().to_string().contains('\'') {
+            return Err(format!(
+                "the shader translator is built with MSBuild, which cannot take a folder path containing an apostrophe, \
+                 and this one has one: {}. Move the unzipped folder somewhere without one (C:\\EmblemWeave, for \
+                 example) and press Build the game again; the rest of the build is not affected.",
+                root.display()
+            ));
+        }
         ensure_ryubing_refs(ctx, &root)?;
         run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\shaders\\scripts\\setup_ryujinx.ps1", "-Ryubing", "work\\refs\\ryubing"])?;
         // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
@@ -1134,6 +1156,13 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
                 format!(
                     "the shader translator is a .NET 10 program and this PC has the .NET runtime but no 10.x SDK. Install it with `{}`, then press Build the game again. ({e})",
                     install_hint(".NET 10 SDK")
+                )
+            } else if lower.contains("msb3021") && lower.contains("debugsymbolsintermediatepath") {
+                // The same apostrophe, when it arrives from a path this check could not see (a referenced source under it).
+                format!(
+                    "the shader translator could not be built: MSBuild received one of its own item transforms as a file \
+                     name, which happens when the folder path has an apostrophe in it. Move the unzipped folder to a path \
+                     without one and press Build the game again. ({e})"
                 )
             } else {
                 e

@@ -98,8 +98,33 @@ pub fn data_root_from(env: &dyn Fn(&str) -> Option<String>) -> Option<std::path:
         .or_else(|| env("HOME").filter(|s| !s.is_empty()).map(|s| std::path::PathBuf::from(s).join(".config").join("EmblemWeave")))
 }
 
-/// `data_root_from` against this process's environment.
+/// The file beside the executable that turns portable mode on.
+pub const PORTABLE_MARKER: &str = "portable.txt";
+
+/// Where a portable copy keeps its data: `data` next to `EmblemWeave.exe`, holding `play`, `work`, `save` and `logs`
+/// just as `%APPDATA%\EmblemWeave` does. Portable mode is on when `portable.txt` sits beside the executable, so an
+/// unzipped folder with that one empty file in it can be moved, copied or carried on a stick as one piece, and no
+/// other copy on the PC sees its saves or its cache.
+pub fn portable_root(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Matched without regard to case, the way Windows compares file names: someone who makes `Portable.txt` in
+    // Explorer means the same thing.
+    let marker = std::fs::read_dir(exe_dir)
+        .ok()?
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(PORTABLE_MARKER));
+    marker.then(|| exe_dir.join("data"))
+}
+
+/// The folder the launcher's copy was started from, for portable mode.
+pub fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))
+}
+
+/// `data_root_from` against this process's environment, unless this copy is portable.
 pub fn data_root() -> Option<std::path::PathBuf> {
+    if let Some(dir) = exe_dir().and_then(|d| portable_root(&d)) {
+        return Some(dir);
+    }
     data_root_from(&|k| std::env::var(k).ok())
 }
 
@@ -132,6 +157,18 @@ mod tests {
             assert_eq!(home.unwrap(), std::path::PathBuf::from("/home/x/.config/EmblemWeave"));
         }
         assert!(data_root_from(&env_of(&[])).is_none());
+    }
+
+    #[test]
+    fn a_portable_marker_beside_the_exe_moves_every_folder_next_to_it() {
+        let dir = std::env::temp_dir().join(format!("emblemweave-portable-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(portable_root(&dir), None, "no marker, no portable mode");
+        std::fs::write(dir.join("Portable.TXT"), "").unwrap();
+        // The name Windows would match, whatever case the file was made in.
+        assert_eq!(portable_root(&dir), Some(dir.join("data")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

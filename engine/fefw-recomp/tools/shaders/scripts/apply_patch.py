@@ -11,6 +11,7 @@ Used by tools/maxwell/spirv_harness/translator/Ryujinx.Graphics.Shader.csproj on
 
 Usage: python tools/maxwell/apply_patch.py [--quiet] [--forward] -o <out> <in> <patchfile>
 """
+import os
 import re
 import sys
 
@@ -88,13 +89,22 @@ def apply(src_text, hunks):
     return eol.join(out) + (eol if final_eol else "")
 
 
+def _present(src_text, new_lines):
+    """Whether a hunk's added lines are already in the source, i.e. the patch has been applied before."""
+    src = [l.rstrip("\r") for l in src_text.splitlines()]
+    want = [l.rstrip("\r") for l in new_lines]
+    return any(src[i:i + len(want)] == want for i in range(0, len(src) - len(want) + 1))
+
+
 def main(argv):
-    args, out_path = [], None
+    args, out_path, forwards = [], None, False
     it = iter(argv)
     for a in it:
         if a == "-o":
             out_path = next(it, None)
-        elif a in ("--quiet", "-s", "--silent", "--forward", "-N"):
+        elif a in ("--forward", "-N"):
+            forwards = True
+        elif a in ("--quiet", "-s", "--silent"):
             pass
         else:
             args.append(a)
@@ -102,15 +112,32 @@ def main(argv):
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
     src_path, patch_path = args
+    # Named rather than left to a traceback: a missing checkout or a patch file that a zip did not carry is the common
+    # case, and "FileNotFoundError: [Errno 2] ..." under a long path tells the reader nothing.
+    for name, path in (("source", src_path), ("patch", patch_path)):
+        if not os.path.isfile(path):
+            print(f"apply_patch: {name} file not found: {path}", file=sys.stderr)
+            return 1
     with open(src_path, encoding="utf-8", newline="") as f:
         src_text = f.read()
     with open(patch_path, encoding="utf-8", newline="") as f:
         patch_text = f.read()
     try:
-        result = apply(src_text, parse_hunks(patch_text))
+        hunks = parse_hunks(patch_text)
+        result = apply(src_text, hunks)
     except ValueError as e:
-        print(f"apply_patch: {patch_path}: {e}", file=sys.stderr)
-        return 1
+        # `patch --forward` leaves an already-applied hunk alone and exits 0, which is what a second build of the same
+        # tree asks for. Without this a rebuild of the translator failed on its own earlier output.
+        if forwards and all(_present(src_text, new) for _, _, new in hunks):
+            result = src_text
+        else:
+            print(f"apply_patch: {patch_path}: {e}", file=sys.stderr)
+            return 1
+    # The output lives under a directory MSBuild names but does not create (`obj/<project>/patched/<folder>/`), which
+    # is why the first build on a clean install used to die writing it.
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         f.write(result)
     return 0
