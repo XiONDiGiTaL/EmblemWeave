@@ -366,6 +366,17 @@ fn reason_from(lines: &[String]) -> String {
     }
 }
 
+/// How a step is named in a failure: the script it ran, not the flag before
+/// it (`pwsh -NoProfile` says nothing about which step died).
+fn step_name(program: &str, args: &[&str]) -> String {
+    if let Some(i) = args.iter().position(|a| *a == "-File") {
+        if let Some(script) = args.get(i + 1) {
+            return (*script).to_string();
+        }
+    }
+    args.first().map(|a| (*a).to_string()).unwrap_or_else(|| program.to_string())
+}
+
 /// The program cmd says it could not find: "'git' is not recognized as an
 /// internal or external command".
 fn missing_program(reason: &str) -> Option<String> {
@@ -449,9 +460,16 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
             .map(|t| t.iter().filter(|l| !l.trim().is_empty()).cloned().collect())
             .unwrap_or_default();
         let said = reason_from(&lines);
-        let name = args.first().copied().unwrap_or("");
+        let name = step_name(program, args);
         if said.is_empty() {
-            Err(format!("{program} {name} failed ({status}); the log has the output"))
+            // Nothing at all was printed. A script that security software or a
+            // machine policy kills exits exactly like this, so saying "the log
+            // has the output" would point at an empty file.
+            Err(format!(
+                "{program} {name} failed ({status}) and printed nothing at all. That is what a script looks like when \
+                 machine policy or security software stops it before its first line; the log has the command and the \
+                 lines around it"
+            ))
         } else if let Some(missing) = missing_program(&said) {
             Err(format!(
                 "the build called `{missing}`, which is not installed or not on PATH ({program} {name} failed ({status})). \
@@ -1436,6 +1454,15 @@ mod tests {
         .collect();
         let said = reason_from(&lines);
         assert!(said.contains("CMake Error at CMakeLists.txt"), "{said}");
+    }
+
+    #[test]
+    fn a_failed_step_is_named_by_the_script_it_ran() {
+        assert_eq!(
+            super::step_name("pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"]),
+            "tools\\textures\\scripts\\fetch_third_party.ps1"
+        );
+        assert_eq!(super::step_name("cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"]), "/C");
     }
 
     #[test]
