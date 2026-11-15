@@ -1065,6 +1065,8 @@ problem: {e}");
 
 fn main() -> eframe::Result<()> {
     crash::install();
+    // Before anything reads the settings: a fresh copy keeps its data beside the program, so the first run writes its config there.
+    platform::adopt_portable_on_first_run();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--check-toolchain") {
         std::process::exit(check_toolchain_cli());

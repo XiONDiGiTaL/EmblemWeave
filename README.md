@@ -321,11 +321,14 @@ The zip and what it deliberately leaves out are listed in [docs/PACKAGE.md](docs
 
 ### Portable mode
 
-Put an empty file named `portable.txt` next to `EmblemWeave.exe` and every folder the launcher writes moves beside it,
-into `data`: `play` (the run folder and its `fefw.ini`), `work` (decoded modules and build output), `save` and `logs`.
-The unzipped folder can then be moved, copied or carried on a stick as one piece, and a portable copy keeps its own
-saves and its own build cache away from any other copy on the PC. Delete the marker to go back to
-`%APPDATA%\EmblemWeave`. The game's own dump is read where it is, in either mode.
+A fresh copy keeps everything in its own folder without being asked: on its first start, when there is no
+`%APPDATA%\EmblemWeave` yet, the launcher puts its data in `data` beside `EmblemWeave.exe`, holding `play` (the run
+folder and its `fefw.ini`), `work` (decoded modules and build output), `save` and `logs`. Unzip it anywhere, carry it on
+a stick, and the whole thing moves as one piece with its saves and its build cache; nothing on the PC knows it is there.
+
+A copy that has been using the profile folder can switch: **About → Storage → Keep everything in this folder** writes
+the marker, creates `data` and copies your saves across, and the game is built into the new folder on the next build.
+Delete `portable.txt` to go back to `%APPDATA%\EmblemWeave`. The game's own dump is read where it is, in either mode.
 
 ### Where the folder can live
 

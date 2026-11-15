@@ -106,13 +106,60 @@ pub const PORTABLE_MARKER: &str = "portable.txt";
 /// unzipped folder with that one empty file in it can be moved, copied or carried on a stick as one piece, and no
 /// other copy on the PC sees its saves or its cache.
 pub fn portable_root(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    // Matched without regard to case, the way Windows compares file names: someone who makes `Portable.txt` in
-    // Explorer means the same thing.
     let marker = std::fs::read_dir(exe_dir)
         .ok()?
         .flatten()
         .any(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(PORTABLE_MARKER));
     marker.then(|| exe_dir.join("data"))
+}
+
+/// A fresh copy keeps everything in its own folder. Nothing else on the PC holds data for this launcher, so nothing moves and nothing
+/// surprises; a zip unpacked onto a stick is portable without anyone creating a marker file, which is what issue #21 asked for. A copy
+/// that sits beside an existing profile keeps using it, and the About page switches it with the button there.
+///
+/// Returns the folder the profile holds, when it was adopted.
+pub fn adopt_portable_on_first_run() -> Option<std::path::PathBuf> {
+    let exe_dir = exe_dir()?;
+    if portable_root(&exe_dir).is_some() {
+        return None;
+    }
+    let profile = data_root_from(&|k| std::env::var(k).ok())?;
+    if profile.exists() {
+        return None;
+    }
+    let data = exe_dir.join("data");
+    std::fs::create_dir_all(&data).ok()?;
+    std::fs::write(exe_dir.join(PORTABLE_MARKER), b"").ok()?;
+    Some(data)
+}
+
+/// Switch this copy to keeping everything beside the program, the way the About page's button does: the marker goes in, and the saves
+/// that the profile already holds are copied across so the player's progress comes with them. The game folder and the build output are
+/// not copied: they are rebuilt in the new folder by the next build, and the old ones are left where they were.
+pub fn set_portable(exe_dir: &std::path::Path, on: bool) -> Result<Option<std::path::PathBuf>, String> {
+    let marker = exe_dir.join(PORTABLE_MARKER);
+    if !on {
+        match std::fs::remove_file(&marker) {
+            Ok(()) => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("removing {}: {e}", marker.display())),
+        }
+    }
+    let data = exe_dir.join("data");
+    std::fs::create_dir_all(&data).map_err(|e| format!("creating {}: {e}", data.display()))?;
+    std::fs::write(&marker, b"").map_err(|e| format!("writing {}: {e}", marker.display()))?;
+    // The saves are the part a player cannot get back, so they follow the switch; a copy that cannot be made does not undo it.
+    let mut copied = None;
+    if let Some(profile) = data_root_from(&|k| std::env::var(k).ok()) {
+        let from = profile.join("save");
+        let to = data.join("save");
+        if from.is_dir() && !to.exists() {
+            if crate::saves::copy_tree(&from, &to).is_ok() {
+                copied = Some(to);
+            }
+        }
+    }
+    Ok(copied)
 }
 
 /// The folder the launcher's copy was started from, for portable mode.
@@ -168,6 +215,23 @@ mod tests {
         std::fs::write(dir.join("Portable.TXT"), "").unwrap();
         // The name Windows would match, whatever case the file was made in.
         assert_eq!(portable_root(&dir), Some(dir.join("data")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_button_writes_the_marker_and_creates_the_data_folder() {
+        let dir = std::env::temp_dir().join(format!("emblemweave-portable-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(portable_root(&dir), None);
+        set_portable(&dir, true).unwrap();
+        assert!(dir.join(PORTABLE_MARKER).is_file());
+        assert!(dir.join("data").is_dir());
+        assert_eq!(portable_root(&dir), Some(dir.join("data")));
+        // Off removes the marker; the data folder stays, because it holds what the copy has been using.
+        set_portable(&dir, false).unwrap();
+        assert!(!dir.join(PORTABLE_MARKER).is_file());
+        assert!(dir.join("data").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

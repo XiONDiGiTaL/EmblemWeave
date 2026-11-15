@@ -20,6 +20,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_L);
 
     updates(app, ui, &p);
+    storage(app, ui, &p);
 
     ui.columns(2, |cols| {
         widgets::section(&mut cols[0], &p, "Build", |ui| {
@@ -65,6 +66,58 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             )
             .size(13.0)
             .color(p.body),
+        );
+    });
+}
+
+/// Where the launcher keeps its data, and the button that moves it beside the program. A fresh copy starts here already, so this page is
+/// for the player who has been using a build in their profile and wants the saves, cache and game in one folder they can carry.
+fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
+    widgets::section(ui, p, "Storage", |ui| {
+        let exe = crate::platform::exe_dir();
+        let portable = exe.as_ref().and_then(|d| crate::platform::portable_root(d)).is_some();
+        let folder = crate::config::Config::dir();
+        widgets::kv(
+            ui,
+            p,
+            "Folder",
+            &folder.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| crate::platform::NO_DATA_DIR.to_string()),
+        );
+        widgets::kv(
+            ui,
+            p,
+            "Portable",
+            if portable { "yes, everything is in this folder" } else { "no, in your profile folder" },
+        );
+        if portable {
+            ui.add_space(theme::SPACE_S);
+            ui.label(RichText::new("Move or copy this whole folder to take the saves and the game with it.").size(13.0).color(p.muted));
+            return;
+        }
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal_wrapped(|ui| {
+            if widgets::button(ui, p, "Keep everything in this folder", true).clicked() {
+                match exe.as_deref().map(|d| crate::platform::set_portable(d, true)) {
+                    Some(Ok(copied)) => {
+                        let saves = if copied.is_some() { " Your saves were copied across." } else { "" };
+                        app.notify(
+                            format!("Portable mode is on. Restart EmblemWeave to use it; the game is built into this folder on the next build.{saves}"),
+                            Tone::Ok,
+                        );
+                    }
+                    Some(Err(e)) => app.notify(format!("Portable mode could not be turned on: {e}"), Tone::Bad),
+                    None => app.notify("The folder this copy runs from could not be found", Tone::Bad),
+                }
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Everything then lives in a `data` folder beside the program, so the whole thing can be moved, copied or kept on a stick, \
+                 and no other copy on this PC sees its saves. A game folder that is already built stays where it is and is built again here \
+                 on the next build.",
+            )
+            .size(13.0)
+            .color(p.muted),
         );
     });
 }
