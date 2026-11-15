@@ -23,16 +23,16 @@ fn upscaler_help(current: &str, sdk: &crate::engine::Sdk) -> String {
         "FSR 1.0" => "AMD's spatial upscaler: scales and sharpens on any GPU, with no motion vectors.".into(),
         "FSR 3.1" => match &sdk.fsr3 {
             Some(dir) => format!("AMD's temporal upscaler, using the FidelityFX DLLs in {}. Applies at the game's next start.", dir.display()),
-            None => "AMD's temporal upscaler. Put amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll in upscalers\\fsr3 next to the game; without them the engine logs why and leaves the picture unscaled.".into(),
+            None => "AMD's temporal upscaler. Put amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll in upscalers\\fsr in the play folder; without them the engine logs why and leaves the picture unscaled.".into(),
         },
         "NVIDIA Image Scaling" => "NVIDIA's spatial upscaler: any GPU, up to 2x per side, FSR 1 beyond that.".into(),
         "DLSS" | "DLAA" => match &sdk.dlss {
             Some(dir) => format!("NVIDIA's temporal upscaler through Streamline, in {}. Applies at the game's next start.", dir.display()),
-            None => "NVIDIA's temporal upscaler. Needs NVIDIA's four Streamline DLLs in upscalers\\streamline next to the game, on an RTX GPU; without them the engine keeps its own upscaler.".into(),
+            None => "NVIDIA's temporal upscaler. Needs NVIDIA's four Streamline DLLs in upscalers\\streamline in the play folder, on an RTX GPU; without them the engine keeps its own upscaler.".into(),
         },
         "XeSS" => match &sdk.xess {
             Some(dir) => format!("Intel's temporal upscaler through libxess.dll in {}. Applies at the game's next start.", dir.display()),
-            None => "Intel's temporal upscaler, which runs on any GPU with DP4a (best on Intel Arc). Needs libxess.dll in upscalers\\xess next to the game, and the Visual C++ 2015-2022 runtime; without them the engine keeps its own upscaler.".into(),
+            None => "Intel's temporal upscaler, which runs on any GPU with DP4a (best on Intel Arc). Needs libxess.dll in upscalers\\xess in the play folder, and the Visual C++ 2015-2022 runtime; without them the engine keeps its own upscaler.".into(),
         },
         _ => "The picture is scaled by the presentation path alone.".into(),
     }
