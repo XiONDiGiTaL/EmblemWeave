@@ -536,8 +536,13 @@ impl App {
                 let strip = ui.available_rect_before_wrap();
                 widgets::glass_panel(ui, strip, &p, egui::CornerRadius::same(14));
                 // The bar is the window's title bar now. Empty parts of it drag
-                // the window; the buttons added later sit above this response.
-                let drag = ui.interact(strip, ui.id().with("shell-drag"), egui::Sense::click_and_drag());
+                // the window; the controls on the right are outside the drag
+                // region, so a double-click there can only act on the button.
+                let drag_rect = egui::Rect::from_min_max(
+                    strip.min,
+                    egui::pos2(strip.right() - SHELL_CONTROL_ZONE, strip.bottom()),
+                );
+                let drag = ui.interact(drag_rect, ui.id().with("shell-drag"), egui::Sense::click_and_drag());
                 if drag.drag_started() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
@@ -570,17 +575,24 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Right to left: close is the rightmost button, then
                         // maximize, minimize, and the quiet version/frame text.
-                        if shell_button(ui, &p, "✕", "Close", p.bad).clicked() {
+                        // The cluster is inset from the strip's rounded corner,
+                        // and its own spacing is exact rather than the layout's.
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.add_space(SHELL_CONTROL_INSET);
+                        if shell_control(ui, &p, ShellControl::Close, "Close").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
+                        ui.add_space(SHELL_BUTTON_GAP);
                         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                        if shell_button(ui, &p, if maximized { "❐" } else { "□" }, "Maximize / restore", p.body).clicked() {
+                        if shell_control(ui, &p, ShellControl::Maximize { restore: maximized }, if maximized { "Restore" } else { "Maximize" }).clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                         }
-                        if shell_button(ui, &p, "—", "Minimize", p.body).clicked() {
+                        ui.add_space(SHELL_BUTTON_GAP);
+                        if shell_control(ui, &p, ShellControl::Minimize, "Minimize").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(12.0);
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         if self.config.hud.fps {
                             if ui.small_button("✕").on_hover_text("Hide the frame rate").clicked() {
                                 self.config.hud.fps = false;
@@ -1116,20 +1128,107 @@ fn shell_resize(ctx: &egui::Context) {
     }
 }
 
-/// A flat window button for the custom shell. The native buttons are gone, so
-/// these carry the hover colour and the accessible tooltip themselves.
-fn shell_button(ui: &mut egui::Ui, p: &theme::Palette, glyph: &str, tip: &str, hover: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), egui::Sense::click());
-    let bg = if response.hovered() { theme::alpha(hover, 28) } else { egui::Color32::TRANSPARENT };
-    ui.painter().rect_filled(rect.shrink(2.0), egui::CornerRadius::same(7), bg);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        theme::semibold(13.0),
-        if response.hovered() { hover } else { p.body },
-    );
-    response.on_hover_text(tip)
+/// Caption-button geometry. The three controls are one fixed-width cluster, so
+/// the title bar can keep drag and double-click handling off them entirely.
+const SHELL_BUTTON_W: f32 = 34.0;
+const SHELL_BUTTON_H: f32 = 30.0;
+const SHELL_BUTTON_GAP: f32 = 4.0;
+const SHELL_CONTROL_INSET: f32 = 6.0;
+const SHELL_CONTROL_ZONE: f32 = SHELL_BUTTON_W * 3.0 + SHELL_BUTTON_GAP * 2.0 + SHELL_CONTROL_INSET;
+
+#[derive(Clone, Copy)]
+enum ShellControl {
+    Minimize,
+    Maximize { restore: bool },
+    Close,
+}
+
+/// A caption button for the custom shell. The glyphs are painted rather than
+/// taken from a fallback font, so the three icons share one stroke weight and
+/// optical box at every DPI. Hover fades in, the face sinks on press, and close
+/// is the one control that turns red instead of merely brightening.
+fn shell_control(ui: &mut egui::Ui, p: &theme::Palette, kind: ShellControl, tip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(SHELL_BUTTON_W, SHELL_BUTTON_H), egui::Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(response.id.with("shell-hover"), response.hovered(), 0.12);
+    let pressed = response.is_pointer_button_down_on();
+    let close = matches!(kind, ShellControl::Close);
+    let bg = if close {
+        theme::alpha(p.bad, if pressed { 240 } else { (205.0 * hover) as u8 })
+    } else if pressed {
+        theme::alpha(egui::Color32::WHITE, 22)
+    } else {
+        theme::alpha(egui::Color32::WHITE, (10.0 * hover) as u8)
+    };
+    let sink = if pressed { 2.5 } else { 2.0 };
+    let face = rect.shrink(sink);
+    let radius = egui::CornerRadius::same(8);
+    let painter = ui.painter();
+    painter.rect_filled(face, radius, bg);
+    if !close && hover > 0.0 {
+        painter.rect_stroke(face, radius, egui::Stroke::new(1.0_f32, theme::alpha(egui::Color32::WHITE, (14.0 * hover) as u8)), egui::StrokeKind::Inside);
+    }
+    if response.has_focus() {
+        painter.rect_stroke(face, radius, egui::Stroke::new(1.0_f32, p.electric), egui::StrokeKind::Inside);
+    }
+
+    let ink = if close {
+        mix_colour(p.body, egui::Color32::WHITE, if pressed { 1.0 } else { hover })
+    } else {
+        mix_colour(p.body, p.ink, hover)
+    };
+    let stroke = egui::Stroke::new(1.35_f32, ink);
+    let c = rect.center();
+    match kind {
+        ShellControl::Minimize => {
+            shell_line(painter, &[egui::pos2(c.x - 5.0, c.y + 0.5), egui::pos2(c.x + 5.0, c.y + 0.5)], stroke);
+        }
+        ShellControl::Maximize { restore: false } => {
+            painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)), egui::CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+        }
+        ShellControl::Maximize { restore: true } => {
+            // The back window's top and right edges remain visible; its covered
+            // edges are not drawn, so the two outlines never cross.
+            shell_line(
+                painter,
+                &[
+                    egui::pos2(c.x - 1.5, c.y - 4.5),
+                    egui::pos2(c.x + 4.5, c.y - 4.5),
+                    egui::pos2(c.x + 4.5, c.y + 1.0),
+                ],
+                stroke,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_min_max(egui::pos2(c.x - 4.5, c.y - 1.5), egui::pos2(c.x + 1.5, c.y + 4.5)),
+                egui::CornerRadius::same(1),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        ShellControl::Close => {
+            let r = 4.25;
+            shell_line(painter, &[egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)], stroke);
+            shell_line(painter, &[egui::pos2(c.x + r, c.y - r), egui::pos2(c.x - r, c.y + r)], stroke);
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
+}
+
+/// A line with round caps, matching the softened corners of the painted box.
+fn shell_line(painter: &egui::Painter, points: &[egui::Pos2], stroke: egui::Stroke) {
+    if points.len() < 2 {
+        return;
+    }
+    painter.add(egui::Shape::line(points.to_vec(), stroke));
+    let cap = stroke.width * 0.5;
+    for p in [points[0], points[points.len() - 1]] {
+        painter.circle_filled(p, cap, stroke.color);
+    }
+}
+
+fn mix_colour(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    egui::Color32::from_rgb(channel(a.r(), b.r()), channel(a.g(), b.g()), channel(a.b(), b.b()))
 }
 
 pub(crate) fn window_icon() -> Option<egui::IconData> {
