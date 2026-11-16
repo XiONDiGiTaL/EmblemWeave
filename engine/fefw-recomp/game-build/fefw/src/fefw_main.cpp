@@ -234,8 +234,12 @@ std::string fs_path(const char* key, const std::string& cli, const char* def) {
 
 int fefw_run(int argc, char** argv);
 
-// The processor features the build of the game code needs (FEFW_CPU_*), logged at start-up.
-uint32_t g_cpu_needs = FEFW_CPU_NEEDS_FMA_BUILD;
+// The processor features the build of the game code needs (FEFW_CPU_*), logged at start-up. The CMake build sets FEFW_CPU_NEEDS
+// from FEFW_CPU_VARIANT (game-build/fefw/CMakeLists.txt); a build that does not name one is the FMA3 build.
+#ifndef FEFW_CPU_NEEDS
+#define FEFW_CPU_NEEDS FEFW_CPU_NEEDS_FMA_BUILD
+#endif
+uint32_t g_cpu_needs = FEFW_CPU_NEEDS;
 
 // Before the first lifted instruction: a CPU without what this build of the game code needs (`needs`: FMA3 / AVX for the default build,
 // SSE4.2 / POPCNT for the compatible one, CX16 for both) would die on an illegal instruction in a blank window (issues 33, 5). Says which

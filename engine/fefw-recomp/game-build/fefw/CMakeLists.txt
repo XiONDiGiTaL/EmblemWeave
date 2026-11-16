@@ -109,6 +109,18 @@ target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG 
 # The shared-font fallback (runtime src/services/pl.cpp looks in fonts\ next to the exe) and the ASTC decoder DLLs when the transcoder is in.
 add_custom_command(TARGET fefw POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:fefw>/fonts/DejaVuSans.ttf")
+# The processor features this build's lifted libraries need (recomp/games/fefw/CMakeLists.txt FEFW_CPU_VARIANT): the stub passes the
+# them to the runtime, which checks the processor before the first game instruction (fefw_cpu.h). The launcher names the variant in
+# FEFW_CPU_VARIANT (apps/emblemweave/src/cpu.rs): fma (FMA3 + AVX, the default) or compat (SSE4.2 + POPCNT).
+set(FEFW_CPU_VARIANT "fma" CACHE STRING "processor target of the lifted code: fma (FMA3 + AVX) or compat (SSE4.2 + POPCNT)")
+if(DEFINED ENV{FEFW_CPU_VARIANT} AND NOT "$ENV{FEFW_CPU_VARIANT}" STREQUAL "")
+    set(FEFW_CPU_VARIANT "$ENV{FEFW_CPU_VARIANT}" CACHE STRING "processor target of the lifted code" FORCE)
+endif()
+if(FEFW_CPU_VARIANT STREQUAL "compat")
+    target_compile_definitions(fefw PRIVATE FEFW_CPU_NEEDS=FEFW_CPU_NEEDS_COMPAT_BUILD)
+else()
+    target_compile_definitions(fefw PRIVATE FEFW_CPU_NEEDS=FEFW_CPU_NEEDS_FMA_BUILD)
+endif()
 # The site list the libraries were lifted with (recomp/games/fefw/CMakeLists.txt), as fefw.sites for the runtime's checks of code mods.
 if(EXISTS "${FEFW_LIB_DIR}/main.sites")
     add_custom_command(TARGET fefw POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different

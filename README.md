@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>.<br>
-  Recompiled ahead of time, with integrated mod management and in-game enhancements.</strong><br>
+  <strong>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>, with integrated mod management and in-game enhancements.</strong><br>
+  Recompiled ahead of time, and played natively with no emulator.<br>
   Built by <a href="https://github.com/XiONDiGiTaL">XiØN</a>.
 </p>
 
@@ -37,18 +37,20 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.17, playable through the baseline engine.** Build the game once from your dump, press **Play**,
-> and on an AMD Radeon RX 7900 XT it runs at about 60 fps with sound, including the opening movie and cutscenes. 0.1.17
-> moves the engine to the 0.2.0 tree Obersteinn preserved, builds it from an empty folder on this PC, and was checked by
-> playing: title screen, the save loaded through **Continue**, the hub walked through, the in-game menu and the F1
-> settings overlay. The build needs Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader
-> translator ships in the zip with its own runtime. What changed in each release is in the
-> [changelog](docs/changelog/README.md).
+> **Current status: 0.1.32, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
+> AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes; it covered the title screen, the
+> save loaded through **Continue**, the hub, the in-game menu and the F1 settings overlay. Later releases are checked by
+> building and by headless runs of the real game, listed under [Development status](#development-status). The build needs
+> Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with its
+> own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
 >
-> EmblemWeave's own Rust runtime is being completed to take over running the game. It executes the game's code natively,
-> serves NVN on the host GPU through Vulkan, opens a window and presents the swap chain, and carries out the command
-> buffer's buffer and texture clears and copies. It does not yet draw the game's own geometry; see
-> [Development status](#development-status) and [docs/ENGINE.md](docs/ENGINE.md).
+> **The engine is fefw-recomp, integrated.** `engine/fefw-recomp` is the permanent primary engine and is built from source
+> in this repository: its recompiler lifts the game's AArch64 code into C++, its CMake build compiles and links
+> `fefw.exe`, and its runtime provides the system services, graphics and audio. EmblemWeave is the application around it:
+> it validates the dump, configures the toolchain and the processor target, runs the build with progress and diagnostics,
+> writes the engine's configuration, starts the game and explains failures. The Rust crates in `crates/` are supporting
+> tools (format parsing, the reference interpreter used to verify the recompiler, and experimental runtime work). They are
+> not a replacement engine and do not run the shipping game.
 
 > **AI-assisted development.** EmblemWeave is designed and directed by [XiØN](https://github.com/XiONDiGiTaL) and developed
 > with the help of AI coding tools. Every change is tested against the real game and the project's own test suite before it
@@ -84,22 +86,20 @@ carries that engine forward as the launcher around it, and
 
 ## What EmblemWeave does
 
-EmblemWeave is a launcher first and a recompiler underneath it. It finds and validates your dump, builds the game
-natively, keeps your saves and mods in order, and starts the game with its own in-game menu over it. It plays
-*Fire Emblem: Fortune's Weave* on Windows with no emulator. Today the
-game is built and run by the bundled baseline engine in `engine/` (GPL-3.0, with its own licence and notices in that
-folder): it translates the game's code to C++ and compiles it into `fefw.exe`, which draws with Vulkan, plays audio
-through XAudio2 and decodes the game's movies. The EmblemWeave launcher does the rest: it finds and checks your dump,
-drives that build, keeps your saves (including imports from Switch emulators), manages your mods, and starts the game.
-
-EmblemWeave also has its own recompiler and runtime in Rust, which is being completed to replace the baseline engine:
+EmblemWeave is a launcher first, and the engine underneath it is fefw-recomp: the recompiler, build system and runtime
+in `engine/fefw-recomp` (GPL-3.0, with its own licence and notices in that folder). It plays *Fire Emblem: Fortune's
+Weave* on Windows with no emulator. The engine translates the game's code to C++, compiles it into `fefw.exe`, draws
+with Vulkan, plays audio through XAudio2 and decodes the game's movies. EmblemWeave is the application around it: it
+finds and checks your dump, drives the build, keeps your saves (including imports from Switch emulators), manages your
+mods, starts the game and shows what happened when something fails.
 
 | Stage | What happens |
 | --- | --- |
-| **Read** | Your extracted ExeFS, RomFS and title metadata are located and validated. |
-| **Decode** | The game's executable is decompressed into its code and data segments. |
-| **Recompile** | Every AArch64 instruction is decoded, functions and control flow are recovered, and the code is emitted as portable C and compiled natively. |
-| **Run** | The runtime maps the game, starts it the way the console's SDK does, serves its system calls with native implementations, and presents what the game asks the GPU to produce. |
+| **Validate** | Your dump is located and checked against the title's module hashes and build ID. |
+| **Prepare** | The console's compressed `main` is unpacked, and the RomFS is served from a folder, an `.nsp`, an `.nx` or a `.nup`. |
+| **Recompile** | fefw-recomp's lifter decodes every AArch64 instruction, recovers functions and control flow, and emits C++ for each of the six modules. |
+| **Compile and link** | clang-cl compiles the emitted code and the runtime, and links `fefw.exe` for the processor and hook-site list this PC needs. |
+| **Run** | The runtime maps the modules, starts them the way the console SDK does, serves their system calls natively, and drives NVN on the host GPU. |
 
 The launcher wraps all of this in one application: it shows exactly what is
 ready, what is running and where the runtime stops, and it never presents a
@@ -123,38 +123,120 @@ what changed. The README keeps the current state; the changelog keeps the histor
 
 ## Development status
 
-Measured on the retail game (version 1.1.0, update 131072) on 15 November 2026.
+Measured on the retail game (version 1.1.0, update 131072) on 16 November 2026.
 
-**Playable through the baseline engine.** On an AMD Radeon RX 7900 XT the game runs at about 60 fps, with sound and
-its movies, from the launcher's **Build the game** and **Play**. The first build takes a while (the game code is
-compiled and about 12,000 shaders are translated); later builds only redo what changed. The baseline is built with
-libvpx for the title's VP9/VP8 codecs and dav1d for its AV1 decoder, so the opening movie and cutscenes decode on the
-host instead of being skipped. 0.1.17 ran that build from an empty folder on the test PC and played it: title screen,
-the existing save loaded through **Continue** into chapter 4 of Theodora's Path, the hub area walked with `W`, the
-in-game menu on `Tab` and the engine's settings overlay on `F1`, at 47 to 68 fps with no errors in the log.
+### Playable build
 
-EmblemWeave's own Rust runtime, which is being completed to replace the baseline engine ([docs/ENGINE.md](docs/ENGINE.md)):
+The game builds from your own dump and plays. The launcher's **Build the game** runs fefw-recomp's lifter, compiles the
+six modules and links `fefw.exe`; **Play** starts it with the chosen graphics, audio and controller settings.
+
+- **0.1.17 play test**, AMD Radeon RX 7900 XT: about 60 fps with sound, the opening movie and cutscenes, the title
+  screen, an existing save loaded through **Continue** into chapter 4, the hub walked with `W`, the in-game menu on
+  `Tab`, the engine's settings overlay on `F1`, 47 to 68 fps and no errors in the log.
+- **0.1.31 headless run**, `.nx` archive: the engine built a 252,693-file RomFS image and ran 25 s, exit 0.
+- **0.1.32 headless run**, `.nup` package that packs 65,074 of its 252,686 files with zstd: full image, 25 s, 12,163
+  presents, 85 textures, no crash, no unreadable file, with no unpacked copy on disk.
+- **0.1.32 code-mod test**: a DLL built with clang-cl against `nxrt/mod_api.h` loaded from `mods/TestMod/exefs`, ran
+  `nxmod_init`, saw 30 frames, and was told when one of its `.sites` entries was not in the build.
+
+Requirements are listed under [System requirements](#system-requirements); failures and their messages under
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+### Engine integration
+
+- `engine/fefw-recomp` is the integrated primary engine: lifter, generated code, runtime, services, graphics, audio and
+  its own documentation. It is built from source in this repository, not launched as an external program.
+- The launcher owns the build around it: toolchain probe, CMake cache and build folder handling, the Python decode step,
+  the lift, the per-module compile and the link, plus the hook-site merge for code mods.
+- The engine's configuration (`fefw.ini`, `controls.ini`, `NXRT_*` variables) is written by the launcher's pages and
+  documented in `engine/fefw-recomp/runtime/docs/CONFIG.md`.
+- Crash reports from the engine are read back by the launcher, which shows the decoded stop, the modules and the log.
+
+### Compiler and toolchain
+
+- The lifter, the generated C++ and the runtime are compiled with LLVM clang-cl and lld-link through CMake and Ninja. The
+  launcher validates the exact executables and the Visual Studio environment before a build starts, records their
+  fingerprint, and refuses to mix builds from different compilers.
+- **Two processor targets.** The lifted code is built as `fma` (FMA3 + AVX) or `compat` (SSE4.2 + POPCNT, no FMA3).
+  `apps/emblemweave/src/cpu.rs` probes the processor and passes `FEFW_CPU_VARIANT`; the engine re-checks at start and
+  writes `fefw_fatal.txt` and exit code 4 naming anything missing. Both configure paths are verified: the `compat` tree
+  contains no `-mfma`, and its stub compiles with `FEFW_CPU_NEEDS_COMPAT_BUILD`.
+- Build folders are reused when the compiler, generator and toolchain file match, including a toolchain path spelled
+  with `..`; a folder that lost its compiler is reset instead of failing.
+- An optional `sccache` is used when present. The build takes a lock so two builds cannot write the same objects.
+
+### Runtime
+
+- The engine maps the six modules, runs the console SDK's start-up, and serves the game's system calls natively: kernel
+  objects, threads and synchronization, `fsp-srv` with RomFS (folder, `.nsp`, `.nx`, `.nup`, zstd entries) and save data,
+  `aoc:u`, `hid`, `time`, `pctl`, `lm`, `csrng`, applet and audio services.
+- NVN is served on the host GPU through Vulkan. Movies decode with dav1d and libvpx on the host.
+- Saves live in the launcher's profile directory and are imported from yuzu, suyu, sudachi, citron, eden and torzu.
+
+### Graphics
+
+- Vulkan 1.3 NVN shell, HDR output, swap-chain management, shader translation with a disk cache, GPU texture transcoding
+  (BC, ASTC) and frame pacing.
+- Upscaling: built-in TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with its own availability
+  check; FSR 3 frame generation is implemented but cannot be used by this title, which provides no motion vectors.
+- The evaluation of further options (FSR 4, OptiScaler, ReShade, vkBasalt) and their status are in
+  [docs/GRAPHICS.md](docs/GRAPHICS.md).
+
+### Audio
+
+- The audio renderer runs on its 5 ms clock through XAudio2, and the game's voice buffers, sound effects and music reach
+  it; the runtime log reports underruns, accepted and dropped buffers, and queue depth.
+
+### Input
+
+- Keyboard and up to four controllers through SDL 3 and XInput, with mappings in `controls.ini`, editable in the
+  launcher's Controls page. The in-game menu opens on `F10` (or Back + RB) and can pause, screenshot, restart or stop.
+
+### Launcher features
+
+- Game data validation and preparation, builds with eight visible stages, save profiles and a save editor, Atmosphere
+  cheats and Cheat Engine tables, quick cheats, an in-game menu, RomFS and code mods with profiles and conflict listing,
+  GameBanana browsing, graphics and control settings, diagnostics with export, crash reports, six colour schemes and
+  portable mode.
+
+### Experimental components
+
+The Rust crates in `crates/` are development tools, not the engine that runs the game:
 
 | Area | Result |
 | --- | --- |
-| Instruction decoding | **99.97%** of 6,714,569 instruction words, including the Advanced SIMD (vector) unit, system registers and supervisor calls |
+| `ew-lift` decoder | 99.97% of 6,714,569 instruction words, including Advanced SIMD, system registers and supervisor calls |
 | Control-flow recovery | 304,909 basic blocks in 3,620 complete functions (4,000-function pass); 151 switch tables resolved |
-| Emitted C verified | 400 recovered functions and 2,400 vector-instruction runs identical to the reference interpreter |
-| Independent CPU check | Execution compared instruction by instruction against Unicorn (QEMU's AArch64 model) |
-| Program modules | `main` plus the title's own `sdk`, loaded side by side; the C++ standard library and other library code run as the title's own code |
-| Graphics | NVN device on the host GPU through Vulkan: queues, memory pools, buffers, textures (block-linear sizes, BC and ASTC formats), samplers, render state, shaders and the DLSS upscaler are served |
-| Presentation | A window and a Vulkan swap chain present the game's swap texture, untiled from guest memory and scaled to the window; `ew-present` exercises the path on its own |
-| Command buffers | Buffer copies and clears, uniform updates, reports, fences, events, and the texture clears and texture-to-texture copies that write render targets and swap textures, all carried out on the game's tiled storage |
-| Not yet | The game's own draws are recorded and counted but not rendered, so the runtime does not produce the game's picture yet |
-| Input | Player 1 is a Pro Controller fed by the first XInput gamepad |
-| Audio | The audio renderer opens and runs on its 5 ms clock; voices are not yet mixed to the speakers |
-| Content | Content index, shader archives (`.bfsha`), texture archives (`.bntx`) and graphics presets load from RomFS |
-| Own runtime | Runs the frame loop past the autosave notice and the opening movie into the first map load (27.9 billion instructions) |
-| Native execution | The whole main module (807,604 functions, 10.6 million instructions) compiled ahead of time into one library; identical to the reference interpreter over the boot's first billion instructions, and about twice as fast |
+| Verification | 400 recovered functions and 2,400 vector-instruction runs identical to the reference interpreter, and the interpreter checked against Unicorn |
+| `ew-boot` / `ew-gfx` | A run that reaches the first map load in the interpreter; a Vulkan device and presenter that serves NVN calls but does not yet draw the game's own geometry |
 
-The full compatibility matrix, the list of verified host services and the
-known limitations live in [docs/STATUS.md](docs/STATUS.md). What the launcher needs and what each failure message means
-is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+They are kept because they verify the recompiler's output and provide format tooling. They are not a replacement engine
+and are not on the shipping path.
+
+### Known limitations
+
+- `.xci` cartridge images are not read; use a folder, `.nsp`, `.nx` or `.nup`.
+- FSR 4 is not integrated. The FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader.
+- Frame generation is not offered for this title: the engine's FSR 3 path needs motion vectors the game does not give it.
+- Code mods are tested with the loader and site checks; a mod hooking a site that exists in the build, `make_function`,
+  `make_writable` and `edit_file` have not been exercised end to end.
+- The compatibility matrix is small: a Ryzen 7 5700X3D with an RTX 5060 (development PC) and the 0.1.17 test PC. Other
+  CPUs and GPUs are supported in code but not each verified; [docs/PLATFORMS.md](docs/PLATFORMS.md) records what is
+  known.
+
+## Roadmap
+
+1. Keep fefw-recomp integrated, updated and building from source, with its licence and notices intact.
+2. Compiler and toolchain reliability: clearer failures, fewer environment assumptions, validated releases.
+3. Processor compatibility: more build targets where they measurably help, and a compatibility report for every build.
+4. Recompilation performance and generated-code quality, measured before and after each change.
+5. Runtime stability and game compatibility, with diagnostics that separate engine faults from game faults.
+6. Graphics: correctness first, then performance, then more upscalers after the inputs they need are verified.
+7. Audio completeness and synchronization, particularly voice buffers and cutscenes.
+8. Input compatibility: more controllers, better defaults, profiles.
+9. Mod management and in-game enhancements.
+10. Portable installation, configuration and a simpler first run.
+11. Diagnostics, automated tests and long-term maintainability.
 
 ## Screenshots
 
@@ -203,11 +285,19 @@ The screenshots are the launcher's own rendering, saved with `EmblemWeave.exe --
 | Component | Requirement |
 | --- | --- |
 | Operating system | Windows 10 or 11, 64-bit |
-| Graphics | A GPU with a Vulkan 1.3 driver |
-| Processor | Any x86-64 processor; recompilation benefits from more cores |
+| Graphics | A GPU with a Vulkan 1.3 driver. Upscalers are optional and need their vendor files (see [Upscaling](#upscaling)) |
+| Processor | x86-64 with SSE4.2, POPCNT and CMPXCHG16B: Intel Nehalem (2008) or AMD Bulldozer (2011) and newer. FMA3 + AVX (Intel Haswell 2013, AMD Piledriver 2012) get the faster build |
 | Memory | 8 GB minimum, 16 GB recommended |
 | Storage | About 30 GB for the extracted game data, plus space for build output |
 | Game | Your own legally obtained copy of *Fire Emblem: Fortune's Weave* |
+
+The engine builds the game's lifted code for one of two processor targets. The launcher probes the CPU and chooses:
+`fma` (FMA3 + AVX, fused multiply-add for the guest's FMADD/FMLA family) where the processor has it, otherwise `compat`
+(SSE4.2 + POPCNT, with `fma`/`fmaf` as correctly rounded library calls). Sandy Bridge, Ivy Bridge and Xeon E5 v1/v2 fall in
+the second group. A processor without SSE4.2, POPCNT or CMPXCHG16B (Core 2, Phenom II and older) cannot run the game: the
+launcher refuses to build for it, and an existing build moved to such a PC stops with exit code 4 and a message naming the
+missing features in `fefw_fatal.txt` instead of an illegal-instruction crash. The Diagnostics page shows the brand, the
+detected instruction sets and the target the next build will use.
 
 Building the game needs the tools below. The launcher checks every one with the same detection the build uses before it
 starts, and the Requirements page names each missing one with the command that installs it.
@@ -477,37 +567,41 @@ AMD's, NVIDIA's and Intel's files cannot be shipped, so those upscalers need you
 missing. **Open the upscalers folder** creates those three folders and opens them; **Look for the files** searches the
 launcher's folder, the engine folder, Downloads and the Desktop one folder deep, copies what it finds into the run
 folder and says what is still missing, so a ZIP that landed in Downloads does not have to be arranged by hand. The game's
-own F1 menu, Graphics tab, reports the same under `Files found`. **FSR 4** is not offered: it runs
-through AMD's DirectX 12 FidelityFX runtime on RDNA 4 cards, and this engine presents through Vulkan, so there is no
-FSR 4 pass to call. **OptiScaler** works by swapping the upscaler a DirectX game already calls, and there is no DirectX
-device here for it to hook. FSR 3.1 is the newest upscaler the engine runs itself.
+own F1 menu, Graphics tab, reports the same under `Files found`. **FSR 4** is not integrated yet: the
+engine's FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader, and AMD's newer ML upscaler needs a
+different entry point and input set. [docs/GRAPHICS.md](docs/GRAPHICS.md) records what was evaluated and why it is not
+present. **OptiScaler** redirects an upscaler a game already calls; this engine calls its own FidelityFX, Streamline and XeSS
+interfaces, so there is nothing for it to intercept, and it is documented as an external tool that does not apply here.
+FSR 3.1, DLSS / DLAA and XeSS are the temporal upscalers the engine runs itself.
 
 ## How the recompilation works
 
+The pipeline below is fefw-recomp's, and the launcher orchestrates it:
+
 ```
-  your ExeFS ──► ew-format ──► decoded segments
-                                   │
-                                   ▼
-                              ew-lift: decode ─► recover functions ─► emit C ─► native code
-                                   │                                               │
-                                   ▼                                               ▼
-                         reference interpreter ◄── differential verification ──► compiled C
-                                   │
-                                   ▼
-  your RomFS ──► ew-boot: module image, SDK startup, scheduler, host services ──► the game runs
+  your game data (folder, .nsp, .nx, .nup)
+        │  validate the modules and the build ID
+        ▼
+  ExeFS ──► unpack main (ZBIC) ──► fefw-recomp lifter (recomp/)
+        │                              decode AArch64, recover functions, emit C++
+        ▼
+  generated C++ per module ──► clang-cl + lld-link ──► fefw.exe (six modules, runtime, hook sites)
+        │
+        ▼
+  fefw.exe: module mapping, console SDK start-up, kernel and service HLE,
+            NVN on Vulkan, XAudio2 audio, RomFS and save data ──► the game runs
 ```
 
-| Crate | Responsibility |
+| Piece | Responsibility |
 | --- | --- |
-| `ew-format` | NSO0, ExeFS and RomFS parsing, LZ4 segments, module validation |
-| `ew-lift` | AArch64 decoder, control-flow and jump-table recovery, C emitter, reference interpreter, Advanced SIMD |
-| `ew-boot` | Module image and imports, SDK startup sequence, guest thread scheduler, and the host services (`nn::os`, `nn::fs`, `nn::oe`, `nn::lmem`, `nn::nvn`, C and C++ runtime) |
-| `ew-gfx` | The host Vulkan device behind the NVN layer, and the window and swap chain that present its frames |
-| `ew-runtime` | Guest memory bus and service readiness |
-| `apps/emblemweave` | The EmblemWeave launcher |
+| `engine/fefw-recomp/recomp` | The lifter, its C++ emitter, the module build definitions and the hook-site format |
+| `engine/fefw-recomp/runtime` | Execution: scheduler, kernel objects, services, RomFS and saves, NVN/Vulkan, audio, input, in-game menu and diagnostics |
+| `engine/fefw-recomp/game-build` | Configure and build `fefw.exe`, the runtime checks and the tooling |
+| `apps/emblemweave` | The launcher: dump validation, build orchestration, toolchain and CPU target, configuration, saves, mods, cheats and diagnostics |
+| `crates/` | Supporting Rust tools: format parsing, the reference interpreter and experimental runtime work, used for verification and tooling |
 
-Design details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and the
-reasoning behind static recompilation is in [docs/FEASIBILITY.md](docs/FEASIBILITY.md).
+Design notes are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the engine's own documentation is in
+`engine/fefw-recomp/README.md` and `engine/fefw-recomp/runtime/docs/`.
 
 ## Building from source
 
@@ -565,14 +659,14 @@ The verification tools need `pip install ziglang unicorn`.
 ```
 apps/emblemweave/     the EmblemWeave launcher (egui)
 assets/branding/     the EmblemWeave logo
-crates/ew-format/    container and asset formats
-crates/ew-lift/      decoder, recompiler and reference interpreter
-crates/ew-boot/      runtime: image, startup, scheduler, host services
-crates/ew-gfx/       host Vulkan device and the presenter
-crates/ew-runtime/   guest memory and service registry
-docs/                status, architecture, feasibility, legal, upstream
-engine/fefw-recomp/  the baseline engine (GPL-3.0, its own licence and notices)
-tools/               decoding helper and verification scripts
+crates/ew-format/    container and asset formats (supporting tool)
+crates/ew-lift/      decoder, recompiler and reference interpreter (verification)
+crates/ew-boot/      experimental runtime work: image, startup, scheduler, host services
+crates/ew-gfx/       experimental host Vulkan device and presenter
+crates/ew-runtime/   experimental guest memory and service registry
+docs/                status, architecture, graphics, legal, upstream, changelog
+engine/fefw-recomp/  the integrated primary engine (GPL-3.0, its own licence and notices)
+tools/               decoding helper, release and verification scripts
 ```
 
 ## Legal
@@ -592,7 +686,7 @@ your machine and must not be redistributed. See [docs/LEGAL.md](docs/LEGAL.md).
 - **[XiØN](https://github.com/XiONDiGiTaL)**: Creator, Project Lead, Architecture & Design
 - [Goldoire](https://github.com/Goldoire/fefw-recomp): fefw-recomp, the baseline engine, and everyone who contributed to that project. Its repository is no longer online; EmblemWeave continues from the snapshot in `engine/`
 - [Obersteinn](https://github.com/Obersteinn): preserved the final fefw-recomp 0.2.0 release and its files after the original repository was removed, keeping the reference build, its build tools and its tested-dump manifest available ([docs/UPSTREAM.md](docs/UPSTREAM.md))
-- [ranbinrang-rgb](https://github.com/ranbinrang-rgb): Code mods extension & suggestions per claude code.
+- [ranbinrang-rgb](https://github.com/ranbinrang-rgb): code mods, the DLL interface (`nxrt/mod_api.h`), the mod hook-site format and the loader (issue #31, PR #32)
 - [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) (MIT): shader translation, whose shader code the build uses
 - [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause) and [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause): the host video decoders the baseline build links
 - [roxmltree](https://github.com/RazrFalcon/roxmltree) (MIT / Apache-2.0) reads Cheat Engine tables; [windows-sys](https://github.com/microsoft/windows-rs) (MIT / Apache-2.0) reaches the game's memory and the controller

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EmblemWeave — a recompilation launcher for Fire Emblem: Fortune's Weave</title>
+<meta name="description" content="EmblemWeave builds Fire Emblem: Fortune's Weave from your own dump and plays it natively on Windows, with mods, saves, cheats and an in-game menu.">
+<meta property="og:title" content="EmblemWeave">
+<meta property="og:description" content="A feature-rich recompilation launcher for Fire Emblem: Fortune's Weave, with integrated mod management and in-game enhancements.">
+<meta property="og:image" content="branding/logo.png">
+<link rel="icon" href="branding/logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="grid" aria-hidden="true"></div>
+<div class="scanlines" aria-hidden="true"></div>
+
+<header class="hud">
+  <a class="brand" href="#top">
+    <span class="brand-mark">EW</span>
+    <span class="brand-text">EMBLEMWEAVE<small>RECOMPILATION TERMINAL</small></span>
+  </a>
+  <nav>
+    <a href="#features" data-sfx="hover">Features</a>
+    <a href="#engine" data-sfx="hover">Engine</a>
+    <a href="#screens" data-sfx="hover">Screens</a>
+    <a href="#mirrors" data-sfx="hover">Mirrors</a>
+    <a class="docs" href="https://github.com/XiONDiGiTaL/EmblemWeave#readme">Docs</a>
+  </nav>
+  <div class="hud-right">
+    <span class="build" id="version">v0.1.32</span>
+    <button id="sound" class="icon" title="Sound on or off" aria-pressed="true">♪</button>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="hero-art">
+      <img id="logo" src="branding/logo.png" alt="The EmblemWeave logo: interlocking EW letters inside a winged, glowing shield." width="420" height="420">
+    </div>
+    <div class="hero-copy">
+      <p class="eyebrow">FIRE EMBLEM: FORTUNE'S WEAVE · WINDOWS · NATIVE</p>
+      <h1>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>, with integrated mod management and in-game enhancements.</h1>
+      <p class="lede">EmblemWeave builds the game ahead of time from your own dump and plays it natively, with no emulator. Mods, save profiles, cheats, an in-game menu and a recompilation pipeline you can watch run.</p>
+      <div class="cta">
+        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/latest" data-sfx="coin">Download for Windows</a>
+        <a class="btn ghost" href="https://github.com/XiONDiGiTaL/EmblemWeave" data-sfx="click">Source on GitHub</a>
+      </div>
+      <ul class="badges">
+        <li id="badge-release">release 0.1.32</li>
+        <li>Windows x64</li>
+        <li>GPL-3.0</li>
+        <li>No game code included</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="features" class="section">
+    <h2><span>01</span> What the launcher does</h2>
+    <div class="cards">
+      <article><h3>Build once, then play</h3><p>Validates your dump, unpacks the console's compressed main, lifts six modules and links <code>fefw.exe</code>. Later builds only redo what changed.</p></article>
+      <article><h3>Mods, both kinds</h3><p>RomFS mods with on/off switches, profiles and conflict listing. Code mods load as DLLs with the hook sites they bring, through the engine's versioned interface.</p></article>
+      <article><h3>Saves and cheats</h3><p>Save profiles, a slot editor, imports from yuzu, suyu, sudachi, citron, eden and torzu. Atmosphere codes and Cheat Engine tables, live.</p></article>
+      <article><h3>Graphics choices</h3><p>TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with a real availability check. HDR output and frame pacing in the engine.</p></article>
+      <article><h3>An in-game menu</h3><p><kbd>F10</kbd> pauses the game, takes a screenshot, restarts or stops it, and reaches quick cheats, display settings and controls.</p></article>
+      <article><h3>Diagnostics that explain</h3><p>Every stage reports, engine logs are read back, crashes are decoded, and the CPU, GPU and toolchain are recorded for bug reports.</p></article>
+    </div>
+  </section>
+
+  <section id="engine" class="section">
+    <h2><span>02</span> The engine under the launcher</h2>
+    <div class="split">
+      <div>
+        <p><strong>fefw-recomp</strong> is the permanent primary engine, integrated at <code>engine/fefw-recomp</code> and built from source here. Its lifter decodes AArch64, emits C++, and its runtime serves the console SDK's services, NVN on Vulkan and XAudio2 audio. EmblemWeave is the application around it: validation, toolchain, build orchestration, configuration, diagnostics.</p>
+        <p>The lifted code is built for the processor it will run on. <code>fma</code> uses FMA3 and AVX where the CPU has them; <code>compat</code> needs only SSE4.2, POPCNT and CMPXCHG16B, which brings Sandy Bridge, Ivy Bridge and Xeon E5 v1/v2 in. The launcher probes the CPU, picks the target and records it in Diagnostics; anything older is refused with the missing instruction set named.</p>
+        <p class="note">The launcher needs Visual Studio 2022 C++ tools, the Windows SDK, LLVM, CMake, Ninja and Python. The release zip carries the shader translator, so no .NET SDK is needed.</p>
+      </div>
+      <ul class="ticks">
+        <li>Ahead-of-time recompilation, no JIT at play time</li>
+        <li>RomFS from a folder, <code>.nsp</code>, <code>.nx</code> or a packed <code>.nup</code></li>
+        <li>Code mods through <code>nxrt/mod_api.h</code>, version 3</li>
+        <li>Crash reports with the decoded stop, modules and log</li>
+        <li>Portable mode, saves and builds in one folder</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="screens" class="section">
+    <h2><span>03</span> In the launcher</h2>
+    <div class="shots">
+      <figure><img src="screenshots/overview.png" alt="The Overview page" loading="lazy"><figcaption>Overview: play, rebuild, readiness</figcaption></figure>
+      <figure><img src="screenshots/mods.png" alt="The Mods page" loading="lazy"><figcaption>Mods, switches and profiles</figcaption></figure>
+      <figure><img src="screenshots/saves.png" alt="The Saves page" loading="lazy"><figcaption>Saves and the slot editor</figcaption></figure>
+      <figure><img src="screenshots/recompilation.png" alt="The Recompilation page" loading="lazy"><figcaption>The build pipeline</figcaption></figure>
+      <figure><img src="screenshots/appearance.png" alt="The Appearance page" loading="lazy"><figcaption>Six colour schemes</figcaption></figure>
+      <figure><img src="screenshots/diagnostics.png" alt="The Diagnostics page" loading="lazy"><figcaption>Diagnostics and export</figcaption></figure>
+    </div>
+  </section>
+
+  <section id="mirrors" class="section">
+    <h2><span>04</span> If this page disappears</h2>
+    <p class="lede small">Recompilation projects have been taken down before. The source is mirrored, and this page checks the mirrors when it loads. If GitHub is unreachable, one of these should still be.</p>
+    <ul id="mirror-list" class="mirrors">
+      <li class="loading">Checking mirrors…</li>
+    </ul>
+    <p class="note">The mirrors hold the source and the changelog. Releases, saves and your own files stay where you put them.</p>
+  </section>
+
+  <section class="section legal">
+    <h2><span>05</span> What this is not</h2>
+    <p>EmblemWeave contains no game code, no game assets, no firmware and no keys, and downloads none of them. You need your own legally obtained copy of the game. It is not affiliated with, endorsed by or supported by Nintendo or Intelligent Systems; the names identify the software it works with. The engine is GPL-3.0 and keeps its own licence and notices; the launcher is GPL-3.0 too.</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <p>Built by <a href="https://github.com/XiONDiGiTaL">XiØN</a>. Engine by <a href="https://github.com/Goldoire/fefw-recomp">Goldoire</a> and contributors, preserved by <a href="https://github.com/Obersteinn">Obersteinn</a>. Code mods by <a href="https://github.com/ranbinrang-rgb">ranbinrang-rgb</a>.</p>
+  <p class="tiny">EmblemWeave is free software under the GNU General Public License, version 3. Third-party code keeps its own licence.</p>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

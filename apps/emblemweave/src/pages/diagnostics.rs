@@ -152,6 +152,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     match app.diag_tab {
         Tab::Runtime => {
+            // What this processor is and which build of the game code it gets: the first thing a "code 4" report needs (cpu.rs).
+            widgets::section(ui, &p, "This PC", |ui| {
+                let f = crate::cpu::probe();
+                let chosen = crate::cpu::choose(&f);
+                widgets::kv(ui, &p, "Processor", if f.brand.is_empty() { "unknown" } else { f.brand.as_str() });
+                widgets::kv(
+                    ui,
+                    &p,
+                    "Instruction sets",
+                    &format!(
+                        "SSE4.2 {} · POPCNT {} · CMPXCHG16B {} · AVX {} · FMA3 {}",
+                        if f.sse42 { "yes" } else { "no" },
+                        if f.popcnt { "yes" } else { "no" },
+                        if f.cx16 { "yes" } else { "no" },
+                        if f.avx { "yes" } else { "no" },
+                        if f.fma { "yes" } else { "no" }
+                    ),
+                );
+                match &chosen {
+                    Ok(v) => widgets::kv(ui, &p, "Build for this CPU", &format!("{} ({})", v.key(), v.label())),
+                    Err(why) => widgets::mono_line(ui, &widgets::demangle_line(why), p.warn),
+                }
+            });
             frame_times(app, ui, &p);
             snapshots(app, ui, &p);
             crashes(app, ui, &p);

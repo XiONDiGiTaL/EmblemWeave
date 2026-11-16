@@ -1247,7 +1247,14 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             _ => "not found; the engine's scripts will look for it themselves".into(),
         }
     ));
-    let mut envs: Vec<(&str, &str)> = vec![("NX_JOBS", &jobs)];
+    // The build of the lifted code that this processor can run (cpu.rs): FMA3 + AVX where the CPU has it, SSE4.2 + POPCNT
+    // otherwise. A processor with neither set is refused here, before anything is compiled, instead of at start with code 4.
+    let cpu = crate::cpu::probe();
+    let chosen = crate::cpu::choose(&cpu);
+    ctx.log(format!("cpu: {}", crate::cpu::summary(&cpu, &chosen)));
+    let variant = chosen.map_err(|why| format!("{why}\n\nThe game cannot be built for this processor."))?;
+    ctx.log(format!("cpu build: {} ({})", variant.key(), variant.label()));
+    let mut envs: Vec<(&str, &str)> = vec![("NX_JOBS", &jobs), ("FEFW_CPU_VARIANT", variant.key())];
     if let Some(vc) = &vc_env {
         envs.push(("NX_VCVARS", vc));
     }

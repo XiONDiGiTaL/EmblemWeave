@@ -1,0 +1,333 @@
+/* EmblemWeave site: the launcher's Arcade scheme (deep violet cabinet, hot pink,
+   arcade yellow, cyan) with a neon grid and a light CRT feel. */
+
+:root {
+  --bg: #0b0716;
+  --deep: #07040f;
+  --panel: #110a22;
+  --panel-hi: #1d1238;
+  --surface: #150d2b;
+  --line: #2a1c4a;
+  --line-strong: #3d296b;
+  --ink: #fff6e0;
+  --body: #d3c8f0;
+  --muted: #8f82b3;
+  --pink: #ff2e97;
+  --pink-hi: #ff52aa;
+  --cyan: #29e3ff;
+  --gold: #ffd23f;
+  --ok: #4dff9a;
+  --radius: 14px;
+  --max: 1180px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--deep);
+  color: var(--body);
+  font: 16px/1.65 "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+  position: relative;
+  min-height: 100vh;
+}
+
+/* Animated neon floor grid. */
+.grid {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(ellipse 60% 45% at 70% 0%, rgba(41, 227, 255, 0.10), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 10% 30%, rgba(255, 46, 151, 0.10), transparent 70%),
+    linear-gradient(180deg, var(--bg), var(--deep) 70%);
+}
+.grid::after {
+  content: "";
+  position: absolute;
+  left: -50%;
+  right: -50%;
+  bottom: -20%;
+  height: 70%;
+  background-image:
+    linear-gradient(to right, rgba(41, 227, 255, 0.16) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(41, 227, 255, 0.16) 1px, transparent 1px);
+  background-size: 64px 64px;
+  transform: perspective(420px) rotateX(62deg);
+  transform-origin: bottom center;
+  mask-image: linear-gradient(to top, black 0%, transparent 85%);
+  animation: floor 18s linear infinite;
+  opacity: 0.55;
+}
+@keyframes floor {
+  from { background-position: 0 0, 0 0; }
+  to   { background-position: 0 64px, 0 64px; }
+}
+
+.scanlines {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom, rgba(7, 4, 15, 0.22) 0 1px, transparent 1px 3px);
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+}
+
+/* HUD bar */
+.hud {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px clamp(16px, 4vw, 40px);
+  background: rgba(9, 5, 18, 0.82);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--ink); }
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  font: 800 15px/1 "Bahnschrift", "Segoe UI", sans-serif;
+  letter-spacing: 0.5px;
+  color: var(--deep);
+  background: linear-gradient(140deg, var(--cyan), var(--pink));
+  box-shadow: 0 0 22px rgba(255, 46, 151, 0.55), inset 0 1px 0 rgba(255,255,255,0.5);
+}
+.brand-text { font: 700 14px/1.15 "Bahnschrift", "Segoe UI", sans-serif; letter-spacing: 2.2px; }
+.brand-text small { display: block; font: 500 9.5px/1.2 "Consolas", monospace; letter-spacing: 2px; color: var(--muted); margin-top: 4px; }
+.hud nav { display: flex; gap: 20px; margin-left: auto; }
+.hud nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font: 600 12.5px/1 "Bahnschrift", "Segoe UI", sans-serif;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  padding: 8px 2px;
+  border-bottom: 1px solid transparent;
+  transition: color 0.2s, border-color 0.2s, text-shadow 0.2s;
+}
+.hud nav a:hover, .hud nav a:focus-visible {
+  color: var(--cyan);
+  border-color: var(--cyan);
+  text-shadow: 0 0 14px rgba(41, 227, 255, 0.8);
+}
+.hud-right { display: flex; align-items: center; gap: 10px; }
+.build {
+  font: 600 11px/1 "Consolas", monospace;
+  color: var(--gold);
+  border: 1px solid rgba(255, 210, 63, 0.35);
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: rgba(255, 210, 63, 0.06);
+}
+.icon {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: box-shadow 0.2s, color 0.2s, border-color 0.2s;
+}
+.icon:hover { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 16px rgba(41, 227, 255, 0.4); }
+.icon[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
+
+main { max-width: var(--max); margin: 0 auto; padding: 0 clamp(16px, 4vw, 40px) 80px; }
+
+/* Hero */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) 1fr;
+  gap: clamp(24px, 5vw, 64px);
+  align-items: center;
+  padding: clamp(36px, 7vw, 86px) 0 28px;
+}
+.hero-art { position: relative; display: grid; place-items: center; }
+.hero-art::before {
+  content: "";
+  position: absolute;
+  width: 78%; height: 78%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(41, 227, 255, 0.28), rgba(255, 46, 151, 0.18) 55%, transparent 70%);
+  filter: blur(18px);
+  animation: pulse 5s ease-in-out infinite;
+}
+.hero-art img { width: 100%; height: auto; filter: drop-shadow(0 0 34px rgba(41, 227, 255, 0.35)); position: relative; }
+@keyframes pulse { 0%, 100% { transform: scale(0.94); opacity: 0.75; } 50% { transform: scale(1.04); opacity: 1; } }
+
+.eyebrow {
+  font: 600 11px/1.4 "Consolas", monospace;
+  letter-spacing: 2.6px;
+  color: var(--cyan);
+  margin: 0 0 16px;
+}
+h1 {
+  font: 700 clamp(28px, 3.7vw, 46px)/1.14 "Bahnschrift", "Segoe UI", sans-serif;
+  color: var(--ink);
+  margin: 0 0 18px;
+  letter-spacing: -0.3px;
+  text-wrap: balance;
+}
+h1 em { font-style: normal; color: var(--pink); text-shadow: 0 0 22px rgba(255, 46, 151, 0.45); }
+.lede { font-size: clamp(15px, 1.5vw, 17.5px); color: var(--body); max-width: 60ch; }
+.lede.small { font-size: 15px; }
+
+.cta { display: flex; flex-wrap: wrap; gap: 14px; margin: 26px 0 18px; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  font: 700 13.5px/1 "Bahnschrift", "Segoe UI", sans-serif;
+  letter-spacing: 1.3px;
+  text-transform: uppercase;
+  padding: 14px 20px;
+  border-radius: 10px;
+  transition: transform 0.15s, box-shadow 0.2s, background 0.2s, border-color 0.2s;
+}
+.btn.primary {
+  color: #1a0410;
+  background: linear-gradient(135deg, var(--pink), #ff8ac4 55%, var(--gold));
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2) inset, 0 10px 34px rgba(255, 46, 151, 0.38);
+}
+.btn.primary:hover { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(255,255,255,0.3) inset, 0 14px 44px rgba(255, 46, 151, 0.6); }
+.btn.ghost { color: var(--ink); border: 1px solid var(--line-strong); background: rgba(21, 13, 43, 0.7); }
+.btn.ghost:hover { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 24px rgba(41, 227, 255, 0.28); }
+.btn:active { transform: translateY(0); }
+
+.badges { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 6px 0 0; list-style: none; }
+.badges li {
+  font: 600 10.5px/1 "Consolas", monospace;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  background: rgba(17, 10, 34, 0.75);
+  padding: 7px 9px;
+  border-radius: 5px;
+}
+
+/* Sections */
+.section { padding: clamp(38px, 6vw, 70px) 0 8px; }
+h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  font: 700 clamp(20px, 2.3vw, 27px)/1.2 "Bahnschrift", "Segoe UI", sans-serif;
+  color: var(--ink);
+  margin: 0 0 22px;
+  letter-spacing: 0.2px;
+}
+h2 span {
+  font: 700 11px/1 "Consolas", monospace;
+  color: var(--pink);
+  border: 1px solid rgba(255, 46, 151, 0.4);
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: rgba(255, 46, 151, 0.08);
+}
+
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.cards article {
+  background: linear-gradient(165deg, rgba(29, 18, 56, 0.72), rgba(17, 10, 34, 0.92));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 20px 18px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.cards article::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%; height: 2px;
+  background: linear-gradient(90deg, var(--cyan), transparent 70%);
+  opacity: 0.5;
+}
+.cards article:hover {
+  transform: translateY(-3px);
+  border-color: var(--line-strong);
+  box-shadow: 0 16px 40px rgba(4, 2, 10, 0.55), 0 0 30px rgba(41, 227, 255, 0.10);
+}
+.cards h3 { margin: 0 0 8px; font: 700 16px/1.3 "Bahnschrift", "Segoe UI", sans-serif; color: var(--ink); }
+.cards p { margin: 0; font-size: 14.5px; color: var(--body); }
+.cards code, .split code, .note code { color: var(--cyan); font-family: "Consolas", monospace; font-size: 0.94em; }
+
+.split { display: grid; grid-template-columns: 1.35fr 1fr; gap: 26px; align-items: start; }
+.split p { margin-top: 0; }
+.note { font-size: 13.5px; color: var(--muted); }
+.ticks { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.ticks li {
+  position: relative;
+  padding: 12px 14px 12px 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(17, 10, 34, 0.6);
+  font-size: 14px;
+}
+.ticks li::before {
+  content: "▸";
+  position: absolute;
+  left: 14px;
+  color: var(--pink);
+  text-shadow: 0 0 12px rgba(255, 46, 151, 0.8);
+}
+
+.shots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.shots figure { margin: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
+.shots img { display: block; width: 100%; height: auto; transition: transform 0.35s, filter 0.35s; }
+.shots figure:hover img { transform: scale(1.02); filter: brightness(1.08); }
+.shots figcaption { padding: 10px 14px; font: 600 12px/1.4 "Consolas", monospace; color: var(--muted); border-top: 1px solid var(--line); }
+
+.mirrors { list-style: none; padding: 0; margin: 16px 0 14px; display: grid; gap: 10px; }
+.mirrors li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(17, 10, 34, 0.65);
+  font-size: 14px;
+}
+.mirrors a { color: var(--ink); text-decoration: none; font-weight: 600; }
+.mirrors a:hover { color: var(--cyan); }
+.mirrors .state { margin-left: auto; font: 600 10.5px/1 "Consolas", monospace; letter-spacing: 1px; padding: 6px 8px; border-radius: 5px; border: 1px solid var(--line-strong); color: var(--muted); }
+.mirrors .state.up { color: var(--ok); border-color: rgba(77, 255, 154, 0.4); }
+.mirrors .state.down { color: #ff8a9b; border-color: rgba(255, 120, 140, 0.35); }
+.mirrors .why { color: var(--muted); font-size: 12.5px; }
+
+.legal p { font-size: 14.5px; color: var(--body); border-left: 2px solid var(--line-strong); padding-left: 16px; }
+
+.foot { border-top: 1px solid var(--line); padding: 30px clamp(16px, 4vw, 40px) 44px; text-align: center; color: var(--muted); font-size: 13.5px; }
+.foot a { color: var(--cyan); text-decoration: none; }
+.foot .tiny { font-size: 11.5px; opacity: 0.8; }
+
+@media (max-width: 940px) {
+  .hero { grid-template-columns: 1fr; text-align: center; }
+  .hero-art { max-width: 340px; margin: 0 auto; }
+  .cta, .badges { justify-content: center; }
+  .cards { grid-template-columns: 1fr 1fr; }
+  .split { grid-template-columns: 1fr; }
+  .hud nav { display: none; }
+}
+@media (max-width: 620px) {
+  .cards, .shots { grid-template-columns: 1fr; }
+  .hud { gap: 12px; }
+  .brand-text small { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grid::after, .hero-art::before { animation: none; }
+  html { scroll-behavior: auto; }
+}

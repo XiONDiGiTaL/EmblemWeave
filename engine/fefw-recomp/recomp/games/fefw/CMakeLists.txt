@@ -66,9 +66,22 @@ add_custom_target(fefw_modules DEPENDS ${FEFW_MODULES})
 # FMA3 code generation: the lifted FMADD / FMLA family is std::fma, which without it is a call into the CRT's fmaf (16 % of the game's
 # job workers in Dagsion, notes/pacing.md). A fused result is exactly rounded either way; -ffp-contract=off still keeps separate
 # multiplies and adds apart. Needs an x64 CPU with FMA3 (2013 on).
-foreach(t ${FEFW_MODULES})
-    target_compile_options(${t} PRIVATE -mfma)
-endforeach()
+#
+# The compat variant (game-build/release/fefw_build.py CPU_VARIANTS): the launcher names the one this processor runs in
+# FEFW_CPU_VARIANT (apps/emblemweave/src/cpu.rs), so a Sandy Bridge, Ivy Bridge or Xeon E5 v1/v2 gets lifted code without FMA3 and
+# does not die on an illegal instruction. Without -mfma, std::fma stays a correctly rounded call.
+set(FEFW_CPU_VARIANT "fma" CACHE STRING "processor target of the lifted code: fma (FMA3 + AVX) or compat (SSE4.2 + POPCNT)")
+if(DEFINED ENV{FEFW_CPU_VARIANT} AND NOT "$ENV{FEFW_CPU_VARIANT}" STREQUAL "")
+    set(FEFW_CPU_VARIANT "$ENV{FEFW_CPU_VARIANT}" CACHE STRING "processor target of the lifted code" FORCE)
+endif()
+if(FEFW_CPU_VARIANT STREQUAL "compat")
+    message(STATUS "lifted code: compat build (SSE4.2 + POPCNT, no FMA3)")
+else()
+    message(STATUS "lifted code: fma build (FMA3 + AVX)")
+    foreach(t ${FEFW_MODULES})
+        target_compile_options(${t} PRIVATE -mfma)
+    endforeach()
+endif()
 # Indirect calls look the target up at the call site in the runtime's flat table (nxrecomp/cxx.h, runtime core/dispatch.cpp).
 foreach(t ${FEFW_MODULES})
     target_compile_definitions(${t} PRIVATE NX_INLINE_INDIRECT)

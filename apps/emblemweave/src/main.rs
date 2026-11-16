@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod cpu;
 mod engine;
 #[cfg(windows)]
 mod exe_icon;
