@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "test_framework.h"
 #include "project_root.h"
 
+#include "extras/hdr_nvn.h"
 #include "extras/hdr_tonemap_patch.h"
 
 NXTEST_GROUP(hdr_tonemap_patch)
@@ -28,6 +31,9 @@ const fs::path kTonemapPath = kSpvDir / "e728113b14f3564a.spv";
 const char* kSpirvVal = "C:\\VulkanSDK\\1.4.363.0\\Bin\\spirv-val.exe";
 
 constexpr uint32_t kOpExtInst = 12, kOpFMul = 133, kOpStore = 62, kOpImageSampleImplicitLod = 87;
+constexpr uint32_t kOpExtInstImport = 11, kOpEntryPoint = 15, kOpTypeInt = 21, kOpTypeFloat = 22, kOpTypePointer = 32;
+constexpr uint32_t kOpTypeFunction = 33, kOpConstant = 43, kOpFunction = 54, kOpFunctionEnd = 56, kOpVariable = 59;
+constexpr uint32_t kOpLoad = 61, kOpAccessChain = 65, kGlslExp2 = 29;
 constexpr uint32_t kGlslFMax = 40;
 
 // Reads a .spv file as little-endian 32-bit words. Returns false if it is missing, unreadable or not a whole number of words.
@@ -87,6 +93,72 @@ Census census(const std::vector<uint32_t>& w) {
 bool shader_present() {
     std::error_code ec;
     return fs::is_regular_file(kTonemapPath, ec);
+}
+
+uint32_t float_bits(float f) {
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof bits);
+    return bits;
+}
+
+void emit(std::vector<uint32_t>& words, uint32_t op, std::initializer_list<uint32_t> body) {
+    words.push_back((static_cast<uint32_t>(body.size()) + 1) << 16 | op);
+    words.insert(words.end(), body.begin(), body.end());
+}
+
+// A small structural GT shader: one P load at (cb, 0, 2, 0), one float load at another offset, three exp2 uses and the
+// four BT.2020 -> BT.709 constants. It is not a complete Vulkan shader; this test exercises the patch's ID rewriting only.
+std::vector<uint32_t> synthetic_gt_shader(bool matching) {
+    constexpr uint32_t kGlsl = 1, kFloat = 2, kInt = 3, kPointer = 4, kFunctionType = 7, kUniform = 6;
+    constexpr uint32_t kP = 40, kPLoad = 41, kOther = 42, kOtherLoad = 43;
+    constexpr uint32_t kZero = 30, kTwo = 31, kOne = 32;
+    std::vector<uint32_t> body;
+    emit(body, kOpExtInstImport, {kGlsl, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0});   // "GLSL.std.450"
+    emit(body, kOpEntryPoint, {4, 20, 0x6e69616du, 0});                                 // Fragment, "main"
+    emit(body, kOpTypeFloat, {kFloat, 32});
+    emit(body, kOpTypeInt, {kInt, 32, 0});
+    emit(body, kOpTypePointer, {kPointer, 2, kFloat});                                   // UniformConstant float pointer
+    emit(body, kOpConstant, {kInt, kZero, 0});
+    emit(body, kOpConstant, {kInt, kTwo, 2});
+    emit(body, kOpConstant, {kInt, kOne, 1});
+    const float matrix[4] = {1.66049027f, -0.587639093f, 1.11872983f, -0.124549903f};
+    for (uint32_t i = 0; i < (matching ? 4u : 3u); ++i) emit(body, kOpConstant, {kFloat, 60 + i, float_bits(matrix[i])});
+    emit(body, kOpTypeFunction, {kFunctionType, kFloat});
+    emit(body, kOpVariable, {kPointer, kUniform, 2});
+    emit(body, kOpFunction, {kFloat, 20, 0, kFunctionType});
+    emit(body, kOpAccessChain, {kPointer, kP, kUniform, kZero, kTwo, kZero});
+    emit(body, kOpLoad, {kFloat, kPLoad, kP});
+    emit(body, kOpAccessChain, {kPointer, kOther, kUniform, kZero, kOne, kZero});
+    emit(body, kOpLoad, {kFloat, kOtherLoad, kOther});
+    for (uint32_t id : {50u, 51u, 52u}) emit(body, kOpExtInst, {kFloat, id, kGlsl, kGlslExp2, kPLoad});
+    emit(body, kOpFunctionEnd, {});
+    std::vector<uint32_t> words = {0x07230203u, 0x00010000u, 0, 100, 0};
+    words.insert(words.end(), body.begin(), body.end());
+    return words;
+}
+
+struct Instruction {
+    size_t pos;
+    uint32_t op, len;
+};
+
+std::vector<Instruction> instructions(const std::vector<uint32_t>& words) {
+    std::vector<Instruction> out;
+    for (size_t at = 5; at < words.size();) {
+        const uint32_t len = words[at] >> 16;
+        if (len == 0 || at + len > words.size()) return {};
+        out.push_back({at, words[at] & 0xffffu, len});
+        at += len;
+    }
+    return out;
+}
+
+uint32_t result_id(const std::vector<uint32_t>& words, const Instruction& in) {
+    switch (in.op) {
+        case kOpExtInstImport: case kOpTypeInt: case kOpTypeFloat: case kOpTypePointer: case kOpTypeFunction: return words[in.pos + 1];
+        case kOpConstant: case kOpVariable: case kOpFunction: case kOpAccessChain: case kOpLoad: case kOpExtInst: return words[in.pos + 2];
+        default: return 0;
+    }
 }
 
 }  // namespace
@@ -181,7 +253,85 @@ NXTEST(spirv_val_accepts_patched_output) {
     fs::remove(tmp, ec);
 }
 
-// ---- case 4: negative inputs return false and leave out empty -----------------------------------------------------------------------------
+// ---- case 4: a synthetic GT shader has only its P loads wrapped, and its IDs stay in bounds ------------------------------
+
+NXTEST(gt_synthetic_only_p_loads_are_wrapped) {
+    const std::vector<uint32_t> in = synthetic_gt_shader(true);
+    std::vector<uint32_t> out;
+    REQUIRE(hdr::spirv_hdr_tonemap_gt(in, 4.0f, out));
+    CHECK_EQ(out.size(), in.size() + 11);                       // one float constant (4 words) + one FMax (7 words)
+    CHECK_EQ(out[0], in[0]);
+    CHECK_EQ(out[1], in[1]);
+    CHECK_EQ(out[2], in[2]);
+    CHECK_EQ(out[3], 102u);                                    // two new IDs: the peak and the raw load
+    CHECK_EQ(out[4], in[4]);
+
+    const std::vector<Instruction> after = instructions(out);
+    REQUIRE(!after.empty());
+    size_t fmax_at = SIZE_MAX;
+    int fmax_count = 0, p_loads = 0, other_loads = 0;
+    uint32_t p_raw = 0, other_result = 0;
+    for (const Instruction& n : after) {
+        if (n.op == kOpExtInst && n.len >= 5 && out[n.pos + 3] == 1 && out[n.pos + 4] == kGlslFMax) {
+            ++fmax_count;
+            fmax_at = n.pos;
+        }
+        if (n.op == kOpLoad && n.len == 4 && out[n.pos + 1] == 2) {
+            if (out[n.pos + 3] == 40) {
+                ++p_loads;
+                p_raw = out[n.pos + 2];
+            } else if (out[n.pos + 3] == 42) {
+                ++other_loads;
+                other_result = out[n.pos + 2];
+            }
+        }
+    }
+    CHECK_EQ(fmax_count, 1);
+    CHECK_EQ(p_loads, 1);
+    CHECK_EQ(other_loads, 1);
+    REQUIRE(fmax_at != SIZE_MAX);
+    CHECK_EQ(p_raw, 101u);
+    CHECK_EQ(out[fmax_at + 2], 41u);                           // the original result id now names the max
+    CHECK_EQ(out[fmax_at + 5], p_raw);
+    CHECK_EQ(out[fmax_at + 6], 100u);
+    CHECK_EQ(other_result, 43u);                               // the non-P load is untouched
+    CHECK(out[fmax_at + 5] != other_result);
+    CHECK(out[fmax_at + 6] != other_result);
+
+    bool peak_ok = false;
+    for (const Instruction& n : after) {
+        if (n.op == kOpConstant && out[n.pos + 2] == 100u) {
+            peak_ok = out[n.pos + 1] == 2 && out[n.pos + 3] == float_bits(4.0f);
+        }
+    }
+    CHECK(peak_ok);
+
+    std::set<uint32_t> ids;
+    for (const Instruction& n : after) {
+        const uint32_t id = result_id(out, n);
+        if (id == 0) continue;
+        CHECK(id < out[3]);
+        CHECK(ids.insert(id).second);
+    }
+}
+
+NXTEST(gt_synthetic_nonmatching_shader_is_untouched) {
+    const std::vector<uint32_t> keep = {0xdeadbeefu, 7u};
+    std::vector<uint32_t> out = keep;
+    CHECK(!hdr::spirv_hdr_tonemap_gt(synthetic_gt_shader(false), 4.0f, out));
+    CHECK(out == keep);
+
+    out = keep;
+    CHECK(!hdr::spirv_hdr_tonemap_gt(synthetic_gt_shader(true), 1.0f, out));
+    CHECK(out == keep);
+}
+
+NXTEST(gt_synthetic_shader_is_recognized_as_a_tonemap) {
+    CHECK(hdr::hdr_is_tonemap(synthetic_gt_shader(true), "synthetic-gt-tonemap"));
+    CHECK(!hdr::hdr_is_tonemap(synthetic_gt_shader(false), "synthetic-gt-not-tonemap"));
+}
+
+// ---- case 5: negative inputs return false and leave out empty -----------------------------------------------------------------------------
 
 NXTEST(rejects_empty_input) {
     std::vector<uint32_t> in, out;

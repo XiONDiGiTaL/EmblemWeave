@@ -30,9 +30,18 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
     // the curve tone map (Metroid Prime Remastered; small shaders), else the GT curve (Fire Emblem Fortune's Weave; small shaders),
     // else the LUT tone map (Pokopia's composite pass)
     const char* kind = "curve";
-    bool ok = words.size() <= 16384 && spirv_hdr_tonemap(words, out);
-    if (!ok && words.size() <= 16384 && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out)) { ok = true; kind = "GT shoulder moved to peak"; }
-    if (!ok && spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out)) { ok = true; kind = "LUT highlights extended"; }
+    bool ok = false;
+    if (words.size() <= 16384) {
+        ok = spirv_hdr_tonemap(words, out);
+        if (!ok && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out)) {
+            ok = true;
+            kind = "GT shoulder moved to peak";
+        }
+    }
+    if (!ok && spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out)) {
+        ok = true;
+        kind = "LUT highlights extended";
+    }
     std::lock_guard<std::mutex> lk(mu);
     if (tried.insert(hash).second && ok)
         NXLOG_I("hdr", "tone-map shader %s: HDR variant made (%s, peak ratio %.2f)", hash.c_str(), kind, static_cast<double>(hdr_state().peak_ratio));
@@ -48,8 +57,12 @@ bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash)
         if (it != cache.end()) return it->second;
     }
     std::vector<uint32_t> scratch;
-    // the curve tone map (MPR) or the LUT composite (Pokopia); the patch result is only used as a match test here
-    bool ok = words.size() <= 16384 && spirv_hdr_tonemap(words, scratch);
+    // the curve, GT curve or LUT composite; the patch result is only used as a match test here
+    bool ok = false;
+    if (words.size() <= 16384) {
+        ok = spirv_hdr_tonemap(words, scratch);
+        if (!ok) ok = spirv_hdr_tonemap_gt(words, 2.0f, scratch);
+    }
     if (!ok) {   // no size limit: Pokopia's composite shader is large (hdr_tonemap_variant matches it the same way)
         scratch.clear();
         ok = spirv_hdr_tonemap_lut(words, 2.0f, scratch);
