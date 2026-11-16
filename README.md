@@ -41,7 +41,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.34, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
+> **Current status: 0.1.35, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
 > AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes; it covered the title screen, the
 > save loaded through **Continue**, the hub, the in-game menu and the F1 settings overlay. Later releases are checked by
 > building and by headless runs of the real game, listed under [Development status](#development-status). The build needs
@@ -95,7 +95,7 @@ mods, starts the game and shows what happened when something fails.
 | Stage | What happens |
 | --- | --- |
 | **Validate** | Your dump is located and checked against the title's module hashes and build ID. |
-| **Prepare** | The console's compressed `main` is unpacked, and the RomFS is served from a folder, an `.nsp`, an `.nx` or a `.nup`. |
+| **Prepare** | The console's compressed `main` is unpacked, and the RomFS is served from a folder, a plaintext `.nsp` or `.xci`, an `.nx`, or a `.nup`. |
 | **Recompile** | fefw-recomp's lifter decodes every AArch64 instruction, recovers functions and control flow, and emits C++ for each of the six modules. |
 | **Compile and link** | clang-cl compiles the emitted code and the runtime, and links `fefw.exe` for the processor and hook-site list this PC needs. |
 | **Run** | The runtime maps the modules, starts them the way the console SDK does, serves their system calls natively, and drives NVN on the host GPU. |
@@ -172,7 +172,7 @@ Requirements are listed under [System requirements](#system-requirements); failu
 ### Runtime
 
 - The engine maps the six modules, runs the console SDK's start-up, and serves the game's system calls natively: kernel
-  objects, threads and synchronization, `fsp-srv` with RomFS (folder, `.nsp`, `.nx`, `.nup`, zstd entries) and save data,
+  objects, threads and synchronization, `fsp-srv` with RomFS (folder, `.nsp`, `.nx`, `.nup`, plaintext `.xci`, zstd entries) and save data,
   `aoc:u`, `hid`, `time`, `pctl`, `lm`, `csrng`, applet and audio services.
 - NVN is served on the host GPU through Vulkan. Movies decode with dav1d and libvpx on the host.
 - Saves live in the launcher's profile directory and are imported from yuzu, suyu, sudachi, citron, eden and torzu.
@@ -219,7 +219,7 @@ and are not on the shipping path.
 
 ### Known limitations
 
-- `.xci` cartridge images are not read; use a folder, `.nsp`, `.nx` or `.nup`.
+- Encrypted retail `.xci` images are not decrypted: EmblemWeave reads plaintext/decrypted `.xci` files, and names the first encrypted NCA instead of unpacking garbage. A plaintext `.xci` is accepted like a plaintext `.nsp`; a folder, `.nsp`, `.nx` or `.nup` also works.
 - FSR 4 is not integrated. The FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader.
 - Frame generation is not offered for this title: the engine's FSR 3 path needs motion vectors the game does not give it.
 - Code mods are tested with the loader and site checks; a mod hooking a site that exists in the build, `make_function`,
@@ -369,7 +369,7 @@ The release zip is not code-signed; its SHA-256 is published in every release no
 
 1. Download `EmblemWeave-<version>-windows-x64.zip` from the [releases page](https://github.com/XiONDiGiTaL/EmblemWeave/releases) and unzip it anywhere.
 2. Run `EmblemWeave.exe`. A fresh release is **portable by default**: settings, saves, builds, mods and logs stay in `data` beside the executable, so the whole folder can be moved as one piece.
-3. On **Game Setup**, choose your own dump: a `.nup`, `.nx`, plaintext `.nsp`, or an extracted folder.
+3. On **Game Setup**, choose your own dump: a `.nup`, `.nx`, plaintext `.nsp`, plaintext `.xci`, or an extracted folder.
 4. Press **Build the game** once on **Overview**, then **Play**.
 
 The build needs Visual Studio 2022 Build Tools with the C++ workload, LLVM, CMake and Ninja. The launcher checks each one and offers the install command. The shader translator ships in the zip with its own runtime, so the .NET SDK is not needed.
@@ -389,7 +389,7 @@ The full page-by-page guide, display settings, upscaling file layout and the in-
 The pipeline below is fefw-recomp's, and the launcher orchestrates it:
 
 ```
-  your game data (folder, .nsp, .nx, .nup)
+  your game data (folder, .nsp, .nx, .nup, .xci)
         │  validate the modules and the build ID
         ▼
   ExeFS ──► unpack main (ZBIC) ──► fefw-recomp lifter (recomp/)

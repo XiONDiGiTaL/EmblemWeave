@@ -72,6 +72,13 @@ so the game boots from it and the recompiler reads it. The unpack is repeated
 only when the package's size or modification time changes, and the folder can be
 deleted to reclaim the space.
 
+A plaintext **`.xci` game card** is accepted the same way. EmblemWeave reads
+the card's HFS0 root, opens its `secure` partition, and unpacks the program and
+control NCAs into `work\xci`; the game and the recompiler then use that folder
+like an extracted dump. Retail cartridge images keep their NCAs encrypted, so
+they are refused with the name of the first NCA that needs a console key. A
+decrypted XCI created by your own dump tool is what this path reads.
+
 You can also use an extracted copy. EmblemWeave then needs:
 
 | Item | What it is | Where it usually is |

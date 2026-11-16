@@ -419,7 +419,7 @@ fn menu_cards(app: &App) -> Vec<MenuCard> {
             icon: "📁",
             eyebrow: "START HERE",
             title: "Game Setup",
-            body: "Point at a folder, .nup, .nx or .nsp and verify the dump before anything is compiled.",
+            body: "Point at a folder, .nup, .nx, .nsp or plaintext .xci and verify the dump before anything is compiled.",
             status: data_status,
             tone: data_tone,
             action: MenuAction::Open(Page::Setup),

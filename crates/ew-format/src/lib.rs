@@ -12,6 +12,7 @@ pub mod nsp;
 pub mod nup;
 pub mod nx;
 pub mod romfs;
+pub mod xci;
 
 pub use exefs::{ExeFs, ModuleEntry, NpdmInfo};
 pub use nso::{Compression, GameImage, Mod0, Nso, NsoHeader, Segment, SegmentKind};

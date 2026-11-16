@@ -28,8 +28,8 @@ const LANGUAGES: [(&str, &str); 12] = [
 enum Pick {
     Folder,
     Nacp,
-    /// The game data: an `.nx` archive, a `.nup` dump, an `.nsp` package, or a
-    /// folder.
+    /// The game data: an `.nx` archive, a `.nup` dump, an `.nsp` package, a
+    /// plaintext `.xci` game card, or a folder.
     Dump,
 }
 
@@ -42,7 +42,7 @@ fn path_row(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &mut Stri
         let mut picked = None;
         if pick == Pick::Dump && widgets::button(ui, p, "Choose package…", true).clicked() {
             picked = rfd::FileDialog::new()
-                .add_filter("Game package (.nx, .nup, .nsp)", &["nx", "nup", "nsp"])
+                .add_filter("Game package (.nx, .nup, .nsp, .xci)", &["nx", "nup", "nsp", "xci"])
                 .pick_file();
         }
         let browse = if pick == Pick::Dump { "Folder…" } else { "Browse…" };
@@ -63,7 +63,7 @@ fn path_row(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &mut Stri
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Game Setup", "Point EmblemWeave at your own copy of the game: a .nx archive, a .nup dump or a .nsp package as it is, or an extracted folder. Nothing here modifies your files.");
+    widgets::page_header(ui, &p, "Game Setup", "Point EmblemWeave at your own copy of the game: a .nx archive, a .nup dump, a .nsp package or a plaintext .xci game card as it is, or an extracted folder. Nothing here modifies your files.");
 
     let mut rescan = false;
     widgets::section(ui, &p, "Game data", |ui| {
@@ -72,7 +72,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             &p,
             "Game data",
             &mut app.config.paths.game_root,
-            r"your .nx archive, .nup dump, .nsp package, or a folder with exefs and romfs",
+            r"your .nx archive, .nup dump, .nsp package, .xci game card, or a folder with exefs and romfs",
             Pick::Dump,
         );
         ui.horizontal(|ui| {

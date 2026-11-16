@@ -116,6 +116,9 @@ pub struct Nca {
     pub size: u64,
     pub title_id: u64,
     pub kind: ContentKind,
+    /// 0 for plaintext content. Retail game-card NCAs use a non-zero value
+    /// and cannot be read without the console's keys.
+    pub crypto_type: u8,
     pub sections: Vec<Section>,
 }
 
@@ -250,66 +253,8 @@ impl Nsp {
     /// and leaves the caller to remove what it wrote.
     pub fn dump(&self, dest: &Path, progress: &mut dyn FnMut(u64, u64), cancelled: &dyn Fn() -> bool) -> Result<Dumped> {
         let program = self.program()?;
-        let mut f = File::open(&self.path)?;
-        let exefs = program.exefs(&mut f)?;
-        ensure!(!exefs.is_empty(), "{} holds no ExeFS", self.path.display());
-        let romfs = program.romfs(&mut f)?;
-        // control.nacp names the title and its display version: it sits in the
-        // control NCA's RomFS, in the layout the launcher already reads.
-        let nacp = match self.control()? {
-            Some(control) => control.romfs(&mut f)?.into_iter().find(|e| e.path.eq_ignore_ascii_case("control.nacp")),
-            None => None,
-        };
-
-        let exefs_dir = dest.join("exefs");
-        let romfs_dir = dest.join("romfs");
-        let nacp_to = dest.join("data").join("control").join("control.nacp");
-        std::fs::create_dir_all(&exefs_dir)?;
-        std::fs::create_dir_all(&romfs_dir)?;
-
-        let total = exefs.iter().map(|e| e.size).sum::<u64>()
-            + romfs.iter().map(|e| e.size).sum::<u64>()
-            + nacp.as_ref().map(|e| e.size).unwrap_or(0);
-        progress(0, total);
-        let mut copied = 0u64;
-        let mut reported = 0u64;
-        let mut put = |f: &mut File, e: &Extent, to: &Path, copied: &mut u64, reported: &mut u64| -> Result<()> {
-            if cancelled() {
-                return Err(anyhow::Error::new(Cancelled));
-            }
-            safe_path(&e.path)?;
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            copy_range(f, e.offset, e.size, to)?;
-            *copied += e.size;
-            if *copied - *reported >= (16 << 20) || *copied == total {
-                *reported = *copied;
-                progress(*copied, total);
-            }
-            Ok(())
-        };
-
-        for e in &exefs {
-            put(&mut f, e, &exefs_dir.join(e.path.replace('\\', "/")), &mut copied, &mut reported)?;
-        }
-        for e in &romfs {
-            put(&mut f, e, &romfs_dir.join(e.path.replace('\\', "/")), &mut copied, &mut reported)?;
-        }
-        let mut control_nacp = None;
-        if let Some(e) = &nacp {
-            put(&mut f, e, &nacp_to, &mut copied, &mut reported)?;
-            control_nacp = Some(nacp_to);
-        }
-
-        Ok(Dumped {
-            exefs: exefs.len(),
-            romfs: romfs.len(),
-            romfs_bytes: romfs.iter().map(|e| e.size).sum(),
-            exefs_dir,
-            romfs_dir,
-            control_nacp,
-        })
+        let control = self.control()?;
+        dump_package(&self.path, &program, control.as_ref(), dest, progress, cancelled)
     }
 
     /// A one-line description of the archive for the launcher's checks.
@@ -320,14 +265,92 @@ impl Nsp {
     }
 }
 
-fn nca(f: &mut File, e: &Entry) -> Result<Nca> {
-    ensure!(e.offset + NCA_HEADER <= e.offset + e.size, "{} is shorter than an NCA header", e.name);
-    let head = read_at(f, e.offset + NCA_MAGIC, (NCA_HEADER - NCA_MAGIC) as usize)?;
-    ensure!(&head[0..3] == b"NCA", "{} is not a plaintext NCA: an encrypted retail package cannot be unpacked", e.name);
+/// Copy a plaintext program NCA (and optional control NCA) into the folder the
+/// launcher reads like an NSP extraction. Shared by `.nsp` and plaintext `.xci`,
+/// which differ only in how their NCAs are found.
+pub(crate) fn dump_package(
+    source: &Path,
+    program: &Nca,
+    control: Option<&Nca>,
+    dest: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Dumped> {
+    let mut f = File::open(source)?;
+    let exefs = program.exefs(&mut f)?;
+    ensure!(!exefs.is_empty(), "{} holds no ExeFS", source.display());
+    let romfs = program.romfs(&mut f)?;
+    // control.nacp names the title and its display version: it sits in the
+    // control NCA's RomFS, in the layout the launcher already reads.
+    let nacp = match control {
+        Some(control) => control.romfs(&mut f)?.into_iter().find(|e| e.path.eq_ignore_ascii_case("control.nacp")),
+        None => None,
+    };
+
+    let exefs_dir = dest.join("exefs");
+    let romfs_dir = dest.join("romfs");
+    let nacp_to = dest.join("data").join("control").join("control.nacp");
+    std::fs::create_dir_all(&exefs_dir)?;
+    std::fs::create_dir_all(&romfs_dir)?;
+
+    let total = exefs.iter().map(|e| e.size).sum::<u64>()
+        + romfs.iter().map(|e| e.size).sum::<u64>()
+        + nacp.as_ref().map(|e| e.size).unwrap_or(0);
+    progress(0, total);
+    let mut copied = 0u64;
+    let mut reported = 0u64;
+    let mut put = |f: &mut File, e: &Extent, to: &Path, copied: &mut u64, reported: &mut u64| -> Result<()> {
+        if cancelled() {
+            return Err(anyhow::Error::new(Cancelled));
+        }
+        safe_path(&e.path)?;
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        copy_range(f, e.offset, e.size, to)?;
+        *copied += e.size;
+        if *copied - *reported >= (16 << 20) || *copied == total {
+            *reported = *copied;
+            progress(*copied, total);
+        }
+        Ok(())
+    };
+
+    for e in &exefs {
+        put(&mut f, e, &exefs_dir.join(e.path.replace('\\', "/")), &mut copied, &mut reported)?;
+    }
+    for e in &romfs {
+        put(&mut f, e, &romfs_dir.join(e.path.replace('\\', "/")), &mut copied, &mut reported)?;
+    }
+    let mut control_nacp = None;
+    if let Some(e) = &nacp {
+        put(&mut f, e, &nacp_to, &mut copied, &mut reported)?;
+        control_nacp = Some(nacp_to);
+    }
+
+    Ok(Dumped {
+        exefs: exefs.len(),
+        romfs: romfs.len(),
+        romfs_bytes: romfs.iter().map(|e| e.size).sum(),
+        exefs_dir,
+        romfs_dir,
+        control_nacp,
+    })
+}
+
+pub(crate) fn nca_at(f: &mut File, name: &str, offset: u64, size: u64) -> Result<Nca> {
+    ensure!(size >= NCA_HEADER, "{name} is shorter than an NCA header");
+    let head = read_at(f, offset + NCA_MAGIC, (NCA_HEADER - NCA_MAGIC) as usize)?;
+    ensure!(&head[0..3] == b"NCA", "{name} is not a plaintext NCA: an encrypted retail package cannot be unpacked");
+    let crypto_type = head[6];
+    ensure!(
+        crypto_type == 0,
+        "{name} is encrypted (NCA crypto type {crypto_type}): decrypt the dump first; this launcher never asks for keys"
+    );
     let kind = ContentKind::of(head[5]);
     let title_id = u64_at(&head, 0x10);
     let declared = u64_at(&head, 8);
-    ensure!(declared <= e.size, "{} declares {declared} bytes but only {} are in the .nsp", e.name, e.size);
+    ensure!(declared <= size, "{name} declares {declared} bytes but only {size} are in the package");
     let mut sections = Vec::new();
     for i in 0..4usize {
         let at = 0x40 + 16 * i;
@@ -335,12 +358,16 @@ fn nca(f: &mut File, e: &Entry) -> Result<Nca> {
         if end <= first {
             continue;
         }
-        ensure!(e.offset + end <= e.offset + e.size, "a section of {} runs past its NCA", e.name);
+        ensure!(offset + end <= offset + size, "a section of {name} runs past its NCA");
         let mut fs = [0u8; 512];
         fs.copy_from_slice(&head[0x200 + 512 * i..0x400 + 512 * i]);
-        sections.push(Section { offset: e.offset + first, size: end - first, fs });
+        sections.push(Section { offset: offset + first, size: end - first, fs });
     }
-    Ok(Nca { name: e.name.clone(), offset: e.offset, size: e.size, title_id, kind, sections })
+    Ok(Nca { name: name.to_string(), offset, size, title_id, kind, crypto_type, sections })
+}
+
+fn nca(f: &mut File, e: &Entry) -> Result<Nca> {
+    nca_at(f, &e.name, e.offset, e.size)
 }
 
 impl Nca {
@@ -544,7 +571,7 @@ fn copy_range(f: &mut File, from: u64, size: u64, to: &Path) -> Result<()> {
     while left > 0 {
         let want = left.min(buf.len() as u64) as usize;
         let n = f.read(&mut buf[..want])?;
-        ensure!(n > 0, "the .nsp ended after {} of {size} bytes", size - left);
+        ensure!(n > 0, "the package ended after {} of {size} bytes", size - left);
         out.write_all(&buf[..n])?;
         left -= n as u64;
     }

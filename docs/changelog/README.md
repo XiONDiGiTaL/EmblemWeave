@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.35](0.1.35.md) | 2026-11-16 | Plaintext `.xci` game cards build with `.nup`, `.nsp`, `.nx` and dumps; the `.nx` and CMake fixes get named regressions. |
 | [0.1.34](0.1.34.md) | 2026-11-16 | Saves load again, shader compilation stops pinning every core, vibration can be tested, and the launcher has a modern dashboard. |
 | [0.1.33](0.1.33.md) | 2026-11-16 | The launcher builds the lifted code for the processor it is running on, and Diagnostics says which build that is. |
 | [0.1.32](0.1.32.md) | 2026-11-15 | Code mods: a DLL in a mod's `exefs` now runs inside the game, and a mod can bring the hook sites it needs |

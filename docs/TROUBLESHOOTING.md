@@ -6,7 +6,7 @@ What EmblemWeave needs, and what the launcher means when it stops.
 
 | Need | When | Where it comes from |
 | --- | --- | --- |
-| Your game files | Game Setup, always | Your own copy of *Fire Emblem: Fortune's Weave*: the base game and its update, a plaintext `.nup`, `.nx` or `.nsp` package, or a folder holding the extracted ExeFS and RomFS |
+| Your game files | Game Setup, always | Your own copy of *Fire Emblem: Fortune's Weave*: the base game and its update, a plaintext `.nup`, `.nx`, `.nsp` or `.xci` package, or a folder holding the extracted ExeFS and RomFS |
 | A decoded `main` module | Recompilation, always | **Game Setup > Decode main module**: the launcher writes `%APPDATA%\EmblemWeave\work\decoded\main` with Python and the `zbic` package (`pip install zbic`) |
 | A C compiler | Recompilation only, for the verification stage | `ziglang` (`pip install ziglang`, used as `zig cc`) or LLVM's `clang`, found on `PATH` or in its usual install folder (`C:\Program Files\LLVM\bin`, or the clang Visual Studio installs). Without one the pipeline still lifts the game; it skips the native check |
 | A Vulkan 1.3 driver | Play | Your graphics driver. The engine presents through Vulkan and has no other renderer |
@@ -54,6 +54,12 @@ A package may store its files as they are or pack each one as a zstd frame. Stor
 
 A retail NSP stays encrypted: its NCAs are sealed with the console's own keys, which this project neither ships nor asks for. The Game Setup check names the first NCA it cannot read. Convert the package to a plaintext one (NSP Box's NSP → NUP and NUP → NSP do that without keys) or point EmblemWeave at an extracted folder instead.
 
+## Running straight from a `.xci`
+
+**Game Setup > Choose package…** also accepts a plaintext `.xci` game card. EmblemWeave reads the HFS0 root, opens its `secure` partition and unpacks the program and control NCAs into `work\xci\<title>-<bytes>`, then uses that folder like an extracted dump. The unpack, cancellation and `dump.txt` marker work exactly as they do for an `.nsp`.
+
+A retail cartridge stays encrypted: its NCAs are sealed with console keys, which this project neither ships nor asks for. The check names the first NCA it cannot read. Use a decrypted XCI made from your own dump, or point EmblemWeave at an extracted folder.
+
 ## Where the evidence is
 
 Every task writes its own file to `%APPDATA%\EmblemWeave\logs`: the launcher's build stamp, the folders it ran from, each stage, and the whole output of every tool it called. **Diagnostics > Activity log > Log files** names the folder and opens it. The game keeps its own log at `%APPDATA%\EmblemWeave\play\fefw.log`.
@@ -67,7 +73,8 @@ A bug report with the failing task's log attached is worth more than any descrip
 | Message | Meaning | Fix |
 | --- | --- | --- |
 | `Game file: the .nup holds no base game or update` | The file picked is not this game, or only holds DLC | Pick the base game's `.nup` or its `.nsp` |
-| `Game file: … .nca is not a plaintext NCA: an encrypted retail package cannot be unpacked` | The `.nsp` still holds encrypted retail NCAs | Use a plaintext `.nup`/`.nsp`, or an extracted dump |
+| `Game file: … .nca is not a plaintext NCA: an encrypted retail package cannot be unpacked` | The `.nsp` or `.xci` still holds encrypted retail NCAs | Use a plaintext `.nup`/`.nsp`/`.xci`, or an extracted dump |
+| `Game file: … is encrypted (NCA crypto type …)` | A retail cartridge NCA needs console keys | Use a decrypted `.xci`, a plaintext `.nsp`/`.nup`, or an extracted dump |
 | `Game file: unpacked below …: N ExeFS files and M RomFS files (X GB)` | Expected: the package was unpacked once into the work folder | Nothing to fix. Delete that folder to reclaim the space; it is rebuilt on the next Detect |
 | `ExeFS: not found; choose the folder that contains your extracted exefs` | The game folder has no `exefs` beside it | Point **Game folder** at the folder that contains `exefs` and `romfs` |
 | ``ExeFS: no `main` module in this ExeFS`` | The folder is an ExeFS but not this game's | Pick the update's ExeFS if the base one has no `main` |

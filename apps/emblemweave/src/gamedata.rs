@@ -74,6 +74,8 @@ pub struct GameData {
     pub nsp: Option<PathBuf>,
     /// The `.nx` archive, when the game data is one.
     pub nx: Option<PathBuf>,
+    /// The plaintext `.xci` game card, when the game data is one.
+    pub xci: Option<PathBuf>,
     /// The program id, from the `.nup` or `control.nacp`; it names the save
     /// folder in an emulator.
     pub title_id: Option<u64>,
@@ -474,9 +476,6 @@ fn use_nx(g: &mut GameData, path: &Path) -> Package {
     Package::Ready(dir)
 }
 
-/// Open a `.nsp` package: unpack its ExeFS, RomFS and control metadata once
-/// into the launcher's work folder, then use that folder like a dump. Returns
-/// the ExeFS folder and keeps the dump counts for the checks.
 /// What came of the package the user pointed at.
 enum Package {
     Ready(PathBuf),
@@ -485,33 +484,81 @@ enum Package {
     Failed,
 }
 
-fn use_nsp(
+/// The two single-file packages whose NCAs can be unpacked without keys. They
+/// differ only in how the NCAs are found; the unpack and the resulting folder
+/// layout are identical.
+enum Container {
+    Nsp(ew_format::nsp::Nsp),
+    Xci(ew_format::xci::Xci),
+}
+
+impl Container {
+    fn size(&self) -> u64 {
+        match self {
+            Container::Nsp(n) => n.size,
+            Container::Xci(x) => x.size,
+        }
+    }
+    fn kind(&self) -> &'static str {
+        match self {
+            Container::Nsp(_) => ".nsp",
+            Container::Xci(_) => ".xci",
+        }
+    }
+    fn folder(&self) -> &'static str {
+        match self {
+            Container::Nsp(_) => "nsp",
+            Container::Xci(_) => "xci",
+        }
+    }
+    fn program(&self) -> anyhow::Result<ew_format::nsp::Nca> {
+        match self {
+            Container::Nsp(n) => n.program(),
+            Container::Xci(x) => x.program(),
+        }
+    }
+    fn summary(&self) -> anyhow::Result<String> {
+        match self {
+            Container::Nsp(n) => n.summary(),
+            Container::Xci(x) => x.summary(),
+        }
+    }
+    fn dump(&self, dest: &Path, progress: &mut dyn FnMut(u64, u64), cancelled: &dyn Fn() -> bool) -> anyhow::Result<ew_format::nsp::Dumped> {
+        match self {
+            Container::Nsp(n) => n.dump(dest, progress, cancelled),
+            Container::Xci(x) => x.dump(dest, progress, cancelled),
+        }
+    }
+}
+
+/// Unpack a package's ExeFS, RomFS and control metadata once into the
+/// launcher's work folder, then use that folder like a dump. Returns the ExeFS
+/// folder and keeps the dump counts for the checks.
+fn use_package(
     g: &mut GameData,
     path: &Path,
+    package: Container,
     progress: &mut dyn FnMut(u64, u64),
     cancelled: &dyn Fn() -> bool,
 ) -> Package {
-    let nsp = match ew_format::nsp::Nsp::open(path) {
-        Ok(n) => n,
-        Err(e) => {
-            g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
-            return Package::Failed;
-        }
-    };
-    let program = match nsp.program() {
+    let program = match package.program() {
         Ok(p) => p,
         Err(e) => {
             g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
             return Package::Failed;
         }
     };
-    g.checks.push(Check::new(Severity::Ok, "Game file", nsp.summary().unwrap_or_else(|e| format!(".nsp, {e:#}"))));
+    g.checks.push(Check::new(
+        Severity::Ok,
+        "Game file",
+        package.summary().unwrap_or_else(|e| format!("{}, {e:#}", package.kind())),
+    ));
 
     // The dump is keyed by the package's title and size, and re-done when the
     // package changes, so pointing at a new build never reuses stale files.
-    let stamp = format!("{}-{}", nsp.size, modified_stamp(path));
+    let stamp = format!("{}-{}", package.size(), modified_stamp(path));
     let Some(work) = Config::work_dir() else { return Package::Failed };
-    let dir = work.join("nsp").join(format!("{:016X}-{}", program.title_id, nsp.size));
+    let dir = work.join(package.folder()).join(format!("{:016X}-{}", program.title_id, package.size()));
     let marker = dir.join("dump.txt");
     let cached = std::fs::read_to_string(&marker).ok().and_then(|t| {
         let mut lines = t.lines();
@@ -532,7 +579,7 @@ fn use_nsp(
                 format!("unpacking {} into {}, which takes a while the first time", path.display(), dir.display()),
             ));
             let _ = std::fs::remove_dir_all(&dir);
-            let dumped = match nsp.dump(&dir, progress, cancelled) {
+            let dumped = match package.dump(&dir, progress, cancelled) {
                 Ok(d) => d,
                 Err(e) if e.downcast_ref::<ew_format::nsp::Cancelled>().is_some() => {
                     // A half-unpacked folder would be mistaken for a complete
@@ -573,9 +620,42 @@ fn use_nsp(
     }
     g.title_id = Some(program.title_id);
     g.romfs = Some(dir.join("romfs"));
-    g.nsp = Some(path.to_path_buf());
+    match package {
+        Container::Nsp(_) => g.nsp = Some(path.to_path_buf()),
+        Container::Xci(_) => g.xci = Some(path.to_path_buf()),
+    }
     g.romfs_entries = std::fs::read_dir(dir.join("romfs")).map(|rd| rd.count()).unwrap_or(0);
     Package::Ready(dir.join("exefs"))
+}
+
+fn use_nsp(
+    g: &mut GameData,
+    path: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Package {
+    match ew_format::nsp::Nsp::open(path) {
+        Ok(nsp) => use_package(g, path, Container::Nsp(nsp), progress, cancelled),
+        Err(e) => {
+            g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
+            Package::Failed
+        }
+    }
+}
+
+fn use_xci(
+    g: &mut GameData,
+    path: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Package {
+    match ew_format::xci::Xci::open(path) {
+        Ok(xci) => use_package(g, path, Container::Xci(xci), progress, cancelled),
+        Err(e) => {
+            g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
+            Package::Failed
+        }
+    }
 }
 
 /// A file's modification time as nanoseconds, for the unpack marker.
@@ -626,6 +706,19 @@ pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64), cancelled:
     if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nx::is_nx(r)) {
         let r = r.clone();
         match use_nx(&mut g, &r) {
+            Package::Ready(exefs) => g.exefs = non_empty(&paths.exefs).or(Some(exefs)),
+            Package::Cancelled => return g,
+            Package::Failed => {}
+        }
+        return finish(g, paths);
+    }
+
+    // A plaintext .xci game-card image: its secure partition holds NCAs in the
+    // same form as an .nsp, so it is unpacked with the same code (issue 28's
+    // container work made this a small addition).
+    if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::xci::Xci::is_xci(r)) {
+        let r = r.clone();
+        match use_xci(&mut g, &r, progress, cancelled) {
             Package::Ready(exefs) => g.exefs = non_empty(&paths.exefs).or(Some(exefs)),
             Package::Cancelled => return g,
             Package::Failed => {}
@@ -909,6 +1002,39 @@ mod tests {
         // rest is junk, so detection has to report the damage instead of panicking.
         let p = dir.join("broken.nx");
         std::fs::write(&p, b"NXAR\0\0\0\0").unwrap();
+        let paths = Paths { game_root: p.to_string_lossy().into(), ..Default::default() };
+        let g = detect_with(&paths, &mut |_, _| {}, &|| false);
+        assert!(g.checks.iter().any(|c| c.label == "Game file" && c.severity == Severity::Error), "{:?}", g.checks);
+        assert!(g.exefs.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `.nx` reader that issue 28 asked for is not only in `ew-format`: the
+    /// picker has to route the archive to `use_nx` before it looks for a folder.
+    #[test]
+    fn an_nx_archive_is_taken_as_a_package_for_issue_28() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/ew-format/tests/nx-fixtures/minimal_valid.nx");
+        assert!(fixture.is_file(), "missing {}", fixture.display());
+        let g = detect_with(&Paths { game_root: fixture.to_string_lossy().into(), ..Default::default() }, &mut |_, _| {}, &|| false);
+        assert!(
+            g.checks.iter().any(|c| c.detail.contains(".nx") && c.detail.contains("exefs")),
+            "the .nx was not opened as a package: {:?}",
+            g.checks
+        );
+        assert!(g.exefs.is_none(), "the empty fixture should not produce an ExeFS");
+    }
+
+    #[test]
+    fn a_card_header_is_taken_as_an_xci_package() {
+        let dir = std::env::temp_dir().join(format!("ew-xci-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("broken.xci");
+        let mut image = vec![0u8; 0x200];
+        image[0x100..0x104].copy_from_slice(b"HEAD");
+        image[0x130..0x138].copy_from_slice(&0x200u64.to_le_bytes());
+        std::fs::write(&p, &image).unwrap();
         let paths = Paths { game_root: p.to_string_lossy().into(), ..Default::default() };
         let g = detect_with(&paths, &mut |_, _| {}, &|| false);
         assert!(g.checks.iter().any(|c| c.label == "Game file" && c.severity == Severity::Error), "{:?}", g.checks);
