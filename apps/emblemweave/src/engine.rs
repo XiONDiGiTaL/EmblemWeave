@@ -2577,6 +2577,13 @@ fn write_settings(
     let on_disk = (ini_parse(&fefw), ini_parse(&ctl));
 
     let mut touched = false;
+    // A folder built before the launcher wrote an absolute mods path still says `mods = mods`. Rewrite it at Play so an update
+    // fixes an existing game folder too, not only one built from now on (#39).
+    let mods = dir.join("mods").display().to_string().replace('\\', "/");
+    if ini_parse(&fefw).get("fs.mods") != Some(&mods) {
+        fefw = set_ini_key(&fefw, "fs", "mods", &mods);
+        touched = true;
+    }
     for (id, value) in desired_values(g, a) {
         let (section, key) = id.split_once('.').unwrap_or(("", ""));
         let (in_fefw, in_ctl) = match section {
@@ -3482,6 +3489,8 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = 1440p"));
         assert!(text.contains("mode = fsr1"));
+        assert!(text.contains("mods = "), "the run folder's mods are an absolute path after Play");
+        assert!(!text.contains("mods = mods"), "an old relative mods key is replaced");
         assert!(text.contains("fps60 = 1"), "the rest of the file stays");
         assert!(text.contains("sharpness = 0.8"), "the sharpening the page shows");
 
