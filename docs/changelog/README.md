@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.31](0.1.31.md) | 2026-11-15 | A `.nx` plays from the archive again, and a build folder that lost its compiler starts over instead of failing |
 | [0.1.30](0.1.30.md) | 2026-11-15 | NASM joined the optional list; the engine builds without it |
 | [0.1.29](0.1.29.md) | 2026-11-15 | Three installs left the requirements: Git, PowerShell 7 and uv |
 | [0.1.28](0.1.28.md) | 2026-11-15 | Portable mode takes the settings and installed mods with it, and can be switched from the command line |
