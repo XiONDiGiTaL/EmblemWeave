@@ -313,4 +313,94 @@ bool spirv_hdr_tonemap_lut(const std::vector<uint32_t>& in, float peak_ratio, st
     return true;
 }
 
+bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out) {
+    enum : uint32_t { kOpTypeInt = 21, kOpVariable = 59, kOpAccessChain = 65, kScUniform = 2, kGlslExp2 = 29 };
+    if (!(peak_ratio > 1.001f) || in.size() < 8 || in[0] != 0x07230203u) return false;
+    std::vector<Inst> insts;
+    insts.reserve(in.size() / 4);
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t op = in[i] & 0xffff, len = in[i] >> 16;
+        if (len == 0 || i + len > in.size()) return false;
+        insts.push_back({i, op, len});
+        i += len;
+    }
+    bool fragment = false;
+    uint32_t glsl = 0, t_float = 0;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.pos];
+        if (n.op == kOpEntryPoint && n.len >= 3 && w[1] == kExecFragment) fragment = true;
+        if (n.op == kOpExtInstImport && n.len >= 5 && std::memcmp(&w[2], "GLSL.std.450", 12) == 0) glsl = w[1];
+        if (n.op == kOpTypeFloat && n.len == 3 && w[2] == 32) t_float = w[1];
+    }
+    if (!fragment || !glsl || !t_float) return false;
+
+    // the BT.2020 -> BT.709 matrix the curve output goes through (all four distinctive coefficients), and the curve's exp2 terms
+    const float mat[] = {1.66049027f, -0.587639093f, 1.11872983f, -0.124549903f};
+    int mat_found = 0, exp2s = 0;
+    std::unordered_map<uint32_t, uint32_t> int_value;
+    std::unordered_map<uint32_t, bool> uniform_var;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.pos];
+        if (n.op == kOpConstant && n.len == 4 && w[1] == t_float)
+            for (float f : mat) if (w[3] == float_bits(f)) ++mat_found;
+        if (n.op == kOpExtInst && n.len >= 5 && w[3] == glsl && w[4] == kGlslExp2) ++exp2s;
+        if (n.op == kOpVariable && n.len >= 4 && w[3] == kScUniform) uniform_var[w[2]] = true;
+    }
+    std::unordered_map<uint32_t, bool> int_type;
+    for (const Inst& n : insts)
+        if (n.op == kOpTypeInt && n.len == 4 && in[n.pos + 2] == 32) int_type[in[n.pos + 1]] = true;
+    for (const Inst& n : insts)
+        if (n.op == kOpConstant && n.len == 4 && int_type.count(in[n.pos + 1])) int_value[in[n.pos + 2]] = in[n.pos + 3];
+    if (mat_found != 4 || exp2s < 3 || uniform_var.empty()) return false;
+
+    // the shoulder's maximum P: the float at constant buffer vec4 2, component x (Ryujinx: AccessChain(cb, 0, 2, 0))
+    auto is_int = [&](uint32_t id, uint32_t v) { auto it = int_value.find(id); return it != int_value.end() && it->second == v; };
+    std::unordered_map<uint32_t, bool> p_ptr;
+    uint32_t p_base = 0;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.pos];
+        if (n.op != kOpAccessChain || n.len != 7 || !uniform_var.count(w[3])) continue;
+        if (!is_int(w[4], 0) || !is_int(w[5], 2) || !is_int(w[6], 0)) continue;
+        if (p_base && p_base != w[3]) return false;              // one constant buffer only
+        p_base = w[3];
+        p_ptr[w[2]] = true;
+    }
+    std::vector<size_t> loads;
+    for (size_t k = 0; k < insts.size(); ++k) {
+        const Inst& n = insts[k];
+        if (n.op == kOpLoad && n.len == 4 && in[n.pos + 1] == t_float && p_ptr.count(in[n.pos + 3])) loads.push_back(k);
+    }
+    if (loads.empty()) return false;
+    size_t first_fn = SIZE_MAX;
+    for (size_t k = 0; k < insts.size() && first_fn == SIZE_MAX; ++k)
+        if (insts[k].op == kOpFunction) first_fn = k;
+    if (first_fn == SIZE_MAX) return false;
+
+    uint32_t bound = in[3];
+    const uint32_t c_r = bound++;
+    out.clear();
+    out.reserve(in.size() + 8 * loads.size() + 8);
+    out.insert(out.end(), in.begin(), in.begin() + 5);
+    size_t li = 0;
+    for (size_t k = 0; k < insts.size(); ++k) {
+        const Inst& n = insts[k];
+        if (k == first_fn) {
+            out.push_back((4u << 16) | kOpConstant);
+            out.push_back(t_float);
+            out.push_back(c_r);
+            out.push_back(float_bits(peak_ratio));
+        }
+        if (li < loads.size() && loads[li] == k) {               // %p = Load ptr  ->  %raw = Load ptr; %p = FMax(%raw, R)
+            ++li;
+            const uint32_t raw = bound++;
+            out.insert(out.end(), {in[n.pos], in[n.pos + 1], raw, in[n.pos + 3]});
+            out.insert(out.end(), {(7u << 16) | kOpExtInst, t_float, in[n.pos + 2], glsl, kGlslFMax, raw, c_r});
+            continue;
+        }
+        out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.pos), in.begin() + static_cast<std::ptrdiff_t>(n.pos + n.len));
+    }
+    out[3] = bound;
+    return true;
+}
+
 }  // namespace nxrt::extras

@@ -27,14 +27,15 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
     if (!hdr_scene_active()) return false;
     static std::mutex mu;
     static std::set<std::string> tried;
-    // the curve tone map (Metroid Prime Remastered; small shaders), else the LUT tone map (Pokopia's composite pass)
-    bool lut = false;
+    // the curve tone map (Metroid Prime Remastered; small shaders), else the GT curve (Fire Emblem Fortune's Weave; small shaders),
+    // else the LUT tone map (Pokopia's composite pass)
+    const char* kind = "curve";
     bool ok = words.size() <= 16384 && spirv_hdr_tonemap(words, out);
-    if (!ok) ok = lut = spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out);
+    if (!ok && words.size() <= 16384 && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out)) { ok = true; kind = "GT shoulder moved to peak"; }
+    if (!ok && spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out)) { ok = true; kind = "LUT highlights extended"; }
     std::lock_guard<std::mutex> lk(mu);
     if (tried.insert(hash).second && ok)
-        NXLOG_I("hdr", "tone-map shader %s: HDR variant made (%s, peak ratio %.2f)", hash.c_str(), lut ? "LUT highlights extended" : "curve",
-                static_cast<double>(hdr_state().peak_ratio));
+        NXLOG_I("hdr", "tone-map shader %s: HDR variant made (%s, peak ratio %.2f)", hash.c_str(), kind, static_cast<double>(hdr_state().peak_ratio));
     return ok;
 }
 
