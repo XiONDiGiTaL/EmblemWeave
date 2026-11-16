@@ -554,6 +554,147 @@ NXTEST(bc7_disk_cache_hit_and_truncated_file) {
     no_cache();
 }
 
+// [nvn] tex_async = standin (TexCaps::standin_first): with a valid cache entry on disk the render thread still gets the quick stand-in, never the
+// entry, and the stand-in is the same data as the one made when there is no entry (it untiles only the levels it encodes).
+NXTEST(standin_first_skips_the_cache_entry) {
+    const fs::path dir = fs::temp_directory_path() /
+                         ("nxrt_texdata_si_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    set_env("NXRT_NVN_BC7_CACHE", dir.string().c_str());
+
+    const TextureBuilderInfo info = make_info(NVN_TEXTURE_TARGET_2D, 256, 256, 1, 4, NVN_FORMAT_RGBA_ASTC_5x4_SRGB);
+    Built bt;
+    CHECK_MSG(begin_block_linear(bt, info), "layout");
+    std::vector<uint16_t> scratch;
+    for (uint32_t i = 0; i < 4; ++i) fill_astc_void_level(bt, i, 0, scratch, 700 + i);
+    finish_block_linear(bt, info);
+
+    PreparedTexture full;   // writes the entry
+    CHECK_MSG(prepare_texture(*bt.tex, TexCaps(), full), full.error);
+    CHECK_EQ(cache_files(dir).size(), 1u);
+    PreparedTexture hit;
+    CHECK_MSG(prepare_texture(*bt.tex, TexCaps(), hit), hit.error);
+    CHECK(hit.from_cache);
+
+    TexCaps si;
+    si.provisional = true;
+    si.standin_first = true;
+    si.image_format = VK_FORMAT_BC7_SRGB_BLOCK;
+    PreparedTexture a;
+    CHECK_MSG(prepare_texture(*bt.tex, si, a), a.error);
+    CHECK(a.provisional);
+    CHECK(!a.from_cache);
+    CHECK_EQ(a.format, VK_FORMAT_BC7_SRGB_BLOCK);
+    CHECK_EQ(a.data.size(), full.data.size());
+    CHECK_EQ(a.level.size(), full.level.size());
+
+    // an image that is not BC7 (an RGBA8 entry made it) is not given a BC7 stand-in
+    TexCaps rgba = si;
+    rgba.image_format = VK_FORMAT_R8G8B8A8_SRGB;
+    PreparedTexture c;
+    CHECK_MSG(prepare_texture(*bt.tex, rgba, c), c.error);
+    CHECK(!c.provisional);
+    CHECK_EQ(c.format, VK_FORMAT_R8G8B8A8_SRGB);
+
+    // the stand-in of a texture without an entry (the old path, whole untile) is byte for byte the same
+    set_env("NXRT_NVN_BC7_CACHE", "");
+    config_set("nvn", "bc7_cache", "");
+    TexCaps prov;
+    prov.provisional = true;
+    prov.image_format = VK_FORMAT_BC7_SRGB_BLOCK;
+    PreparedTexture b;
+    CHECK_MSG(prepare_texture(*bt.tex, prov, b), b.error);
+    CHECK(b.provisional);
+    CHECK(a.data == b.data);
+
+    fs::remove_all(dir, ec);
+    no_cache();
+}
+
+// [nvn] standin_copy: the stand-in's solid blocks are encoded once per source texel and copied into the big levels (rows that map to the same
+// source row copied whole). The result must be byte for byte the block-by-block one, for big, odd-sized and layered textures; the times of both
+// are printed (a 4096x4096 stand-in is the case that costs the render thread on a first visit).
+NXTEST(standin_copy_equals_block_by_block) {
+    no_cache();
+    struct Case { int target, w, h, depth, levels, format; };
+    const Case cases[] = {
+        {NVN_TEXTURE_TARGET_2D, 4096, 4096, 1, 13, NVN_FORMAT_RGBA_ASTC_8x8_SRGB},
+        {NVN_TEXTURE_TARGET_2D, 1000, 600, 1, 10, NVN_FORMAT_RGBA_ASTC_8x8},
+        {NVN_TEXTURE_TARGET_2D_ARRAY, 300, 200, 3, 6, NVN_FORMAT_RGBA_ASTC_4x4},
+        {NVN_TEXTURE_TARGET_2D, 2048, 512, 1, 12, NVN_FORMAT_RGBA_ASTC_5x4_SRGB},
+    };
+    for (const Case& c : cases) {
+        const TextureBuilderInfo info = make_info(c.target, c.w, c.h, c.depth, c.levels, c.format);
+        Built bt;
+        CHECK_MSG(begin_block_linear(bt, info), "layout");
+        std::vector<uint16_t> scratch;
+        for (uint32_t layer = 0; layer < bt.L.layers; ++layer)
+            for (uint32_t i = 0; i < bt.L.layout.levels.size(); ++i) fill_astc_void_level(bt, i, layer, scratch, 1300 + layer * 31 + i);
+        finish_block_linear(bt, info);
+        TexCaps si;
+        si.provisional = true;
+        si.standin_first = true;
+        si.image_format = bt.L.fmt->srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+        PreparedTexture fast, slow;
+        double ms_fast = 1e9, ms_slow = 1e9;
+        for (int rep = 0; rep < 3; ++rep) {   // the best of three of each, alternating (the first call pays for fresh memory)
+            config_set("nvn", "standin_copy", "1");
+            auto t0 = std::chrono::steady_clock::now();
+            CHECK_MSG(prepare_texture(*bt.tex, si, fast), fast.error);
+            ms_fast = std::min(ms_fast, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            config_set("nvn", "standin_copy", "0");
+            t0 = std::chrono::steady_clock::now();
+            CHECK_MSG(prepare_texture(*bt.tex, si, slow), slow.error);
+            ms_slow = std::min(ms_slow, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        config_set("nvn", "standin_copy", "1");
+        std::printf("texdata: stand-in %dx%d x%d, %d levels (%zu KB): %.2f ms copied, %.2f ms block by block\n", c.w, c.h, c.depth, c.levels,
+                    fast.data.size() >> 10, ms_fast, ms_slow);
+        CHECK(fast.provisional);
+        CHECK(slow.provisional);
+        CHECK_EQ(fast.data.size(), slow.data.size());
+        CHECK(fast.data == slow.data);
+
+        // TexCaps::compact_standin: the solid levels as their distinct block rows. Expanded row by row (as the GPU copy does) it is the same image.
+        TexCaps cs = si;
+        cs.compact_standin = true;
+        PreparedTexture compact;
+        double ms_compact = 1e9;
+        for (int rep = 0; rep < 3; ++rep) {
+            const auto t0 = std::chrono::steady_clock::now();
+            CHECK_MSG(prepare_texture(*bt.tex, cs, compact), compact.error);
+            ms_compact = std::min(ms_compact, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::printf("texdata: compact stand-in %dx%d: %zu KB in %.2f ms (whole: %zu KB)\n", c.w, c.h, compact.data.size() >> 10, ms_compact,
+                    fast.data.size() >> 10);
+        CHECK(compact.provisional);
+        CHECK(compact.compact);
+        CHECK_EQ(compact.level.size(), fast.level.size());
+        CHECK(compact.data.size() < fast.data.size());
+        bool same = compact.level.size() == fast.level.size();
+        for (size_t i = 0; same && i < fast.level.size(); ++i) {
+            const PreparedLevel& f = fast.level[i];
+            const PreparedLevel& k = compact.level[i];
+            const uint64_t row_bytes = static_cast<uint64_t>(f.row_blocks) * 16;
+            const uint32_t bh = (f.height + 3) / 4;
+            if (k.rows.empty()) {
+                same = k.size == f.size && std::memcmp(compact.data.data() + k.offset, fast.data.data() + f.offset, static_cast<size_t>(f.size)) == 0;
+                continue;
+            }
+            same = k.rows.size() == static_cast<size_t>(bh) * bt.L.layers;
+            for (uint32_t layer = 0; same && layer < bt.L.layers; ++layer)
+                for (uint32_t by = 0; same && by < bh; ++by) {
+                    const uint64_t want = f.offset + (static_cast<uint64_t>(layer) * bh + by) * row_bytes;
+                    const uint64_t got = k.rows[static_cast<size_t>(layer) * bh + by];
+                    same = got + row_bytes <= compact.data.size() && got % 16 == 0 &&
+                           std::memcmp(compact.data.data() + got, fast.data.data() + want, static_cast<size_t>(row_bytes)) == 0;
+                }
+        }
+        CHECK_MSG(same, "the compact stand-in expands to the whole one");
+    }
+}
+
 // ---- disk cache entries of other formats ------------------------------------------------------------------------------------
 // An entry the setup tool makes has the layout of the runtime's BC7 entry, with another VkFormat (nvn_texdata.cpp). These tests
 // replace the BC7 entry of a texture with a hand-made one and check which entries prepare_texture uses.

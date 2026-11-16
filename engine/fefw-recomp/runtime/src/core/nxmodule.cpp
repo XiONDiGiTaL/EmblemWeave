@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include "nxrt/tl_counts.h"
 #include <unordered_map>
 
 #include "nxrt/dispatch.h"
@@ -38,17 +39,13 @@ std::unique_ptr<Entry> g_owned[kMaxListed];           // owns the entries, regis
 std::atomic<Entry*> g_list[kMaxListed];               // the same, for lock-free readers: entries [0, g_count) are valid
 std::atomic<size_t> g_count{0};
 std::atomic<Entry*> g_by_index[kMaxModules];
-// Imports through the registry, counted per thread slot: every guest thread calls host_import many times a frame, and one shared
-// counter made each call contend for the same cache line (main and the job workers at once). Summed when read.
-struct alignas(64) ImportSlot { std::atomic<uint64_t> n{0}; };
-constexpr size_t kImportSlots = 32;
-ImportSlot g_import_slots[kImportSlots];
-std::atomic<uint32_t> g_import_next{0};
-uint64_t import_calls_sum() {
-    uint64_t s = 0;
-    for (const ImportSlot& sl : g_import_slots) s += sl.n.load(std::memory_order_relaxed);
-    return s;
-}
+// Imports through the registry, counted per thread (tl_counts.h: a relaxed load and store into the thread's own block): every guest thread calls
+// imports at a high rate, and one shared counter made each call a cache-line transfer between cores (8.9 % of the game thread's busy samples,
+// 46-52 % of the job workers', sat on its fetch_add in stutter-1's slow-frame samples).
+struct ImportCountTag {};
+TlCounts<1, ImportCountTag> g_import_counts;
+uint64_t import_calls_sum() { return g_import_counts.total(); }
+void import_calls_zero() { g_import_counts.clear(); }
 std::mutex g_type_lock;                               // resolved imported typeinfo slots (ABI 3 NxEh.type_syms), keyed by slot address
 std::unordered_map<const uint64_t*, uint64_t> g_type_cache;
 
@@ -202,7 +199,7 @@ void nxmodules_clear() {
         g_list[k].store(nullptr);
         g_owned[k].reset();
     }
-    for (ImportSlot& sl : g_import_slots) sl.n.store(0, std::memory_order_relaxed);
+    import_calls_zero();
     std::lock_guard<std::mutex> tk(g_type_lock);
     g_type_cache.clear();
 }
@@ -239,6 +236,22 @@ const char* import_name(uint32_t import_id) {
     return nx && sym < static_cast<uint32_t>(nx->nsyms) && nx->syms[sym].name ? nx->syms[sym].name : "";
 }
 
+uint64_t import_resolve_named(uint32_t import_id, const char** name_out) {
+    Entry* e = by_index(NX_IMPORT_MODULE(import_id));
+    const uint32_t sym = NX_IMPORT_SYM(import_id);
+    if (e && sym < e->ncache) {
+        const char* name = e->nx->syms[sym].name;
+        if (name) {
+            if (const uint64_t hit = e->cache[sym].load(std::memory_order_acquire)) {
+                *name_out = name;
+                return hit;
+            }
+        }
+    }
+    *name_out = import_name(import_id);
+    return import_resolve(import_id);
+}
+
 uint64_t import_resolve(uint32_t import_id) {
     Entry* e = by_index(NX_IMPORT_MODULE(import_id));
     uint32_t sym = NX_IMPORT_SYM(import_id);
@@ -269,10 +282,7 @@ void import_cache_invalidate() {
 uint64_t import_calls() { return import_calls_sum(); }
 
 namespace detail {
-void count_import() {
-    thread_local ImportSlot* slot = &g_import_slots[g_import_next.fetch_add(1, std::memory_order_relaxed) % kImportSlots];
-    slot->n.fetch_add(1, std::memory_order_relaxed);
-}
+void count_import() { g_import_counts.add(0); }
 }  // namespace detail
 
 }  // namespace nxrt

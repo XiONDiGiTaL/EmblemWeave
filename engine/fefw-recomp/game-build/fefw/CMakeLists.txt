@@ -66,12 +66,18 @@ if(NOT DEFINED NXRT_ASTC2BC7 AND NOT EXISTS "${FEFW_ROOT}/tools/textures/build/r
    NOT EXISTS "${FEFW_ROOT}/tools/textures/third_party/astc-encoder/Source/astcenc.h")
     set(NXRT_ASTC2BC7 OFF CACHE BOOL "Link the ASTC -> BC7 transcoder of tools/textures (OFF: no ISPC build and no sources)")
 endif()
-add_subdirectory("${FEFW_RUNTIME_DIR}" runtime)
-
 # Release package (FEFW_RT_DLL=ON): no game code in anything built here. The runtime and the boot code become fefw_rt.dll (+ its import
 # library fefw_rt.lib); fefw.exe is linked on the player's PC from the libraries lifted out of their own dump and src/fefw_stub.cpp
 # (tools/build/fefw_build.py in the package, with the bundled Zig). Nothing lifted is imported here.
 option(FEFW_RT_DLL "build the runtime as fefw_rt.dll for the release package" OFF)
+if(FEFW_RT_DLL)
+    # Debug info in every object (/Z7: in the .obj, which sccache can cache; /Zi's shared .pdb it cannot), so the link below can write
+    # fefw_rt.pdb. The release publishes it beside the package (not in it) to turn crash reports' fefw_rt.dll+0x... into functions and lines
+    # (tools/symbolize.py). Set before the runtime's targets exist: CMP0141 (3.25) reads it when a target is made. Codegen is unchanged.
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+endif()
+add_subdirectory("${FEFW_RUNTIME_DIR}" runtime)
+
 if(FEFW_RT_DLL AND NOT NXRT_ASTC2BC7)
     message(FATAL_ERROR "FEFW_RT_DLL=ON needs the ASTC transcoder (NXRT_ASTC2BC7=ON): without it desktop GPUs render most textures black")
 endif()
@@ -80,8 +86,10 @@ if(FEFW_RT_DLL)
     target_include_directories(fefw_rt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" src)
     target_compile_definitions(fefw_rt PRIVATE FEFW_RT_DLL=1)
     target_link_libraries(fefw_rt PRIVATE nxrt_game_fefw nxrt_gfx nxrt user32)
-    # no .pdb path in the DLL; low host allocations as for fefw.exe (the guest ranges at 0x71_0000_0000 stay free)
-    target_link_options(fefw_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG:NONE /Brepro)
+    # fefw_rt.pdb next to the DLL, with only its bare name recorded in the DLL (/PDBALTPATH: no build machine path, as before);
+    # /DEBUG turns /OPT:REF and /OPT:ICF off unless they are named, so they are: unused code stays dropped and identical functions folded.
+    # Low host allocations as for fefw.exe (the guest ranges at 0x71_0000_0000 stay free).
+    target_link_options(fefw_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG /PDBALTPATH:fefw_rt.pdb /OPT:REF /OPT:ICF /INCREMENTAL:NO /Brepro)
     target_compile_options(fefw_rt PRIVATE "-clang:-ffile-prefix-map=${FEFW_ROOT}=.")
     add_custom_command(TARGET fefw_rt POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:fefw_rt>/fonts/DejaVuSans.ttf")
@@ -98,10 +106,12 @@ foreach(m main sdk subsdk0 subsdk1 subsdk2 rtld)
     list(APPEND FEFW_LIBS fefw_${m})
 endforeach()
 
-add_executable(fefw src/fefw_main.cpp res/fefw.rc)
+# src/fefw_hle.cpp: native routines the lifted code calls (recomp/games/fefw/config.py inline_replace), e.g. the game's zstd decoder;
+# it uses the runtime's zstd (nxrt_zstd, public API only), so no second copy is linked.
+add_executable(fefw src/fefw_main.cpp src/fefw_hle.cpp res/fefw.rc)
 set_source_files_properties(res/fefw.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.manifest;${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.ico")
 target_include_directories(fefw PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_fefw nxrt_gfx nxrt)
+target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_fefw nxrt_gfx nxrt nxrt_zstd)
 # As pkp.exe: a linker map next to the exe (host frames get names), a big main stack (lifted code nests deeply), low host allocations so
 # the guest ranges at 0x71_0000_0000 and up stay free. res/fefw.rc carries the manifest (UTF-8 code page).
 target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)

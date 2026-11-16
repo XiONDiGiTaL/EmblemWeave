@@ -12,10 +12,13 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #include <nxrt/config.h>
 #include <nxrt/diag.h>
+#include <nxrt/gauge.h>
 #include <nxrt/log.h>
 
 #include "astc2bc7.h"
@@ -117,6 +120,39 @@ uint64_t get64(const uint8_t* p) { return static_cast<uint64_t>(get32(p)) | (sta
 
 std::string cache_dir() { return config_get_str("nvn", "bc7_cache", "bc7_cache"); }
 
+// Formats of the cache entries this process has looked at or written (any thread). The render thread asks it instead of the disk with
+// [nvn] tex_async = standin: only an entry that is not BC7 changes the image format, and those are rare (setup-tool entries), so while none
+// has been seen the answer is "BC7" without hashing the storage or opening a file.
+std::mutex g_learned_mu;
+std::unordered_map<uint64_t, VkFormat> g_learned;   // key -> format of its valid entry
+std::atomic<uint32_t> g_learned_non_bc7{0};
+
+// The hitch line (nxrt/gauge.h): BC7 cache files read on the render thread during a slow frame, and the milliseconds that took. Each one is a
+// file open and read in the middle of a frame (on a hard disk 30 ms to over a second); [nvn] tex_async = standin should keep both at 0.
+std::atomic<uint64_t> g_rt_cache_reads{0}, g_rt_cache_read_us{0};
+const bool g_rt_cache_hitch = (nxrt::hitch_add_counter("bc7_cache_reads_render", []() -> uint64_t { return g_rt_cache_reads.load(std::memory_order_relaxed); }),
+                               nxrt::hitch_add_counter("bc7_cache_read_ms_render", []() -> uint64_t { return g_rt_cache_read_us.load(std::memory_order_relaxed) / 1000; }), true);
+
+void learn_entry_format(uint64_t key, VkFormat f) {
+    if (f == VK_FORMAT_UNDEFINED) return;
+    std::lock_guard<std::mutex> lk(g_learned_mu);
+    auto [it, fresh] = g_learned.try_emplace(key, f);
+    const bool bc7 = f == VK_FORMAT_BC7_UNORM_BLOCK || f == VK_FORMAT_BC7_SRGB_BLOCK;
+    if (!fresh) {
+        if (it->second == f) return;
+        const bool was_bc7 = it->second == VK_FORMAT_BC7_UNORM_BLOCK || it->second == VK_FORMAT_BC7_SRGB_BLOCK;
+        if (!was_bc7) g_learned_non_bc7.fetch_sub(1, std::memory_order_relaxed);
+        it->second = f;
+    }
+    if (!bc7) g_learned_non_bc7.fetch_add(1, std::memory_order_relaxed);
+}
+
+VkFormat learned_entry_format(uint64_t key) {
+    std::lock_guard<std::mutex> lk(g_learned_mu);
+    auto it = g_learned.find(key);
+    return it == g_learned.end() ? VK_FORMAT_UNDEFINED : it->second;
+}
+
 int bc7_quality() {
     const int def = slow_encoder() ? 1 : 3;
     const int64_t q = config_get_int("nvn", "bc7_quality", def);
@@ -185,6 +221,7 @@ bool cache_write(const std::string& path, uint64_t key, const PreparedTexture& o
         fs::remove(tmp, ignore);
         return false;
     }
+    learn_entry_format(key, out.format);
     return true;
 }
 
@@ -211,6 +248,8 @@ bool cache_read(const std::string& path, uint64_t key, PreparedTexture& out) {
     std::vector<uint8_t> head(head_bytes);
     if (!f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head_bytes))) return false;
     const uint8_t* p = head.data();
+    if (std::memcmp(p, kCacheMagic, 4) == 0 && get32(p + 4) == kCacheVersion && get64(p + 8) == key)
+        learn_entry_format(key, static_cast<VkFormat>(get32(p + 16)));   // also when it is not the format wanted here: the next image is made in it
     bool ok = std::memcmp(p, kCacheMagic, 4) == 0 && get32(p + 4) == kCacheVersion && get64(p + 8) == key &&
               get32(p + 16) == static_cast<uint32_t>(out.format) && get32(p + 20) == out.level.size() &&
               get32(p + 24) == out.layers;
@@ -418,7 +457,9 @@ VkFormat cache_peek_format(const std::string& path, uint64_t key) {
     uint8_t head[kCacheHeadBytes];
     if (!f || !f.read(reinterpret_cast<char*>(head), sizeof head)) return VK_FORMAT_UNDEFINED;
     if (std::memcmp(head, kCacheMagic, 4) != 0 || get32(head + 4) != kCacheVersion || get64(head + 8) != key) return VK_FORMAT_UNDEFINED;
-    return static_cast<VkFormat>(get32(head + 16));
+    const VkFormat ef = static_cast<VkFormat>(get32(head + 16));
+    learn_entry_format(key, ef);
+    return ef;
 }
 
 }  // namespace
@@ -560,8 +601,18 @@ int entry_qualities(AstcQuality am, int q[2]) {
 }
 }  // namespace
 
-VkFormat cache_entry_format(const Texture& t, bool bc1) {
+thread_local EntryFormatHook t_entry_hook = nullptr;
+thread_local void* t_entry_hook_ctx = nullptr;
+void set_entry_format_hook(EntryFormatHook fn, void* ctx) {
+    t_entry_hook = fn;
+    t_entry_hook_ctx = ctx;
+}
+
+VkFormat cache_entry_format(const Texture& t, bool bc1, bool no_disk) {
     if (!t.mem) return VK_FORMAT_UNDEFINED;
+    // no_disk: what this process learned only. No non-BC7 entry seen yet (the usual case): BC7, without hashing the storage.
+    // (With bc1 the alpha scan below still decides between BC1 and BC7.)
+    if (no_disk && !bc1 && astc_quality() != AstcQuality::Uncompressed && g_learned_non_bc7.load(std::memory_order_relaxed) == 0) return VK_FORMAT_UNDEFINED;
     const TexLayout L = compute_texture_layout(t.b);
     if (!L.valid || !L.fmt || !L.fmt->astc || t.b.samples > 1 || t.storage_size < L.storage_size) return VK_FORMAT_UNDEFINED;
     const VkFormat rgba = L.fmt->srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
@@ -575,15 +626,16 @@ VkFormat cache_entry_format(const Texture& t, bool bc1) {
         const int n = entry_qualities(am, q);
         for (int i = 0; i < n; ++i) {
             const uint64_t key = cache_key_of(t.storage_size, t.mem, L, geo, *L.fmt, q[i]);
-            const VkFormat f = cache_peek_format(bc7_cache_path(t, key), key);
+            const VkFormat f = no_disk ? learned_entry_format(key) : cache_peek_format(bc7_cache_path(t, key), key);
             if (f == VK_FORMAT_UNDEFINED) continue;
             if (f == rgba || (f == VK_FORMAT_BC5_UNORM_BLOCK && !L.fmt->srgb)) return f;   // the first valid entry decides
             break;
         }
     }
     if (!bc1 || t.vpool || (tex_edit_active() && tex_edit_match(t, t.mem).id)) return VK_FORMAT_UNDEFINED;
-    // BC1: an entry of its own key needs no scan (prepare_texture makes the same choice: the entry, else the scan)
-    if (!cache_dir().empty()) {
+    // BC1: an entry of its own key needs no scan (prepare_texture makes the same choice: the entry, else the scan). no_disk: the scan only
+    // (a BC1 entry is only ever made for a texture the scan proves opaque, so the answer is the same)
+    if (!no_disk && !cache_dir().empty()) {
         const uint64_t key = cache_key_of(t.storage_size, t.mem, L, geo, *L.fmt, kBc1KeySeed);
         if (cache_peek_format(bc7_cache_path(t, key), key) == bc1f) return bc1f;
     }
@@ -591,7 +643,13 @@ VkFormat cache_entry_format(const Texture& t, bool bc1) {
 }
 
 bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out) {
-    out = PreparedTexture();
+    {   // the output's data buffer is kept (its capacity): a caller that reuses `out` writes into memory that is already paged in
+        std::vector<uint8_t> keep;
+        keep.swap(out.data);
+        out = PreparedTexture();
+        keep.clear();
+        out.data.swap(keep);
+    }
     const auto fail = [&out, &t](std::string msg) {
         NXLOG_W(kTag, "texture %u: %s", t.id, msg.c_str());
         out.error = std::move(msg);
@@ -631,11 +689,15 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     bool upgrade_possible = false;
     uint64_t upgrade_key = 0;
     int upgrade_quality = 0;
+    // [nvn] tex_async = standin: a BC7 image whose data is not ready gets a stand-in at once. No cache key, no file lookup, no read: the disk
+    // is only touched by the background job. Host pixel edits keep the synchronous path (their data never comes from the cache).
+    const bool standin_now = caps.standin_first && caps.provisional && fmt.astc && !caps.astc && caps.bc7_transcode && !uncompressed &&
+                             caps.image_format == bc7_format && !tex_edit_active();
     if (fmt.astc) {
         if (caps.astc) mode = Mode::Passthrough;
         else if (caps.bc7_transcode && !uncompressed) mode = Mode::Bc7;
         else mode = Mode::Rgba8;
-        if (!caps.astc && !uncompressed && !cache_dir().empty()) {
+        if (!caps.astc && !uncompressed && !cache_dir().empty() && !standin_now) {
             // A cache entry may hold the texture as BC7 (the default), as RGBA8 (a texture BC7 cannot reproduce well) or as BC5 (a two-channel
             // normal map: blue 0 and alpha 1 on sampling). The image the data goes into is made in the entry's format (caps.image_format).
             const VkFormat bc5_format = VK_FORMAT_BC5_UNORM_BLOCK;
@@ -655,6 +717,8 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
                 else if (ef == bc7_format && !caps.skip_entries && (want == VK_FORMAT_UNDEFINED || want == bc7_format)) { mode = Mode::Bc7; chosen = i; }
             }
             entry_applies = chosen >= 0;
+            if (t_entry_hook) t_entry_hook(t_entry_hook_ctx, entry_applies && (mode == Mode::Rgba8 || mode == Mode::Bc5) ? (mode == Mode::Bc5 ? bc5_format : rgba8_format)
+                                                                                                                  : VK_FORMAT_UNDEFINED);
             const int use = entry_applies ? chosen : nq - 1;   // no usable entry: the fast preset's file is where a transcode goes
             key = cand[use].key;
             cache_file = cand[use].path;
@@ -796,7 +860,14 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     const bool bc1 = mode == Mode::Bc1;
     const int quality = bc7 ? bc7_quality() : 0;
     if (entry_applies && !edit_make) {
-        if (cache_read(cache_file, key, out)) {
+        const bool rt = nxrt::hitch_on_render_thread();
+        const auto tr0 = std::chrono::steady_clock::now();
+        const bool hit = cache_read(cache_file, key, out);
+        if (rt) {
+            g_rt_cache_reads.fetch_add(1, std::memory_order_relaxed);
+            g_rt_cache_read_us.fetch_add(static_cast<uint64_t>(ms_since(tr0) * 1000.0), std::memory_order_relaxed);
+        }
+        if (hit) {
             out.from_cache = true;
             NXLOG_I(kTag, "texture %u: %s data from cache %s", t.id, mode == Mode::Bc5 ? "BC5" : mode == Mode::Rgba8 ? "RGBA8" : bc1 ? "BC1" : "BC7", cache_file.c_str());
             if (upgrade_possible && !edit_make) schedule_upgrade(t, src_mem, upgrade_key, upgrade_quality, cache_dir());   // a fast entry served now; the high one is made behind
@@ -815,7 +886,8 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     if (gpu_kind && (bc7 || bc1) && !cache_dir().empty() && (entry_format == VK_FORMAT_UNDEFINED || entry_format == out.format)) {
         gpu_key = cache_key_of(t.storage_size, src_mem, L, geo, fmt, (bc1 ? 0x300 : 0x200) + kGpuEncoderVersion);
         gpu_file = bc7_cache_path(t, gpu_key);
-        if (!caps.skip_entries && cache_peek_format(gpu_file, gpu_key) == out.format && cache_read(gpu_file, gpu_key, out)) {
+        // (standin_now: no file is opened on the render thread; the GPU transcodes, or the background job reads the entry behind a stand-in)
+        if (!caps.skip_entries && !standin_now && cache_peek_format(gpu_file, gpu_key) == out.format && cache_read(gpu_file, gpu_key, out)) {
             out.from_cache = true;
             NXLOG_I(kTag, "texture %u: %s data (GPU encoded) from cache %s", t.id, bc1 ? "BC1" : "BC7", gpu_file.c_str());
             if (upgrade_possible) schedule_upgrade(t, src_mem, upgrade_key, upgrade_quality, cache_dir());
@@ -845,22 +917,60 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     if (!(bc7 || bc1) || (entry_format != VK_FORMAT_UNDEFINED && entry_format != out.format)) cache_file.clear();
     if (edit_make) cache_file.clear();   // edited data stays out of the shared cache
     // needed this frame and no entry: the quickest preset now (not cached, no upgrade); the background job makes the entry and the real data
-    const bool provisional = caps.provisional && ((bc7 && quality > 0) || bc1) && !edit_make;
+    // (standin_now: a stand-in at any preset, as the background job makes the real data; standin_now only applies to BC7 images)
+    const bool provisional = caps.provisional && ((bc7 && (quality > 0 || standin_now)) || bc1) && !edit_make;
     if (provisional) {
         cache_file.clear();
         out.provisional = true;
     }
 
+    // A stand-in only has to look right for the half second until the background job lands: the big levels are filled with
+    // solid BC7 blocks taken from a small level (decoded once per layer) instead of being encoded, so it costs about 1 ms, not 50-150.
+    size_t solid_src = geo.size();
+    if (provisional && geo[0].d == 1 && geo.size() > 1) {
+        // [nvn] standin_full_px: levels up to this size are encoded (preset 0), the bigger ones are solid blocks taken from the first of them. 256 cost
+        // 5-10 s of render thread per Dagsion load (580 stand-ins at 10-40 ms, mostly the 256 level's encode); 64 costs 0.5 s.
+        static const uint32_t solid_max = static_cast<uint32_t>(std::max<int64_t>(16, config_get_int("nvn", "standin_full_px", 64)));
+        for (size_t i = 0; i < geo.size(); ++i)
+            if (std::max(geo[i].w, geo[i].h) <= solid_max) { solid_src = i; break; }
+        if (solid_src == 0 || solid_src >= geo.size()) solid_src = geo.size();
+    }
+    // [nvn] standin_encode_px (default 16): of the levels from solid_src on, only those up to this size are encoded (BC7 preset 0); the ones
+    // between (64 and 32 px) are solid blocks from the solid_src level too. Their encode was most of a stand-in's cost on the render thread
+    // (bc7e in 97 of 254 samples of tex_ensure_current in a 4K load-in frame, about 0.7 ms per stand-in). At least standin_full_px: as before.
+    size_t solid_end = solid_src;
+    if (solid_src < geo.size()) {
+        static const uint32_t enc_max = static_cast<uint32_t>(std::max<int64_t>(1, config_get_int("nvn", "standin_encode_px", 16)));
+        while (solid_end < geo.size() && std::max(geo[solid_end].w, geo[solid_end].h) > enc_max) ++solid_end;
+    }
+
     // ---- the source image: tight linear buffer --------------------------------------------------------------------------
-    std::vector<uint8_t> lin;
-    if (!make_linear(L, geo, fmt, src_mem, lin)) return fail("untile failed");
+    // A stand-in reads only the small levels it encodes (solid_src and after): untiling the big ones, which it never looks at, was most of its cost.
+    // The buffer then starts at the first of those levels (lin_base): the big levels' space was allocated and zeroed for nothing.
+    // A pass-through texture is untiled straight into the output's buffer (out.data, whose capacity a reusing caller keeps).
+    std::vector<uint8_t> lin_own;
+    std::vector<uint8_t>& lin = mode == Mode::Passthrough && solid_src >= geo.size() ? out.data : lin_own;
+    uint64_t lin_base = 0;
+    if (solid_src < geo.size() && L.block_linear) {
+        const LevelGeom& last = geo.back();
+        lin_base = geo[solid_src].lin_off;
+        lin.assign(static_cast<size_t>(last.lin_off + last.slice * L.layers - lin_base), 0);
+        for (size_t i = solid_src; i < L.layout.levels.size(); ++i) {
+            const tegra::LevelLayout& lv = L.layout.levels[i];
+            for (uint32_t layer = 0; layer < L.layers; ++layer)
+                tegra::untile_level(L.desc, lv, src_mem + layer * L.layout.tiled_layer_stride + lv.tiled_offset,
+                                    lin.data() + lv.linear_offset - lin_base + layer * lv.linear_slice_size);
+        }
+    } else if (!make_linear(L, geo, fmt, src_mem, lin)) {
+        return fail("untile failed");
+    }
 
     if (mode == Mode::Passthrough) {
         // button prompt icons and the like: a host hook may replace the pixels of a small single-level BC7 sRGB texture
         if (fmt.vk == VK_FORMAT_BC7_SRGB_BLOCK && L.levels == 1 && L.layers == 1 && geo[0].d == 1 && geo[0].w <= 128 &&
             geo[0].h <= 128 && texture_override_active() && texture_override_apply(t, geo[0].w, geo[0].h, lin))
             NXLOG_I(kTag, "texture %u: content replaced by the host (%ux%u BC7)", t.id, geo[0].w, geo[0].h);
-        out.data = std::move(lin);
+        if (&lin != &out.data) out.data = std::move(lin);
         return true;
     }
 
@@ -871,7 +981,32 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
         a2b_bc7_encoder(&name);
         NXLOG_I(kTag, "ASTC transcoder: %s; [nvn] bc7_quality %d, [gfx] astc_quality %s", name, bc7_quality(), astc_quality_name(aq));
     }
-    out.data.assign(static_cast<size_t>(out_total), 0);
+    // Compact stand-in (TexCaps::compact_standin): the solid levels keep only their distinct block rows (the source row of block row y only
+    // moves forward with y); every level is then laid out again, back to back.
+    uint64_t data_total = out_total;
+    if (provisional && caps.compact_standin && bc7 && solid_src < geo.size() && !edit_make) {
+        const LevelGeom& sg = geo[solid_src];
+        uint64_t off = 0;
+        for (size_t i = 0; i < geo.size(); ++i) {
+            PreparedLevel& pl = out.level[i];
+            pl.offset = off;
+            if (i < solid_end) {
+                const LevelGeom& g = geo[i];
+                const uint32_t bh = (g.h + 3) / 4;
+                uint32_t prev = ~0u, n = 0;
+                for (uint32_t by = 0; by < bh; ++by) {
+                    const uint32_t sy = std::min(sg.h - 1, static_cast<uint32_t>((static_cast<uint64_t>(by) * 4 + 2) * sg.h / g.h));
+                    if (sy != prev) { ++n; prev = sy; }
+                }
+                pl.size = static_cast<uint64_t>(n) * pl.row_blocks * 16 * L.layers;
+                pl.rows.resize(static_cast<size_t>(bh) * L.layers);
+            }
+            off += pl.size;
+        }
+        data_total = off;
+        out.compact = true;
+    }
+    out.data.assign(static_cast<size_t>(data_total), 0);
     a2b_options opt{};
     opt.quality = provisional ? 0 : quality;
     opt.threads = provisional ? 1 : caps.encode_threads;   // 0: all hardware threads; a stand-in is small work: thread start-up per level cost more than the encode
@@ -918,43 +1053,85 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
                 bc7 ? "BC7" : bc1 ? "BC1" : "RGBA8", geo[0].w, geo[0].h, L.levels, ms);
         return true;
     }
-    // A stand-in only has to look right for the half second until the background job lands: the big levels are filled with
-    // solid BC7 blocks taken from a small level (decoded once per layer) instead of being encoded, so it costs about 1 ms, not 50-150.
-    size_t solid_src = geo.size();
-    if (provisional && geo[0].d == 1 && geo.size() > 1) {
-        // [nvn] standin_full_px: levels up to this size are encoded (preset 0), the bigger ones are solid blocks taken from the first of them. 256 cost
-        // 5-10 s of render thread per Dagsion load (580 stand-ins at 10-40 ms, mostly the 256 level's encode); 64 costs 0.5 s.
-        static const uint32_t solid_max = static_cast<uint32_t>(std::max<int64_t>(16, config_get_int("nvn", "standin_full_px", 64)));
-        for (size_t i = 0; i < geo.size(); ++i)
-            if (std::max(geo[i].w, geo[i].h) <= solid_max) { solid_src = i; break; }
-        if (solid_src == 0 || solid_src >= geo.size()) solid_src = geo.size();
-    }
-    std::vector<uint8_t> solid_rgba;
+    std::vector<uint8_t> solid_rgba, solid_enc;
+    std::vector<uint32_t> solid_xs;
     uint32_t solid_layer = ~0u;
+    // [nvn] standin_copy (default on): the solid blocks of the source level are encoded once per layer and copied into the big levels, a row of
+    // blocks that maps to the same source row as the one before is copied whole (a 4096x4096 stand-in wrote a million blocks one by one, with
+    // two 64-bit divisions each). Byte for byte the old result. false: each block computed as before (A/B). BC7 (16-byte) or BC1 (8-byte) blocks.
+    const bool solid_copy = solid_src < geo.size() && config_get_bool("nvn", "standin_copy", true);
+    const size_t sbb = bc1 ? 8 : 16;   // bytes of a stand-in's solid block (the compact layout is BC7 only)
     std::vector<uint8_t> bc1_rgba;
     const bool bc1_alpha_checked = !bc1;   // a BC1 texture's decoded alpha is checked (cheap next to the encode)
     bool bc1_alpha_seen = false;
     for (size_t i = 0; i < geo.size(); ++i) {
         const LevelGeom& g = geo[i];
         const PreparedLevel& pl = out.level[i];
-        if (i < solid_src && solid_src < geo.size()) {
+        if (i < solid_end && solid_src < geo.size()) {
             const LevelGeom& sg = geo[solid_src];
             const uint64_t out_slice = pl.size / L.layers;
             const uint32_t bw = (g.w + 3) / 4, bh = (g.h + 3) / 4;
-            const uint32_t bb = bc1 ? 8 : 16;
-            if (out_slice != static_cast<uint64_t>(bw) * bh * bb) return fail("internal: stand-in size mismatch");
+            if (!out.compact && out_slice != static_cast<uint64_t>(bw) * bh * sbb) return fail("internal: stand-in size mismatch");
             for (uint32_t layer = 0; layer < L.layers; ++layer) {
                 if (solid_layer != layer) {
                     a2b_input sin = in;
                     sin.width = sg.w;
                     sin.height = sg.h;
                     solid_rgba.resize(static_cast<size_t>(sg.w) * sg.h * 4);
-                    const a2b_status st = a2b_decode_astc_rgba8(&sin, lin.data() + sg.lin_off + static_cast<uint64_t>(layer) * sg.slice,
+                    const a2b_status st = a2b_decode_astc_rgba8(&sin, lin.data() + sg.lin_off - lin_base + static_cast<uint64_t>(layer) * sg.slice,
                                                                 static_cast<size_t>(sg.slice), 1, solid_rgba.data(), nullptr);
                     if (st != A2B_OK) return fail(std::string("ASTC decode for the stand-in failed: ") + a2b_status_string(st));
                     solid_layer = layer;
+                    if (solid_copy) {   // every source texel's block, once
+                        solid_enc.resize(static_cast<size_t>(sg.w) * sg.h * sbb);
+                        for (size_t px = 0; px < static_cast<size_t>(sg.w) * sg.h; ++px) {
+                            if (bc1) bc1_solid_block(solid_rgba.data() + px * 4, solid_enc.data() + px * sbb);
+                            else bc7_solid_block(solid_rgba.data() + px * 4, solid_enc.data() + px * sbb);
+                        }
+                    }
                 }
                 uint8_t* dst = out.data.data() + pl.offset + static_cast<uint64_t>(layer) * out_slice;
+                if (out.compact) {   // the distinct rows of this layer, each made once from the source row's blocks
+                    const size_t row_bytes = static_cast<size_t>(bw) * 16;
+                    std::vector<uint64_t>& rows = out.level[i].rows;
+                    uint32_t prev_sy = ~0u;
+                    uint64_t cur = 0;
+                    size_t k = 0;
+                    for (uint32_t by = 0; by < bh; ++by) {
+                        const uint32_t sy = std::min(sg.h - 1, static_cast<uint32_t>((static_cast<uint64_t>(by) * 4 + 2) * sg.h / g.h));
+                        if (sy != prev_sy) {
+                            prev_sy = sy;
+                            uint8_t* row = dst + k * row_bytes;
+                            cur = static_cast<uint64_t>(row - out.data.data());
+                            ++k;
+                            for (uint32_t bx = 0; bx < bw; ++bx) {
+                                const uint32_t sx = std::min(sg.w - 1, static_cast<uint32_t>((static_cast<uint64_t>(bx) * 4 + 2) * sg.w / g.w));
+                                bc7_solid_block(solid_rgba.data() + (static_cast<size_t>(sy) * sg.w + sx) * 4, row + static_cast<size_t>(bx) * 16);
+                            }
+                        }
+                        rows[static_cast<size_t>(layer) * bh + by] = cur;
+                    }
+                    continue;
+                }
+                if (solid_copy) {
+                    solid_xs.resize(bw);
+                    for (uint32_t bx = 0; bx < bw; ++bx)
+                        solid_xs[bx] = std::min(sg.w - 1, static_cast<uint32_t>((static_cast<uint64_t>(bx) * 4 + 2) * sg.w / g.w));
+                    const size_t row_bytes = static_cast<size_t>(bw) * sbb;
+                    uint32_t prev_sy = ~0u;
+                    for (uint32_t by = 0; by < bh; ++by) {
+                        const uint32_t sy = std::min(sg.h - 1, static_cast<uint32_t>((static_cast<uint64_t>(by) * 4 + 2) * sg.h / g.h));
+                        uint8_t* row = dst + static_cast<size_t>(by) * row_bytes;
+                        if (sy == prev_sy) {
+                            std::memcpy(row, row - row_bytes, row_bytes);
+                            continue;
+                        }
+                        prev_sy = sy;
+                        const uint8_t* src = solid_enc.data() + static_cast<size_t>(sy) * sg.w * sbb;
+                        for (uint32_t bx = 0; bx < bw; ++bx) std::memcpy(row + static_cast<size_t>(bx) * sbb, src + static_cast<size_t>(solid_xs[bx]) * sbb, sbb);
+                    }
+                    continue;
+                }
                 for (uint32_t by = 0; by < bh; ++by) {
                     const uint32_t sy = std::min(sg.h - 1, static_cast<uint32_t>((static_cast<uint64_t>(by) * 4 + 2) * sg.h / g.h));
                     for (uint32_t bx = 0; bx < bw; ++bx) {
@@ -975,7 +1152,7 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
         if (bc1 && div_up(g.w, 4) * div_up(g.h, 4) * 8 != out_slice) return fail("internal: BC1 slice size mismatch");
         for (uint32_t layer = 0; layer < L.layers; ++layer)
             for (uint32_t z = 0; z < g.d; ++z) {
-                const uint8_t* src = lin.data() + g.lin_off + static_cast<uint64_t>(layer) * g.slice + z * in_slice;
+                const uint8_t* src = lin.data() + g.lin_off - lin_base + static_cast<uint64_t>(layer) * g.slice + z * in_slice;
                 uint8_t* dst = out.data.data() + pl.offset + (static_cast<uint64_t>(layer) * g.d + z) * out_slice;
                 a2b_status st;
                 if (bc1) {

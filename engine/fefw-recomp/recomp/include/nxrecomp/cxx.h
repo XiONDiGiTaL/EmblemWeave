@@ -15,6 +15,111 @@
 
 #define NX_BASE_UNUSED 0
 
+// NZCV in a local of the lifted function (nxrecomp/opt.py). The four flags are computed exactly as ctx.h's helpers do (and read
+// from there by get_nzcv, the context stores and any direct use), and the setter also records what it compared, so cond() can test
+// the operands directly: `cmp; b.ge` becomes one compare and branch instead of the N == V formula, which the host compiler does not
+// fold back. Each fast path is the same function of the operands as the flag formula it replaces (AArch64 condition semantics):
+//   subtraction a - b (adds with carry-in 1 of ~b): EQ a == b, CS a >= b, HI a > b, GE a >= b signed, GT a > b signed;
+//   FCMP a, b: EQ a == b, MI a < b, CS !(a < b), HI !(a <= b), GE a >= b, GT a > b, VS unordered.
+// Once inlined, the kind is a constant at almost every use and the unused fields disappear.
+enum { NXF_RAW = 0, NXF_ADD64, NXF_ADD32, NXF_FCMP };
+struct NxFlags {
+    uint32_t N, Z, C, V;
+    uint32_t k, cin;
+    uint64_t a, b;
+    double fa, fb;
+};
+#define NXF_INLINE static inline __attribute__((always_inline))
+NXF_INLINE uint64_t adds64(NxFlags *c, uint64_t a, uint64_t b, uint32_t cin) {
+    uint64_t r = a + b + cin;
+    c->N = (uint32_t)(r >> 63);
+    c->Z = r == 0;
+    c->C = (r < a) || (cin && r == a);
+    c->V = (uint32_t)(((a ^ r) & (b ^ r)) >> 63);
+    c->k = NXF_ADD64; c->a = a; c->b = b; c->cin = cin;
+    return r;
+}
+NXF_INLINE uint32_t adds32(NxFlags *c, uint32_t a, uint32_t b, uint32_t cin) {
+    uint64_t wide = (uint64_t)a + b + cin;
+    uint32_t r = (uint32_t)wide;
+    c->N = r >> 31;
+    c->Z = r == 0;
+    c->C = (uint32_t)(wide >> 32);
+    c->V = ((a ^ r) & (b ^ r)) >> 31;
+    c->k = NXF_ADD32; c->a = a; c->b = b; c->cin = cin;
+    return r;
+}
+NXF_INLINE uint64_t logic64(NxFlags *c, uint64_t r) { c->N = (uint32_t)(r >> 63); c->Z = r == 0; c->C = 0; c->V = 0; c->k = NXF_RAW; return r; }
+NXF_INLINE uint32_t logic32(NxFlags *c, uint32_t r) { c->N = r >> 31; c->Z = r == 0; c->C = 0; c->V = 0; c->k = NXF_RAW; return r; }
+NXF_INLINE void set_nzcv(NxFlags *c, int f) { c->N = (f >> 3) & 1; c->Z = (f >> 2) & 1; c->C = (f >> 1) & 1; c->V = f & 1; c->k = NXF_RAW; }
+NXF_INLINE uint64_t get_nzcv(const NxFlags *c) { return ((uint64_t)c->N << 31) | ((uint64_t)c->Z << 30) | ((uint64_t)c->C << 29) | ((uint64_t)c->V << 28); }
+NXF_INLINE void fcmp(NxFlags *c, double a, double b) {
+    if (a != a || b != b) set_nzcv(c, 3);
+    else if (a == b) set_nzcv(c, 6);
+    else if (a < b) set_nzcv(c, 8);
+    else set_nzcv(c, 2);
+    c->k = NXF_FCMP; c->fa = a; c->fb = b;
+}
+NXF_INLINE int cond(const NxFlags *c, int cc) {
+    int r;
+    if (c->k == NXF_ADD64 && c->cin == 1) {             // SUBS / CMP a, b with b = ~c->b
+        const uint64_t a = c->a, b = ~c->b;
+        switch (cc >> 1) {
+        case 0: r = a == b; break;
+        case 1: r = a >= b; break;
+        case 4: r = a > b; break;
+        case 5: r = (int64_t)a >= (int64_t)b; break;
+        case 6: r = (int64_t)a > (int64_t)b; break;
+        case 7: return 1;
+        default: goto raw;
+        }
+        return (cc & 1) ? !r : r;
+    }
+    if (c->k == NXF_ADD32 && c->cin == 1) {
+        const uint32_t a = (uint32_t)c->a, b = ~(uint32_t)c->b;
+        switch (cc >> 1) {
+        case 0: r = a == b; break;
+        case 1: r = a >= b; break;
+        case 4: r = a > b; break;
+        case 5: r = (int32_t)a >= (int32_t)b; break;
+        case 6: r = (int32_t)a > (int32_t)b; break;
+        case 7: return 1;
+        default: goto raw;
+        }
+        return (cc & 1) ? !r : r;
+    }
+    if (c->k == NXF_FCMP) {
+        const double a = c->fa, b = c->fb;
+        switch (cc >> 1) {
+        case 0: r = a == b; break;
+        case 1: r = !(a < b); break;
+        case 2: r = a < b; break;
+        case 3: r = a != a || b != b; break;
+        case 4: r = !(a <= b); break;
+        case 5: r = a >= b; break;
+        case 6: r = a > b; break;
+        default: return 1;
+        }
+        return (cc & 1) ? !r : r;
+    }
+raw:
+    switch (cc >> 1) {
+    case 0: r = c->Z; break;
+    case 1: r = c->C; break;
+    case 2: r = c->N; break;
+    case 3: r = c->V; break;
+    case 4: r = c->C && !c->Z; break;
+    case 5: r = c->N == c->V; break;
+    case 6: r = c->N == c->V && !c->Z; break;
+    default: return 1;
+    }
+    return (cc & 1) ? !r : r;
+}
+
+// ---- native routines outside the lifted code (fefw.exe: game-build/fefw/src/fefw_hle.cpp), for GameConfig.inline_replace bodies --------
+// `orig` is the lifted original (NX_ORIG in the body): the routine hands the call to it when it cannot give the same result.
+extern "C" void nx_hle_zstd_multiframe(Ctx *NX_NOESC c, void (*orig)(Ctx *));
+
 namespace nx {
 
 using ::adds64; using ::adds32; using ::logic64; using ::logic32; using ::set_nzcv; using ::get_nzcv;
@@ -129,13 +234,15 @@ NX_INLINE void barrier() { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
 
 NX_INLINE uint64_t subs64(Ctx *c, uint64_t a, uint64_t b) { return adds64(c, a, ~b, 1); }
 NX_INLINE uint32_t subs32(Ctx *c, uint32_t a, uint32_t b) { return adds32(c, a, ~b, 1); }
+NX_INLINE uint64_t subs64(NxFlags *c, uint64_t a, uint64_t b) { return adds64(c, a, ~b, 1); }
+NX_INLINE uint32_t subs32(NxFlags *c, uint32_t a, uint32_t b) { return adds32(c, a, ~b, 1); }
 
 
 
 
 
-template <typename F>
-NX_INLINE void fcmp(Ctx *c, F a, F b) {
+template <typename F, typename C>
+NX_INLINE void fcmp(C *c, F a, F b) {
     if (std::isnan(a) || std::isnan(b))
         set_nzcv(c, 0b0011);
     else if (a == b)
@@ -555,6 +662,51 @@ inline V128 clmul64(uint64_t a, uint64_t b) {
     return r;
 }
 
+// ---- scalar results into a vector register (nxrecomp/opt.py 'vstore') ----------------------------------------------------
+// Writing an S / D / W / X element 0 of a V register clears the rest. Emitted as vzero + element store, that is a 16-byte store and
+// a smaller one to the same register; a later 16-byte read of it cannot be forwarded from the two stores and waits for both to
+// reach the cache. These build the whole register first, so it is one 16-byte store. Same 128 bits.
+NX_INLINE V128 lane0_f(float t) { V128 v; v.d[0] = 0; v.d[1] = 0; v.f[0] = t; return v; }
+NX_INLINE V128 lane0_df(double t) { V128 v; v.d[1] = 0; v.df[0] = t; return v; }
+NX_INLINE V128 lane0_w(uint32_t t) { V128 v; v.d[0] = t; v.d[1] = 0; return v; }
+NX_INLINE V128 lane0_d(uint64_t t) { V128 v; v.d[0] = t; v.d[1] = 0; return v; }
+// both halves of a register (MOVI / MVNI / FMOV vector immediates), written as one 16-byte store (opt vstore)
+NX_INLINE V128 v_dd(uint64_t lo, uint64_t hi) { V128 v; v.d[0] = lo; v.d[1] = hi; return v; }
+
+// ---- C library string routines, run natively (GameConfig.inline_replace) -------------------------------------------------
+// The guest's own memcpy / memmove / memset / memcmp / strlen / strcmp (nnSdk's, the Arm optimized-routines ones) lifted
+// instruction by instruction are byte loops and register shuffles; these give the same results with the host's routines. Each
+// takes the AAPCS64 arguments from x0.. and leaves the result in x0 exactly as the guest routine does (memcpy / memmove / memset:
+// x0 unchanged = the destination; memcmp / strcmp: the difference of the first differing bytes as unsigned chars, written as a W
+// register, 0 when equal; strlen: the length). Registers the guest routine clobbers (x1..x18, v0..v7, NZCV) are left as they
+// are: no caller reads them after the call (AAPCS64). The guest memcpy (__memcpy_aarch64) is overlap-safe like memmove.
+NX_INLINE void hle_memmove(Ctx *c) { std::memmove(reinterpret_cast<void *>(c->x[0]), reinterpret_cast<const void *>(c->x[1]), c->x[2]); }
+NX_INLINE void hle_memset(Ctx *c) { std::memset(reinterpret_cast<void *>(c->x[0]), static_cast<int>(static_cast<uint8_t>(c->x[1])), c->x[2]); }
+NX_INLINE void hle_strlen(Ctx *c) { c->x[0] = std::strlen(reinterpret_cast<const char *>(c->x[0])); }
+NX_INLINE uint32_t hle_bytediff(uint64_t x, uint64_t y) {   // first differing byte (lowest address = lowest byte) of two unequal words
+    const unsigned s = static_cast<unsigned>(__builtin_ctzll(x ^ y)) & ~7u;
+    return static_cast<uint32_t>((x >> s) & 0xff) - static_cast<uint32_t>((y >> s) & 0xff);
+}
+NX_INLINE void hle_memcmp(Ctx *c) {
+    const uint8_t *a = reinterpret_cast<const uint8_t *>(c->x[0]), *b = reinterpret_cast<const uint8_t *>(c->x[1]);
+    uint64_t n = c->x[2], i = 0;
+    uint32_t r = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t x, y;
+        std::memcpy(&x, a + i, 8);
+        std::memcpy(&y, b + i, 8);
+        if (x != y) { c->x[0] = hle_bytediff(x, y); return; }
+    }
+    for (; i < n; i++)
+        if (a[i] != b[i]) { r = static_cast<uint32_t>(a[i]) - static_cast<uint32_t>(b[i]); break; }
+    c->x[0] = r;
+}
+NX_INLINE void hle_strcmp(Ctx *c) {
+    const uint8_t *a = reinterpret_cast<const uint8_t *>(c->x[0]), *b = reinterpret_cast<const uint8_t *>(c->x[1]);
+    for (;; a++, b++)
+        if (*a != *b || !*a) { c->x[0] = static_cast<uint32_t>(*a) - static_cast<uint32_t>(*b); return; }
+}
+
 }  // namespace nx
 
 #include "cxx_fp.h"
@@ -576,7 +728,7 @@ NX_INLINE void nx_call_indirect(Ctx *c, uint64_t a) {
     const uint64_t i = __builtin_rotateright64(a - 0x7100000000ull, 2);
     if (i < __atomic_load_n(&nx_fn_flat_n, __ATOMIC_ACQUIRE)) {
         if (const uint32_t off = nx_fn_flat[i]) {
-            reinterpret_cast<void (*)(Ctx *)>(nx_fn_flat_host + off)(c);
+            reinterpret_cast<void (*)(Ctx *NX_NOESC)>(nx_fn_flat_host + off)(c);
             return;
         }
     }

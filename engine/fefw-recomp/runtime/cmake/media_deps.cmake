@@ -24,12 +24,16 @@ else()
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_LIBVPX=0)
 endif()
 
-# dav1d (BSD-2-Clause, third_party/dav1d) for the Switch 2 movie player's AV1 decoder (src/media/movie_vdec.cpp): built from source, C only.
+# dav1d (BSD-2-Clause, third_party/dav1d) for the Switch 2 movie player's AV1 decoder (src/media/movie_vdec.cpp): built from source, with
+# its x86-64 assembly when NASM is found (NXRT_DAV1D_ASM; the runtime logs which one it has).
 option(NXRT_DAV1D "Build dav1d for AV1 movies (src/media/movie_vdec.cpp)" ON)
 if(NXRT_DAV1D)
     add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../third_party/dav1d" "${CMAKE_BINARY_DIR}/third_party/dav1d")
     target_link_libraries(nxrt PUBLIC nxrt_dav1d)
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=1)
+    if(NXRT_DAV1D_ASM)
+        target_compile_definitions(nxrt PRIVATE NXRT_DAV1D_ASM=1)
+    endif()
 else()
     target_compile_definitions(nxrt PRIVATE NXRT_HAVE_DAV1D=0)
 endif()

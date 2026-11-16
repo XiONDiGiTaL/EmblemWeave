@@ -23,9 +23,9 @@ function Get-Source {
     Remove-Item -Force $archive
 }
 
-Get-Source -Url 'https://github.com/ARM-software/astc-encoder/archive/refs/tags/5.7.0.tar.gz' `
-    -Sha256 '7c1b28ece59c9c2737e297123a9910c1c548676c7aed87a09d5734e2fa7bdaf0' `
-    -Name 'astc-encoder-5.7.0' -Inner 'astc-encoder-5.7.0' -Folder 'astc-encoder'
+Get-Source -Url 'https://github.com/ARM-software/astc-encoder/archive/refs/tags/5.7.1.tar.gz' `
+    -Sha256 '37ff3928c4c156fb3ac0d1adb5df144ff9c5cdbc8a8e1ffeb20229cc7f35c767' `
+    -Name 'astc-encoder-5.7.1' -Inner 'astc-encoder-5.7.1' -Folder 'astc-encoder'
 
 Get-Source -Url 'https://github.com/richgel999/bc7enc_rdo/archive/b9438627eef73a1157e84201b6fa6eb2ffd6d9f0.tar.gz' `
     -Sha256 'bbb33d1dbb6178a3a2c044956c3cc0b8ea9fc2f2903824379dd86f87d53b64c6' `

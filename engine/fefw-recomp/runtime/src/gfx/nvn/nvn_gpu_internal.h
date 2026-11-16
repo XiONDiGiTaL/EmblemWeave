@@ -40,6 +40,7 @@ struct Counters {
     std::atomic<uint64_t> passes{0}, pass_breaks{0}, pipelines_created{0}, pipeline_cache_hits{0}, descriptor_sets{0};
     std::atomic<uint64_t> textures_created{0}, texture_uploads{0}, texture_upload_bytes{0}, bc7_transcodes{0}, textures_failed{0};
     std::atomic<uint64_t> pools_imported{0}, unresolved_addresses{0}, unsupported_ops{0}, submit_replay_ns{0};
+    std::atomic<uint64_t> game_barriers{0}, game_barriers_left_out{0}, dispatch_barriers_left_out{0};   // nvnCommandBufferBarrier replayed (left out: [nvn] game_barriers = tracked); [nvn] dispatch_barriers = tracked
 };
 Counters& counters();
 bool counters_ready();   // false until the GPU back end is set up (counters() would read through a null pointer)
@@ -78,6 +79,7 @@ struct Frame {
     VkCommandBuffer cb = VK_NULL_HANDLE;
     uint64_t serial = 0;          // the timeline value this submission signals when the GPU has run it
     void* slot = nullptr;         // nvn_gpu.cpp: the submission slot (command pool, descriptor pools, upload memory)
+    bool split_ok = false;        // split_submission may hand the commands recorded so far to the GPU (a normal, signalled submission)
     // Host-visible memory valid until the submission has completed: small per-draw data (support buffer, driver constants,
     // inline uniform data). align is a power of two.
     UploadAlloc upload(VkDeviceSize size, VkDeviceSize align);
@@ -91,6 +93,14 @@ struct Frame {
     // A descriptor set of this submission's pool (freed when the slot is reused). Null on failure.
     VkDescriptorSet alloc_set(VkDescriptorSetLayout layout);
 };
+
+// [nvn] split_submit_ms: ends the command buffer being recorded, hands it to the GPU at once (no signal: the submission's final command
+// buffer signals its serial, and a queue submission's signal covers everything submitted before it) and continues the recording in a fresh
+// command buffer of the same slot, so the GPU starts on a long submission while the render thread still records the rest. f.cb changes:
+// the caller must treat all command buffer state (bound pipeline, sets, vertex buffers, dynamic state) as lost. Outside a render pass only.
+// False (nothing done) when the submission cannot be split (batched submits, a pending pool copy, a frame that is not a slot's).
+bool split_submission(Frame& f);
+uint64_t split_count();   // command buffers handed over early so far
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
 void defer_destroy(std::function<void()> fn);
@@ -109,6 +119,8 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
 void memory_barrier(VkCommandBuffer cb);
+// Full memory barriers this thread recorded into `cb` so far: a change since a point in its recording means one lies between.
+uint64_t memory_barrier_count(VkCommandBuffer cb);
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
 // all memory. Set by the replay for each submission; any thread may record image barriers, so it is an atomic.
 void set_narrow_barriers(bool on);
@@ -123,6 +135,8 @@ struct BufRef {
 // The buffer and offset of `size` bytes at a GPU address. When the address is in no pool (or size runs past the pool), ok is
 // false and the buffer is the dummy buffer (a zeroed 64 KiB buffer) so the draw can go on; this is logged once per address.
 BufRef resolve_buffer(uint64_t gpu_address, uint64_t size);
+// The same only when the range is in a pool part that is already imported (ok false otherwise): never imports, never waits.
+BufRef resolve_buffer_imported(uint64_t gpu_address, uint64_t size);
 VkBuffer dummy_buffer();
 // The last 32 bytes of the dummy buffer hold the default of an unset vertex attribute: float (0,0,0,1) and integer (0,0,0,1).
 constexpr VkDeviceSize kDummyAttrFloatOffset = 65504, kDummyAttrIntOffset = 65520;
@@ -236,6 +250,8 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why);
 // Records an upload when the texture's memory was not yet uploaded or the CPU wrote it since (and the GPU did not render it).
 // Must be called with no render pass open on `f.cb`. Leaves the image in SHADER_READ_ONLY_OPTIMAL after an upload.
 void tex_ensure_current(Texture* t, Frame& f);
+// The same for a copy or clear of the image: never a stand-in ([nvn] tex_async), the real content now.
+void tex_ensure_exact(Texture* t, Frame& f);
 void tex_poll_cpu_writes();   // start of a submission: textures of coherent pools whose pages the CPU wrote become dirty (nvn_gpu_texture.cpp)
 // Moves the whole image to `layout` (no-op if already there). Call with no render pass open.
 void tex_transition(Texture* t, Frame& f, VkImageLayout layout);
@@ -265,6 +281,16 @@ uint32_t tex_layers(Texture* t);
 bool tex_is_depth(Texture* t);
 // Readiness aligned with supported uploads; retains layout dependencies.
 bool tex_pool_preparation_pending(Texture* t);
+// A texture whose first upload may wait for a later frame when it is only needed through a texture pool ([nvn] pool_upload_ms): an asset texture
+// (ASTC or BCn from the game's memory) whose image never held content, is not rendered to, and is not a depth image. Its pool element is the dummy
+// until then. Render thread.
+bool tex_first_upload_deferrable(Texture* t);
+// The image holds a stand-in of the texture's current content and the texture is waiting for its upload (its job's result is there, or the
+// render thread will keep the stand-in): the swap may wait a frame (the pool upload budget). Render thread.
+bool tex_standin_swap_pending(Texture* t);
+// The same as tex_first_upload_deferrable for an uncompressed texture from the game's memory ([nvn] burst_defer_uncompressed): its image
+// exists, never held content, is not rendered to. Render thread.
+bool tex_first_upload_uncompressed_deferrable(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req);
 // A float-declared sampler over this texture (the view format `requested`, UNDEFINED: the image's own): 0 when a float view gives the
