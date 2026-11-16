@@ -787,6 +787,27 @@ NXTEST(romfs_from_nup_package) {
     }
 }
 
+// #39: the launcher writes the originals of zstd-packed .nup files into its package overlay, below installed mods. A mod that
+// replaces one of those files must be served from the mod after both overlays have been merged, not from the package.
+NXTEST(romfs_nup_overlay_replaces_packed_file) {
+    TempTree t, package_overlay, mod;
+    const auto path = t.root / "game.nup";
+    const std::vector<uint8_t> a = pattern(5000, 1), b = pattern(70000, 2);
+    const std::vector<uint8_t> bytes = tiny_nup(a, b, 1);
+    { std::ofstream(path, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+    write_host(package_overlay.root, {{"/a.bin", false, pattern(11, 3)}});
+    write_host(mod.root, {{"/a.bin", false, pattern(99, 9)}});
+    RomfsImage img;
+    std::string err;
+    REQUIRE(img.build(utf8(path), &err, {utf8(package_overlay.root), utf8(mod.root)}));
+    uint64_t off = 0, size = 0;
+    REQUIRE(img.file_extent("/a.bin", &off, &size));
+    CHECK_EQ(size, uint64_t{99});
+    std::vector<uint8_t> got(size);
+    REQUIRE(img.read(off, got.data(), size));
+    CHECK(got == pattern(99, 9));
+}
+
 // RomFS mods: overlays laid over the game's tree. A file at the same path (ignoring ASCII case) takes the overlay's data and keeps the
 // game's spelling, new paths are added, a later overlay wins over an earlier one, and a missing overlay is skipped.
 // An installed mod replaces a file served from a .nx archive. The overlay is a host file, so the archived and packed
