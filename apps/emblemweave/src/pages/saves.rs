@@ -101,12 +101,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let account = crate::saves::account_dir(&save_dir);
     let current = crate::saves::slots_with_sizes(&save_dir);
     widgets::section(ui, &p, "Current save", |ui| {
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("The game reads this folder").size(12.0).color(p.muted));
-                ui.label(RichText::new(account.display().to_string()).font(theme::mono(12.5)).color(p.ink)).on_hover_text("account/<the title's fixed user id>");
-            });
-            ui.add_space(theme::SPACE_L);
+        ui.label(RichText::new("The game reads this folder").size(12.0).color(p.muted));
+        // A long path has no spaces to wrap at. Truncate it in the card and keep
+        // the whole path in the hover, so it cannot push the badges off the edge.
+        ui.add(egui::Label::new(RichText::new(account.display().to_string()).font(theme::mono(12.5)).color(p.ink)).truncate())
+            .on_hover_text(format!("{}\naccount/<the title's fixed user id>", account.display()));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
             let newest = current.iter().filter_map(|s| s.1).max();
             widgets::pill(ui, &p, &format!("{} slots", current.len()), if current.is_empty() { Tone::Neutral } else { Tone::Ok });
             if !current.is_empty() {
@@ -115,18 +116,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if let Some(t) = newest {
                 widgets::pill(ui, &p, &ago(Some(t)), Tone::Neutral);
             }
-            // A fixed row height, not the remaining page height: `with_layout` in a horizontal row otherwise
-            // stretches this card to the bottom of the window.
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 34.0),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if widgets::button(ui, &p, "Open folder", true).clicked() {
-                        let _ = std::fs::create_dir_all(&account);
-                        let _ = std::process::Command::new("explorer").arg(&account).spawn();
-                    }
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::button(ui, &p, "Open folder", true).clicked() {
+                    let _ = std::fs::create_dir_all(&account);
+                    let _ = std::process::Command::new("explorer").arg(&account).spawn();
+                }
+            });
         });
         if current.is_empty() {
             ui.add_space(4.0);
@@ -228,10 +223,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     widgets::section(ui, &p, "Slots in the current save", |ui| {
         let account = crate::saves::account_dir(&save_dir);
         let slots = crate::saves::slots_with_sizes(&save_dir);
+        let account_text = format!("The save the game reads is {}:", account.display());
+        ui.add(egui::Label::new(RichText::new(account_text.clone()).size(12.5).color(p.muted)).truncate())
+            .on_hover_text(account_text);
         ui.label(
             RichText::new(format!(
-                "The save the game reads is {}: {} slot{}, {} in total.",
-                account.display(),
+                "{} slot{}, {} in total.",
                 slots.len(),
                 if slots.len() == 1 { "" } else { "s" },
                 megabytes(slots.iter().map(|s| s.2).sum())
