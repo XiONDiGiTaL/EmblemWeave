@@ -224,7 +224,9 @@ impl Nsp {
             if !e.name.ends_with(".nca") || e.size < NCA_HEADER {
                 continue;
             }
-            out.push(nca(&mut f, e).with_context(|| format!("reading {}", e.name))?);
+            // nca_at names the file in every message, so do not wrap it in a context that
+            // would hide the crypto-type explanation behind "reading game.nca" in the UI.
+            out.push(nca(&mut f, e)?);
         }
         Ok(out)
     }
@@ -473,6 +475,62 @@ mod tests {
         dir
     }
 
+    /// A PFS0 with the given files, as an `.nsp` stores them.
+    fn pfs0_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut offsets = Vec::new();
+        for (name, _) in files {
+            offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let mut out = b"PFS0".to_vec();
+        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut data_off = 0u64;
+        for (i, (_, data)) in files.iter().enumerate() {
+            out.extend_from_slice(&data_off.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&offsets[i].to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            data_off += data.len() as u64;
+        }
+        out.extend_from_slice(&names);
+        for (_, data) in files {
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
+    /// A small, structurally valid NCA with one ExeFS section. `crypto` is the
+    /// NCA header's crypto type: 0 is plaintext, anything else is refused.
+    fn nca_with_exefs(crypto: u8) -> Vec<u8> {
+        let exefs = pfs0_bytes(&[("main", b"main-bytes"), ("main.npdm", b"npdm")]);
+        let section_at = 0xc00u64;
+        let data_at = 0x200u64; // the section's FS header and block hashes
+        let section_end = (section_at + data_at + exefs.len() as u64 + 0x1ff) & !0x1ff;
+        let mut nca = vec![0u8; section_end as usize];
+        nca[0x200..0x204].copy_from_slice(b"NCA3");
+        nca[0x205] = 0; // program content
+        nca[0x206] = crypto;
+        nca[0x210..0x218].copy_from_slice(&0x0400_0000_0000_0000u64.to_le_bytes());
+        let len = nca.len() as u64;
+        nca[0x208..0x210].copy_from_slice(&len.to_le_bytes());
+        // Section 0: start / end in 0x200-byte sectors.
+        nca[0x240..0x244].copy_from_slice(&((section_at / 0x200) as u32).to_le_bytes());
+        nca[0x244..0x248].copy_from_slice(&((section_end / 0x200) as u32).to_le_bytes());
+        // Its file-system header sits at blob + 0x400; the section itself is a
+        // 0x200-byte header followed by the PFS0 at section + 0x200.
+        let fs = 0x400usize;
+        nca[fs..fs + 2].copy_from_slice(&2u16.to_le_bytes());
+        nca[fs + 0x40..fs + 0x48].copy_from_slice(&data_at.to_le_bytes());
+        nca[fs + 0x48..fs + 0x50].copy_from_slice(&(exefs.len() as u64).to_le_bytes());
+        let exefs_at = (section_at + data_at) as usize;
+        nca[exefs_at..exefs_at + exefs.len()].copy_from_slice(&exefs);
+        nca
+    }
+
     #[test]
     fn reads_a_pfs0_and_its_names() {
         let dir = temp("pfs0");
@@ -511,6 +569,36 @@ mod tests {
         assert_eq!(entries[1].size, 10);
         let at = entries[1].offset as usize;
         assert_eq!(&head[at..at + 10], b"0123456789");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plaintext_nca_with_crypto_type_zero_still_unpacks() {
+        let dir = temp("plaintext");
+        let nca = nca_with_exefs(0);
+        let path = dir.join("plain.nsp");
+        std::fs::write(&path, pfs0_bytes(&[("game.nca", &nca)])).unwrap();
+        let nsp = Nsp::open(&path).unwrap();
+        let program = nsp.program().unwrap();
+        assert_eq!(program.crypto_type, 0);
+        let out = dir.join("dump");
+        let dumped = nsp.dump(&out, &mut |_, _| {}, &|| false).unwrap();
+        assert_eq!(dumped.exefs, 2, "the program NCA's ExeFS should have two files");
+        assert_eq!(std::fs::read_to_string(out.join("exefs").join("main")).unwrap(), "main-bytes");
+        assert!(out.join("exefs").join("main.npdm").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_encrypted_nca_is_refused_with_the_crypto_type_named() {
+        let dir = temp("encrypted");
+        let nca = nca_with_exefs(1);
+        let path = dir.join("retail.nsp");
+        std::fs::write(&path, pfs0_bytes(&[("game.nca", &nca)])).unwrap();
+        let err = Nsp::open(&path).unwrap().program().unwrap_err().to_string();
+        assert!(err.contains("encrypted"), "{err}");
+        assert!(err.contains("crypto type 1"), "{err}");
+        assert!(err.contains("never asks for keys"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -162,7 +162,9 @@ impl Xci {
             if !e.name.to_ascii_lowercase().ends_with(".nca") || e.size < 0xc00 {
                 continue;
             }
-            out.push(nca_at(&mut f, &e.name, e.offset, e.size).with_context(|| format!("reading {}", e.name))?);
+            // nca_at names the file in every message, so do not wrap it in a context that
+            // would hide the crypto-type explanation behind "reading game.nca" in the UI.
+            out.push(nca_at(&mut f, &e.name, e.offset, e.size)?);
         }
         Ok(out)
     }
@@ -209,6 +211,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A PFS0 with the given files, as an NCA's ExeFS section stores them.
+    fn build_pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut offsets = Vec::new();
+        for (name, _) in files {
+            offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let mut out = b"PFS0".to_vec();
+        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut data_off = 0u64;
+        for (i, (_, data)) in files.iter().enumerate() {
+            out.extend_from_slice(&data_off.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&offsets[i].to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            data_off += data.len() as u64;
+        }
+        out.extend_from_slice(&names);
+        for (_, data) in files {
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
+    /// A small plaintext NCA carrying one ExeFS section, so the game NCA in an
+    /// XCI can be parsed and unpacked without a retail image.
+    fn build_nca() -> Vec<u8> {
+        let exefs = build_pfs0(&[("main", b"main-bytes"), ("main.npdm", b"npdm")]);
+        let section_at = 0xc00u64;
+        let data_at = 0x200u64;
+        let section_end = (section_at + data_at + exefs.len() as u64 + 0x1ff) & !0x1ff;
+        let mut nca = vec![0u8; section_end as usize];
+        nca[0x200..0x204].copy_from_slice(b"NCA3");
+        nca[0x205] = 0; // program content
+        nca[0x206] = 0; // plaintext
+        nca[0x210..0x218].copy_from_slice(&0x0400_0000_0000_0000u64.to_le_bytes());
+        let len = nca.len() as u64;
+        nca[0x208..0x210].copy_from_slice(&len.to_le_bytes());
+        nca[0x240..0x244].copy_from_slice(&((section_at / 0x200) as u32).to_le_bytes());
+        nca[0x244..0x248].copy_from_slice(&((section_end / 0x200) as u32).to_le_bytes());
+        let fs = 0x400usize;
+        nca[fs..fs + 2].copy_from_slice(&2u16.to_le_bytes());
+        nca[fs + 0x40..fs + 0x48].copy_from_slice(&data_at.to_le_bytes());
+        nca[fs + 0x48..fs + 0x50].copy_from_slice(&(exefs.len() as u64).to_le_bytes());
+        let exefs_at = (section_at + data_at) as usize;
+        nca[exefs_at..exefs_at + exefs.len()].copy_from_slice(&exefs);
+        nca
     }
 
     /// Build an HFS0 from `(name, bytes)` pairs. Offsets are relative to the
@@ -278,6 +333,36 @@ mod tests {
         assert_eq!(xci.secure.entries.len(), 1);
         assert_eq!(xci.secure.entries[0].name, "dummy.bin");
         assert_eq!(xci.secure.base, xci.root.entries[0].offset);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_card_header_at_0x1000_applies_its_root_offset() {
+        let dir = temp("header-1000");
+        let nca = build_nca();
+        let secure = build_hfs0(&[("game.nca", &nca)]);
+        let root = build_hfs0(&[("secure", &secure)]);
+        let card = 0x1000u64;
+        let root_off = 0x400u64;
+        let mut image = vec![0u8; (card + root_off) as usize];
+        image[card as usize + 0x100..card as usize + 0x104].copy_from_slice(b"HEAD");
+        image[card as usize + 0x130..card as usize + 0x138].copy_from_slice(&root_off.to_le_bytes());
+        image.extend_from_slice(&root);
+        let path = dir.join("full.xci");
+        std::fs::write(&path, &image).unwrap();
+        assert!(Xci::is_xci(&path));
+        let xci = Xci::open(&path).unwrap();
+        assert_eq!(xci.root.base, card + root_off, "the header's root offset counts from the 0x1000 header");
+        assert_eq!(xci.root.entries.len(), 1);
+        assert_eq!(xci.root.entries[0].name, "secure");
+        assert_eq!(xci.secure.base, xci.root.entries[0].offset);
+        assert_eq!(xci.secure.entries[0].name, "game.nca");
+        let program = xci.program().unwrap();
+        assert_eq!(program.crypto_type, 0);
+        let out = dir.join("dump");
+        let dumped = xci.dump(&out, &mut |_, _| {}, &|| false).unwrap();
+        assert_eq!(dumped.exefs, 2);
+        assert_eq!(std::fs::read_to_string(out.join("exefs").join("main")).unwrap(), "main-bytes");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
