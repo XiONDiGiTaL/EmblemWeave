@@ -37,6 +37,17 @@ The baseline engine in `engine/` is a separate checkout with its own build notes
 It builds `fefw.exe` with CMake, Ninja and `clang-cl`; when a vcpkg `libvpx:x64-windows-static` install is present
 (under `NXRT_LIBVPX_ROOT`, or in `C:\vcpkg`), the runtime also decodes the title's VP9/VP8 movies on the host.
 
+The engine's source and build path handling is covered without building the whole game:
+
+```powershell
+pwsh -NoProfile -File engine/fefw-recomp/recomp/tests/build_paths.ps1
+```
+
+It configures and runs a small CMake/Ninja project from folders containing spaces, `&`, parentheses, non-ASCII
+text and long names (and combinations of them), using the same `CMAKE_NINJA_FORCE_RESPONSE_FILE=ON` setting as
+`build_game.cmd` and `build_fefw.ps1`. It needs `cmake`, `ninja` and LLVM's `clang-cl`; pass `-ClangCl <path>`
+when LLVM is not on `PATH`. This is a path-handling check, not a build of the game.
+
 ## Testing and verification
 
 ```powershell

@@ -28,7 +28,11 @@ rem CMAKE_SUPPRESS_REGENERATION: the configure on the next line runs on every bu
 rem re-run it from a timestamp comparison. A release extracted with files newer than the clock, or an
 rem output written in the same tick as an input, otherwise loops "Re-running CMake" until Ninja's
 rem 100-try limit (issue #34).
-call "%HERE%nx_env.cmd" cmake -S "%HERE%..\games\%GAME%" -B "%NX_BUILD%" -G Ninja -DCMAKE_TOOLCHAIN_FILE="%HERE%..\cmake\clang-cl.cmake" -DCMAKE_BUILD_TYPE=Release -DNX_ROOT="%ROOT%" -DCMAKE_SUPPRESS_REGENERATION=ON
+rem CMAKE_NINJA_FORCE_RESPONSE_FILE: Ninja otherwise writes object paths into the command line, and
+rem cmd.exe splits an unquoted `&` in an absolute source path (for example `PC Ports & Recomps`) into
+rem two commands (issue #38). Response files keep every path one argument, including spaces,
+rem parentheses, Unicode and long object lists.
+call "%HERE%nx_env.cmd" cmake -S "%HERE%..\games\%GAME%" -B "%NX_BUILD%" -G Ninja -DCMAKE_TOOLCHAIN_FILE="%HERE%..\cmake\clang-cl.cmake" -DCMAKE_BUILD_TYPE=Release -DNX_ROOT="%ROOT%" -DCMAKE_SUPPRESS_REGENERATION=ON -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON
 if errorlevel 1 exit /b 1
 call "%HERE%nx_env.cmd" cmake --build "%NX_BUILD%" --target %GAME%_modules -- -j %NX_JOBS%%ARGS%
 exit /b %errorlevel%
