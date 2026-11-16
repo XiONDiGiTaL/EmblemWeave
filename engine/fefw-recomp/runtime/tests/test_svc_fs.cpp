@@ -275,6 +275,51 @@ NXTEST(rom_storage_with_mods) {
     CHECK_EQ(first_root_file(st2), std::string(1000, 'a'));
 }
 
+// #39: packed-package files are base game data, so their overlay sits below every installed mod. The order the facade builds is
+// base RomFS, [fs] romfs_overlay, then installed mods in name order; this walks that order one layer at a time.
+NXTEST(rom_storage_package_overlay_is_below_mods) {
+    Fixture f;
+    nxrt::services::profile_reload();
+    const stdfs::path overlay = f.dir / "romfs-overlay";
+    const stdfs::path mods = f.dir / "mods";
+    const stdfs::path disabled = f.dir / "mods-disabled";
+    std::error_code ec;
+    stdfs::create_directories(overlay, ec);
+    Fixture::write(overlay / "a.bin", "package-overlay");
+    nxrt::config_set("fs", "romfs_overlay", overlay.string().c_str());
+
+    auto root_file = [&]() -> std::string {
+        nxrt::services::reset_all();
+        Session s = open_fsp();
+        const Reply r = s.call(200);
+        if (!r.ok()) return {};
+        Session st = s.sub(r);
+        return st.valid() ? first_root_file(st) : std::string();
+    };
+
+    // 2. The package overlay replaces the base file.
+    CHECK_EQ(root_file(), std::string("package-overlay"));
+
+    for (const char* m : {"01-first", "02-second", "_off"}) stdfs::create_directories(mods / m / "romfs", ec);
+    Fixture::write(mods / "01-first" / "romfs" / "a.bin", "mod-one");
+    Fixture::write(mods / "02-second" / "romfs" / "a.bin", "mod-two");
+    Fixture::write(mods / "_off" / "romfs" / "a.bin", "disabled");
+    nxrt::config_set("fs", "mods", mods.string().c_str());
+    // 3 and 4. A mod replaces the package overlay, and the last mod in name order wins.
+    CHECK_EQ(root_file(), std::string("mod-two"));
+
+    // 5. A mod disabled by its leading `_` is left out, restoring the package overlay underneath it.
+    stdfs::create_directories(disabled / "_off" / "romfs", ec);
+    Fixture::write(disabled / "_off" / "romfs" / "a.bin", "disabled");
+    nxrt::config_set("fs", "mods", disabled.string().c_str());
+    CHECK_EQ(root_file(), std::string("package-overlay"));
+
+    // 1. With neither a package overlay nor a mod, the base RomFS file is visible.
+    nxrt::config_set("fs", "romfs_overlay", "");
+    nxrt::config_set("fs", "mods", (f.dir / "no_mods").string().c_str());
+    CHECK_EQ(root_file(), std::string(1000, 'a'));
+}
+
 NXTEST(aoc_storage_by_data_id) {
     Fixture f;
     nxrt::services::profile_reload();

@@ -328,9 +328,16 @@ bool merge(Node& base, Node& add, uint32_t& taken, std::string& msg) {
         } else if (it->is_dir && k.is_dir) {
             if (!merge(*it, k, taken, msg)) return false;
         } else if (!it->is_dir && !k.is_dir) {
+            // The overlay's file becomes a host file. Clear every source marker the base may have carried: an
+            // archived (.nx) or packed (.nup) file would otherwise still be read from its archive/package.
             it->host = k.host;
             it->size = k.size;
             it->src = 0;
+            it->archived = false;
+            it->nx_src = nx::File{};
+            it->packed = false;
+            it->pkg = nup::File{};
+            it->mem.reset();
             taken++;
         } else {
             // a file where the game has a folder, or the other way round: the overlay's entry replaces the game's

@@ -782,6 +782,31 @@ NXTEST(romfs_from_nup_package) {
 
 // RomFS mods: overlays laid over the game's tree. A file at the same path (ignoring ASCII case) takes the overlay's data and keeps the
 // game's spelling, new paths are added, a later overlay wins over an earlier one, and a missing overlay is skipped.
+// An installed mod replaces a file served from a .nx archive. The overlay is a host file, so the archived and packed
+// markers from the base node must not survive the merge; otherwise the image would keep reading the archive.
+NXTEST(romfs_nx_overlay_replaces_archived_file) {
+#ifdef EW_NX_FIXTURE_DIR
+    const std::filesystem::path nx = std::filesystem::path(EW_NX_FIXTURE_DIR) / "raw_only.nx";
+    if (!std::filesystem::is_regular_file(nx)) {
+        nxtest::skip("NXFormat fixtures are not beside this engine checkout");
+        return;
+    }
+    TempTree mod;
+    write_host(mod.root, {{"/data.bin", false, pattern(99, 9)}});
+    RomfsImage img;
+    std::string err;
+    REQUIRE(img.build(utf8(nx), &err, {utf8(mod.root)}));
+    uint64_t off = 0, size = 0;
+    REQUIRE(img.file_extent("/data.bin", &off, &size));
+    CHECK_EQ(size, uint64_t{99});
+    std::vector<uint8_t> got(size);
+    REQUIRE(img.read(off, got.data(), size));
+    CHECK(got == pattern(99, 9));
+#else
+    nxtest::skip("the NXFormat fixture directory is not defined");
+#endif
+}
+
 NXTEST(romfs_overlays_replace_and_add) {
     TempTree base, mod1, mod2;
     write_host(base.root, {{"/Data/Unit.bin", false, pattern(100, 1)}, {"/Data/Keep.bin", false, pattern(50, 2)}, {"/top.txt", false, pattern(7, 3)}});
