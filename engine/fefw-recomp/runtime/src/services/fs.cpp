@@ -448,15 +448,9 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     std::string err;
     const std::string dir = romfs_dir();
     std::vector<std::string> overlays;
-    for (const RomfsMod& m : installed_mods()) {
-        if (m.has_exefs && has_exefs_patches(m)) NXLOG_W("mods", "%s: exefs patches are left out (the game code is compiled ahead of time)", m.name.c_str());
-        if (!m.romfs.empty()) {
-            NXLOG_I("mods", "%s: RomFS from %s", m.name.c_str(), m.romfs.c_str());
-            overlays.push_back(m.romfs);
-        }
-    }
     // [fs] romfs_overlay: what the launcher writes for a package whose RomFS is packed with zstd, since those files cannot be served from the
-    // package itself. Semi-colon separated, so more than one folder can be laid over it.
+    // package itself. Semi-colon separated, so more than one folder can be laid over it. This is base game data, so it goes *below* the
+    // installed mods: a mod replacing a packed file must not be undone by the unpacked original (#39).
     for (std::string list = config_get_str("fs", "romfs_overlay", ""); !list.empty();) {
         const size_t at = list.find(';');
         const std::string one = list.substr(0, at);
@@ -466,6 +460,14 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
         }
         if (at == std::string::npos) break;
         list.erase(0, at + 1);
+    }
+    // Installed mods are laid over the game and the packed-file overlay, in name order; a later overlay wins.
+    for (const RomfsMod& m : installed_mods()) {
+        if (m.has_exefs && has_exefs_patches(m)) NXLOG_W("mods", "%s: exefs patches are left out (the game code is compiled ahead of time)", m.name.c_str());
+        if (!m.romfs.empty()) {
+            NXLOG_I("mods", "%s: RomFS from %s", m.name.c_str(), m.romfs.c_str());
+            overlays.push_back(m.romfs);
+        }
     }
     // code mods' file edits (nxrt/mod_api.h edit_file): applied to the tree with the RomFS mods laid over it
     fs::RomfsEdits edits;
