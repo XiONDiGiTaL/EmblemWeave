@@ -28,6 +28,7 @@ mod perf;
 mod snapshots;
 mod updater;
 mod saves;
+mod sites;
 mod savefile;
 mod theme;
 mod toolchain;

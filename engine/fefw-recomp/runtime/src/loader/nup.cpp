@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include <zstd.h>
+
 namespace nxrt::nup {
 namespace {
 
@@ -68,6 +70,7 @@ bool walk(const Toc& t, uint32_t dir, const std::string& prefix, int depth, std:
         f.size = u64(t.b, fr + 8);
         f.offset = u64(t.b, fr + 0x10);
         const uint64_t stored = u64(t.b, fr + 0x18);
+        f.stored = stored;
         const uint8_t codec = t.b[fr + 0x40];
         // A compressed entry is listed with its decompressed size and its compressed extent: only read_file can serve it. The caller
         // decides whether that is a problem, so a package whose ExeFS is packed still boots from the extracted exefs folder.
@@ -140,8 +143,20 @@ bool open(const std::string& path, Content& out, std::string* err) {
 }
 
 bool read_file(const std::string& path, const File& file, std::vector<uint8_t>& out, std::string* err) {
-    if (file.compressed) return fail(err, file.path + " is compressed in the .nup; unpack the package's ExeFS instead");
     std::ifstream f(fs_path(path), std::ios::binary);
+    if (!f) return fail(err, "cannot open " + path);
+    // A compressed entry is one zstd frame for the whole file: decompress it here, so a package that packed its files still serves them.
+    if (file.compressed) {
+        std::vector<uint8_t> src(static_cast<size_t>(file.stored));
+        f.seekg(static_cast<std::streamoff>(file.offset));
+        if (!src.empty() && !f.read(reinterpret_cast<char*>(src.data()), static_cast<std::streamsize>(src.size())))
+            return fail(err, "cannot read " + file.path + " from " + path);
+        out.resize(static_cast<size_t>(file.size));
+        const size_t got = ZSTD_decompress(out.data(), out.size(), src.data(), src.size());
+        if (ZSTD_isError(got) || got != out.size())
+            return fail(err, "cannot decompress " + file.path + " from " + path + ": " + ZSTD_getErrorName(got));
+        return true;
+    }
     out.resize(static_cast<size_t>(file.size));
     f.seekg(static_cast<std::streamoff>(file.offset));
     if (!f || !f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(file.size)))

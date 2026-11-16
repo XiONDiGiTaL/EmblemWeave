@@ -15,6 +15,7 @@ struct File {
     std::string path;           // inside its subtree, '/'-separated, no leading slash ("data/a.bin")
     uint64_t size = 0;          // the file's size once decompressed
     uint64_t offset = 0;        // absolute offset of the data in the package file
+    uint64_t stored = 0;        // bytes the package holds at offset: the size itself, or the zstd frame of a compressed entry
     bool compressed = false;    // a zstd entry: one frame for the whole file, so it can only be read whole (read_file)
 };
 
@@ -31,7 +32,7 @@ bool is_nup(const std::string& path);
 // are ignored). False with *err set when the file is not a valid package or holds a compressed file.
 bool open(const std::string& path, Content& out, std::string* err = nullptr);
 
-// Reads a whole file of the package (an ExeFS module).
+// Reads a whole file of the package (an ExeFS module, or a RomFS file packed with zstd, which is decompressed here).
 bool read_file(const std::string& path, const File& f, std::vector<uint8_t>& out, std::string* err = nullptr);
 
 }  // namespace nxrt::nup

@@ -248,6 +248,12 @@ struct Overlay::Impl {
     double note_since_s = -1.0, note_empty_s = -1.0;
     int note_peak = 0;
     bool note_visible(double now_s);
+    // code mods' note (services::modapi::notice(): a mod whose hook sites this build lacks), shown for kModsNoteSeconds from the
+    // first frame it is seen, re-read once a second
+    std::string mods_text;
+    double mods_since_s = -1.0, mods_read_s = -1e9;
+    bool mods_note_visible(double now_s);
+    void draw_mods_note(const FrameInfo& f);
     void draw_note(const FrameInfo& f);
 
     // The on-screen keyboard (services_api.h swkbdui). kb_mu guards the question and its text: key events edit it on the game's main thread,
@@ -1110,6 +1116,29 @@ bool Overlay::Impl::note_visible(double now_s) {
     return now_s - note_since_s >= 1.5;
 }
 
+constexpr double kModsNoteSeconds = 20.0;
+bool Overlay::Impl::mods_note_visible(double now_s) {
+    if (now_s - mods_read_s >= 1.0) {
+        mods_read_s = now_s;
+        mods_text = services::modapi::notice();
+    }
+    if (mods_text.empty()) return false;
+    if (mods_since_s < 0) mods_since_s = now_s;
+    return now_s - mods_since_s < kModsNoteSeconds;
+}
+
+void Overlay::Impl::draw_mods_note(const FrameInfo& f) {
+    ImFont* font = ImGui::GetFont();
+    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 50.f), 13.f, 32.f);
+    const float pad = size * 0.5f;
+    const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, mods_text.c_str());
+    const float W = static_cast<float>(f.extent.width);
+    const float x0 = (W - sz.x) * 0.5f - pad, y0 = size;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), IM_COL32(0, 0, 0, 170), size * 0.3f);
+    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), IM_COL32(255, 200, 80, 255), mods_text.c_str());
+}
+
 void Overlay::Impl::draw_note(const FrameInfo& f) {
     char text[96];
     const int pending = shader_backlog();
@@ -1133,9 +1162,10 @@ void Overlay::draw(const FrameInfo& f) {
     const auto now = std::chrono::steady_clock::now();
     const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
     const bool note_on = s.note_visible(now_s) && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
+    const bool mods_on = s.mods_note_visible(now_s) && !s.ctx.renderer->capture_pending();
     const bool ptr_on = s.ptr_show.load(std::memory_order_relaxed) && (s.ptr_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
     const bool kb_on = s.kb_poll();
-    if (!s.visible && !counter_on && !note_on && !ptr_on && !kb_on) {
+    if (!s.visible && !counter_on && !note_on && !mods_on && !ptr_on && !kb_on) {
         s.last_frame = now;
         s.counter_was_on = false;
         return;
@@ -1158,7 +1188,7 @@ void Overlay::draw(const FrameInfo& f) {
     }
     // a screenshot leaves the counter out unless asked for; with the menu hidden there is then nothing to draw
     const bool show_counter = counter_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !show_counter && !note_on && !ptr_on && !kb_on) {
+    if (!s.visible && !show_counter && !note_on && !mods_on && !ptr_on && !kb_on) {
         s.last_frame = now;
         return;
     }
@@ -1180,6 +1210,7 @@ void Overlay::draw(const FrameInfo& f) {
     if (kb_on) s.draw_keyboard(now_s);
     if (show_counter) s.draw_counter(f, now_s);
     if (note_on) s.draw_note(f);
+    if (mods_on) s.draw_mods_note(f);
     if (ptr_on) {   // a plain arrow, white with a dark outline, sized with the frame height
         const float k = std::max(1.f, static_cast<float>(f.extent.height) / 720.f);
         const float x = s.ptr_x.load(std::memory_order_relaxed), y = s.ptr_y.load(std::memory_order_relaxed);

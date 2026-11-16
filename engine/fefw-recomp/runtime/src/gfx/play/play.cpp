@@ -14,6 +14,8 @@
 
 #include <windows.h>
 
+#include <zstd.h>
+
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_scancode.h>
@@ -63,6 +65,21 @@
 #include "pad_orient.h"
 
 namespace nxrt::play {
+
+// zstd for code mods (nxrt/mod_api.h zstd_decompress / zstd_compress; handed to services::modapi::set_codec)
+static int64_t mod_zstd_decompress(const void* src, uint64_t src_size, void* dst, uint64_t cap) {
+    if (!dst) {
+        const unsigned long long n = ZSTD_getFrameContentSize(src, static_cast<size_t>(src_size));
+        return n == ZSTD_CONTENTSIZE_UNKNOWN || n == ZSTD_CONTENTSIZE_ERROR ? -1 : static_cast<int64_t>(n);
+    }
+    const size_t n = ZSTD_decompress(dst, static_cast<size_t>(cap), src, static_cast<size_t>(src_size));
+    return ZSTD_isError(n) ? -1 : static_cast<int64_t>(n);
+}
+static int64_t mod_zstd_compress(const void* src, uint64_t src_size, void* dst, uint64_t cap, int level) {
+    if (!dst) return static_cast<int64_t>(ZSTD_compressBound(static_cast<size_t>(src_size)));
+    const size_t n = ZSTD_compress(dst, static_cast<size_t>(cap), src, static_cast<size_t>(src_size), level ? level : ZSTD_CLEVEL_DEFAULT);
+    return ZSTD_isError(n) ? -1 : static_cast<int64_t>(n);
+}
 namespace {
 // Keep-alive pump: the window's events are normally pumped at the frame boundary. While the game boots or loads it can go ten seconds and
 // more without one, and Windows then calls the window "Not Responding". busy_pump runs before every SVC (svc_set_busy_hook); on the
@@ -1429,6 +1446,9 @@ bool start(const StartOptions& opt) {
     if (gp && gp->frame_update) st.hook_update = hook_add_entry(st.base + gp->frame_update, &update_hook);
     else NXLOG_W(kTag, "the game (%s) names no frame update: play mode is not pumped", game::info().id);
     if (gp && gp->install) gp->install(st.base, &g_game_host, st.settings);
+    // code mods (mods/<name>/exefs/*.dll, nxrt/mod_api.h) after the game's own hooks, so theirs run after the game's at a shared site
+    services::modapi::set_codec({&mod_zstd_decompress, &mod_zstd_compress});   // zstd lives in this half of the runtime
+    services::modapi::load_dll_mods(st.base, gp ? gp->frame_update : 0);
     apply_frame_cap(st.settings);      // the game's hooks may have set a frame cap floor (frame_limiter.h)
     st.started = true;
     NXLOG_I(kTag, "play mode started (%s, overlay %s, base 0x%llx, game %s, frame hook %u)", st.window ? "window" : "no window", st.overlay ? "on" : "off",

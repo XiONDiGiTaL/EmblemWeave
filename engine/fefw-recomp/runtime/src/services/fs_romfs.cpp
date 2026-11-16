@@ -7,6 +7,8 @@
 #endif
 #include "fs_romfs.h"
 
+#include <nxrt/config.h>
+
 #include <windows.h>
 
 #include <algorithm>
@@ -113,6 +115,9 @@ struct Node {
     uint64_t data = 0;           // files: offset of the data from the partition start
     bool archived = false;       // files: read from the blocks of an .nx archive
     nx::File nx_src;             // files: the archive record (path, size, block range)
+    bool packed = false;         // files: a zstd entry of a .nup, decompressed on first read
+    nup::File pkg;               // files: the package record, when packed
+    std::shared_ptr<const std::vector<uint8_t>> mem;   // files: the content after an edit (RomfsEdits), served instead of the host file
 };
 
 std::string shown(const Node& n) { return n.path.empty() ? std::string("/") : n.path; }
@@ -193,12 +198,9 @@ bool scan_nup(const std::string& nup_path, Node& root, std::string& msg) {
     }
     size_t packed = 0;
     for (const nup::File& f : c.romfs) {
-        // A zstd entry has no random access into it, so it cannot be served from the package: the launcher writes those files into a folder
-        // and passes it as [fs] romfs_overlay, which merges over this tree by path.
-        if (f.compressed) {
-            ++packed;
-            continue;
-        }
+        // A zstd entry has no random access into it: it is decompressed whole on its first read (Impl::packed_content), so a package that
+        // packed its files is served as it is, and an [fs] romfs_overlay holding the same files is not needed.
+        if (f.compressed) ++packed;
         Node* d = &root;
         size_t at = 0;
         for (size_t slash; (slash = f.path.find('/', at)) != std::string::npos; at = slash + 1) {
@@ -220,13 +222,17 @@ bool scan_nup(const std::string& nup_path, Node& root, std::string& msg) {
         k.host = root.host;
         k.size = f.size;
         k.src = f.offset;
+        k.packed = f.compressed;
+        if (k.packed) k.pkg = f;
         if (k.name.size() > kMaxName || k.path.size() > kMaxPath) {
             msg = "name or path too long for a RomFS: " + k.path;
             return false;
         }
         d->kids.push_back(std::move(k));
     }
-    if (packed) NXLOG_I("fs", "RomFS: %zu of %zu files are packed with zstd and are read from [fs] romfs_overlay", packed, c.romfs.size());
+    if (packed)
+        NXLOG_I("fs", "RomFS: %zu of %zu files are packed with zstd and are decompressed on their first read (an [fs] romfs_overlay holding them is not needed)", packed,
+                c.romfs.size());
     sort_tree(root);
     return true;
 }
@@ -350,12 +356,12 @@ void flatten(Node& n, std::vector<Node*>& dirs, std::vector<Node*>& files) {
 }
 
 struct Segment {
-    enum class Kind : uint8_t { kHeader, kTables, kZero, kFile };
+    enum class Kind : uint8_t { kHeader, kTables, kZero, kFile, kMem };
     uint64_t off = 0;            // image offset
     uint64_t len = 0;
     Kind kind = Kind::kZero;
     uint64_t src = 0;            // kHeader/kTables: offset in that buffer; kFile: offset in the host file
-    uint32_t file = 0;           // kFile: index into Layout::files
+    uint32_t file = 0;           // kFile, kMem: index into Layout::files
 };
 
 struct FileRec {
@@ -366,7 +372,32 @@ struct FileRec {
     uint64_t image_off = 0;
     uint64_t src = 0;            // offset of the data in the host file
     std::string path;            // path inside the image ("/a/b.bin"), for the first-read note
+    std::shared_ptr<const std::vector<uint8_t>> mem;   // set: the content is here (an edited file), the host file is not read
+    bool packed = false;         // a zstd entry of the package: decompressed on first read
+    nup::File pkg;               // the package record, when packed
 };
+
+// The whole of a file of the tree (a host file, or its range of a package). False when it cannot be read.
+bool read_whole(const Node& f, std::vector<uint8_t>& out) {
+    HANDLE h = CreateFileW(f.host.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    out.resize(static_cast<size_t>(f.size));
+    uint64_t done = 0;
+    bool ok = true;
+    while (ok && done < f.size) {
+        const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(f.size - done, 1ull << 30));
+        const uint64_t ofs = f.src + done;
+        OVERLAPPED ov{};
+        ov.Offset = static_cast<DWORD>(ofs & 0xFFFFFFFFull);
+        ov.OffsetHigh = static_cast<DWORD>(ofs >> 32);
+        DWORD got = 0;
+        ok = ReadFile(h, out.data() + done, chunk, &got, &ov) && got == chunk;
+        done += chunk;
+    }
+    CloseHandle(h);
+    return ok;
+}
 
 // Everything build() produces. Replaced as a whole.
 struct Layout {
@@ -383,7 +414,8 @@ struct Layout {
 };
 
 // Lays out the host folder: entries sorted by full path in each table, file data in that order, 16-byte aligned.
-bool make_layout(const std::string& host_dir, const std::vector<std::string>& overlays, Layout& L, std::string* err) {
+bool make_layout(const std::string& host_dir, const std::vector<std::string>& overlays, const RomfsEdits* edits, Layout& L,
+                 std::string* err) {
     std::string msg;
     std::wstring wdir;
     const bool packaged = nup::is_nup(host_dir);
@@ -448,6 +480,35 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     auto by_path = [](const Node* a, const Node* b) { return a->path < b->path; };
     std::sort(dirs.begin(), dirs.end(), by_path);
     std::sort(files.begin(), files.end(), by_path);
+
+    // Edits by code mods: the file as it stands after the overlays, changed in memory. Its size is the edited one from here on.
+    uint32_t edited = 0;
+    if (edits && edits->wants && edits->edit) {
+        for (Node* f : files) {
+            if (!edits->wants(f->path)) continue;
+            if (f->packed) {
+                NXLOG_W("fs", "romfs: %s is packed with zstd in the package: a mod's edit to it is left out", f->path.c_str());
+                continue;
+            }
+            if (f->size > edits->max_size) {
+                NXLOG_W("fs", "romfs: %s is too large to be edited by a mod (%llu bytes): served as it is", f->path.c_str(),
+                        static_cast<unsigned long long>(f->size));
+                continue;
+            }
+            std::vector<uint8_t> data;
+            if (!read_whole(*f, data)) {
+                NXLOG_W("fs", "romfs: %s cannot be read for a mod's edit: served as it is", f->path.c_str());
+                continue;
+            }
+            const uint64_t before = f->size;
+            if (!edits->edit(f->path, data)) continue;
+            f->size = data.size();
+            f->mem = std::make_shared<const std::vector<uint8_t>>(std::move(data));
+            edited++;
+            NXLOG_I("fs", "romfs: %s edited by a code mod: %llu -> %llu bytes", f->path.c_str(), static_cast<unsigned long long>(before),
+                    static_cast<unsigned long long>(f->size));
+        }
+    }
 
     // Entry offsets in the two tables (root first: its path is empty).
     uint64_t dir_bytes = 0, file_bytes = 0;
@@ -556,8 +617,8 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         const uint64_t img = kPartitionOfs + f->data;
         if (img > cursor) L.segs.push_back({cursor, img - cursor, Segment::Kind::kZero, 0, 0});
         const uint32_t idx = static_cast<uint32_t>(L.files.size());
-        L.files.push_back({f->host, f->archived, f->nx_src, f->size, img, f->src, f->path});
-        if (f->size > 0) L.segs.push_back({img, f->size, Segment::Kind::kFile, f->src, idx});
+        L.files.push_back({f->host, f->archived, f->nx_src, f->size, img, f->src, f->path, f->mem, f->packed, f->pkg});
+        if (f->size > 0) L.segs.push_back({img, f->size, f->mem ? Segment::Kind::kMem : Segment::Kind::kFile, f->mem ? 0 : f->src, idx});
         L.by_path[f->path] = idx;
         cursor = img + f->size;
         data_bytes += f->size;
@@ -571,6 +632,7 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     L.stats.data_bytes = data_bytes;
     L.stats.data_offset = kPartitionOfs;
     L.stats.overlay_files = taken;
+    L.stats.edited_files = edited;
     L.built = true;
     return true;
 }
@@ -611,6 +673,35 @@ struct RomfsImage::Impl {
     mutable std::vector<OpenSlot> cache;    // at most kOpenFiles entries
     mutable uint64_t tick = 0;
 
+    // Decompressed zstd entries of the package, by file index, while the budget allows: one frame per file has no random access into it,
+    // so the whole file is decoded on its first read and its ranges are copied from here.
+    static constexpr uint64_t kPackedBudget = 1536ull << 20;
+    mutable std::map<uint32_t, std::shared_ptr<const std::vector<uint8_t>>> packed_cache;
+    mutable uint64_t packed_bytes = 0;
+
+    std::shared_ptr<const std::vector<uint8_t>> packed_content(uint32_t idx) const {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            auto it = packed_cache.find(idx);
+            if (it != packed_cache.end()) return it->second;
+        }
+        std::vector<uint8_t> data;
+        std::string err;
+        if (!nup::read_file(l.package, l.files[idx].pkg, data, &err)) {
+            NXLOG_E("fs", "romfs: %s", err.c_str());
+            return nullptr;
+        }
+        auto box = std::make_shared<const std::vector<uint8_t>>(std::move(data));
+        std::lock_guard<std::mutex> lk(mu);
+        if (packed_bytes + box->size() > kPackedBudget && !packed_cache.empty()) {
+            packed_cache.clear();
+            packed_bytes = 0;
+        }
+        packed_cache[idx] = box;
+        packed_bytes += box->size();
+        return box;
+    }
+
     // The handle for file idx, opened if it is not cached. The least recently used entry is dropped when the cache is full.
     std::shared_ptr<HandleBox> acquire(uint32_t idx) const {
         std::lock_guard<std::mutex> lk(mu);
@@ -639,6 +730,18 @@ struct RomfsImage::Impl {
     // Positioned reads (OVERLAPPED offset), so concurrent readers of one handle need no seek lock.
     bool read_host(uint32_t idx, uint64_t ofs, uint8_t* out, uint64_t n) const {
         const FileRec& rec = l.files[idx];
+        if (rec.packed) {
+            // The caller's offset is absolute in the package file (the segment carries the compressed extent's start), and the decoded
+            // content starts at that extent: read from the file's own offset.
+            const uint64_t in = ofs >= rec.src ? ofs - rec.src : 0;
+            const auto data = packed_content(idx);
+            if (!data || in > data->size() || n > data->size() - in) {
+                NXLOG_E("fs", "nup: cannot read %s at %llu", rec.path.c_str(), static_cast<unsigned long long>(ofs));
+                return false;
+            }
+            if (n) std::memcpy(out, data->data() + in, static_cast<size_t>(n));
+            return true;
+        }
         if (rec.archived) {
             const mem::ww::OsWriteScope ws(out, n);
             if (!l.archive || !l.archive->read(rec.nx_src, ofs, out, n)) {
@@ -669,9 +772,9 @@ struct RomfsImage::Impl {
 RomfsImage::RomfsImage() : p_(std::make_unique<Impl>()) {}
 RomfsImage::~RomfsImage() = default;
 
-bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays) {
+bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays, const RomfsEdits* edits) {
     Layout fresh;
-    const bool ok = make_layout(host_dir, overlays, fresh, err);
+    const bool ok = make_layout(host_dir, overlays, edits, fresh, err);
     std::lock_guard<std::mutex> lk(p_->mu);
     p_->cache.clear();
     p_->l = ok ? std::move(fresh) : Layout{};
@@ -702,6 +805,10 @@ bool RomfsImage::read(uint64_t offset, void* dst, uint64_t len) const {
             case Segment::Kind::kFile:
                 p_->note_read(g.file);
                 if (!p_->read_host(g.file, g.src + within, out, n)) return false;
+                break;
+            case Segment::Kind::kMem:
+                p_->note_read(g.file);
+                std::memcpy(out, L.files[g.file].mem->data() + within, n);
                 break;
         }
         out += n;

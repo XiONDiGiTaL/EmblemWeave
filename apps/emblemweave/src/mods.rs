@@ -3,9 +3,11 @@
 //!
 //! The engine lays every `<mods>/<name>/romfs` over the game's RomFS when the
 //! game starts. A mod folder whose name starts with `_` is skipped, which is
-//! how a mod is switched off. `exefs/` patches (`.ips`, `.pchtxt`) cannot
-//! apply, because the game's code is compiled ahead of time; an import keeps
-//! them but says so.
+//! how a mod is switched off. A mod's `exefs/` may hold code mods: DLLs the
+//! engine loads at start (`runtime/include/nxrt/mod_api.h`) and the hook sites
+//! they need (`*.sites`, built in by Build the game; see `sites.rs`).
+//! `exefs/` patches (`.ips`, `.pchtxt`) cannot apply, because the game's code
+//! is compiled ahead of time; an import keeps them but says so.
 //!
 //! Archives are unpacked with Windows' own `tar.exe` (libarchive), which reads
 //! zip, 7z and rar. GameBanana is read through its public API with Windows'
@@ -37,6 +39,33 @@ pub struct Mod {
     pub files: usize,
     pub has_romfs: bool,
     pub has_exefs: bool,
+    /// `exefs/` holds a code mod: a `.dll` or `.sites`.
+    pub has_code: bool,
+    /// `exefs/` holds `.ips` / `.pchtxt` patches, which cannot apply.
+    pub has_patches: bool,
+}
+
+/// The `exefs` folders of a mod (up to three folders deep).
+pub fn exefs_dirs(path: &Path) -> Vec<PathBuf> {
+    let mut x = Vec::new();
+    find_named(path, "exefs", 3, &mut x);
+    x
+}
+
+fn exefs_has(dir: &Path, exts: &[&str]) -> bool {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten().any(|e| {
+                let p = e.path();
+                p.is_file() && p.extension().is_some_and(|x| exts.iter().any(|w| x.to_string_lossy().eq_ignore_ascii_case(w)))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// An `exefs` folder that holds a code mod for this engine (a DLL or hook sites).
+pub fn is_code_exefs(dir: &Path) -> bool {
+    exefs_has(dir, &["dll", "sites"])
 }
 
 pub fn dir() -> Option<PathBuf> {
@@ -80,7 +109,19 @@ pub fn list(mods: &Path) -> Vec<Mod> {
         let (mut r, mut x) = (Vec::new(), Vec::new());
         find_named(&path, "romfs", 3, &mut r);
         find_named(&path, "exefs", 3, &mut x);
-        out.push(Mod { files: crate::saves::summary(&path).0, path, name, enabled, info, has_romfs: !r.is_empty(), has_exefs: !x.is_empty() });
+        let has_code = x.iter().any(|d| is_code_exefs(d));
+        let has_patches = x.iter().any(|d| exefs_has(d, &["ips", "pchtxt"]));
+        out.push(Mod {
+            files: crate::saves::summary(&path).0,
+            path,
+            name,
+            enabled,
+            info,
+            has_romfs: !r.is_empty(),
+            has_exefs: !x.is_empty(),
+            has_code,
+            has_patches,
+        });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
@@ -228,11 +269,15 @@ const ROMFS_TOP: &[&str] = &["Animation", "Character", "Effect", "Font", "GameDa
 pub struct Installed {
     pub mods: Vec<String>,
     pub exefs_only: bool,
+    /// A mod brought hook sites (`exefs/*.sites`): the game needs building again before its code works.
+    pub needs_build: bool,
 }
 
 /// Install the mod in `staged` (an unpacked archive or a folder) into `mods`.
 /// Every `romfs` folder found becomes a mod; when there are several (an
 /// archive offering variants), all but the first are installed switched off.
+/// A code mod's `exefs` (a DLL or hook sites) next to a `romfs` goes with it;
+/// a code mod without a `romfs` is a mod of its own.
 pub fn install_from(staged: &Path, mods: &Path, info: &Info) -> Result<Installed, String> {
     let mut romfs = Vec::new();
     find_named(staged, "romfs", 4, &mut romfs);
@@ -257,17 +302,27 @@ pub fn install_from(staged: &Path, mods: &Path, info: &Info) -> Result<Installed
     }
     let mut exefs = Vec::new();
     find_named(staged, "exefs", 4, &mut exefs);
-    if romfs.is_empty() {
+    exefs.sort();
+    let code: Vec<PathBuf> = exefs.iter().filter(|e| is_code_exefs(e)).cloned().collect();
+    if romfs.is_empty() && code.is_empty() {
         if !exefs.is_empty() {
-            return Ok(Installed { mods: Vec::new(), exefs_only: true });
+            return Ok(Installed { mods: Vec::new(), exefs_only: true, needs_build: false });
         }
         return Err("no romfs folder or game files were found in it".into());
     }
+    // What each mod is made of: its romfs and/or a code exefs from the same folder.
+    let units: Vec<(Option<PathBuf>, Option<PathBuf>)> = if romfs.is_empty() {
+        code.iter().map(|x| (None, Some(x.clone()))).collect()
+    } else {
+        romfs.iter().map(|r| (Some(r.clone()), code.iter().find(|x| x.parent() == r.parent()).cloned())).collect()
+    };
     std::fs::create_dir_all(mods).map_err(|e| e.to_string())?;
     let base = clean_name(&info.title);
     let mut names = Vec::new();
-    for (i, r) in romfs.iter().enumerate() {
-        let variant = r.parent().filter(|p| *p != staged && romfs.len() > 1).and_then(|p| p.strip_prefix(staged).ok()).map(|p| p.display().to_string());
+    let mut needs_build = false;
+    for (i, (r, x)) in units.iter().enumerate() {
+        let key = r.as_ref().or(x.as_ref()).expect("a unit has a romfs or an exefs");
+        let variant = key.parent().filter(|p| *p != staged && units.len() > 1).and_then(|p| p.strip_prefix(staged).ok()).map(|p| p.display().to_string());
         let mut name = match &variant {
             Some(v) if !v.is_empty() => clean_name(&format!("{base} - {v}")),
             _ => base.clone(),
@@ -279,13 +334,19 @@ pub fn install_from(staged: &Path, mods: &Path, info: &Info) -> Result<Installed
             name = format!("{first} ({n})");
         }
         let folder = mods.join(if i == 0 { name.clone() } else { format!("_{name}") });
-        copy_tree(r, &folder.join("romfs"))?;
+        if let Some(r) = r {
+            copy_tree(r, &folder.join("romfs"))?;
+        }
+        if let Some(x) = x {
+            copy_tree(x, &folder.join("exefs"))?;
+            needs_build |= exefs_has(x, &["sites"]);
+        }
         let mut info = info.clone();
         info.title = name.clone();
         let _ = std::fs::write(folder.join("emblemweave.json"), serde_json::to_string_pretty(&info).unwrap_or_default());
         names.push(name);
     }
-    Ok(Installed { mods: names, exefs_only: false })
+    Ok(Installed { mods: names, exefs_only: false, needs_build })
 }
 
 fn staging() -> Result<PathBuf, String> {

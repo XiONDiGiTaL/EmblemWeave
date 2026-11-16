@@ -1251,6 +1251,18 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     if let Some(vc) = &vc_env {
         envs.push(("NX_VCVARS", vc));
     }
+    // Hook sites code mods bring (sites.rs): main is lifted with main.sites plus theirs. The list is only rewritten when it
+    // changes, and with no such mods it is main.sites itself, so ninja lifts main again only when the sites really change.
+    let mods_dir = run_dir().map(|d| d.join("mods")).unwrap_or_default();
+    let (site_list, mod_sites) = crate::sites::prepare(&root, &mods_dir)?;
+    if mod_sites.is_empty() {
+        ctx.log("hook sites: main.sites (no installed mod adds any)");
+    } else {
+        let from: std::collections::BTreeSet<&str> = mod_sites.iter().map(|s| s.from.split(':').next().unwrap_or("")).collect();
+        ctx.log(format!("hook sites: main.sites plus {} from mods ({})", mod_sites.len(), from.into_iter().collect::<Vec<_>>().join(", ")));
+    }
+    let site_list = site_list.display().to_string();
+    envs.push(("FEFW_SITES", &site_list));
     let built = run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs);
     if let Err(e) = built {
         // The same old-toolset case, when it slips past the version check: the C++ library of an older Visual Studio has no
