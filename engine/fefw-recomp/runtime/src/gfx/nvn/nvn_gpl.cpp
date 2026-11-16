@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -94,6 +95,7 @@ std::deque<std::function<void()>> g_exact_q;   // [nvn] gpl_async: parts a defer
 std::unordered_set<std::string> g_exact_pending;
 std::atomic<int64_t> g_frame_seen_ns{0};      // when the replay last saw the present count move
 std::deque<std::function<void()>> g_pre_q;     // parts of the key file's pipelines (gpl_prebuild): after the hot programs, before the cold ones
+std::deque<std::function<void()>> g_task_q;    // gpl_queue_task (compute pipelines): after the exact parts, before the hot programs
 std::deque<Job> g_hot_q, g_cold_q;    // hot: programs a command buffer was recorded with (oldest first); cold: set but not yet bound (newest first)
 std::vector<RasterKey> g_rasters;
 std::deque<std::array<const ShaderInfo*, 3>> g_programs;   // the most recent programs, for the raster flags that show up later
@@ -120,7 +122,7 @@ int g_fail_streak = 0;
 int g_running = 0;                         // jobs being built by the workers right now
 
 // Tells the overlay how much shader work is waiting (queued + running). Caller holds g_mu.
-void publish_backlog_locked() { nxrt::gfx::set_shader_backlog(static_cast<int>(g_exact_q.size() + g_hot_q.size() + g_pre_q.size() + g_cold_q.size() + g_up_q.size()) + g_running + g_up_running); }
+void publish_backlog_locked() { nxrt::gfx::set_shader_backlog(static_cast<int>(g_exact_q.size() + g_task_q.size() + g_hot_q.size() + g_pre_q.size() + g_cold_q.size() + g_up_q.size()) + g_running + g_up_running); }
 
 thread_local const GraphicsKey* t_link_key = nullptr;      // the draw being linked on this thread, for the log line of a slow part
 
@@ -200,13 +202,16 @@ std::string fo_key(const GraphicsKey& key) {
 }
 
 // ---- the four builders ------------------------------------------------------------------------------------------------------------
-VkPipeline create_part(VkGraphicsPipelineCreateInfo& gi, const char* what) {
+// use_cache = false: parts without shader code (vertex input, fragment output) gain nothing from the pipeline cache, and the draw that makes
+// them should not wait on its lock ([nvn] gpl_link_cache).
+VkPipeline create_part(VkGraphicsPipelineCreateInfo& gi, const char* what, bool use_cache = true) {
     gi.flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
     if (g_retain) gi.flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
     VkPipeline p = VK_NULL_HANDLE;
     const auto t0 = Clock::now();
     // shader preparation keeps nothing in the app cache file (it would grow to hundreds of MB); the driver's own cache holds the result
-    const VkResult r = create_graphics_pipeline_tracked(vkdev(), (g_discard.load(std::memory_order_relaxed) && !g_prepare_cache.load(std::memory_order_relaxed)) ? VK_NULL_HANDLE : pipeline_cache_handle(), &gi, &p);
+    const bool cache = use_cache && !(g_discard.load(std::memory_order_relaxed) && !g_prepare_cache.load(std::memory_order_relaxed));
+    const VkResult r = create_graphics_pipeline_tracked(vkdev(), cache ? pipeline_cache_handle() : VK_NULL_HANDLE, &gi, &p);
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "pipeline part (%s) failed (%d)", what, static_cast<int>(r));
         return VK_NULL_HANDLE;
@@ -296,7 +301,8 @@ VkPipeline build_vi(const GraphicsKey& key) {
     gi.pVertexInputState = &vi;
     gi.pInputAssemblyState = &ia;
     gi.pDynamicState = pipeline_dynamic_state();
-    return create_part(gi, "vertex input part");
+    static const bool link_cache = config_get_bool("nvn", "gpl_link_cache", false);
+    return create_part(gi, "vertex input part", link_cache || g_retain);
 }
 
 VkPipeline build_fo(const GraphicsKey& key) {
@@ -333,7 +339,8 @@ VkPipeline build_fo(const GraphicsKey& key) {
     gi.pColorBlendState = &cb;
     gi.pMultisampleState = &ms;
     gi.pDynamicState = pipeline_dynamic_state();
-    return create_part(gi, "fragment output part");
+    static const bool link_cache = config_get_bool("nvn", "gpl_link_cache", false);
+    return create_part(gi, "fragment output part", link_cache || g_retain);
 }
 
 // A draw that needs a part a background thread is still building waits for that thread, which runs at below-normal priority and in efficiency mode:
@@ -490,25 +497,31 @@ void run_job(const Job& j) {
     }
 }
 
-void worker_main() {
-    log_set_thread_name("nvn-gpl");
+// burst: one of the [nvn] gpl_burst_threads, which only take what a draw or a dispatch is about to need (exact parts, compute pipelines, the
+// parts of programs a command buffer was recorded with), so a first-use burst (new area, spell, cutscene) is built with more threads while the
+// speculative backlog keeps the usual number.
+void worker_main(bool burst) {
+    log_set_thread_name(burst ? "nvn-gpl-burst" : "nvn-gpl");
     set_compile_thread_priority();
+    auto have = [burst] {
+        return !g_exact_q.empty() || !g_task_q.empty() || !g_hot_q.empty() || (!burst && (!g_pre_q.empty() || (g_cold && !g_cold_q.empty())));
+    };
     for (;;) {
         Job j;
         {
             std::unique_lock<std::mutex> lk(g_mu);
             if (!ab_pause_on()) {
-                g_cv.wait(lk, [] { return g_stop || !g_exact_q.empty() || !g_hot_q.empty() || !g_pre_q.empty() || (g_cold && !g_cold_q.empty()); });
+                g_cv.wait(lk, [&] { return g_stop || have(); });
                 if (g_stop) return;
             } else {
                 for (;;) {
                     if (g_stop) return;
-                    if ((!g_exact_q.empty() || !g_hot_q.empty() || !g_pre_q.empty() || (g_cold && !g_cold_q.empty())) && !workers_paused()) break;
+                    if (have() && !workers_paused()) break;
                     g_cv.wait_for(lk, std::chrono::milliseconds(20));
                 }
             }
-            if (!g_exact_q.empty() || (g_hot_q.empty() && !g_pre_q.empty())) {
-                auto& q = !g_exact_q.empty() ? g_exact_q : g_pre_q;
+            if (!g_exact_q.empty() || !g_task_q.empty() || (g_hot_q.empty() && !g_pre_q.empty())) {
+                auto& q = !g_exact_q.empty() ? g_exact_q : !g_task_q.empty() ? g_task_q : g_pre_q;
                 std::function<void()> fn = std::move(q.front());
                 q.pop_front();
                 ++g_running;
@@ -604,14 +617,18 @@ void init_once() {
     }
     g_rasters.assign(1, RasterKey{});
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    // Two part-compile workers by default, not four on a 24-thread laptop; the launcher writes this from Graphics.
+    // Two part-compile workers by default, not four on a 24-thread laptop; the launcher writes this from Graphics. They run below normal priority.
     const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 8, 1, 2));
-    for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
+    for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main, false);
+    // [nvn] gpl_burst_threads (default 2): extra threads for the urgent jobs only (see worker_main); idle otherwise
+    const int64_t burst = std::clamp<int64_t>(config_get_int("nvn", "gpl_burst_threads", 2), 0, 8);
+    for (int64_t i = 0; i < burst; ++i) g_workers.emplace_back(worker_main, true);
     if (g_up_mode != UpMode::Off) {
         const int64_t nup = config_get_int("nvn", "gpl_upgrade_threads", 1);
         for (int64_t i = 0; i < nup; ++i) g_up_workers.emplace_back(upgrade_main);
     }
-    NXLOG_I(kTag, "pipeline libraries on: %zu background threads%s; linked pipelines are replaced by %s", g_workers.size(), g_lto ? ", link-time optimisation requested" : "",
+    NXLOG_I(kTag, "pipeline libraries on: %lld background threads + %lld for urgent parts%s; linked pipelines are replaced by %s", static_cast<long long>(want),
+            static_cast<long long>(burst), g_lto ? ", link-time optimisation requested" : "",
             g_up_mode == UpMode::Off ? "nothing (gpl_upgrade is off)" : g_up_mode == UpMode::Lto ? "link-time optimised links" : "whole pipelines");
 }
 
@@ -640,6 +657,34 @@ void learn_raster(const RasterKey& r) {
 
 }  // namespace
 
+#if defined(_WIN32)
+namespace {
+// A CPU with cores of more than one efficiency class (Intel P and E cores): where EcoQoS moves work to the slow cores. On the others it only
+// lowers the clock of the thread, which makes the background builds slower without freeing a core for the game.
+bool cpu_is_hybrid() {
+    static const bool hybrid = [] {
+        ULONG len = 0;
+        GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
+        if (len == 0) return false;
+        std::vector<uint8_t> buf(len);
+        if (!GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buf.data()), len, &len, GetCurrentProcess(), 0)) return false;
+        int lo = 256, hi = -1;
+        for (ULONG off = 0; off + sizeof(DWORD) * 2 <= len;) {
+            const auto* e = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buf.data() + off);
+            if (e->Size == 0) break;
+            if (e->Type == CpuSetInformation) {
+                lo = std::min<int>(lo, e->CpuSet.EfficiencyClass);
+                hi = std::max<int>(hi, e->CpuSet.EfficiencyClass);
+            }
+            off += e->Size;
+        }
+        return hi > lo;
+    }();
+    return hybrid;
+}
+}  // namespace
+#endif
+
 void set_compile_thread_priority(bool background) {
 #if defined(_WIN32)
     static const std::string mode = config_get_str("nvn", "compile_priority", "below");
@@ -649,7 +694,17 @@ void set_compile_thread_priority(bool background) {
     SetThreadPriority(GetCurrentThread(), p);
     // Efficiency mode (EcoQoS): Windows runs the thread on the efficiency cores of a hybrid CPU and at a lower clock elsewhere, so a burst of
     // shader compiles does not take the fast cores from the game's own threads. Not for the shader preparation, which wants all the speed.
-    static const bool eco = config_get_bool("nvn", "compile_eco", true);
+    // [nvn] compile_eco: auto (default) = on only for a hybrid CPU; true / false force it.
+    static const bool eco = [] {
+        std::string v = config_get_str("nvn", "compile_eco", "auto");
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (v.empty() || v == "auto") {
+            const bool h = cpu_is_hybrid();
+            NXLOG_I(kTag, "[nvn] compile_eco = auto: background pipeline builds %s (%s CPU)", h ? "in efficiency mode" : "at full speed", h ? "hybrid" : "not a hybrid");
+            return h;
+        }
+        return !(v == "false" || v == "0" || v == "off" || v == "no");
+    }();
     if (background && eco) {
         THREAD_POWER_THROTTLING_STATE st = {};
         st.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
@@ -832,7 +887,11 @@ VkPipeline gpl_link(const GraphicsKey& key, const ProgLayout& layout, std::share
         VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &lci};
         if (g_lto) gi.flags |= VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT;
         gi.layout = layout.layout;
-        const VkResult res = create_graphics_pipeline_tracked(vkdev(), pipeline_cache_handle(), &gi, &pipe);
+        // [nvn] gpl_link_cache (default false): a fast link only joins the parts' code, the pipeline cache has nothing to give it; without the
+        // cache the draw's link cannot wait on the cache's lock while the saver thread serialises it (vkGetPipelineCacheData of hundreds of MB)
+        // or a background thread's compile holds it.
+        static const bool link_cache = config_get_bool("nvn", "gpl_link_cache", false);
+        const VkResult res = create_graphics_pipeline_tracked(vkdev(), (link_cache || g_lto) ? pipeline_cache_handle() : VK_NULL_HANDLE, &gi, &pipe);
         if (res != VK_SUCCESS) {
             pipe = VK_NULL_HANDLE;
             ok = false;
@@ -929,6 +988,18 @@ void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve,
     g_cv.notify_one();
 }
 
+bool gpl_frames_flowing() { return frames_flowing(); }
+
+bool gpl_queue_task(std::function<void()> fn) {
+    if (!gpl_active()) return false;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_stop) return false;
+    g_task_q.push_back(std::move(fn));
+    publish_backlog_locked();
+    g_cv.notify_one();
+    return true;
+}
+
 bool gpl_ready(const GraphicsKey& key, const ProgLayout& layout) {
     if (!g_on.load(std::memory_order_acquire) || !link_eligible(key)) return false;
     StageModules sm;
@@ -998,7 +1069,7 @@ GplStats gpl_stats() {
     std::lock_guard<std::mutex> lk(g_mu);
     GplStats s = g_stats;
     s.paced_ms = static_cast<double>(g_paced_us.load(std::memory_order_relaxed)) / 1000.0;
-    s.jobs_pending = g_exact_q.size() + g_hot_q.size() + g_pre_q.size() + (g_cold ? g_cold_q.size() : 0) + static_cast<uint64_t>(g_running);
+    s.jobs_pending = g_exact_q.size() + g_task_q.size() + g_hot_q.size() + g_pre_q.size() + (g_cold ? g_cold_q.size() : 0) + static_cast<uint64_t>(g_running);
     return s;
 }
 
@@ -1013,6 +1084,7 @@ void gpl_stop() {
         g_hot_q.clear();
         g_cold_q.clear();
         g_pre_q.clear();
+        g_task_q.clear();
         g_exact_q.clear();
         g_exact_pending.clear();
         g_up_q.clear();

@@ -42,6 +42,9 @@ struct ProgLayout {
     bool has_set[5] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
+    // The alpha-test variant of a program's layout (alpha_layout): the same sets and one more push constant range, FRAGMENT [0, 4) = the
+    // reference of the game's alpha test (spirv_alpha_test reads it). Draws that run the alpha-test fragment variant use this layout.
+    bool alpha_push = false;
     // Set 0 (the uniform buffers) is a push descriptor set ([nvn] push_uniforms): the replay pushes its buffers with each draw that changes
     // them (vkCmdPushDescriptorSetKHR) instead of finding or making a descriptor set for them. Every binding of it is a buffer.
     bool push_set0 = false;
@@ -56,6 +59,8 @@ bool push_uniforms_on();
 
 // Stages by NVN stage index (0 vertex, 1 fragment, 2 geometry, 5 compute); null = absent.
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);
+// The layout of `base` with the alpha-test push constant (cached per base; `base` itself when it has push constants of its own).
+const ProgLayout* alpha_layout(const ProgLayout& base);
 
 // Vertex input for the key.
 struct KeyAttr {
@@ -91,6 +96,13 @@ struct GraphicsKey {
     // Tessellation control and evaluation stages (null: none). Last, so that the prewarm key file keeps its record layout (it records the bytes
     // before these and never a tessellated key). A key with them has topology PATCH_LIST and patch_control_points = the NVN patch size.
     const ShaderInfo* tess[2] = {};
+    // After the tessellation stages, so that the prewarm key file keeps its record layout (it records the bytes before them): the fixed-function
+    // alpha test of the game ([nvn] alpha_test). alpha_func = NVNalphaFunc 1..7 (0: none / ALWAYS); the fragment shader then runs as a variant
+    // that kills the invocation when the test fails (spirv_alpha_test); the reference is a push constant (ProgLayout::alpha_push).
+    // alpha_layout = 1: built with the alpha-test layout (alpha_layout(): the program's sets plus the reference's push constant range). It is in
+    // the key because begin_draw picks that layout before the pass is known: a draw whose pass then rules the variant out (no colour target 0,
+    // dual-source blend) keeps alpha_func = 0 but still uses the other layout, and pipelines of incompatible layouts must not share a cache entry.
+    uint8_t alpha_func = 0, alpha_layout = 0, alpha_pad[6] = {};
     bool operator==(const GraphicsKey& o) const;
     uint64_t hash() const;
 };
@@ -132,10 +144,13 @@ void prewarm_record(const GraphicsKey& key);                              // a d
 size_t prewarm_program(const ShaderInfo* const stages[6]);                // a program got its shaders: its recorded pipelines go first in line (how many)
 // True with *out: the pipeline was built ahead. False: build it here, except that when a background build of it is under way and can_link()
 // says the draw can link it from parts now, *later gets the whole pipeline that will replace the linked one (link with no upgrade of its own).
-bool prewarm_take(const GraphicsKey& key, VkPipeline* out, const std::function<bool()>& can_link, std::shared_ptr<PipeUpgrade>* later);
+// busy (when given): the background build is under way and the draw cannot link it; instead of waiting for the build, false with *busy = true
+// (the caller skips the draw and asks again at the next one).
+bool prewarm_take(const GraphicsKey& key, VkPipeline* out, const std::function<bool()>& can_link, std::shared_ptr<PipeUpgrade>* later,
+                  bool* busy = nullptr);
 void prewarm_shutdown();                                                  // stops the workers (before the device is torn down)
 struct PrewarmStats {
-    uint64_t recorded = 0, loaded = 0, queued = 0, built = 0, taken = 0, waited = 0, claimed = 0;
+    uint64_t recorded = 0, loaded = 0, queued = 0, built = 0, taken = 0, waited = 0, claimed = 0, skipped_busy = 0;
     uint64_t failed = 0, promoted = 0, linked_meanwhile = 0;   // builds that failed; jobs moved ahead by a program set; draws linked while the whole build ran
     double wait_ms = 0;
 };
@@ -143,6 +158,12 @@ PrewarmStats prewarm_stats();
 // `ints`: samplers that read integer textures (spirv_int_samplers); null when that variant cannot be made (the caller then uses the
 // translated module with float views).
 VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, const std::vector<SpvIntSampler>& ints = {});
+// [nvn] compute_async (default prebuild): a compute program's pipeline is built on a background thread as soon as the game sets its shader, so
+// the first dispatch (render thread) takes it ready instead of compiling it (tens to hundreds of ms on a cold driver cache). The dispatch waits
+// for a build under way and builds one still queued itself; `skip` skips the dispatch instead while a build runs and frames are flowing (visual
+// risk: a dispatch whose results later frames keep; for measurements). Any thread.
+void compute_prebuild(const ShaderInfo* cs);
+void compute_progress_log();                     // one log line when something changed since the last call
 VkShaderModule shader_module(const ShaderInfo* s);
 // A content id of a shader module (hash of the words it was made from): two modules made from the same words have the same id, so the shader
 // parts built for the stand-in shaders of the key file are found again by the game's own. Any thread.
@@ -170,6 +191,11 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f);
 // moved: it looks at the ids registered since the last call and the textures tex_transition moved since (pool_note_layout), and at every
 // registered texture only when the CPU wrote textures since (g_tex_scan_epoch).
 void pool_textures_to_prepare(TexturePool* tp, std::vector<Texture*>& out);
+// The texture's first upload waits for a later frame ([nvn] pool_upload_ms): until this frame ends it is left out of the lists every draw looks
+// through (its pool elements keep the dummy); the next frame's first look takes it up again. Render thread.
+void pool_hold(Texture* t);
+// How many textures the last frame that held any held back (the backlog the pool upload budget looks at).
+size_t pool_held_backlog();
 // Some registration, layout move or CPU write since the pair was last made current: the replay sets its bindings again. O(1).
 bool pool_state_moved(TexturePool* tp, SamplerPool* sp);
 void pool_sets_shutdown();                       // device idle
@@ -201,6 +227,9 @@ void gpl_program_bound(const ShaderInfo* const stages[6]);           // a comman
 void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve, bool front);
 // True when the draw can link this key now: eligible, and its two shader parts are built.
 bool gpl_ready(const GraphicsKey& key, const ProgLayout& layout);
+bool gpl_frames_flowing();                                           // a present within the last 100 ms (draws may be skipped rather than wait)
+// A job for the pipeline-library threads (compute pipelines, compute_prebuild): ahead of the hot programs' parts. False when they are off.
+bool gpl_queue_task(std::function<void()> fn);
 void gpl_progress_log();                                             // one log line when something changed since the last call
 void gpl_stop();                                                     // stops the workers (before modules and layouts go)
 void gpl_shutdown();                                                 // destroys the parts (after the pipelines)

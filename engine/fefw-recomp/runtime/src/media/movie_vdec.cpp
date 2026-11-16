@@ -716,8 +716,14 @@ bool install_movie_decoder_hle() {
             module_override_symbol(im.name);
         }
         g_enabled = true;
-        NXLOG_I(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s (%d threads), %zu imports routed", dav1d_version(), g_threads,
-                sizeof kImports / sizeof kImports[0]);
+#if NXRT_DAV1D_ASM
+        NXLOG_I(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s with x86-64 assembly (%d threads), %zu imports routed",
+                dav1d_version(), g_threads, sizeof kImports / sizeof kImports[0]);
+#else
+        // A runtime built without NASM: 1440p pictures take 30-50 ms instead of 10-15, so the movies play below 30 fps (choppy cutscenes).
+        NXLOG_W(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s, C only: built without NASM, movies decode several times slower "
+                "and may play below their frame rate (%d threads), %zu imports routed", dav1d_version(), g_threads, sizeof kImports / sizeof kImports[0]);
+#endif
     });
     return g_enabled;
 }

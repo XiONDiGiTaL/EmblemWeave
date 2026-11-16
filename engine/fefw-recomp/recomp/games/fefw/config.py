@@ -32,6 +32,30 @@ class Config(GameConfig):
         ModuleSpec('rtld', 0x7700000000, 'rtld'),
     ]
     overrides = {}
+    # nxrecomp/opt.py (perf/codegen; fewer and shorter x86 instructions, the same guest behaviour): NZCV in function locals, and
+    # scalar results written to a V register as one whole-register store (perf/codegen2: every V register write), and x8..x17 in
+    # function locals in functions that make calls ('tregs', opt.temps_local: AAPCS64 temporaries, not written back at calls and
+    # returns). tregs changes the control flow clang sees in ~40 % of the functions it touches: build PGO with a profile of tregs code.
+    # tregs is off until it is shown safe for this game: it assumes no value in x9..x17 crosses a call or a return, and a first static
+    # check of the lifted game left a few hundred places it could not clear yet. NXRECOMP_OPT=flags,vstore,tregs turns it on for a build.
+    opt = ('flags', 'vstore')
+    # nnSdk 22.2.0's C string routines run natively (cxx.h hle_*; same results, checked against the lifted routines by
+    # recomp/tests/hle_libc_test.cpp). Address: (body, the routine's first instruction words).
+    inline_replace = {
+        0x75007bbc80: ('nx::hle_memmove(c);', (0x8b020024, 0x8b020005, 0xf102005f, 0x540007a8)),   # __memcpy_aarch64 (overlap-safe)
+        0x750078df20: ('nx::hle_memmove(c);', (0xeb01001f, 0x54000ba0, 0x8b020028, 0xeb00011f)),   # memmove
+        0x750078e1e0: ('nx::hle_memset(c);', (0xb40006c2, 0x8b020008, 0x39000001, 0x381ff101)),    # memset
+        0x75007a6c20: ('nx::hle_strlen(c);', (0xaa0003e8, 0xf240081f, 0x54000560, 0x39400008)),    # strlen
+        0x75007bc140: ('nx::hle_memcmp(c);', (0xb4000162, 0x4a000028, 0x92400908, 0xb4000168)),    # memcmp
+        0x75007bc240: ('nx::hle_strcmp(c);', (0x4a000028, 0x92400908, 0xb4000288, 0x39400008)),    # strcmp
+        # main's zstd 1.5.x ZSTD_decompressMultiFrame (loading / area changes): native zstd, the lifted original as the fallback
+        # (game-build/fefw/src/fefw_hle.cpp; FEFW_HLE_ZSTD=0 turns it off)
+        0x71000c6a60: ('nx_hle_zstd_multiframe(c, NX_ORIG);', (0xd503237f, 0xd10483ff, 0xa90c7bfd, 0xa90d6ffc)),
+    }
+    # hot code packed together (guest entries from the perf push's profiles, hottest first; see hot.txt's header)
+    hot_order = 'hot.txt'
+    # small hot callees copied into their hot callers' translation units (inline.txt's header)
+    inline_edges = 'inline.txt'
     # rtld's process entry (0x0): this rtld has an FDE there, Pokopia's has none; listed so discovery roots it either way
     extra_entries = {'rtld': [0x0]}
     patches = None

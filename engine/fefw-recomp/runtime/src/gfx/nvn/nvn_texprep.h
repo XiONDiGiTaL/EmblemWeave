@@ -36,6 +36,14 @@
 namespace nxrt::nvn::be::texprep {
 
 bool enabled();
+// [nvn] tex_async = standin (default; off: the synchronous behaviour described above). The render thread neither reads the BC7 disk cache nor waits
+// for a job: an ASTC texture whose background result is not ready gets a quick stand-in (TexCaps::standin_first), its job moves to the front of
+// the queue and its result replaces the stand-in at the next use. A job already running is waited for at most [nvn] tex_prep_wait_ms (2 ms here).
+// This relaxes the rule above that a texture is never drawn before its data is ready: for a few frames it is drawn with the stand-in.
+bool async_standin();
+// This thread is about to copy or clear the texture it prepares (tex_ensure_exact): no stand-in, the real data now. Returns the previous value.
+bool set_exact_thread(bool on);
+bool exact_thread();
 
 // Any thread. on_flushed: the CPU wrote the storage (called by gpu::mark_texture_cpu_dirty). on_bound: a handle of the texture was bound in a command list.
 void on_flushed(Texture* t);
@@ -58,6 +66,13 @@ bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged = nullptr, uint6
 bool wants_provisional(Texture* t);
 void provisional_uploaded(Texture* t);
 void final_uploaded(Texture* t);
+// Render thread. standin_on_screen: the image holds a stand-in of the texture's current content (tex_async = standin). standin_kept: an upload of
+// such a texture found no result of its job; the stand-in stays and the job is queued again at the front unless one is queued, running or done
+// for this content (its end marks the texture dirty, and the next use uploads the result). Nothing is prepared on the render thread for it.
+bool standin_on_screen(Texture* t);
+// Any thread: a background result for the texture's current content is waiting to be taken (cheap to upload).
+bool has_result(Texture* t);
+void standin_kept(Texture* t);
 // Any thread: hash of the texture's storage as take checks it (false: no storage or a page is gone).
 bool hash_storage(const Texture& t, uint64_t& h);
 // The GPU layer is going away (gpu::tex_shutdown): finished results give their upload buffers back and no new ones are made until reopen_staging.
@@ -66,7 +81,7 @@ void reopen_staging();
 
 // Counters for the log line and the tests.
 struct Stats {
-    uint64_t scheduled = 0, hits = 0, waited_hits = 0, stale = 0, stolen = 0, none = 0, mismatches = 0, verified = 0, crashes = 0, failed = 0, skipped_budget = 0, evicted = 0;
+    uint64_t scheduled = 0, hits = 0, waited_hits = 0, stale = 0, stolen = 0, deferred = 0, none = 0, mismatches = 0, verified = 0, crashes = 0, failed = 0, skipped_budget = 0, evicted = 0;
 };
 Stats stats();
 // Test aid: returns when no job is queued or running (at most 10 s).

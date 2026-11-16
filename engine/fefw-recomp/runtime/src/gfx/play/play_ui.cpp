@@ -1017,7 +1017,9 @@ void gpu_group(Page& p) {
     tip("Keeps device-local copies of the memory the draws read: faster, costs up to 2 GiB of video memory. [nvn] pool_mirror in the ini wins over this.");
     restart_badge();
     if (ImGui::Checkbox("Fewer GPU pipeline waits", &d.fewer_gpu_waits)) mark(p);
-    tip("No full barrier after render passes that only wrote their own targets. [nvn] pass_barriers in the ini wins over this.");
+    tip("No full barrier after render passes that only wrote their own targets. On NVIDIA GPUs it also leaves out the barriers the game's compute "
+        "work and uniform updates do not need (lower GPU time per frame). Turn it off if you see flickering or broken effects. "
+        "[nvn] pass_barriers and [nvn] lean_barriers in the ini win over this.");
     restart_badge();
     if (ImGui::Checkbox("Prepare shaders ahead (pipeline prewarm)", &d.shader_prewarm)) mark(p);
     tip("Builds the pipelines that earlier runs recorded when the game loads a program, on background threads, so draws do not stall on a first compile. [nvn] prewarm in the ini wins over this.");

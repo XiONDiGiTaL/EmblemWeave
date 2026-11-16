@@ -112,6 +112,10 @@ struct KThread : KObject {
     uint32_t wait_tag = 0;
     void* cv_storage[1] = {nullptr};    // CONDITION_VARIABLE is pointer sized: this thread's own wake-up (kernel_sync.cpp)
     std::weak_ptr<KThread> self;
+    // [kernel] spin_threads / lock_spin_threads (kernel_sync.cpp): this thread spins on its wake flag before it sleeps / polls a held mutex
+    // word before it queues. Set when the game names the thread (main: when it is adopted). Read by the thread itself.
+    bool spin_ok = false, lock_spin_ok = false;
+    char game_name[32] = {};            // the name nn::os::SetThreadName gave it (thread_diag.cpp), written under the kernel lock; empty until then
     ~KThread() override;                // closes host_handle
     ObjType type() const override { return ObjType::Thread; }
     bool signaled() const override { return exited; }
@@ -155,6 +159,8 @@ struct SchedInfo {
     uint64_t host_masks[16] = {};        // host processor per console core (the first `cores` are used): the affinity (strict) or ideal processor (soft)
     uint64_t pool = 0;                   // host processors a guest thread may use under soft (and during a starvation boost under strict)
     int slot = -1;                       // processor slot taken (-1: shared / explicit mask)
+    uint64_t render_core = 0;            // [sched] render_place = reserve: the physical core kept for the render thread (left out of `pool`), 0 = none
+    uint64_t reserved = 0;               // processors left out of `pool` by render_place = reserve (render_core and main's SMT sibling)
 };
 SchedInfo sched_info();                  // initialises on first use
 int sched_host_priority(int hos_prio);   // THREAD_PRIORITY_* for a HOS priority under the model (nn::os prio = hos - 28)
