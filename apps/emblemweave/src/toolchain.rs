@@ -736,7 +736,21 @@ pub fn cache_facts(text: &str) -> CacheFacts {
 }
 
 fn tidy_path(p: &str) -> String {
-    p.trim().trim_matches('"').replace('/', "\\").to_lowercase()
+    // A cache keeps the spelling the configure was given: `build_game.cmd` passes `recomp\scripts\..\cmake\clang-cl.cmake` and the
+    // launcher passes `recomp\cmake\clang-cl.cmake`, which name the same file. Resolve `.` and `..` textually (the file may not exist
+    // yet in a folder that is being checked) so the comparison sees one path.
+    let spelled = p.trim().trim_matches('"').replace('/', "\\").to_lowercase();
+    let mut parts: Vec<&str> = Vec::new();
+    for part in spelled.split('\\') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("\\")
 }
 
 /// Why a build folder cannot be reused: its cache names a compiler, generator
@@ -864,6 +878,27 @@ fn resolve() -> Result<Resolved, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_toolchain_file_spelled_with_dot_dot_is_the_same_file() {
+        // build_game.cmd passes `recomp\scripts\..\cmake\clang-cl.cmake`, the launcher passes `recomp\cmake\clang-cl.cmake`; the
+        // cache keeps whichever ran, and a difference here threw a whole build folder away.
+        let cache = concat!(
+            "CMAKE_C_COMPILER:FILEPATH=C:/llvm/bin/clang-cl.exe
+",
+            "CMAKE_CXX_COMPILER:FILEPATH=C:/llvm/bin/clang-cl.exe
+",
+            "CMAKE_GENERATOR:INTERNAL=Ninja
+",
+            "CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=C:/repo/engine/fefw-recomp/recomp/scripts/../cmake/clang-cl.cmake",
+        );
+        let facts = cache_facts(cache);
+        let compiler = Path::new("C:/llvm/bin/clang-cl.exe");
+        let got = cache_mismatch(&facts, compiler, "Ninja", "C:/repo/engine/fefw-recomp/recomp/cmake/clang-cl.cmake");
+        assert_eq!(got, None);
+        let other = cache_mismatch(&facts, compiler, "Ninja", "C:/other/recomp/cmake/clang-cl.cmake");
+        assert!(other.is_some(), "a toolchain file in another checkout is still a mismatch");
+    }
 
     #[test]
     fn vs_versions_compare_by_major() {
