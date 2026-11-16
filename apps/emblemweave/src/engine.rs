@@ -277,6 +277,22 @@ pub fn install_hint(tool: &str) -> &'static str {
         .unwrap_or("see docs/TROUBLESHOOTING.md")
 }
 
+/// Whether the engine's virtual environment can actually run the lifter. A folder
+/// left by another release or Python install can still contain `python.exe` while
+/// that interpreter cannot start (the `python311.dll` conflict in issue #43), and
+/// the old check only looked for the file. The imports are the ones the build's
+/// Python steps need; a partial pip install is repaired the same way.
+fn python_env_ready(python: &Path) -> bool {
+    Command::new(python)
+        .args(["-I", "-c", "import capstone, lz4, zstandard, zbic, elftools, unicorn"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Run one command in `cwd`, its output (stdout and stderr) into the job
 /// log, with no console window. Cancelling the job stops it.
 fn run(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str]) -> Result<(), String> {
@@ -1309,6 +1325,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // 1. Python environment. `uv` is quicker when it is installed, but it is one more thing to install for one virtualenv, so
     // without it the interpreter the build already needs makes the environment and pip installs the same pinned list.
     ctx.start(0);
+    if python.is_file() && !python_env_ready(&python) {
+        ctx.log("the existing tools\\.venv Python cannot start or is missing the lifter's packages; recreating the environment");
+        std::fs::remove_dir_all(root.join("tools").join(".venv"))
+            .map_err(|e| format!("removing the unusable tools\\.venv: {e}"))?;
+    }
     if python.is_file() {
         ctx.end(0, StageStatus::Skipped, "already set up");
     } else if which_tool("uv") {
