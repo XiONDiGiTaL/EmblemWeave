@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.30](0.1.30.md) | 2026-11-15 | NASM joined the optional list; the engine builds without it |
 | [0.1.29](0.1.29.md) | 2026-11-15 | Three installs left the requirements: Git, PowerShell 7 and uv |
 | [0.1.28](0.1.28.md) | 2026-11-15 | Portable mode takes the settings and installed mods with it, and can be switched from the command line |
 | [0.1.27](0.1.27.md) | 2026-11-15 | CMake is found the way the build finds it, `.nx` archives play again, and an SDK unzipped whole is found one folder down |
