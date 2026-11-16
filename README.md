@@ -9,8 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://xiondigital.net/EmblemWeave/">Site</a> ·
-  <a href="docs/MIRRORS.md">Mirrors</a>
+  <a href="https://xiondigital.net/EmblemWeave/">Site</a>
 </p>
 
 <p align="center">

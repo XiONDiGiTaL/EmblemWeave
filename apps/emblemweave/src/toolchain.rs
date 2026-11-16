@@ -221,6 +221,20 @@ fn build_tool_path() -> String {
     }
     dirs.push(r"C:\Program Files\LLVM\bin".to_string());
     dirs.push(r"C:\Program Files\CMake\bin".to_string());
+    // CMake bundled with Visual Studio lives here and reaches PATH only after `vcvars` runs. The dependency page runs it and the
+    // build probe did not, so the page said "installed" while the build said "CMake was not found on PATH" (issue 30).
+    for vs in vs_installs() {
+        dirs.push(vs.path.join(r"Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin").display().to_string());
+    }
+    if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+        dirs.push(format!(r"{pf86}\CMake\bin"));
+    }
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        dirs.push(format!(r"{program_data}\chocolatey\bin"));
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        dirs.push(format!(r"{home}\scoop\shims"));
+    }
     dirs.push(r"C:\Program Files\dotnet".to_string());
     dirs.push(format!(r"{local}\Microsoft\WinGet\Links"));
     dirs.push(format!(r"{local}\bin\NASM"));

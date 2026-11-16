@@ -1037,6 +1037,15 @@ pub fn built_by() -> Option<String> {
     ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned()
 }
 
+/// Whether the game folder was built by a release older than `major.minor.patch`. A folder with no `built_by` predates the key itself,
+/// which every build has written since 0.1.20, so it counts as old.
+fn game_build_is_older_than(major: u32, minor: u32, patch: u32) -> bool {
+    let Some(text) = built_by() else { return true };
+    let mut parts = text.split('.').filter_map(|p| p.trim().parse::<u32>().ok());
+    let found = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    found < (major, minor, patch)
+}
+
 /// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
 /// those files first and then starts the game. True for a game folder built before 0.1.20, or one whose write never ran.
 pub fn packed_package_without_overlay() -> Option<PathBuf> {
@@ -2575,6 +2584,23 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     // A build from an earlier release can point the game at a packed .nup, which the engine cannot read in place. The launcher writes those
     // files before play, so reaching this means that write has not happened yet; say so instead of letting the game die on `main.npdm is
     // compressed in the .nup` (issue #24).
+    // A game folder built by a release before 0.1.20 carries an engine that cannot read a package which keeps some files packed, and a
+    // launcher-side overlay does not help it: the reader that decompresses those files arrived with 0.1.20. Mixed folders are the usual
+    // cause (a new EmblemWeave.exe dropped into an old extracted folder), and its log says "main.npdm is compressed in the .nup" (#34).
+    if game_build_is_older_than(0, 1, 20) {
+        if let Some(dir) = run_dir() {
+            let ini = ini_map(&dir.join("fefw.ini"));
+            if let Some(pkg) = ini.get("fs.romfs").map(PathBuf::from) {
+                if pkg.is_file() && crate::gamedata::packed_romfs(&pkg).is_some() {
+                    return Err(format!(
+                        "this game folder was built by EmblemWeave {}, whose engine cannot read a package that keeps some files packed. \
+                         Press Build the game to rebuild it with this release.",
+                        built_by().unwrap_or_else(|| "0.1.19 or older".into())
+                    ));
+                }
+            }
+        }
+    }
     if packed_package_without_overlay().is_some() {
         return Err("this package keeps some of its files packed: press Play again and the launcher writes them into your work folder first".into());
     }
