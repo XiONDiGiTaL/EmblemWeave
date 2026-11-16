@@ -2803,6 +2803,9 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     let child = Command::new(&exe)
         .current_dir(&dir)
+        // The runtime searches its executable, the working folder, and this folder for `upscalers/<vendor>` (#26).
+        // The engine checkout is where the issue's FSR files were copied, and its ancestors cover a release layout.
+        .env("NXRT_LAUNCHER_DIR", &root)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
         // One line per second while frames are presented: the evidence the
         // watcher needs to tell a slow start from a black window.
