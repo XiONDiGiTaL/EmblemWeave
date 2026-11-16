@@ -70,6 +70,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Stage the pinned Ryujinx sources
+        env:
+          RYUBING_REV: a82350bb774f70fcbd41c9987bf67a3775409963
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout https://git.ryujinx.app/ryubing/ryujinx.git "$RUNNER_TEMP/ryubing"
+          git -C "$RUNNER_TEMP/ryubing" checkout --quiet "$RYUBING_REV"
+          dst=engine/fefw-recomp/tools/shaders/third_party/ryubing
+          mkdir -p "$dst/src"
+          for p in Ryujinx.Common Spv.Generator Ryujinx.Graphics.Shader; do
+            cp -a "$RUNNER_TEMP/ryubing/src/$p" "$dst/src/"
+            rm -rf "$dst/src/$p/obj" "$dst/src/$p/bin"
+          done
+          for f in Directory.Build.props Directory.Packages.props global.json nuget.config LICENSE.txt; do
+            cp "$RUNNER_TEMP/ryubing/$f" "$dst/$f"
+          done
       - name: Build and verify the Windows zip
         shell: pwsh
         run: |
