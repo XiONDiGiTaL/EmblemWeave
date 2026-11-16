@@ -107,10 +107,17 @@ $body
     if ($dirty.Count -gt 0) {
         git add -- $relFiles
         if ($LASTEXITCODE -ne 0) { throw "git add failed ($LASTEXITCODE)" }
-        # Only these two paths: anything else already staged stays staged, for the next commit and out of this tag.
-        git commit -q -m "Release $Version`n`nThe changelog and the index row tools/release.ps1 wrote for it." -- $relFiles
-        if ($LASTEXITCODE -ne 0) { throw "git commit failed ($LASTEXITCODE)" }
-        Write-Host 'committed the changelog and its index row'
+        # A CRLF-only change is reported by git status and disappears after git add. Ask what is actually staged
+        # before committing: an empty commit would make the script fail after the zip has already been built.
+        $staged = @(git diff --cached --name-only -- $relFiles)
+        if ($staged.Count -gt 0) {
+            # Only these two paths: anything else already staged stays staged, for the next commit and out of this tag.
+            git commit -q -m "Release $Version`n`nThe changelog and the index row tools/release.ps1 wrote for it." -- $relFiles
+            if ($LASTEXITCODE -ne 0) { throw "git commit failed ($LASTEXITCODE)" }
+            Write-Host 'committed the changelog and its index row'
+        } else {
+            Write-Host 'changelog and index row already in HEAD; nothing to commit'
+        }
     }
     git push
     if ($LASTEXITCODE -ne 0) { throw "git push failed ($LASTEXITCODE): the tag would point at a tree without this release's notes" }
