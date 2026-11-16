@@ -4331,6 +4331,22 @@ void run_list(const CmdList& list, int depth) {
                 // TIMESTAMP_TOP is a timestamp too (taken when the command reaches the top of the pipe): its counter word is 0 like TIMESTAMP's
                 const bool stamp = p.type == NVN_COUNTER_TYPE_TIMESTAMP || p.type == NVN_COUNTER_TYPE_TIMESTAMP_TOP;
                 if (!stamp) note_unsupported("statistics counters other than samples passed, primitives generated and feedback primitives written are reported as non-zero");
+                // [nvn] stat_counters = once (from metrist38's fefw-recomp): such a counter is always reported as 1, and the
+                // game asks for the whole set about 45 times a frame. Writing each address once saves about 30 us of render
+                // thread time per frame; the address stays non-zero. A game that clears it and waits would hang, so this is
+                // opt-in and the default keeps writing every report.
+                if (!stamp && p.address) {
+                    static const bool once = [] {
+                        const bool on = nxrt::config_get_str("nvn", "stat_counters", "always") == "once";
+                        if (on) NXLOG_I("nvn", "statistics counters the runtime does not implement are written once per address ([nvn] stat_counters = once)");
+                        return on;
+                    }();
+                    static std::unordered_set<uint64_t> written;
+                    if (once) {
+                        if (written.size() > 4096) written.clear();
+                        if (!written.insert(p.address).second) break;
+                    }
+                }
                 if (stamp) rep.counter = 0;
                 note_report(p.address, rep.counter);
                 if (p.address) do_write_memory(p.address, &rep, sizeof rep);
