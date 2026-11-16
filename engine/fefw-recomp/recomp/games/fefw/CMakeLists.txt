@@ -21,7 +21,22 @@ if(DEFINED NX_ROOT)
     set(FEFW_ROOT "${FEFW_ROOT}" CACHE PATH "repository root (game/, work/)" FORCE)
 endif()
 set(FEFW_EXEFS "${FEFW_ROOT}/game/dump/exefs" CACHE PATH "folder with the NSOs main (uncompressed), sdk, subsdk0-2, rtld")
-set(FEFW_GEN "${FEFW_ROOT}/work/lift/fefw" CACHE PATH "where the generated sources go")
+# A '&' in the checkout path broke the static-library command CMake generates for lifted code whose
+# sources live outside the build folder: the object path is absolute, and cmd.exe split it at the '&'
+# (issue #38). Keep the generated sources under the build folder in that case, where CMake writes the
+# object paths relative to it; a normal checkout keeps work/lift so a build can be reused.
+set(FEFW_GEN_DEFAULT "${FEFW_ROOT}/work/lift/fefw")
+if(FEFW_ROOT MATCHES "[&]")
+    set(FEFW_GEN_DEFAULT "${CMAKE_BINARY_DIR}/gen")
+    message(STATUS "checkout path contains '&': generated sources go to ${FEFW_GEN_DEFAULT}")
+endif()
+set(FEFW_GEN "${FEFW_GEN_DEFAULT}" CACHE PATH "where the generated sources go")
+# A build folder made before the rule above (or by an older release) still points at work/lift. Move
+# only that default: an explicit -DFEFW_GEN stays where the user put it.
+if(FEFW_ROOT MATCHES "[&]" AND FEFW_GEN STREQUAL "${FEFW_ROOT}/work/lift/fefw")
+    set(FEFW_GEN "${CMAKE_BINARY_DIR}/gen" CACHE PATH "where the generated sources go" FORCE)
+    message(STATUS "checkout path contains '&': moved generated sources to ${FEFW_GEN}")
+endif()
 # translation units per module: about 45k instruction words each (docs/S1b.md)
 set(FEFW_SHARDS_MAIN 153 CACHE STRING "translation units of main (6.89 M instruction words)")
 set(FEFW_SHARDS_SDK 50 CACHE STRING "translation units of sdk (2.23 M)")
