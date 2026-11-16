@@ -365,12 +365,7 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
 /// tree, and a tree packed from an extracted dump keeps `exefs/`, `romfs/` and an
 /// optional `data/` at its root. The engine serves a `.nup` itself but knows
 /// nothing of NXFormat, so the RomFS has to be materialised for it (issue 28).
-fn use_nx(
-    g: &mut GameData,
-    path: &Path,
-    progress: &mut dyn FnMut(u64, u64),
-    cancelled: &dyn Fn() -> bool,
-) -> Package {
+fn use_nx(g: &mut GameData, path: &Path) -> Package {
     let nx = match ew_format::nx::Nx::open(path) {
         Ok(n) => n,
         Err(e) => {
@@ -380,9 +375,7 @@ fn use_nx(
     };
     // The launcher is built for one game; take its application when the archive
     // holds several, and the only one when it holds exactly one.
-    let wanted = serde_json::from_str::<KnownDump>(KNOWN_DUMP)
-        .ok()
-        .and_then(|k| u64::from_str_radix(k.program_id.trim_start_matches("0x"), 16).ok());
+    let wanted = known_program_id();
     let app_index = wanted.and_then(|id| nx.application(id)).or_else(|| (nx.applications().len() == 1).then_some(0));
     let Some(app_index) = app_index else {
         g.checks.push(Check::new(Severity::Error, "Game file", "the .nx holds no application for this game"));
@@ -470,72 +463,9 @@ fn use_nx(
     tops.dedup();
     g.romfs_entries = tops.len();
 
-    // The engine reads a RomFS folder: its reader knows a .nup, not NXFormat, so the tree is written out once and the folder handed
-    // over. A .nx has no in-place path the engine could serve, unlike a .nup, so this copies the RomFS to disk (issue 28).
-    let romfs_dir = base.join("romfs");
-    let stamp = format!("{}-{}", path.display(), modified_stamp(path));
-    let marker = base.join("romfs.txt");
-    let cached = std::fs::read_to_string(&marker).ok().and_then(|t| {
-        let mut it = t.lines();
-        (it.next() == Some(stamp.as_str())).then(|| it.next().and_then(|l| Some(l.trim().to_string()))).flatten()
-    });
-    if cached.is_none() {
-        let total = romfs.len() as u64;
-        g.checks.push(Check::new(
-            Severity::Info,
-            "Game file",
-            format!(
-                "writing the RomFS out of {} into {} once, {} entries; the engine reads a folder, not an NX container",
-                path.display(),
-                romfs_dir.display(),
-                total
-            ),
-        ));
-        let _ = std::fs::remove_dir_all(&romfs_dir);
-        if let Err(e) = std::fs::create_dir_all(&romfs_dir) {
-            g.checks.push(Check::new(Severity::Error, "RomFS", format!("creating {}: {e}", romfs_dir.display())));
-            return Package::Failed;
-        }
-        let mut done = 0u64;
-        let mut bytes = 0u64;
-        for (p, id, _) in &romfs {
-            let rel = p.strip_prefix("romfs/").unwrap_or(p);
-            if rel.is_empty() || rel.ends_with('/') {
-                continue;
-            }
-            if cancelled() {
-                let _ = std::fs::remove_dir_all(&romfs_dir);
-                g.checks.push(Check::new(Severity::Info, "Game file", "the RomFS copy was cancelled and removed; Detect starts it again"));
-                return Package::Cancelled;
-            }
-            let out = romfs_dir.join(rel.replace('\\', "/"));
-            if let Some(parent) = out.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match nx.read(*id) {
-                Ok(b) => {
-                    if let Err(e) = std::fs::write(&out, &b) {
-                        g.checks.push(Check::new(Severity::Error, "RomFS", format!("writing {}: {e}", out.display())));
-                        return Package::Failed;
-                    }
-                    bytes += b.len() as u64;
-                }
-                Err(e) => {
-                    g.checks.push(Check::new(Severity::Error, "RomFS", format!("reading {rel} from the .nx: {e:#}")));
-                    return Package::Failed;
-                }
-            }
-            done += 1;
-            if done % 128 == 0 {
-                progress(done, total);
-            }
-        }
-        progress(done, total);
-        if std::fs::write(&marker, format!("{stamp}\n{done} {bytes}\n")).is_err() {
-            g.checks.push(Check::new(Severity::Warn, "Game file", format!("the RomFS copy was not recorded in {}", marker.display())));
-        }
-    }
-    g.romfs = Some(romfs_dir.clone());
+    // The engine reads NXFormat's container itself (runtime/src/loader/nx.cpp): the archive is handed over as it is, a RomFS read is a
+    // block read of the file, decoded and checked when the game asks for it, and nothing is copied out first (issue 28).
+    g.romfs = Some(path.to_path_buf());
     g.nx = Some(path.to_path_buf());
     g.title_id = Some(app.id);
     if !app.title.is_empty() {
@@ -660,6 +590,12 @@ fn modified_stamp(path: &Path) -> u128 {
 
 /// [`detect`], reporting how many bytes of a package have been unpacked and
 /// how many there are, while there is a package to unpack.
+/// The title id of the dump this launcher was built for (data/dump_hashes.json).
+pub fn known_program_id() -> Option<u64> {
+    let known: KnownDump = serde_json::from_str(KNOWN_DUMP).ok()?;
+    u64::from_str_radix(known.program_id.trim_start_matches("0x"), 16).ok()
+}
+
 pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64), cancelled: &dyn Fn() -> bool) -> GameData {
     let mut g = GameData::default();
     let root = non_empty(&paths.game_root);
@@ -689,7 +625,7 @@ pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64), cancelled:
     // An .nx archive does the same, in NXFormat's own container.
     if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nx::is_nx(r)) {
         let r = r.clone();
-        match use_nx(&mut g, &r, progress, cancelled) {
+        match use_nx(&mut g, &r) {
             Package::Ready(exefs) => g.exefs = non_empty(&paths.exefs).or(Some(exefs)),
             Package::Cancelled => return g,
             Package::Failed => {}
@@ -791,7 +727,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
         Some(_) if g.nx.is_some() => g.checks.push(Check::new(
             Severity::Ok,
             "RomFS",
-            format!("{} top-level entries, written out of the .nx once", g.romfs_entries),
+            format!("{} top-level entries, read in place from the .nx", g.romfs_entries),
         )),
         Some(dir) => {
             g.romfs_entries = std::fs::read_dir(dir).map(|rd| rd.count()).unwrap_or(0);

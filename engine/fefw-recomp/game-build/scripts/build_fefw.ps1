@@ -27,8 +27,16 @@ if (Test-Path $cache) {
     }
 }
 $llvm_rc = if (Test-Path (Join-Path $llvm_bin 'llvm-rc.exe')) { (Join-Path $llvm_bin 'llvm-rc.exe').Replace('\', '/') } else { '' }
-$cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER=`"$clang_cl`" -DCMAKE_CXX_COMPILER=`"$clang_cl`""
-if ($llvm_rc) { $cfg += " -DCMAKE_RC_COMPILER=`"$llvm_rc`"" }
+# The compilers are named twice: as typed cache entries for this configure, and in the environment. `launcher.rc` enables the RC
+# language part-way through the configure, and a value that arrived untyped on the command line is re-typed when that happens;
+# CMake then says "you have changed variables that require your cache to be deleted", configures again without these -D flags,
+# and the build continues with whatever clang.exe is on PATH (the GNU frontend, which rejects /W3 and -clang: flags) in Debug
+# (issues 9, 33). CC/CXX/RC survive that announcement, the typed entries make it unnecessary.
+$env:CC = $clang_cl
+$env:CXX = $clang_cl
+if ($llvm_rc) { $env:RC = $llvm_rc }
+$cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER:FILEPATH=`"$clang_cl`" -DCMAKE_CXX_COMPILER:FILEPATH=`"$clang_cl`""
+if ($llvm_rc) { $cfg += " -DCMAKE_RC_COMPILER:FILEPATH=`"$llvm_rc`"" }
 $sccache = (Get-Command sccache -ErrorAction SilentlyContinue).Source
 if (-not $sccache -and $env:NX_TOOLCHAIN -and (Test-Path (Join-Path $env:NX_TOOLCHAIN 'bin\sccache.exe'))) { $sccache = Join-Path $env:NX_TOOLCHAIN 'bin\sccache.exe' }
 if ($sccache) {
@@ -41,5 +49,33 @@ if ($sccache) {
 if ($LibDir) { $cfg += " -DFEFW_LIB_DIR=`"$LibDir`"" }
 if ($CMakeArgs) { $cfg += " $CMakeArgs" }
 $tgt = if ($Target -eq "fefw_obj") { "CMakeFiles/fefw.dir/src/fefw_main.cpp.obj" } else { $Target }
+# What the cache says after the configure, which is what the build actually uses. A configure that ended in the middle of a cache
+# reset leaves this folder configured with another compiler or another configuration, and its object files cannot be mixed with
+# this run's, so it is configured once more (the flags are explicit, so the second pass cannot be reset again) and checked again.
+function CacheValue([string]$name) {
+    $line = Select-String -Path (Join-Path $bd 'CMakeCache.txt') -Pattern "^$([regex]::Escape($name)):[^=]*=(.*)$" | Select-Object -First 1
+    if ($line) { $line.Matches[0].Groups[1].Value.Trim() } else { '' }
+}
+function CacheMatches {
+    $c = CacheValue 'CMAKE_C_COMPILER'
+    $t = CacheValue 'CMAKE_BUILD_TYPE'
+    ((Split-Path -Leaf $c).ToLower() -eq (Split-Path -Leaf $clang_cl).ToLower()) -and ($t -eq $Config)
+}
+if ($Target -ne "fefw_obj") {
+    cmd /c "call `"$env_cmd`" && $cfg"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if (-not (CacheMatches)) {
+        # An object file made by clang++ is not one clang-cl can link with, and a Debug object is not a Release one, so the folder
+        # goes rather than being half-reconfigured: CMake cannot swap a compiler on an existing cache without deleting it anyway.
+        Write-Host "this build folder is configured with $(CacheValue 'CMAKE_C_COMPILER') in $(CacheValue 'CMAKE_BUILD_TYPE'); starting it over with $(Split-Path -Leaf $clang_cl) and $Config"
+        Remove-Item -Recurse -Force $bd
+        cmd /c "call `"$env_cmd`" && $cfg"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if (-not (CacheMatches)) {
+            Write-Host "the configure still ends with $(CacheValue 'CMAKE_C_COMPILER') in $(CacheValue 'CMAKE_BUILD_TYPE') after a fresh folder; the log above names the configure that changed it"
+            exit 2
+        }
+    }
+}
 cmd /c "call `"$env_cmd`" && $cfg && cmake --build `"$bd`" --target $tgt -j $Jobs"
 exit $LASTEXITCODE

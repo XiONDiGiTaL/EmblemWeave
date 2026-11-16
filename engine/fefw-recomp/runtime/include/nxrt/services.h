@@ -126,4 +126,8 @@ uint64_t language_code_u64(Language l);  // the same string as the little-endian
 std::string romfs_dir();
 std::string save_dir();
 
+// A whole file of the RomFS, through the same image the game sees, so it works whether the data is a folder or a .nup/.nx package
+// and a mod's overlay applies. `image_path` is the path inside the RomFS with a leading slash ("/Font/a.bffnt.zst").
+bool read_romfs_file(const std::string& image_path, std::vector<uint8_t>& out);
+
 }  // namespace nxrt::services

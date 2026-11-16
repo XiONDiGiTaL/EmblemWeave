@@ -37,13 +37,6 @@ FetchContent_Declare(imgui
     URL_HASH SHA256=e1c46d676c2bcb7ced847ba27f50553e33a19db97b3cadaec7f8be64449139f8
     SOURCE_SUBDIR none)
 
-# zstd: the shader preload pack (src/gfx/nvn/nvn_shaders.cpp). The library sources only (no CLI, no x86-64 assembly).
-FetchContent_Declare(zstd
-    URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
-    DOWNLOAD_DIR "${NXRT_DEPS_DIR}"
-    URL_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
-    SOURCE_SUBDIR none)
-
 # SDL: static, only what a game needs.
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -54,13 +47,8 @@ set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
 set(SDL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
 set(SDL_DISABLE_INSTALL_DOCS ON CACHE BOOL "" FORCE)
 set(SDL_VENDOR_INFO "nxrt" CACHE STRING "" FORCE)
-FetchContent_MakeAvailable(sdl3 vulkan_headers volk vma imgui zstd)
+FetchContent_MakeAvailable(sdl3 vulkan_headers volk vma imgui)
 
-file(GLOB NXRT_ZSTD_SOURCES "${zstd_SOURCE_DIR}/lib/common/*.c" "${zstd_SOURCE_DIR}/lib/compress/*.c" "${zstd_SOURCE_DIR}/lib/decompress/*.c")
-add_library(nxrt_zstd STATIC ${NXRT_ZSTD_SOURCES})
-target_include_directories(nxrt_zstd SYSTEM PUBLIC "${zstd_SOURCE_DIR}/lib")
-target_compile_definitions(nxrt_zstd PRIVATE ZSTD_DISABLE_ASM)
-set_target_properties(nxrt_zstd PROPERTIES C_STANDARD 11)
 
 # volk (loader) next to the Vulkan headers; the Vulkan headers come from the pin, not from the installed SDK.
 add_library(nxrt_volk STATIC "${volk_SOURCE_DIR}/volk.c")

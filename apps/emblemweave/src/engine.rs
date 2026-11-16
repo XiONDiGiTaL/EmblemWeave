@@ -792,6 +792,9 @@ fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u6
     if romfs.is_dir() {
         return Ok((romfs.to_path_buf(), None));
     }
+    if ew_format::nx::is_nx(romfs) {
+        return shader_romfs_nx(root, romfs);
+    }
     let nup = ew_format::nup::Nup::open(romfs).map_err(|e| format!("reading {} as a .nup: {e}", romfs.display()))?;
     let Some(pkg) = nup.program_package().cloned() else {
         return Err(format!("{} holds no base game or update, so its shaders cannot be read", romfs.display()));
@@ -829,6 +832,52 @@ fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u6
     if copied == 0 {
         return Err(format!("{} holds no shader archive ({EXTS:?}), so no shaders can be translated", romfs.display()));
     }
+    std::fs::write(&stamp, &want).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
+    Ok((out, Some((copied, bytes))))
+}
+
+/// The shader archives of an .nx RomFS: the same five extensions read straight out of the archive's blocks (zstd entries are
+/// decompressed as they are read), so the archive is never copied and the engine's own reader stays the only thing that parses it.
+fn shader_romfs_nx(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u64)>), String> {
+    let nx = ew_format::nx::Nx::open(romfs).map_err(|e| format!("reading {}: {e:#}", romfs.display()))?;
+    let app = crate::gamedata::known_program_id()
+        .and_then(|id| nx.application(id))
+        .or_else(|| (nx.applications().len() == 1).then_some(0))
+        .ok_or_else(|| format!("{} holds no application for this game", romfs.display()))?;
+    let snap = nx.current(app).ok_or_else(|| format!("{} holds no snapshot for this game", romfs.display()))?;
+    let version = nx.snapshots()[snap].version;
+    let tree = nx.tree(snap).map_err(|e| format!("{e:#}"))?;
+    let out = root.join("work").join("shaders").join("romfs");
+    let stamp = out.join(".source");
+    let want = format!("{}|{} files|v{version}", romfs.display(), tree.len());
+    if stamp.is_file() && std::fs::read_to_string(&stamp).map(|t| t.trim().to_string()).ok().as_deref() == Some(want.as_str()) {
+        return Ok((out, None));
+    }
+    const EXTS: [&str; 5] = [".bfsha", ".ptcl", ".arc", ".sarc", ".bnsh"];
+    let _ = std::fs::remove_dir_all(&out);
+    let mut copied = 0usize;
+    let mut bytes = 0u64;
+    for (path, id, _) in &tree {
+        let Some(rel) = path.strip_prefix("romfs/") else { continue };
+        let low = rel.to_ascii_lowercase();
+        let base = low.strip_suffix(".zst").unwrap_or(&low);
+        if !EXTS.iter().any(|e| base.ends_with(e)) {
+            continue;
+        }
+        let rel = if low.ends_with(".zst") { rel[..rel.len() - 4].to_string() } else { rel.to_string() };
+        let dst = out.join(&rel);
+        if let Some(dir) = dst.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        }
+        let data = nx.read(*id).map_err(|e| format!("reading {rel} from {}: {e:#}", romfs.display()))?;
+        bytes += data.len() as u64;
+        std::fs::write(&dst, &data).map_err(|e| format!("writing {}: {e}", dst.display()))?;
+        copied += 1;
+    }
+    if copied == 0 {
+        return Err(format!("{} holds no shader archive ({EXTS:?}), so no shaders can be translated", romfs.display()));
+    }
+    std::fs::create_dir_all(&out).ok();
     std::fs::write(&stamp, &want).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
     Ok((out, Some((copied, bytes))))
 }
@@ -1399,7 +1448,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let (romfs_dir, copied) = shader_romfs(&root, &romfs)?;
     if let Some((files, bytes)) = copied {
         ctx.log(format!(
-            "copied {files} shader archives ({:.1} GiB) out of the .nup: the shader extractor walks a folder, and a .nup is a file",
+            "copied {files} shader archives ({:.1} GiB) out of the package: the shader extractor walks a folder, and a .nup or .nx is a file",
             bytes as f64 / (1024.0 * 1024.0 * 1024.0)
         ));
     }
