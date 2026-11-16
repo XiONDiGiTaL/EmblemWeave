@@ -62,7 +62,9 @@ The repository also carries end-to-end checks that run on your own game data:
 | `tools/verify_simd.sh` | every distinct vector encoding behaves identically in both, across edge-case inputs |
 | `tools/oracle_lockstep.py` | the interpreter agrees with an independent CPU model instruction by instruction, from a snapshot taken by `ew-run --snapshot-at` |
 
-The verification tools need `pip install ziglang unicorn`.
+The verification tools need `pip install ziglang unicorn`. Gameplay-specific checks (long sessions, battles, audio,
+mods and controller input) are the repeatable scenario list in [GAMEPLAY_TESTING.md](GAMEPLAY_TESTING.md); they need a
+real dump and hardware and are not run by the unit tests.
 
 ## Project structure
 
