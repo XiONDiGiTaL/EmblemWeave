@@ -110,6 +110,70 @@ pub fn section<R>(ui: &mut egui::Ui, p: &Palette, title: &str, add: impl FnOnce(
     r.inner
 }
 
+/// An elevated section whose body folds away behind its title. The open state
+/// is kept per `id`, so a drawer stays as the player left it while the page is
+/// rebuilt every frame. `summary` is the one-line value shown on the right
+/// when the body is closed, after the pattern of a settings drawer.
+pub fn section_drawer(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    id: &str,
+    title: &str,
+    summary: &str,
+    default_open: bool,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let state = egui::Id::new(("section-drawer", id));
+    let mut open = ui.ctx().data(|d| d.get_temp::<bool>(state).unwrap_or(default_open));
+    let face = ui.painter().add(egui::Shape::Noop);
+    let r = card_frame(p, Margin::symmetric(20, 16)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            open = !open;
+        }
+        if ui.is_rect_visible(rect) {
+            let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
+            if hover > 0.0 {
+                ui.painter().rect_filled(rect.expand2(Vec2::new(5.0, 2.0)), CornerRadius::same(theme::RADIUS_S), alpha(Color32::WHITE, (5.0 * hover) as u8));
+            }
+            if response.has_focus() {
+                ui.painter().rect_stroke(rect.expand(2.0), CornerRadius::same(theme::RADIUS_S), Stroke::new(1.0_f32, p.electric), StrokeKind::Outside);
+            }
+            let painter = ui.painter();
+            // A drawn chevron, so it follows the accent and the type instead of
+            // borrowing a glyph from whichever fallback font is installed.
+            let c = Pos2::new(rect.left() + 8.0, rect.center().y);
+            let ink = lerp(p.muted, p.accent_hi, hover);
+            let stroke = Stroke::new(1.6_f32, ink);
+            if open {
+                painter.line_segment([Pos2::new(c.x - 4.0, c.y - 2.0), Pos2::new(c.x, c.y + 2.0)], stroke);
+                painter.line_segment([Pos2::new(c.x, c.y + 2.0), Pos2::new(c.x + 4.0, c.y - 2.0)], stroke);
+            } else {
+                painter.line_segment([Pos2::new(c.x - 2.0, c.y - 4.0), Pos2::new(c.x + 2.0, c.y)], stroke);
+                painter.line_segment([Pos2::new(c.x + 2.0, c.y), Pos2::new(c.x - 2.0, c.y + 4.0)], stroke);
+            }
+            painter.text(Pos2::new(rect.left() + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, title, theme::semibold(14.5), p.ink);
+            if !summary.is_empty() {
+                let font = theme::mono(11.5);
+                let galley = painter.layout_no_wrap(summary.to_owned(), font, p.muted);
+                painter.galley_with_override_text_color(Pos2::new(rect.right() - galley.size().x, rect.center().y - galley.size().y / 2.0), galley, p.muted);
+            }
+        }
+        if open {
+            ui.add_space(theme::SPACE_S);
+            let line = ui.available_rect_before_wrap();
+            ui.painter().hline(line.x_range(), line.top(), Stroke::new(1.0_f32, alpha(p.line, 150)));
+            ui.add_space(theme::SPACE_S);
+            add(ui);
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(state, open));
+    ui.painter().set(face, card_face(r.response.rect, p));
+    ui.add_space(theme::SPACE_M);
+}
+
 /// The frame of a raised card: a quiet surface, one hairline, and a shadow
 /// that lifts it off the page without glowing.
 pub fn card_frame(p: &Palette, margin: Margin) -> egui::Frame {

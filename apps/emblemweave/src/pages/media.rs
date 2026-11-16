@@ -196,7 +196,8 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
-    widgets::section(ui, &p, "Shader compilation (CPU)", |ui| {
+    let compile_summary = format!("{} threads · {}", g.compile_threads, g.compile_priority.to_lowercase());
+    widgets::section_drawer(ui, &p, "shader-compilation", "Shader compilation (CPU)", &compile_summary, false, |ui| {
         ui.label(
             RichText::new(
                 "While a new area loads, the engine compiles shader parts, whole pipelines and the boot prewarm on \
@@ -264,7 +265,7 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     // for the next start is visibly waiting rather than silently absent.
     if let Some(l) = crate::engine::live() {
         let (pending, kept) = waiting(&desired, &l.values);
-        widgets::section(ui, &p, "What the game will start with", |ui| {
+        widgets::section_drawer(ui, &p, "graphics-live", "What the game will start with", "the files the engine reads", false, |ui| {
             widgets::kv(ui, &p, "Upscaler", crate::engine::upscale_label(&l.upscaling));
             widgets::kv(
                 ui,
@@ -334,7 +335,9 @@ fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
     let guide_id = egui::Id::new("upscaler-guide-open");
     let mut guide_open = ui.ctx().data(|d| d.get_temp::<bool>(guide_id).unwrap_or(false));
 
-    widgets::section(ui, &p, "Upscaler files", |ui| {
+    let found = [!fsr_missing, !dlss_missing, !xess_missing].into_iter().filter(|found| *found).count();
+    let summary = format!("{found} of 3 found");
+    widgets::section_drawer(ui, &p, "upscaler-files", "Upscaler files", &summary, found < 3, |ui| {
         upscaler_line(
             ui,
             &p,
@@ -549,7 +552,7 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
         let desired: std::collections::BTreeMap<String, String> =
             [("audio.volume".to_string(), format!("{:.2}", a.master.clamp(0.0, 1.0)))].into_iter().collect();
         let (pending, kept) = waiting(&desired, &l.values);
-        widgets::section(ui, &p, "What the game will start with", |ui| {
+        widgets::section_drawer(ui, &p, "audio-live", "What the game will start with", &format!("{:.0} %", l.volume * 100.0), false, |ui| {
             widgets::kv(ui, &p, "Master volume", &format!("{:.0} %", l.volume * 100.0));
             waiting_line(ui, &p, pending, kept);
         });

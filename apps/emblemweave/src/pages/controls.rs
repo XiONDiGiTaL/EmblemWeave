@@ -54,15 +54,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 for (label, text) in [
                     ("Left stick", format!("{:+.2}, {:+.2}", l.left.0, l.left.1)),
                     ("Right stick", format!("{:+.2}, {:+.2}", l.right.0, l.right.1)),
-                    ("ZL travel", format!("{:.0} %", l.lt * 100.0)),
-                    ("ZR travel", format!("{:.0} %", l.rt * 100.0)),
                 ] {
                     ui.label(RichText::new(label).size(12.5).color(p.muted));
                     ui.label(RichText::new(text).font(theme::mono(12.5)).color(p.ink));
                     ui.end_row();
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(10.0);
+            // Travel reads better as a filled bar than as a number on its own:
+            // a trigger that only reaches 60 % is obvious at a glance.
+            for (label, value) in [("ZL travel", l.lt), ("ZR travel", l.rt)] {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).size(12.5).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{:.0} %", value * 100.0)).font(theme::mono(12.0)).color(p.ink));
+                    });
+                });
+                widgets::progress_bar(ui, &p, Some(value));
+                ui.add_space(6.0);
+            }
+            ui.add_space(4.0);
             if widgets::button(ui, &p, "Test vibration", true)
                 .on_hover_text("Runs both motors for about half a second through XInput, without starting the game. If this buzzes but play does not, set Vibration backend below to Standard.")
                 .clicked()
