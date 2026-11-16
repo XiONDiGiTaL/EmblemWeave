@@ -2134,7 +2134,29 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
     Texture* d = S.depth_tex.get();
     if (!d || !tex_gpu(d)) return false;
     const VkExtent3D e = tex_image_extent(d, 0);
-    return extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
+    if (n_words < 68) return extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
+    // Most draws of a frame bind the same camera block: the last answer is kept per thread (input words, extent and jitter phase)
+    // so the parse (68 finite checks, a 4x4 inverse and two products) runs once per distinct block instead of once per draw.
+    struct Memo {
+        uint32_t in[68];
+        uint32_t out[16];
+        uint64_t frame;
+        uint32_t w, h;
+        bool ok, valid;
+    };
+    thread_local Memo m{};
+    if (m.valid && m.frame == g_tsr_frame && m.w == e.width && m.h == e.height && std::memcmp(m.in, words, sizeof m.in) == 0) {
+        if (m.ok) std::memcpy(words, m.out, sizeof m.out);
+        return m.ok;
+    }
+    std::memcpy(m.in, words, sizeof m.in);
+    m.ok = extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
+    if (m.ok) std::memcpy(m.out, words, sizeof m.out);
+    m.frame = g_tsr_frame;
+    m.w = e.width;
+    m.h = e.height;
+    m.valid = true;
+    return m.ok;
 }
 
 // build_set's vectors keep their capacity from call to call (allocated and freed for every set of every draw, they were ~10 % of the render
@@ -2237,15 +2259,23 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
                             if (u) {
                                 std::memcpy(u.ptr, host_ptr(bind.addr), n);
-                                if (tsr && n >= 272) tsr_jitter(reinterpret_cast<uint32_t*>(u.ptr), static_cast<size_t>(n / 4));   // temporal upscaling
+                                // The patches work on a copy of the block's head in cached memory and write it back: the upload ring is
+                                // write-combined (device-local through the BAR on most GPUs), and every read of it stalls. Reading the camera
+                                // block back from it for each draw was over half the render thread's time in busy map scenes.
+                                uint32_t head[68];
+                                const size_t hn = static_cast<size_t>(std::min<VkDeviceSize>(n, sizeof head));
+                                std::memcpy(head, host_ptr(bind.addr), hn);
+                                bool patched = tsr && n >= 272 && tsr_jitter(head, 68);   // temporal upscaling
                                 const uint32_t mask = ufs != 1.0f ? nxrt::gfx::tuning().ufs_mask.load(std::memory_order_relaxed) : 0u;
                                 for (uint32_t i = 0; i < 32; ++i) {
                                     if (!(mask & (1u << i)) || (i + 1) * 4 > n) continue;
                                     float v;
-                                    std::memcpy(&v, static_cast<uint8_t*>(u.ptr) + i * 4, 4);
+                                    std::memcpy(&v, &head[i], 4);
                                     v *= ufs;
-                                    std::memcpy(static_cast<uint8_t*>(u.ptr) + i * 4, &v, 4);
+                                    std::memcpy(&head[i], &v, 4);
+                                    patched = true;
                                 }
+                                if (patched) std::memcpy(u.ptr, head, hn);
                                 bi = {u.buffer, u.offset, n};
                             }
                         } else if (br.ok && (br.offset % align) == 0) {
