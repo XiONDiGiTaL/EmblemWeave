@@ -286,8 +286,7 @@ pub fn install_hint(tool: &str) -> &'static str {
 enum PythonEnv {
     Healthy { version: String, executable: String },
     Missing,
-    Stale { version: String, executable: String, why: String },
-    Broken { why: String },
+    Unusable { why: String },
 }
 
 impl PythonEnv {
@@ -295,8 +294,7 @@ impl PythonEnv {
         match self {
             PythonEnv::Healthy { .. } => "ready".into(),
             PythonEnv::Missing => "the interpreter is missing".into(),
-            PythonEnv::Stale { why, .. } => why.clone(),
-            PythonEnv::Broken { why } => why.clone(),
+            PythonEnv::Unusable { why } => why.clone(),
         }
     }
 }
@@ -324,12 +322,11 @@ print("EW_PY_PROBE " + json.dumps({
     "identity": actual == expected,
     "imports": errors,
 }))
-sys.exit(1 if errors else 0)
 "#;
 
-/// Parse the probe's stdout without starting Python, so healthy, stale and
-/// failed-import environments can be tested on every platform.
-fn parse_python_probe(success: bool, stdout: &str, stderr: &str) -> PythonEnv {
+/// Parse the probe's stdout without starting Python, so healthy and unusable
+/// environments can be tested on every platform.
+fn parse_python_probe(stdout: &str, stderr: &str) -> PythonEnv {
     let Some(line) = stdout.lines().rev().find_map(|l| l.strip_prefix("EW_PY_PROBE ")) else {
         let detail = stderr
             .lines()
@@ -337,12 +334,12 @@ fn parse_python_probe(success: bool, stdout: &str, stderr: &str) -> PythonEnv {
             .find(|l| !l.trim().is_empty())
             .or_else(|| stdout.lines().rev().find(|l| !l.trim().is_empty()))
             .unwrap_or("the interpreter printed nothing");
-        return PythonEnv::Broken {
+        return PythonEnv::Unusable {
             why: format!("the interpreter did not report its version: {}", detail.trim()),
         };
     };
     let Ok(report) = serde_json::from_str::<serde_json::Value>(line) else {
-        return PythonEnv::Broken { why: "the interpreter's probe report is not valid JSON".into() };
+        return PythonEnv::Unusable { why: "the interpreter's probe report is not valid JSON".into() };
     };
     let version = report.get("version").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
     let executable = report
@@ -351,20 +348,21 @@ fn parse_python_probe(success: bool, stdout: &str, stderr: &str) -> PythonEnv {
         .unwrap_or_default()
         .to_string();
     if version.is_empty() || executable.is_empty() {
-        return PythonEnv::Broken { why: "the interpreter's probe report does not name its version and executable".into() };
+        return PythonEnv::Unusable { why: "the interpreter's probe report does not name its version and executable".into() };
     }
     let parts = crate::toolchain::version_parts(&version).unwrap_or_default();
     if parts.len() < 2 || (parts[0], parts[1]) < (3, 9) {
-        let why = format!("Python {version} is older than the engine's 3.9 minimum");
-        return PythonEnv::Stale { version, executable, why };
+        return PythonEnv::Unusable { why: format!("Python {version} is older than the engine's 3.9 minimum") };
     }
     if !report.get("venv").and_then(serde_json::Value::as_bool).unwrap_or(false) {
-        let why = format!("Python {version} at {executable} is not a virtual environment");
-        return PythonEnv::Stale { version, executable, why };
+        return PythonEnv::Unusable {
+            why: format!("Python {version} at {executable} is not a virtual environment"),
+        };
     }
     if !report.get("identity").and_then(serde_json::Value::as_bool).unwrap_or(false) {
-        let why = format!("the interpreter reports {executable}, not the tools\\.venv python.exe the launcher started");
-        return PythonEnv::Stale { version, executable, why };
+        return PythonEnv::Unusable {
+            why: format!("the interpreter reports {executable}, not the tools\\.venv python.exe the launcher started"),
+        };
     }
     let imports: Vec<String> = report
         .get("imports")
@@ -372,12 +370,9 @@ fn parse_python_probe(success: bool, stdout: &str, stderr: &str) -> PythonEnv {
         .map(|a| a.iter().filter_map(serde_json::Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
     if !imports.is_empty() {
-        return PythonEnv::Broken {
+        return PythonEnv::Unusable {
             why: format!("required lifter module(s) do not import: {}", imports.join("; ")),
         };
-    }
-    if !success {
-        return PythonEnv::Broken { why: "the interpreter's probe exited with an error after its imports".into() };
     }
     PythonEnv::Healthy { version, executable }
 }
@@ -395,11 +390,10 @@ fn probe_python_env(python: &Path) -> PythonEnv {
         .output();
     match output {
         Ok(output) => parse_python_probe(
-            output.status.success(),
             &String::from_utf8_lossy(&output.stdout),
             &String::from_utf8_lossy(&output.stderr),
         ),
-        Err(e) => PythonEnv::Broken { why: format!("could not start {}: {e}", python.display()) },
+        Err(e) => PythonEnv::Unusable { why: format!("could not start {}: {e}", python.display()) },
     }
 }
 
@@ -409,9 +403,6 @@ fn probe_python_env(python: &Path) -> PythonEnv {
 fn remove_engine_venv(root: &Path) -> Result<(), String> {
     let tools = root.join("tools");
     let venv = tools.join(".venv");
-    if venv.parent() != Some(tools.as_path()) {
-        return Err(format!("refusing to remove {}: it is not the engine's tools\\.venv", venv.display()));
-    }
     match std::fs::symlink_metadata(&venv) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("checking {}: {e}", venv.display())),
@@ -1465,14 +1456,14 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             ctx.end(0, StageStatus::Skipped, "already set up");
         }
         found => {
-            match &found {
-                PythonEnv::Missing => ctx.log(format!("Python environment: {} is missing; creating it", venv.display())),
-                other => {
-                    ctx.log(format!("Python environment: {} failed the probe: {}", python.display(), other.reason()));
-                    ctx.log(format!("removing only the engine's generated {} and recreating it", venv.display()));
-                    remove_engine_venv(&root)?;
-                }
+            let why = found.reason();
+            if matches!(found, PythonEnv::Missing) {
+                ctx.log(format!("Python environment: {} is missing; creating it", venv.display()));
+            } else {
+                ctx.log(format!("Python environment: {} failed the probe: {why}", python.display()));
+                ctx.log(format!("removing only the engine's generated {} and recreating it", venv.display()));
             }
+            remove_engine_venv(&root)?;
             let used_uv = which_tool("uv");
             if used_uv {
                 run(ctx, &root, "uv", &["venv", "tools\\.venv", "--python", "3.13"])?;
@@ -3096,7 +3087,7 @@ mod tests {
     fn a_healthy_python_environment_is_reused() {
         let line = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", true, true, &[]);
         assert_eq!(
-            super::parse_python_probe(true, &line, ""),
+            super::parse_python_probe(&line, ""),
             PythonEnv::Healthy {
                 version: "3.13.5".into(),
                 executable: r"C:\engine\tools\.venv\Scripts\python.exe".into(),
@@ -3105,44 +3096,43 @@ mod tests {
     }
 
     #[test]
-    fn an_old_or_foreign_interpreter_is_stale() {
+    fn an_old_or_foreign_interpreter_is_unusable() {
         let old = probe_line("3.8.10", r"C:\Python38\python.exe", true, true, &[]);
-        let said = super::parse_python_probe(true, &old, "");
-        assert!(matches!(said, PythonEnv::Stale { .. }), "{said:?}");
+        let said = super::parse_python_probe(&old, "");
+        assert!(matches!(said, PythonEnv::Unusable { .. }), "{said:?}");
         assert!(said.reason().contains("older than"), "{}", said.reason());
 
         // A global interpreter copied into the venv folder reports the same
         // executable but is not a virtual environment.
         let global = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", false, true, &[]);
-        let said = super::parse_python_probe(true, &global, "");
+        let said = super::parse_python_probe(&global, "");
         assert!(said.reason().contains("not a virtual environment"), "{}", said.reason());
 
         // A launcher path that resolves to another executable is not the
         // interpreter that was probed.
         let other = probe_line("3.13.5", r"C:\Python313\python.exe", true, false, &[]);
-        let said = super::parse_python_probe(true, &other, "");
+        let said = super::parse_python_probe(&other, "");
         assert!(said.reason().contains("reports"), "{}", said.reason());
     }
 
     #[test]
-    fn a_missing_lifter_import_is_broken_and_names_the_module() {
+    fn a_missing_lifter_import_is_unusable_and_names_the_module() {
         let line = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", true, true, &["capstone: ImportError: no module named capstone"]);
-        let said = super::parse_python_probe(false, &line, "");
-        assert!(matches!(said, PythonEnv::Broken { .. }), "{said:?}");
+        let said = super::parse_python_probe(&line, "");
+        assert!(matches!(said, PythonEnv::Unusable { .. }), "{said:?}");
         assert!(said.reason().contains("capstone"), "{}", said.reason());
     }
 
     #[test]
     fn an_interpreter_that_cannot_start_reports_the_dll_conflict() {
         let said = super::parse_python_probe(
-            false,
             "",
             "ImportError: Module use of python311.dll conflicts with this version of Python.\n",
         );
-        assert!(matches!(said, PythonEnv::Broken { .. }), "{said:?}");
+        assert!(matches!(said, PythonEnv::Unusable { .. }), "{said:?}");
         assert!(said.reason().contains("python311.dll"), "{}", said.reason());
         // A report that is not the probe's own JSON is not reused either.
-        assert!(matches!(super::parse_python_probe(true, "EW_PY_PROBE {oops", ""), PythonEnv::Broken { .. }));
+        assert!(matches!(super::parse_python_probe("EW_PY_PROBE {oops", ""), PythonEnv::Unusable { .. }));
     }
 
     #[test]
