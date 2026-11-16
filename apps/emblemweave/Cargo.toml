@@ -24,6 +24,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ruzstd.workspace = true
 sha2.workspace = true
 roxmltree = "0.20"
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [build-dependencies]
 winresource = "0.1"

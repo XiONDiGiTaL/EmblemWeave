@@ -319,7 +319,9 @@ void prewarm_init() {
         }
         g_stats.queued = boot ? g_recs.size() : 0;
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-        const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 6, 1, 4));
+        // Two workers by default: a 24-thread laptop used to start four, all at full clock, beside the game's own threads. A
+        // recorded pipeline that is not prewarmed yet is built at its first draw, which is the cost this trades against (#10).
+        const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 8, 1, 2));
         for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
         g_saver = std::thread(saver_main);
         NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; %s", g_recs.size(), g_path.c_str(), g_workers.size(),

@@ -15,6 +15,9 @@
 *.json
 # The tested-build manifest is data the launcher ships, not a report.
 !apps/emblemweave/data/dump_hashes.json
+# The site reads these at runtime; they are release data, not local reports.
+!docs/release.json
+!docs/mirrors.json
 
 # Launch videos made with /brag (they contain game footage: keep them local)
 brag-output*/

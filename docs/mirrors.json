@@ -1,0 +1,24 @@
+{
+  "mirrors": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/XiONDiGiTaL/EmblemWeave",
+      "note": "source, releases, issues"
+    },
+    {
+      "name": "GitLab",
+      "url": "https://gitlab.com/XiONDiGiTaL/emblemweave",
+      "note": "source mirror"
+    },
+    {
+      "name": "GitGud",
+      "url": "https://gitgud.io/xiondigital/EmblemWeave",
+      "note": "source mirror"
+    },
+    {
+      "name": "Fallback page",
+      "url": "https://emblemweave.xiondigital.workers.dev",
+      "note": "static copy of this page"
+    }
+  ]
+}

@@ -24,7 +24,7 @@ can be repeated.
 4. **The release archive is Linux-safe.** The zip has 1287 files in 131 folders, no backslashes and no absolute
    names, and extracts under Linux with `unzip` and with Python's `zipfile` with `docs/PACKAGE.md`,
    `docs/changelog/` and `engine/fefw-recomp/...` at the paths the launcher looks for. That check is automated:
-   `tools/verify_archive.py`, run by `tools/package_release.ps1` and again by `tools/release.ps1`.
+   `tools/verify_archive.py`, run by `tools/package_release.ps1` and again by `.github/workflows/release.yml`.
 5. **The window layer is SDL3.** `engine/fefw-recomp/runtime/src/gfx/platform.cpp` creates its window and its
    surface through SDL, which is why the graphics shell is the part of the engine closest to portable. The
    Vulkan side is ordinary Vulkan 1.3 with no Windows-specific extensions in the required set (`VK_KHR_swapchain`

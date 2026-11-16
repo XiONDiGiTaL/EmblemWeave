@@ -672,6 +672,7 @@ fn build_with_repairs(
 ) -> Result<(), String> {
     let mut repaired_deps = false;
     let mut repaired_cache = false;
+    let mut repaired_driver = false;
     loop {
         let e = match build() {
             Ok(()) => break,
@@ -691,6 +692,17 @@ fn build_with_repairs(
             for config in std::fs::read_dir(builds).into_iter().flatten().flatten() {
                 let _ = std::fs::remove_file(config.path().join("CMakeCache.txt"));
                 let _ = std::fs::remove_dir_all(config.path().join("CMakeFiles"));
+            }
+            continue;
+        }
+        // A folder CMake keeps as clang++ (the GNU driver) receives clang-cl flags such as -clang: and /W3 and stops in
+        // dav1d (issue 9). The script starts such a folder over, but a configure that swaps the compiler after its first
+        // pass can still leave one behind; throw the configuration folders away and let the script configure from nothing.
+        if !repaired_driver && driver_flags_rejected(&e) {
+            repaired_driver = true;
+            log("the build folder is configured for the clang++ driver and rejects clang-cl flags; deleting it and compiling again");
+            for config in std::fs::read_dir(builds).into_iter().flatten().flatten() {
+                let _ = std::fs::remove_dir_all(config.path());
             }
             continue;
         }
@@ -715,6 +727,14 @@ fn stale_build_cache(reason: &str) -> bool {
         || reason.contains("CMAKE_CXX_COMPILER")
         || reason.contains("CMAKE_C_COMPILER")
         || reason.contains("is not a full path")
+}
+
+/// The two error lines a clang++ build prints when it is handed the flags this project writes for clang-cl.
+fn driver_flags_rejected(reason: &str) -> bool {
+    reason.contains("unknown argument: '-clang:")
+        || reason.contains("no such file or directory: '/W3'")
+        || reason.contains("unknown argument: '/W3'")
+        || reason.contains("unknown argument: '-fmacro-prefix-map")
 }
 
 /// What the shader translation has actually produced, block by block.
@@ -1018,7 +1038,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
          [dlss]\nupscaler = auto\n\
          [diag]\nwatchdog_seconds = 30\n\
          [fefw]\nfps60 = 1\n\
-         [engine]\nbuilt_by = {}\n",
+         [engine]\nbuilt_by = {}\npacked_nup = 1\n",
         fwd(&run.exefs),
         fwd(&run.romfs),
         overlay.trim_end(),
@@ -1037,6 +1057,40 @@ pub fn built_by() -> Option<String> {
     ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned()
 }
 
+/// A game folder the launcher can play but that was built by another release.
+/// The Overview offers one press that rebuilds it and writes the packed-file
+/// overlay in the same run, so an update does not leave a mixed folder behind
+/// (#24, #34). `built` is the release that wrote `fefw.ini`, or `None` for a
+/// build older than the stamp itself.
+pub fn stale_build() -> Option<(Option<String>, &'static str)> {
+    if !ready() {
+        return None;
+    }
+    let now = env!("CARGO_PKG_VERSION");
+    match built_by() {
+        Some(v) if v == now => None,
+        Some(v) => Some((Some(v), now)),
+        None => Some((None, now)),
+    }
+}
+
+/// Throw away the game's compiled runtime before a repair. An incremental rebuild can leave the old
+/// `fefw.exe` in place when only the launcher was updated, so issue #34's mixed folder survived a
+/// rebuild. The fetched dependencies are outside this folder and are kept; the lifted modules under
+/// `work/build` are fine to reuse, because the packed-package reader lives in the runtime.
+pub fn clean_runtime_build() -> Result<(), String> {
+    let root = root().ok_or("the engine folder engine/fefw-recomp was not found")?;
+    #[cfg(windows)]
+    if crate::cheats::process::find(crate::cheats::GAME_EXE).is_some() {
+        return Err("Close the game before repairing the build".into());
+    }
+    let build = root.join("game-build").join("fefw").join("build");
+    if build.is_dir() {
+        std::fs::remove_dir_all(&build).map_err(|e| format!("clearing {}: {e}", build.display()))?;
+    }
+    Ok(())
+}
+
 /// Whether `dir` was built by a release older than `major.minor.patch`. A folder with no `built_by` predates the key itself,
 /// which every build has written since 0.1.20, so it counts as old.
 fn build_is_older_than(dir: &Path, major: u32, minor: u32, patch: u32) -> bool {
@@ -1046,23 +1100,34 @@ fn build_is_older_than(dir: &Path, major: u32, minor: u32, patch: u32) -> bool {
     found < (major, minor, patch)
 }
 
-/// The refusal Play gives for `dir` when it was built by an engine from before 0.1.20, which cannot read a package that keeps
-/// files packed, and its `[fs] romfs` keeps some packed (#34). Mixing a new `EmblemWeave.exe` into an old extracted release is
-/// the usual cause. None means this guard has nothing to say; Play's other checks still run.
+/// The refusal Play gives for `dir` when its package keeps files packed and its engine cannot read them (#34). The build
+/// writes `[engine] packed_nup = 1` from this release on; a folder without it was built by an engine that predates the
+/// reader, or one whose rebuild reused an old `fefw.exe`. `built_by` alone cannot tell those apart: it records the launcher
+/// that wrote the ini, not which engine binary is beside it. None means this guard has nothing to say; Play's other checks run.
 fn play_blocker_in(dir: &Path) -> Option<String> {
-    if !build_is_older_than(dir, 0, 1, 20) {
-        return None;
-    }
     let ini = ini_map(&dir.join("fefw.ini"));
     let pkg = PathBuf::from(ini.get("fs.romfs")?);
     if !pkg.is_file() || crate::gamedata::packed_romfs(&pkg).is_none() {
         return None;
     }
+    // Two ways an engine at or above 0.1.20 can play a packed package: the reader this release has, or the overlay the
+    // launcher writes into `work\romfs-overlay` (0.1.20 and newer read `[fs] romfs_overlay`). A 0.1.31 build that rebuilt
+    // properly has neither marker nor reason to be refused once Play has written that folder; only one with neither is.
+    let marker = ini.get("engine.packed_nup").is_some_and(|v| v.trim() == "1");
+    let overlay_ready = ini.get("fs.romfs_overlay").map(PathBuf::from).is_some_and(|p| p.is_dir());
+    if !build_is_older_than(dir, 0, 1, 20) && (marker || overlay_ready) {
+        return None;
+    }
     let by = ini.get("engine.built_by").cloned().unwrap_or_else(|| "0.1.19 or older".into());
-    Some(format!(
-        "this game folder was built by EmblemWeave {by}, whose engine cannot read a package that keeps some files packed. \
-         Press Build the game to rebuild it with this release."
-    ))
+    let why = if build_is_older_than(dir, 0, 1, 20) {
+        format!("this game folder was built by EmblemWeave {by}, whose engine cannot read a package that keeps some files packed.")
+    } else {
+        format!(
+            "this game folder says it was built by EmblemWeave {by}, but its engine is older than the reader for packages that keep \
+             some files packed (the rebuild reused an old fefw.exe)."
+        )
+    };
+    Some(format!("{why} Press Build the game to rebuild it with this release."))
 }
 
 /// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
@@ -1070,7 +1135,9 @@ fn play_blocker_in(dir: &Path) -> Option<String> {
 pub fn packed_package_without_overlay() -> Option<PathBuf> {
     let dir = run_dir()?;
     let written = ini_map(&dir.join("fefw.ini"));
-    if written.get("fs.romfs_overlay").is_some() {
+    // A key is not an overlay: an interrupted write, or a folder the player moved, leaves an ini that points at nothing.
+    // Play then tries to write the files again instead of starting an engine that reports main.npdm is compressed.
+    if written.get("fs.romfs_overlay").map(PathBuf::from).is_some_and(|p| p.is_dir()) {
         return None;
     }
     let path = PathBuf::from(written.get("fs.romfs")?);
@@ -1312,7 +1379,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         // saying that. Clear it and configure once more before giving up, so an
         // earlier failed attempt does not condemn every one after it.
         let build = root.join("work").join("build").join("fefw");
-        let stale = e.to_lowercase().contains("cache") || e.contains("CMake Generate step failed") || e.contains("regenerated");
+        let stale = e.to_lowercase().contains("cache") || e.contains("CMake Generate step failed") || e.contains("regenerated") || driver_flags_rejected(&e);
         if !stale {
             return Err(e);
         }
@@ -1678,33 +1745,52 @@ fn has_files(dir: &Path, needed: &[&str], every: bool) -> bool {
     }
 }
 
-fn sdk_in(dirs: &[PathBuf], folders: &[&str], needed: &[&str], every: bool) -> Option<PathBuf> {
-    let vendor = dirs.iter().flat_map(|d| folders.iter().map(move |f| d.join("upscalers").join(f)));
-    for dir in vendor {
-        if has_files(&dir, needed, every) {
-            return Some(dir);
+/// Look for the DLLs in `dir`, then in the folders below it, up to `depth` levels: an SDK unpacked whole keeps them in
+/// `bin`, `bin\x64` or `x64\bin` rather than at its top. The original project also calls this folder `upscaler`, so both
+/// spellings are looked under every root (issues #26 and #29).
+fn sdk_folder(dir: &Path, needed: &[&str], every: bool, depth: usize) -> Option<PathBuf> {
+    if has_files(dir, needed, every) {
+        return Some(dir.to_path_buf());
+    }
+    if depth == 0 {
+        return None;
+    }
+    let mut sub: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    sub.sort();
+    for s in sub {
+        if let Some(hit) = sdk_folder(&s, needed, every, depth - 1) {
+            return Some(hit);
         }
-        // An SDK unpacked whole keeps its DLLs a level down, in `bin` or `x64`: the folder a player drops in is the archive's
-        // own top folder far more often than a folder flattened by hand.
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            let mut sub: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-            sub.sort();
-            if let Some(hit) = sub.into_iter().find(|s| has_files(s, needed, every)) {
-                return Some(hit);
+    }
+    None
+}
+
+fn sdk_in(dirs: &[PathBuf], folders: &[&str], needed: &[&str], every: bool) -> Option<PathBuf> {
+    for d in dirs {
+        for root in ["upscalers", "upscaler"] {
+            for folder in folders {
+                if let Some(hit) = sdk_folder(&d.join(root).join(folder), needed, every, 3) {
+                    return Some(hit);
+                }
             }
         }
     }
     None
 }
 
+/// A complete FSR layout: the SDK 2.x loader and upscaler, or the single v1.1.4 DLL. A lone loader is not enough.
+fn sdk_fsr(dirs: &[PathBuf]) -> Option<PathBuf> {
+    let folders = ["fsr", "fsr3"];
+    sdk_in(dirs, &folders, &["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"], true)
+        .or_else(|| sdk_in(dirs, &folders, &["amd_fidelityfx_vk.dll"], true))
+}
+
 /// Where the engine will look, in the same order: `upscalers\fsr` (and the older `upscalers\fsr3`), `upscalers\streamline`,
 /// `upscalers\xess`, under each of `sdk_dirs`.
 pub fn sdk() -> Sdk {
     let dirs = sdk_dirs();
-    let fsr = ["fsr", "fsr3"];
     Sdk {
-        // Either FSR layout is a complete upscaler, so one of the three files being there is what the page reports.
-        fsr3: sdk_in(&dirs, &fsr, FSR_FILES, false),
+        fsr3: sdk_fsr(&dirs),
         dlss: sdk_in(&dirs, &["streamline"], DLSS_FILES, true),
         xess: sdk_in(&dirs, &["xess"], XESS_FILES, true),
     }
@@ -1713,6 +1799,53 @@ pub fn sdk() -> Sdk {
 /// The one folder the launcher can point a player at: `upscalers` in the run folder, beside the game's ini and log. Created on demand.
 pub fn upscalers_dir() -> Option<PathBuf> {
     run_dir().map(|d| d.join("upscalers"))
+}
+
+/// A file by name below `dir`, comparing names without case, up to `depth` folders deep. An SDK archive extracted as it
+/// came keeps its DLLs in `bin` or `bin\x64`, not loose in the folder the player unzipped.
+fn find_in_tree(dir: &Path, wanted: &str, depth: usize) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    let mut sub: Vec<PathBuf> = Vec::new();
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(wanted)) {
+            return Some(p);
+        }
+        if p.is_dir() {
+            sub.push(p);
+        }
+    }
+    sub.sort();
+    sub.into_iter().find_map(|s| find_in_tree(&s, wanted, depth - 1))
+}
+
+/// The vendor DLLs, wherever an extracted SDK left them. Only folders that name a vendor are walked deeply: searching all
+/// of Downloads, the engine tree or the launcher folder four levels down would cost more than it finds.
+fn find_upscaler_file(sources: &[PathBuf], name: &str) -> Option<PathBuf> {
+    for s in sources {
+        let p = s.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    const HINTS: [&str; 10] = ["upscal", "fsr", "fidelity", "streamline", "dlss", "xess", "intel", "nvidia", "amd", "sdk"];
+    for s in sources {
+        for e in std::fs::read_dir(s).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let named = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            if HINTS.iter().any(|h| named.contains(h)) {
+                if let Some(hit) = find_in_tree(&p, name, 4) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Finds the vendor DLLs in the places a player is likely to have left them (beside the launcher, in the engine folder, in Downloads and on
@@ -1763,7 +1896,7 @@ pub fn adopt_upscaler_files() -> Result<String, String> {
             if dest.is_file() {
                 continue;
             }
-            let Some(src) = sources.iter().map(|s| s.join(name)).find(|p| p.is_file()) else { continue };
+            let Some(src) = find_upscaler_file(&sources, name) else { continue };
             if std::fs::create_dir_all(root_dir.join(folder)).is_err() {
                 continue;
             }
@@ -2126,11 +2259,14 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     d.insert("dlss.upscaler".into(), dlss_upscaler_word(&g.dlss_upscaler).into());
     d.insert("display.astc_quality".into(), g.astc_quality.to_ascii_lowercase());
     d.insert("gfx.gpu".into(), gpu_word(&g.gpu).into());
-    // Shader compilation while playing: the engine's own default is min(4, cpus / 6) background threads,
-    // which on a 24-thread laptop is 4 threads at full clock. A player who hears the fans can cap them and
-    // push them down the priority ladder; 0 is "leave the engine alone".
+    // Shader work while playing is three pools: whole pipelines built at a draw, recorded pipelines prewarmed at boot, and
+    // shader parts compiled in the background. The page's one number caps all three; before this it only reached the parts
+    // pool, so a player who chose 2 still had four prewarm workers and six preload readers fighting the game (#10).
     if g.compile_threads > 0 {
-        d.insert("nvn.gpl_threads".into(), g.compile_threads.min(16).to_string());
+        let n = g.compile_threads.min(8).to_string();
+        for key in ["nvn.gpl_threads", "nvn.prewarm_threads", "nvn.shader_preload_threads"] {
+            d.insert(key.into(), n.clone());
+        }
     }
     d.insert("nvn.compile_priority".into(), compile_priority_word(&g.compile_priority).into());
     d.insert("nvn.compile_eco".into(), if g.compile_eco { "1" } else { "0" }.into());
@@ -2742,11 +2878,75 @@ mod tests {
         // The same folder, built by this release, is not refused by this guard.
         std::fs::write(
             dir.join("fefw.ini"),
-            format!("[engine]\nbuilt_by = 0.1.33\n[fs]\nromfs = {}\n", nup.display()),
+            format!("[engine]\nbuilt_by = 0.1.33\npacked_nup = 1\n[fs]\nromfs = {}\n", nup.display()),
+        )
+        .unwrap();
+        assert_eq!(play_blocker_in(&dir), None);
+        // A newer built_by with no marker is a rebuild that reused the old engine; it is refused too (the #34 report).
+        std::fs::write(
+            dir.join("fefw.ini"),
+            format!("[engine]\nbuilt_by = 0.1.32\n[fs]\nromfs = {}\n", nup.display()),
+        )
+        .unwrap();
+        let stale = play_blocker_in(&dir).expect("an engine without the packed reader is refused even when built_by is newer");
+        assert!(stale.contains("0.1.32"), "{stale}");
+        assert!(stale.contains("old fefw.exe"), "{stale}");
+        // Once Play has written the overlay (what 0.1.20 through 0.1.33 read), that same folder is allowed.
+        let overlay = dir.join("romfs-overlay");
+        std::fs::create_dir_all(&overlay).unwrap();
+        std::fs::write(
+            dir.join("fefw.ini"),
+            format!("[engine]\nbuilt_by = 0.1.32\n[fs]\nromfs = {}\nromfs_overlay = {}\n", nup.display(), overlay.display()),
         )
         .unwrap();
         assert_eq!(play_blocker_in(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_clang_driver_failure_is_recognized_and_repaired() {
+        // The first line is what the #9 report ends with; the second is the one clang prints for its missing /W3 flag.
+        assert!(driver_flags_rejected("clang++: error: unknown argument: '-clang:-fmacro-prefix-map=F:/Games/EmblemWeave-windows-x64=.\'"));
+        assert!(driver_flags_rejected("clang: error: no such file or directory: '/W3'"));
+        assert!(!driver_flags_rejected("ninja: build stopped: subcommand failed."));
+    }
+
+    #[test]
+    fn an_extracted_sdk_in_downloads_is_searched_for_its_dlls() {
+        let root = std::env::temp_dir().join(format!("ew-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("Downloads").join("fsr-sdk").join("bin").join("x64");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dll = bin.join("amd_fidelityfx_vk.dll");
+        std::fs::write(&dll, "").unwrap();
+        let sources = vec![root.join("Downloads")];
+        assert_eq!(find_upscaler_file(&sources, "amd_fidelityfx_vk.dll"), Some(dll));
+        assert_eq!(find_upscaler_file(&sources, "libxess.dll"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn upscaler_dlls_are_found_in_an_extracted_sdk_layout() {
+        let root = std::env::temp_dir().join(format!("ew-sdk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // The two spellings the original project and the issue reporters used.
+        let fsr = root.join("upscalers").join("fsr").join("bin").join("x64");
+        std::fs::create_dir_all(&fsr).unwrap();
+        std::fs::write(fsr.join("amd_fidelityfx_vk.dll"), "").unwrap();
+        let xess = root.join("upscaler").join("xess").join("bin");
+        std::fs::create_dir_all(&xess).unwrap();
+        std::fs::write(xess.join("libxess.dll"), "").unwrap();
+        assert_eq!(sdk_fsr(&[root.clone()]), Some(fsr));
+        assert_eq!(sdk_in(&[root.clone()], &["xess"], XESS_FILES, true), Some(xess));
+        assert_eq!(sdk_in(&[root.clone()], &["streamline"], DLSS_FILES, true), None);
+        // A half-copied SDK 2.x folder (loader only) must not count as a working FSR layout.
+        let partial = root.join("partial").join("upscalers").join("fsr");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("amd_fidelityfx_loader_vk.dll"), "").unwrap();
+        assert_eq!(sdk_fsr(&[root.join("partial")]), None);
+        std::fs::write(partial.join("amd_fidelityfx_upscaler_vk.dll"), "").unwrap();
+        assert_eq!(sdk_fsr(&[root.join("partial")]), Some(partial));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2975,9 +3175,11 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(d.get("dlss.frame_gen").map(String::as_str), Some("0"));
         assert_eq!(d.get("dlss.upscaler").map(String::as_str), Some("auto"));
         assert_eq!(d.get("display.astc_quality").map(String::as_str), Some("high"));
-        assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("below"));
+        assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("idle"));
         assert_eq!(d.get("nvn.compile_eco").map(String::as_str), Some("1"));
-        assert!(!d.contains_key("nvn.gpl_threads"), "automatic leaves the engine's own min(4, cpus / 6)");
+        assert_eq!(d.get("nvn.gpl_threads").map(String::as_str), Some("2"));
+        assert_eq!(d.get("nvn.prewarm_threads").map(String::as_str), Some("2"));
+        assert_eq!(d.get("nvn.shader_preload_threads").map(String::as_str), Some("2"));
 
         g.upscale_quality = "Performance".into();
         g.scene_scale = 70;
@@ -2996,6 +3198,8 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(d.get("display.astc_quality").map(String::as_str), Some("fast"));
         assert_eq!(d.get("gfx.gpu").map(String::as_str), Some("integrated"));
         assert_eq!(d.get("nvn.gpl_threads").map(String::as_str), Some("2"));
+        assert_eq!(d.get("nvn.prewarm_threads").map(String::as_str), Some("2"));
+        assert_eq!(d.get("nvn.shader_preload_threads").map(String::as_str), Some("2"));
         assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("idle"));
         assert_eq!(d.get("nvn.compile_eco").map(String::as_str), Some("0"));
         // A scene scale outside the engine's 25..100 is clamped rather than passed on to be rejected.

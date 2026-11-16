@@ -1,9 +1,9 @@
 # Publishes a release from one source: docs/changelog/<version>.md.
 #
-# That file is the prose. This script packages the build (tools/package_release.ps1), writes the release notes from the
-# changelog file plus the install steps and the asset hashes it just measured, updates the changelog index, commits the
-# changelog and the index row, pushes, and creates the GitHub release with both assets, its tag on that commit. Nothing
-# is typed twice.
+# That file is the prose. This script packages the Windows build (tools/package_release.ps1), writes the release notes
+# from the changelog file plus the install steps and the hash it just measured, updates the changelog index, commits the
+# changelog and the index row, pushes, and creates the GitHub release with the zip and its tag on that commit. The tag
+# workflow builds the Linux translator, stamps the site and runs the live smoke check. Nothing is typed twice.
 #
 #   pwsh -File tools/release.ps1 -Version 0.1.15                  # build, package, write notes, publish
 #   pwsh -File tools/release.ps1 -Version 0.1.15 -SkipBuild       # reuse target\release\EmblemWeave.exe
@@ -56,11 +56,9 @@ try {
     $pkgDir = Join-Path $repo 'target\pkg'
     $manifest = Get-Content (Join-Path $pkgDir 'manifest.json') -Raw | ConvertFrom-Json
 
-    # 3. The notes: install steps, the hashes just measured, then the changelog body.
+    # 3. The notes: install steps, the hash just measured, then the changelog body. The Linux translator is built and
+    # attached by the tag workflow on an Ubuntu runner; this local script packages the Windows zip only.
     $hashes = "``sha256`` of the zip: ``$($manifest.zipSha)``"
-    if ($manifest.tarSha) {
-        $hashes += "`n`n``sha256`` of ``$($manifest.tar)`` (the shader translator for Linux, not needed on Windows): ``$($manifest.tarSha)``"
-    }
     $notes = @"
 # EmblemWeave $Version
 
@@ -125,7 +123,6 @@ $body
 
     $tag = "v$Version"
     $assets = @((Join-Path $pkgDir $manifest.zip))
-    if ($manifest.tar) { $assets += (Join-Path $pkgDir $manifest.tar) }
     # Checked again here, immediately before upload: the same tool package_release.ps1 ran for the zip, so a stale or
     # hand-made asset cannot be published either, and the hashes in the notes are the files that go out.
     $py = Get-Command python -ErrorAction SilentlyContinue
@@ -133,11 +130,8 @@ $body
     if (-not $py) { throw 'python is needed to verify the release assets (tools/verify_archive.py)' }
     & $py.Source (@('tools/verify_archive.py') + $assets)
     if ($LASTEXITCODE -ne 0) { throw 'a release asset failed archive verification; nothing was uploaded' }
-    foreach ($a in $assets) {
-        $sha = (Get-FileHash $a -Algorithm SHA256).Hash.ToLower()
-        $want = if ($a -eq $assets[0]) { $manifest.zipSha } else { $manifest.tarSha }
-        if ($want -and $sha -ne $want) { throw "$([System.IO.Path]::GetFileName($a)) hashes to $sha, the manifest says $want" }
-    }
+    $sha = (Get-FileHash $assets[0] -Algorithm SHA256).Hash.ToLower()
+    if ($sha -ne $manifest.zipSha) { throw "$($manifest.zip) hashes to $sha, the manifest says $($manifest.zipSha)" }
     gh release view $tag *> $null
     if ($LASTEXITCODE -eq 0) {
         # An existing release is edited rather than refused, so a corrected note can be republished.

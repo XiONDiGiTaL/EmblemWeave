@@ -4,12 +4,14 @@
 // every registered thread's host stack and guest registers to the log and a report file. It also honours a
 // "dump_threads" request file next to the exe.
 #include <windows.h>
+#include <psapi.h>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -21,8 +23,10 @@
 #include "nxrt/diag.h"
 #include "nxrt/gauge.h"
 #include "nxrt/dispatch.h"
+#include "nxrt/game.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
+#include "nxrt/memguard.h"
 #include "nxrt/symbols.h"
 #include "stackwalk.h"
 
@@ -172,6 +176,46 @@ std::string format_threads(const std::vector<ThreadDump>& threads) {
     return out;
 }
 
+// Why a freeze report needs these numbers: the game can disappear without a
+// HOST EXCEPTION when Windows runs out of commit, and the old report then only
+// said "no frame tick" while the last opened files pointed at audio. Recording
+// the process footprint, the guard's limit and the machine's remaining memory
+// makes the next report distinguish a deadlock from an exhausted system.
+std::string memory_text() {
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    pmc.cb = sizeof pmc;
+    const bool got = GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc) != 0;
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    const bool got_system = GlobalMemoryStatusEx(&ms) != 0;
+    const double gb = 1024.0 * 1024.0 * 1024.0;
+    char b[512];
+    std::string out = "memory at freeze:\n";
+    if (got) {
+        std::snprintf(b, sizeof b,
+                      "  private commit %.2f GB, working set %.2f GB, peak working set %.2f GB, pagefile %.2f GB\n",
+                      static_cast<double>(pmc.PrivateUsage) / gb, static_cast<double>(pmc.WorkingSetSize) / gb,
+                      static_cast<double>(pmc.PeakWorkingSetSize) / gb, static_cast<double>(pmc.PagefileUsage) / gb);
+        out += b;
+    } else {
+        out += "  private commit: the query failed\n";
+    }
+    const double limit_gb = std::atof(config_get_str("memory", "limit_gb", game::info().platform == game::Platform::Switch2 ? "16" : "8").c_str());
+    std::snprintf(b, sizeof b, "  host footprint %.2f GB (peak %.2f GB), guard limit %.1f GB ([memory] limit_gb), guard %s\n",
+                  static_cast<double>(memguard_footprint_host()) / gb, static_cast<double>(memguard_peak()) / gb, limit_gb,
+                  memguard_running() ? "running" : "not running");
+    out += b;
+    if (got_system) {
+        std::snprintf(b, sizeof b, "  system RAM %.2f GB free of %.2f GB; commit %.2f GB free of %.2f GB\n",
+                      static_cast<double>(ms.ullAvailPhys) / gb, static_cast<double>(ms.ullTotalPhys) / gb,
+                      static_cast<double>(ms.ullAvailPageFile) / gb, static_cast<double>(ms.ullTotalPageFile) / gb);
+        out += b;
+    }
+    std::snprintf(b, sizeof b, "  presented frames %llu\n", static_cast<unsigned long long>(diag_frame_count()));
+    out += b;
+    return out;
+}
+
 std::string dump_text() {
     std::vector<ThreadDump> threads;
     collect_threads(threads);
@@ -228,6 +272,7 @@ std::string extra_reports() {
 std::string emit_dump(const std::string& report_path, const std::string& header) {
     std::string text = header;
     text += '\n';
+    text += memory_text();
     text += dump_text();
     text += kernel::sync_wait_report();
     text += extra_reports();

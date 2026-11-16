@@ -275,18 +275,56 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
         widgets::kv(ui, p, "Files", &if files == 0 { "none yet".to_string() } else { files.to_string() });
         widgets::kv(ui, p, "Title", &format!("{title:016X}"));
         ui.add_space(6.0);
-        let found = crate::saves::find_here(title);
+
+        // Scanning all yuzu-family profiles in APPDATA and LOCALAPPDATA every
+        // frame is wasted work. Keep the list for five seconds, and let the
+        // player force a rescan after copying a save into an emulator.
+        let now = ui.input(|i| i.time);
+        if app.saves_ui.sources_title != Some(title) || now - app.saves_ui.sources_at > 5.0 {
+            app.saves_ui.sources = crate::saves::find_here(title);
+            app.saves_ui.sources_title = Some(title);
+            app.saves_ui.sources_at = now;
+        }
+        let found = app.saves_ui.sources.clone();
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Emulator saves").font(theme::semibold(13.0)).color(p.ink));
+            if widgets::button(ui, p, "Scan again", true).on_hover_text("Looks in yuzu, suyu, sudachi, citron, Eden, Lichii, Fritchii, torzu and Ryujinx-yuzu").clicked() {
+                app.saves_ui.sources = crate::saves::find_here(title);
+                app.saves_ui.sources_title = Some(title);
+                app.saves_ui.sources_at = now;
+            }
+            if !found.is_empty() && widgets::primary_button(ui, p, "Import newest", true).on_hover_text("Imports the most recently written emulator save above").clicked() {
+                message = Some(import_message(crate::saves::import(&found[0].path, &save_dir, title, &stamp())));
+            }
+        });
         if found.is_empty() {
-            ui.label("No emulator saves for this game were found on this PC.");
+            ui.label(RichText::new("No emulator saves for this game were found. Lichii, Fritchii and Eden use the yuzu NAND layout; a portable install can be picked with Import from folder.").size(12.5).color(p.muted));
         }
         for f in &found {
             ui.horizontal(|ui| {
+                let label = match f.source.as_str() {
+                    "yuzu" => "yuzu",
+                    "suyu" => "suyu",
+                    "sudachi" => "sudachi",
+                    "citron" => "citron",
+                    "eden" => "Eden",
+                    "lichii" => "Lichii",
+                    "fritchii" => "Fritchii",
+                    "torzu" => "torzu",
+                    other => other,
+                };
                 let when = f
                     .modified
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| format!(", last written {} days ago", (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|n| n.as_secs()).unwrap_or(0).saturating_sub(d.as_secs())) / 86_400))
+                    .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+                    .map(|d| match d.as_secs() {
+                        0..=59 => "just now".to_string(),
+                        60..=3599 => format!("{} min ago", d.as_secs() / 60),
+                        3600..=86_399 => format!("{} h ago", d.as_secs() / 3600),
+                        secs => format!("{} days ago", secs / 86_400),
+                    })
                     .unwrap_or_default();
-                ui.label(format!("{}: {} files{when}", f.source, f.files)).on_hover_text(f.path.display().to_string());
+                ui.label(format!("{}: {} files, {}", label, f.files, when)).on_hover_text(f.path.display().to_string());
                 if widgets::button(ui, p, "Import", true).clicked() {
                     message = Some(import_message(crate::saves::import(&f.path, &save_dir, title, &stamp())));
                 }

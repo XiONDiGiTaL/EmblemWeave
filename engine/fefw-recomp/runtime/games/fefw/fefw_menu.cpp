@@ -72,6 +72,10 @@ const ImVec4 kRestartTag(0.86f, 0.62f, 0.34f, 0.85f);
 const ImVec4 kGreen(0.55f, 0.86f, 0.55f, 1.0f);
 const ImVec4 kRed(1.0f, 0.42f, 0.38f, 1.0f);
 const ImVec4 kAccent(0.42f, 0.78f, 0.96f, 1.0f);
+const ImVec4 kInk(0.93f, 0.94f, 0.96f, 1.0f);
+const ImVec4 kBody(0.74f, 0.77f, 0.82f, 1.0f);
+const ImVec4 kMuted(0.53f, 0.57f, 0.63f, 1.0f);
+const ImVec4 kAccentDark(0.15f, 0.34f, 0.70f, 1.0f);
 
 enum Tab { kTabDisplay, kTabGraphics, kTabFrameRate, kTabAudio, kTabControls, kTabGame, kTabDebug, kTabCount };
 constexpr const char* kTabNames[kTabCount] = {"Display", "Graphics", "Frame rate", "Audio", "Controls", "Game", "Debug"};
@@ -168,6 +172,109 @@ Menu& menu() {
 
 float px(float v) { return v * ImGui::GetFontSize() / 16.0f; }
 
+// The menu gets its own compact, dark surface and blue accent. Keeping the
+// style in one scope means the rest of the overlay (notifications, the hint
+// bar) keeps the look it had before.
+struct StyleScope {
+    ImGuiStyle old;
+    StyleScope() : old(ImGui::GetStyle()) {
+        ImGuiStyle& s = ImGui::GetStyle();
+        s.WindowRounding = px(16);
+        s.ChildRounding = px(12);
+        s.FrameRounding = px(8);
+        s.PopupRounding = px(10);
+        s.TabRounding = px(8);
+        s.GrabRounding = px(8);
+        s.ScrollbarRounding = px(8);
+        s.WindowBorderSize = 1.0f;
+        s.ChildBorderSize = 1.0f;
+        s.FrameBorderSize = 1.0f;
+        s.TabBarBorderSize = 0.0f;
+        s.TabBarOverlineSize = 2.0f;
+        s.WindowPadding = ImVec2(px(22), px(18));
+        s.FramePadding = ImVec2(px(12), px(7));
+        s.ItemSpacing = ImVec2(px(10), px(9));
+        s.CellPadding = ImVec2(px(12), px(8));
+        s.ScrollbarSize = px(12);
+        const auto col = [&s](ImGuiCol which, float r, float g, float b, float a = 1.0f) { s.Colors[which] = ImVec4(r, g, b, a); };
+        col(ImGuiCol_WindowBg, 0.031f, 0.039f, 0.051f, 0.99f);
+        col(ImGuiCol_ChildBg, 0.043f, 0.055f, 0.071f, 1.0f);
+        col(ImGuiCol_PopupBg, 0.055f, 0.071f, 0.094f, 1.0f);
+        col(ImGuiCol_Border, 1.0f, 1.0f, 1.0f, 0.08f);
+        col(ImGuiCol_FrameBg, 0.09f, 0.11f, 0.14f);
+        col(ImGuiCol_FrameBgHovered, 0.13f, 0.17f, 0.23f);
+        col(ImGuiCol_FrameBgActive, 0.17f, 0.24f, 0.34f);
+        col(ImGuiCol_TableRowBg, 1.0f, 1.0f, 1.0f, 0.0f);
+        col(ImGuiCol_TableRowBgAlt, 1.0f, 1.0f, 1.0f, 0.025f);
+        col(ImGuiCol_Separator, 1.0f, 1.0f, 1.0f, 0.09f);
+        col(ImGuiCol_Tab, 1.0f, 1.0f, 1.0f, 0.0f);
+        col(ImGuiCol_TabHovered, 0.18f, 0.28f, 0.42f, 0.6f);
+        col(ImGuiCol_TabSelected, 0.12f, 0.22f, 0.38f);
+        col(ImGuiCol_TabSelectedOverline, 0.48f, 0.65f, 1.0f);
+        col(ImGuiCol_TabDimmed, 1.0f, 1.0f, 1.0f, 0.0f);
+        col(ImGuiCol_TabDimmedSelected, 0.08f, 0.14f, 0.24f);
+        col(ImGuiCol_Button, 0.10f, 0.13f, 0.17f);
+        col(ImGuiCol_ButtonHovered, 0.15f, 0.20f, 0.27f);
+        col(ImGuiCol_ButtonActive, 0.18f, 0.32f, 0.55f);
+        col(ImGuiCol_Header, 0.12f, 0.24f, 0.42f);
+        col(ImGuiCol_HeaderHovered, 0.16f, 0.30f, 0.52f);
+        col(ImGuiCol_HeaderActive, 0.18f, 0.34f, 0.60f);
+        col(ImGuiCol_CheckMark, 0.48f, 0.65f, 1.0f);
+        col(ImGuiCol_SliderGrab, 0.35f, 0.55f, 0.90f);
+        col(ImGuiCol_SliderGrabActive, 0.55f, 0.72f, 1.0f);
+        col(ImGuiCol_ScrollbarBg, 0.02f, 0.025f, 0.035f);
+        col(ImGuiCol_ScrollbarGrab, 0.20f, 0.24f, 0.31f);
+        col(ImGuiCol_TextSelectedBg, 0.24f, 0.42f, 0.75f, 0.45f);
+    }
+    ~StyleScope() { ImGui::GetStyle() = old; }
+};
+
+// A small rounded tag in a table row, for "restart" and the file checks.
+void pill(const char* text, const ImVec4& tint) {
+    const ImVec2 pad(px(7), px(3));
+    const ImVec2 text_size = ImGui::CalcTextSize(text);
+    const float height = ImGui::GetTextLineHeight() + pad.y * 2;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(p.x, p.y + px(1)), ImVec2(p.x + text_size.x + pad.x * 2, p.y + px(1) + height),
+                      ImGui::GetColorU32(ImVec4(tint.x, tint.y, tint.z, 0.16f)), px(999));
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + pad.x, p.y + px(1) + pad.y), ImGui::GetColorU32(tint), text);
+    ImGui::Dummy(ImVec2(text_size.x + pad.x * 2, height + px(1)));
+}
+
+void draw_header(const play::LiveStatus& live) {
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = px(58);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ImVec4(0.055f, 0.071f, 0.094f, 1.0f)), px(12));
+    dl->AddRect(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.08f)), px(12), 0, 1.0f);
+
+    const float mark = px(30);
+    const ImVec2 mark_at(p.x + px(14), p.y + (height - mark) * 0.5f);
+    dl->AddRectFilled(mark_at, ImVec2(mark_at.x + mark, mark_at.y + mark), ImGui::GetColorU32(kAccentDark), px(9));
+    const char* logo = "EW";
+    const ImVec2 logo_size = ImGui::GetFont()->CalcTextSizeA(px(11), FLT_MAX, 0.0f, logo);
+    dl->AddText(ImGui::GetFont(), px(11), ImVec2(mark_at.x + (mark - logo_size.x) * 0.5f, mark_at.y + (mark - logo_size.y) * 0.5f),
+                IM_COL32(255, 255, 255, 255), logo);
+
+    dl->AddText(ImGui::GetFont(), px(18), ImVec2(p.x + px(56), p.y + px(11)), ImGui::GetColorU32(kInk), tr("Settings"));
+    dl->AddText(ImGui::GetFont(), px(10.5f), ImVec2(p.x + px(57), p.y + px(34)), ImGui::GetColorU32(kMuted), tr("Fire Emblem: Fortune's Weave"));
+
+    const float small = px(10.5f);
+    char fps[48];
+    std::snprintf(fps, sizeof fps, "%.0f FPS", live.fps);
+    const ImVec2 fps_size = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0.0f, fps);
+    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - fps_size.x, p.y + px(13)), ImGui::GetColorU32(kBody), fps);
+    const char* hint = tr("L / R tabs   A select   B close");
+    const ImVec2 hint_size = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0.0f, hint);
+    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - hint_size.x, p.y + px(34)), ImGui::GetColorU32(kMuted), hint);
+    dl->AddRectFilled(ImVec2(p.x + px(14), p.y + height - px(2)), ImVec2(p.x + width - px(14), p.y + height - px(1)),
+                      ImGui::GetColorU32(kAccent), px(1));
+    ImGui::Dummy(ImVec2(0.0f, height));
+    ImGui::Spacing();
+}
+
 void notify(Menu& m, const std::string& text, bool err = false) {
     m.notice = text;
     m.notice_err = err;
@@ -202,14 +309,14 @@ void apply(UiHost& host, Menu& m) { host.apply(m.edit); }
 // ---- widgets: a two-column table of rows, label left, the control right ----------------------------------------------------------------
 enum class When { Live, Restart, Info };
 
-bool pressed(ImGuiKey a, ImGuiKey b, ImGuiKey c) { return ImGui::IsKeyPressed(a, true) || ImGui::IsKeyPressed(b, true) || ImGui::IsKeyPressed(c, true); }
+bool pressed(ImGuiKey a, ImGuiKey b) { return ImGui::IsKeyPressed(a, true) || ImGui::IsKeyPressed(b, true); }
 
 // Left / right on the focused, not held, row: -1 / +1, and the cursor stays where it is.
 int step_dir() {
     if (!ImGui::IsItemFocused() || ImGui::IsItemActive()) return 0;
     int d = 0;
-    if (pressed(ImGuiKey_GamepadDpadLeft, ImGuiKey_LeftArrow, ImGuiKey_None)) d = -1;
-    else if (pressed(ImGuiKey_GamepadDpadRight, ImGuiKey_RightArrow, ImGuiKey_None)) d = 1;
+    if (pressed(ImGuiKey_GamepadDpadLeft, ImGuiKey_LeftArrow)) d = -1;
+    else if (pressed(ImGuiKey_GamepadDpadRight, ImGuiKey_RightArrow)) d = 1;
     if (d) ImGui::NavMoveRequestCancel();
     return d;
 }
@@ -219,9 +326,10 @@ void after_item(Menu& m) {
 }
 
 bool begin_rows(const char* id) {
-    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) return false;
-    ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthStretch, 0.42f);
-    ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_BordersInnerH)) return false;
+    ImGui::TableSetupColumn("##label", ImGuiTableColumnFlags_WidthStretch, 0.40f);
+    ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch, 0.60f);
     return true;
 }
 void end_rows() { ImGui::EndTable(); }
@@ -231,18 +339,19 @@ void section(const char* title) {
     ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
     ImGui::SeparatorText(tr(title));
     ImGui::PopStyleColor();
+    ImGui::Spacing();
 }
 
 // Starts a row: the label (with a "restart" tag for what applies at the next start), then the control's cell, full width.
 void row(Menu& m, const char* label, When when, const char* help) {
-    ImGui::TableNextRow();
+    ImGui::TableNextRow(ImGuiTableRowFlags_None, px(38));
     ImGui::TableSetColumnIndex(0);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(tr(label));
     if (when == When::Restart) {
         ImGui::SameLine();
-        ImGui::TextColored(kRestartTag, tr("restart"));
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(tr("Applies on restart: the game reads this once, when it starts."));
+        pill(tr("restart"), kRestartTag);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Applies on restart: the game reads this once, when it starts."));
     }
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -531,7 +640,7 @@ void output_size(const std::string& v, bool wide, int* w, int* h) {
 
 void resolution_group(Menu& m) {
     section("Resolution");
-    ImGui::TextWrapped(tr("The game chooses its render configuration once, at start: these apply on restart (notes/resolution.md)."));
+    ImGui::TextWrapped("%s", tr("The game chooses its render configuration once, at start: these apply on restart (notes/resolution.md)."));
     if (begin_rows("res")) {
         // the output: the entries, or a WxH from the ini shown as it is
         const IniKey& out = *ini_key("fefw", "output");
@@ -646,10 +755,30 @@ void upscaler_group(Menu& m) {
                         : extras::framegen_requested()  ? "asked for, not running (see the log)"
                                                         : "off");
     // "found" only when every file the feature needs is there (the log names a missing one)
-    ImGui::TextDisabled(tr("Files found: DLSS %s, DLSS-G %s, FSR 3 upscaling %s, FSR 3 frame generation %s, XeSS %s."),
-                        extras::temporal_dlss_available() ? "yes" : "no", extras::streamline_framegen_files() ? "yes" : "no",
-                        extras::temporal_ffx_available() ? "yes" : "no", extras::ffx_fg_files() ? "yes" : "no",
-                        extras::temporal_xess_available() ? "yes" : "no");
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", tr("Files found"));
+    if (ImGui::BeginTable("##ups_files", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+        const struct {
+            const char* name;
+            bool found;
+        } checks[] = {
+            {"DLSS", extras::temporal_dlss_available()},
+            {"DLSS-G", extras::streamline_framegen_files()},
+            {"FSR 3 upscaling", extras::temporal_ffx_available()},
+            {"FSR 3 frame generation", extras::ffx_fg_files()},
+            {"XeSS", extras::temporal_xess_available()},
+        };
+        for (const auto& check_row : checks) {
+            ImGui::TableNextColumn();
+            pill(check_row.found ? tr("ready") : tr("missing"), check_row.found ? kGreen : kRed);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(tr(check_row.name));
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", tr("Put the vendor files beside the game, in upscalers\\<name>, or anywhere in the engine folder tree. The runtime checks the game, launcher and engine folders at startup."));
+    ImGui::PopTextWrapPos();
     if (extras::framegen_requested() && (m.edit.display.vsync || m.edit.extras.latency.mode != extras::LatencyMode::Off))
         ImGui::TextColored(kOrange, "%s", tr("Frame generation works best with vsync and low latency off (Frame rate tab). With vsync on, the game "
                                              "renders at most half the display's refresh rate."));
@@ -816,7 +945,7 @@ void fps_name(int v, char* buf, size_t n) {
 void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov) {
     const ClockInfo ck = clock_info();
     section("The game's frame rate");
-    ImGui::TextWrapped(tr("The game steps its world by its own frame rate; the hooks that change it are installed at start."));
+    ImGui::TextWrapped("%s", tr("The game steps its world by its own frame rate; the hooks that change it are installed at start."));
     if (begin_rows("game")) {
         const IniKey& k60 = *ini_key("fefw", "fps60");
         const IniKey& k120 = *ini_key("fefw", "fps120");
@@ -850,7 +979,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         ImGui::TextDisabled(tr("Game clock %.3fx real time over %d s (1.000 is right), target %d fps, display rate %d, step %.2f frames"), ck.rate,
                             ck.window_s, ck.target, ck.display, static_cast<double>(ck.step));
     else
-        ImGui::TextDisabled(tr("Game clock: not running yet (title or loading)"));
+        ImGui::TextDisabled("%s", tr("Game clock: not running yet (title or loading)"));
 
     play::DisplaySettings& d = m.edit.display;
     section("Presentation");
@@ -969,7 +1098,7 @@ constexpr KeyRowName kKeyRows[] = {
 
 void keyboard_section(Menu& m) {
     section("Keyboard");
-    ImGui::TextWrapped(tr("The keys each Switch button or stick has. To change them, close the game and edit [bindings.all] in controls.ini."));
+    ImGui::TextWrapped("%s", tr("The keys each Switch button or stick has. To change them, close the game and edit [bindings.all] in controls.ini."));
     if (!begin_rows("keys")) return;
     std::vector<std::pair<std::string, std::string>> rows;   // label, keys
     auto add = [&](const std::string& label, const std::string& key) {
@@ -1124,7 +1253,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     mouse_section(host, m);
 
     section("Button mapping");
-    ImGui::TextWrapped(tr("What each controller button presses on the Switch pad. Default keeps the layout above."));
+    ImGui::TextWrapped("%s", tr("What each controller button presses on the Switch pad. Default keeps the layout above."));
     if (begin_rows("map")) {
         for (int i = 0; i < play::kPadSrcCount; ++i) {
             uint64_t& v = p.remap[i];
@@ -1147,7 +1276,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     }
     keyboard_section(m);
     ImGui::Spacing();
-    ImGui::TextDisabled(tr("This menu: F1, or Minus and Plus together on the pad. The game gets no input while it is open."));
+    ImGui::TextDisabled("%s", tr("This menu: F1, or Minus and Plus together on the pad. The game gets no input while it is open."));
 }
 
 // ---- Game -------------------------------------------------------------------------------------------------------------------------------
@@ -1191,7 +1320,7 @@ void game_page(UiHost& host, Menu& m) {
     section("Files");
     ImGui::TextDisabled(tr("Game settings: %s"), config_file_path().empty() ? "(none)" : config_file_path().c_str());
     ImGui::TextDisabled(tr("Controls and display: %s"), host.settings_path().c_str());
-    ImGui::TextDisabled(tr("Every key: runtime/docs/CONFIG.md"));
+    ImGui::TextDisabled("%s", tr("Every key: runtime/docs/CONFIG.md"));
     section("About");
     play::draw_about_page(host.settings_path());
 }
@@ -1306,13 +1435,13 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
         ImGui::Text(tr("%.3fx real time over %d s (1.000 is right); target %d fps, display rate %d, step %.2f frames"), ck.rate, ck.window_s, ck.target,
                     ck.display, static_cast<double>(ck.step));
     else
-        ImGui::TextDisabled(tr("Not running yet (title or loading)."));
+        ImGui::TextDisabled("%s", tr("Not running yet (title or loading)."));
     ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off", ck.smooth ? "on" : "off");
 
     section("Ultrawide");
     const WideInfo wi = wide_info();
     if (!wi.active) {
-        ImGui::TextDisabled(tr("Not installed: the output is 16:9 or narrower, or [fefw] ultrawide = off."));
+        ImGui::TextDisabled("%s", tr("Not installed: the output is 16:9 or narrower, or [fefw] ultrawide = off."));
     } else {
         ImGui::Text(tr("Output %d x %d (%.4fx 16:9). Times each hook changed something:"), wi.out_w, wi.out_h, static_cast<double>(wi.k));
         for (int n = 0; n < WideInfo::kCounters; ++n) {
@@ -1402,6 +1531,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
     }
     if (!ImGui::IsAnyItemActive()) m.edit = host.settings();   // the working copy follows the game (the counter hotkey, Alt+Enter)
     const play::LiveStatus live = host.status();
+    StyleScope style;
 
     // B or Escape go back; with nothing open or held they close the menu
     const bool back = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
@@ -1418,34 +1548,26 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
 
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 130));
-    const float w = std::min(disp.x - px(32), std::max(px(720), std::min(px(1180), disp.x * 0.86f)));
-    const float h = std::min(disp.y - px(32), std::max(px(480), std::min(px(860), disp.y * 0.88f)));
+    const float w = std::min(disp.x - px(32), std::max(px(760), std::min(px(1320), disp.x * 0.91f)));
+    const float h = std::min(disp.y - px(32), std::max(px(500), std::min(px(920), disp.y * 0.90f)));
     ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
     if (opened) ImGui::SetNextWindowFocus();
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(10));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(5));
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(8), px(4)));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(14)));
     const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("##fefw_menu", nullptr, wf)) {
-        ImGui::TextColored(kAccent, tr("Fire Emblem: Fortune's Weave"));
-        ImGui::SameLine();
-        ImGui::TextDisabled(tr(" settings"));
-        const char* hint = "L / R tabs   A select   B close";
-        ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(hint).x);
-        ImGui::TextDisabled("%s", tr(hint));
+        draw_header(live);
 
         m.help.clear();
         const float help_h = ImGui::GetTextLineHeightWithSpacing() * 2.2f;
-        const float bottom = help_h + ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 3;
+        const float bottom = help_h + ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 4 + px(8);
         if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons | ImGuiTabBarFlags_FittingPolicyShrink)) {
             for (int t = 0; t < kTabCount; ++t) {
                 char label[48];
                 std::snprintf(label, sizeof label, "  %s  ###tab%d", tr(kTabNames[t]), t);
                 if (!ImGui::BeginTabItem(label, nullptr, m.tab_request == t ? ImGuiTabItemFlags_SetSelected : 0)) continue;
                 m.tab = t;
-                ImGui::BeginChild("##page", ImVec2(0, -bottom), ImGuiChildFlags_NavFlattened);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(14), px(12)));
+                ImGui::BeginChild("##page", ImVec2(0, -bottom), ImGuiChildFlags_NavFlattened | ImGuiChildFlags_Borders);
                 ImGui::PushItemWidth(-FLT_MIN);
                 switch (t) {
                     case kTabDisplay: display_page(host, m, live); break;
@@ -1458,6 +1580,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
                 }
                 ImGui::PopItemWidth();
                 ImGui::EndChild();
+                ImGui::PopStyleVar();
                 ImGui::EndTabItem();
             }
             m.tab_request = -1;
@@ -1465,10 +1588,12 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         }
 
         // bottom: the row's description, the notice or what waits for a restart, Close
+        ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
         ImGui::PushTextWrapPos(0.f);
         if (!m.help.empty()) ImGui::TextUnformatted(tr(m.help.c_str()));
-        else ImGui::TextDisabled(tr("Changes apply at once and are saved. Rows marked restart apply when the game starts again."));
+        else ImGui::TextDisabled("%s", tr("Changes apply at once and are saved. Rows marked restart apply when the game starts again."));
         ImGui::PopTextWrapPos();
         ImGui::SetCursorPosY(ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight());
         const std::string waits = pending_list(m);
@@ -1480,7 +1605,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
             ImGui::TextColored(kOrange, tr("Restart the game to apply: %s"), waits.c_str());
         } else {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled(tr("Saved to %s and %s"), config_file_path().c_str(), host.settings_path().c_str());
+            ImGui::TextDisabled("%s", tr("Saved to fefw.ini and controls.ini"));
         }
         const char* close = tr("Close");
         const float bw = ImGui::CalcTextSize(close).x + ImGui::GetStyle().FramePadding.x * 6;
@@ -1498,10 +1623,13 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
             quit_armed_until = ImGui::GetTime() + 4.0;
         }
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bw);
+        ImGui::PushStyleColor(ImGuiCol_Button, kAccentDark);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.44f, 0.84f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.28f, 0.60f, 1.0f));
         if (ImGui::Button(close, ImVec2(bw, 0))) ov.request_hide();
+        ImGui::PopStyleColor(3);
     }
     ImGui::End();
-    ImGui::PopStyleVar(4);
     m.busy_last = ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
     static const bool debug_nav = config_get_bool("menu", "debug_nav", false);   // [menu] debug_nav: log the gamepad cursor (test aid)
     if (debug_nav) {

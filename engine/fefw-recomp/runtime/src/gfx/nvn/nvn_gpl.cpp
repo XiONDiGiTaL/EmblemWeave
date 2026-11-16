@@ -604,7 +604,8 @@ void init_once() {
     }
     g_rasters.assign(1, RasterKey{});
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 6, 1, 4));
+    // Two part-compile workers by default, not four on a 24-thread laptop; the launcher writes this from Graphics.
+    const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 8, 1, 2));
     for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
     if (g_up_mode != UpMode::Off) {
         const int64_t nup = config_get_int("nvn", "gpl_upgrade_threads", 1);

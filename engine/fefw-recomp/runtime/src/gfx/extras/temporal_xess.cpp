@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "extras/temporal.h"
+#include "extras/upscaler_paths.h"
 #include "nxrt/config.h"
 #include "nxrt/extras.h"
 #include "nxrt/gfx.h"
@@ -148,6 +149,7 @@ const Found& find_dll() {
         add(exe + L"upscalers\\xess\\");
         if (ln && ln < MAX_PATH) add(slash(std::wstring(ld, ln)) + L"upscalers\\xess\\");
         add(run + L"upscalers\\xess\\");
+        for (const std::wstring& d : upscaler_paths::vendor_dirs(L"xess")) add(d);
         add(exe);
         Found f;
         for (const std::wstring& d : dirs) {

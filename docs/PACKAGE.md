@@ -1,16 +1,21 @@
 # What the release zip contains
 
-Every release zip is built from this repository by `tools/package_release.ps1`. Nothing else goes in, and nothing is
-downloaded at packaging time except what the script itself runs (`cargo build`, and `dotnet publish` for the shader
-translator).
+Every release zip is built from this repository by `tools/package_release.ps1` on the Windows runner of
+`.github/workflows/release.yml`. Nothing else goes in, and nothing is downloaded at packaging time except what the script
+itself runs (`cargo build`, and `dotnet publish` for the shader translator). The same script still works locally for a
+dry run.
 
 ```
 EmblemWeave-vX.Y.Z-windows-x64.zip
 ├── EmblemWeave.exe        the launcher (Rust, Release build) - this is the program you run
+├── portable.txt           keeps settings, saves and build output in data/ beside the exe
 ├── LICENSE                EmblemWeave's own licence
 ├── README.md              the README from the tag the zip was built from
-├── PACKAGE.md             this file
-├── docs/changelog/        what changed in each release, newest first, linked from the README
+├── docs/                  every guide page the README links, the changelog and its screenshots
+│   ├── PACKAGE.md         this file
+│   ├── INSTALL.md, USAGE.md, BUILDING.md, SECURITY.md, TERMS.md, PRIVACY.md
+│   ├── changelog/         what changed in each release, newest first
+│   └── screenshots/       the images the README shows
 └── engine/
     └── fefw-recomp/       the engine, in full source form (GPL-3.0-or-later, its own LICENSE and notices inside)
         ├── LEGAL.md, LICENSE, README.md, SECURITY.md
@@ -60,14 +65,14 @@ zip is derived from a game dump: those live in `game/` and `work/` and never lea
 published for `linux-x64`. It is not inside the Windows zip because a Windows player cannot run it: 41 MB of ELF would
 double the download for nothing. The launcher looks for the translator under `tools/shaders/prebuilt/<platform>/` -
 `win-x64` on Windows (including Wine and Proton, which run the Windows binary) and `linux-x64` elsewhere - so untarring
-the asset into `engine/fefw-recomp/tools/shaders/prebuilt/` is all a Linux build needs. The archive keeps the executable
-bit when it is made on Linux; if it arrives without one, `chmod +x linux-x64/spirv_harness`.
+the asset into `engine/fefw-recomp/tools/shaders/prebuilt/` is all a Linux build needs. It is built and archived on an
+Ubuntu runner by `.github/workflows/release.yml`, so the executable bit is recorded and checked by
+`tools/verify_archive.py`; if a copy somehow loses it, `chmod +x linux-x64/spirv_harness`.
 
 ## Size
 
-About 46 MB, of which about 38 MB is `spirv_harness.exe`: the shader translator published as a single self-contained
-executable so the build needs no .NET SDK and no .NET runtime. The launcher itself is about 13 MB, the engine sources a
-few MB.
+About 54 MB, of which the engine sources are most of the download: the shader translator is published as a single
+self-contained executable so the build needs no .NET SDK and no .NET runtime. The launcher itself is about 14 MB.
 
 ## Extracting on Linux or macOS
 
@@ -112,10 +117,10 @@ from re-packing the folder on Windows with a tool that writes backslashes (Windo
 does; `pwsh` 7 and Explorer do not). If you see it, check the archive's `sha256` against the release notes - if it differs,
 you are extracting a re-zipped copy, not the download.
 
-The release workflow extracts the built zip under Linux before publishing it: `unzip` and Python's `zipfile`
-both produce the same tree, the translator's ELF runs, and `docs/PACKAGE.md`, `docs/changelog/` and
-`engine/fefw-recomp/` are where the launcher looks for them. The `--shader-translator-linux-x64.tar.gz` asset is
-checked the same way, with its executable bit.
+The release workflow builds both archives, then verifies the zip's paths and required engine files and the tarball's
+executable bit before it publishes anything. It also configures the extracted engine on the Windows runner, which is the
+step a missing source folder kills. The `--shader-translator-linux-x64.tar.gz` asset is built on Ubuntu, so its mode
+comes from Linux rather than a Windows zip writer.
 
 The `.exe` inside is a Windows program: it runs under Wine or Proton, not natively, and the launcher's build step installs
 its tools with `winget` and runs PowerShell scripts, so it expects Windows. [STEAMDECK.md](STEAMDECK.md) is the Proton

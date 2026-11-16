@@ -62,6 +62,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.end_row();
                 }
             });
+            ui.add_space(8.0);
+            if widgets::button(ui, &p, "Test vibration", true)
+                .on_hover_text("Runs both motors for about half a second through XInput, without starting the game. If this buzzes but play does not, set Vibration backend below to Standard.")
+                .clicked()
+            {
+                match pad::rumble_test() {
+                    Ok(()) => app.notify("Vibration test sent to the controller", Tone::Ok),
+                    Err(e) => app.notify(e, Tone::Bad),
+                }
+            }
         }
         None => widgets::status_line(
             ui,
@@ -179,6 +189,39 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             save = Some(("haptic_strength", t.rumble_scale));
         }
     });
+    // Auto picks DualSense audio haptics, HD Rumble packets for a wired Switch Pro Controller, and the standard
+    // two motors for everything else. If a pad's richer path is not working, Standard is the same path the
+    // Goldoire build used, so it is the one press that rules the engine's backend out (issue #10).
+    let mut backend = pad::haptic_mode(&ini);
+    widgets::setting_row(ui, p, "Vibration backend", "Automatic uses the best path the pad offers; Standard forces the two-motor rumble every pad supports. Written to controls.ini as [pad] haptic.", |ui| {
+        let label = match backend.as_str() {
+            "off" => "Off",
+            "rumble" => "Standard (most compatible)",
+            "dualsense" => "DualSense haptics",
+            _ => "Automatic",
+        };
+        egui::ComboBox::from_id_salt("haptic-backend").selected_text(label).width(220.0).show_ui(ui, |ui| {
+            for (word, text) in [
+                ("auto", "Automatic"),
+                ("rumble", "Standard (most compatible)"),
+                ("dualsense", "DualSense haptics"),
+            ] {
+                if ui.selectable_label(backend == word, text).clicked() {
+                    backend = word.to_string();
+                }
+            }
+        });
+    });
+    if backend != pad::haptic_mode(&ini) {
+        match pad::write_haptic_mode(&ini, &backend) {
+            Ok(()) => {
+                t.rumble = backend != "off";
+                app.tuning = Some(t);
+                app.notify(format!("Vibration backend set to {backend}"), Tone::Neutral);
+            }
+            Err(e) => app.notify(e, Tone::Bad),
+        }
+    }
 
     if let Some((key, on)) = save_flag {
         let written = if key == "haptic" { pad::write_haptic(&ini, on) } else { pad::write_flag(&ini, key, on) };

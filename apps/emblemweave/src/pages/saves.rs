@@ -12,8 +12,16 @@ use std::path::PathBuf;
 pub struct Ui {
     pub profile_name: String,
     pub editor: Option<Editor>,
+    /// The profile the page last loaded, so the list can say which save is installed.
+    pub active_profile: Option<String>,
     /// Scroll the page to the editor on the next frame (the tour asks for it).
     pub scroll_to_editor: bool,
+    /// Emulator saves found for the title, refreshed at most every few seconds
+    /// from the Saves page. Scanning every frame watched every yuzu fork's
+    /// NAND and made opening the page slower than it needed to be.
+    pub sources: Vec<crate::saves::Found>,
+    pub sources_title: Option<u64>,
+    pub sources_at: f64,
     ids: Option<std::sync::Arc<Ids>>,
 }
 
@@ -89,12 +97,52 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(theme::SPACE_S);
     }
 
+    // The one save the game reads, first: a player who cannot find their save should not have to work out which folder is live.
+    let account = crate::saves::account_dir(&save_dir);
+    let current = crate::saves::slots_with_sizes(&save_dir);
+    widgets::section(ui, &p, "Current save", |ui| {
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("The game reads this folder").size(12.0).color(p.muted));
+                ui.label(RichText::new(account.display().to_string()).font(theme::mono(12.5)).color(p.ink)).on_hover_text("account/<the title's fixed user id>");
+            });
+            ui.add_space(theme::SPACE_L);
+            let newest = current.iter().filter_map(|s| s.1).max();
+            widgets::pill(ui, &p, &format!("{} slots", current.len()), if current.is_empty() { Tone::Neutral } else { Tone::Ok });
+            if !current.is_empty() {
+                widgets::pill(ui, &p, &megabytes(current.iter().map(|s| s.2).sum()), Tone::Neutral);
+            }
+            if let Some(t) = newest {
+                widgets::pill(ui, &p, &ago(Some(t)), Tone::Neutral);
+            }
+            // A fixed row height, not the remaining page height: `with_layout` in a horizontal row otherwise
+            // stretches this card to the bottom of the window.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 34.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if widgets::button(ui, &p, "Open folder", true).clicked() {
+                        let _ = std::fs::create_dir_all(&account);
+                        let _ = std::process::Command::new("explorer").arg(&account).spawn();
+                    }
+                },
+            );
+        });
+        if current.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("No save here yet. Play once, or import one below.").size(12.5).color(p.warn));
+        }
+    });
+
     widgets::section(ui, &p, "Save profiles", |ui| {
         ui.label("A profile is a named copy of the whole save. Loading one makes it the current save; the save it replaces is kept in the backups folder.");
         ui.add_space(6.0);
         let profiles = crate::saves::profiles(&save_dir);
         if profiles.is_empty() {
-            ui.label(RichText::new("No profiles yet.").color(p.muted));
+            ui.label(RichText::new("No profiles yet. Keep the current save under a name to start one.").color(p.muted));
+            ui.add_space(4.0);
+        } else {
+            ui.label(RichText::new(format!("{} profile{}.", profiles.len(), if profiles.len() == 1 { "" } else { "s" })).size(12.0).color(p.muted));
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -118,8 +166,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let typed = app.saves_ui.profile_name.trim().to_string();
         for pr in &profiles {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&pr.name).font(theme::semibold(14.0)).color(p.ink));
-                ui.label(RichText::new(format!("{} files, {}", pr.files, ago(pr.modified))).color(p.muted));
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&pr.name).font(theme::semibold(14.0)).color(p.ink));
+                        if app.saves_ui.active_profile.as_deref() == Some(pr.name.as_str()) {
+                            widgets::pill(ui, &p, "installed", Tone::Ok);
+                        }
+                    });
+                    ui.label(RichText::new(format!("{} files, {}", pr.files, ago(pr.modified))).size(12.0).color(p.muted));
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::button(ui, &p, "Remove", true).on_hover_text("Moves the profile to the backups folder").clicked() {
                         message = Some(match crate::saves::remove_profile(&save_dir, pr, &stamp()) {
@@ -145,17 +200,27 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             Err(e) => (format!("Could not rename the profile: {e}"), Tone::Bad),
                         });
                     }
-                    if widgets::button(ui, &p, "Load", !running).clicked() {
-                        message = Some(match crate::saves::load_profile(&save_dir, pr, title, &stamp()) {
-                            Ok(i) => {
-                                app.saves_ui.editor = None;
-                                (format!("Loaded profile {} ({} files){}", pr.name, i.files, i.backup.map(|b| format!("; the previous save is in {}", b.display())).unwrap_or_default()), Tone::Ok)
+                    if widgets::primary_button(ui, &p, "Load", !running)
+                        .on_hover_text("Checks every slot, then installs this profile as the save the game reads")
+                        .clicked()
+                    {
+                        let check = crate::saves::check_profile(pr);
+                        message = Some(if check.ok() {
+                            match crate::saves::load_profile(&save_dir, pr, title, &stamp()) {
+                                Ok(i) => {
+                                    app.saves_ui.editor = None;
+                                    app.saves_ui.active_profile = Some(pr.name.clone());
+                                    (format!("Loaded profile {} ({} files, {} slot{}){}", pr.name, i.files, check.slots, if check.slots == 1 { "" } else { "s" }, i.backup.map(|b| format!("; the previous save is in {}", b.display())).unwrap_or_default()), Tone::Ok)
+                                }
+                                Err(e) => (format!("Could not load the profile: {e}"), Tone::Bad),
                             }
-                            Err(e) => (format!("Could not load the profile: {e}"), Tone::Bad),
+                        } else {
+                            (format!("This profile was not loaded: {}", check.problems.iter().take(2).cloned().collect::<Vec<_>>().join("; ")), Tone::Bad)
                         });
                     }
                 });
             });
+            ui.add_space(2.0);
         }
 
     });
@@ -208,6 +273,41 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if let Some(m) = editor(app, ui, &p, running) {
         message = Some(m);
     }
+
+    // Whole saves kept by an import or a removed profile. A player who loaded the wrong branch wants the old one back without
+    // hunting through Explorer, so the restore is here beside the profiles.
+    let backups = crate::saves::backups(&save_dir);
+    widgets::section(ui, &p, "Backups", |ui| {
+        if backups.is_empty() {
+            ui.label(RichText::new("No whole-save backups yet. Importing a save or loading a profile keeps the save it replaces here.").size(12.5).color(p.muted));
+        }
+        for b in &backups {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&b.name).font(theme::mono(12.5)).color(p.ink));
+                ui.label(RichText::new(format!("{} files, {}", b.files, ago(b.modified))).size(12.0).color(p.muted));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::button(ui, &p, "Restore", !running)
+                        .on_hover_text("Makes this backup the current save; the save it replaces is kept in the backups folder")
+                        .clicked()
+                    {
+                        message = Some(match crate::saves::restore_backup(&save_dir, b, title, &stamp()) {
+                            Ok(i) => {
+                                app.saves_ui.editor = None;
+                                app.saves_ui.active_profile = None;
+                                (format!("Restored {} ({} files){}", b.name, i.files, i.backup.map(|p| format!("; the save it replaced is in {}", p.display())).unwrap_or_default()), Tone::Ok)
+                            }
+                            Err(e) => (format!("Could not restore {}: {e}", b.name), Tone::Bad),
+                        });
+                    }
+                });
+            });
+        }
+        ui.add_space(4.0);
+        if widgets::button(ui, &p, "Open backups folder", true).clicked() {
+            let _ = std::fs::create_dir_all(save_dir.join("backups"));
+            let _ = std::process::Command::new("explorer").arg(save_dir.join("backups")).spawn();
+        }
+    });
 
     crate::pages::setup::saves_section(app, ui, &p);
     if let Some((text, tone)) = message {

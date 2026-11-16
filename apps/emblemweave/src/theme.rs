@@ -26,13 +26,14 @@ pub const SPACE_S: f32 = 8.0;
 pub const SPACE_M: f32 = 14.0;
 pub const SPACE_L: f32 = 20.0;
 pub const SPACE_XL: f32 = 30.0;
-/// Corner radii: the site's 11 pixel buttons and `--radius` (18) cards.
-pub const RADIUS_S: u8 = 12;
-pub const RADIUS_M: u8 = 20;
+/// Corner radii: compact 10 pixel controls and 16 pixel cards, the modern
+/// dashboard proportions rather than the old fully round pills.
+pub const RADIUS_S: u8 = 10;
+pub const RADIUS_M: u8 = 16;
 /// Width of the navigation rail.
-pub const NAV_WIDTH: f32 = 216.0;
+pub const NAV_WIDTH: f32 = 228.0;
 /// The brand and status strips above and below the pages.
-pub const TOPBAR_HEIGHT: f32 = 46.0;
+pub const TOPBAR_HEIGHT: f32 = 50.0;
 pub const STATUSBAR_HEIGHT: f32 = 28.0;
 /// The column of status panels beside the Overview page, and the window width
 /// below which it steps aside so the page keeps its room.
@@ -41,10 +42,11 @@ pub const SIDE_MIN_WINDOW: f32 = 1240.0;
 /// The widest the page column grows; wider windows centre it instead of
 /// stretching the text across the screen.
 pub const CONTENT_MAX: f32 = 1180.0;
-/// Fully round controls: buttons and chips are pills.
-pub const RADIUS_PILL: u8 = 200;
-/// A card: soft on three corners, squared where it meets the page's spine.
-pub const CARD: egui::CornerRadius = egui::CornerRadius { nw: 18, ne: 18, sw: 18, se: 6 };
+/// The radius of buttons and navigation rows. Chips keep their own 255 in
+/// `widgets::pill`; controls are softly rounded rectangles now, not pills.
+pub const RADIUS_PILL: u8 = 10;
+/// A card: one soft radius on all four corners, so the dashboard reads level.
+pub const CARD: egui::CornerRadius = egui::CornerRadius::same(RADIUS_M);
 /// Letter spacing for the small-caps labels, as the reference launcher sets it.
 pub const TRACK_WIDE: f32 = 2.4;
 pub const TRACK_MID: f32 = 1.6;
@@ -334,7 +336,7 @@ pub fn semibold_family() -> FontFamily {
     FontFamily::Name("semibold".into())
 }
 
-/// Serif display type for branding and page titles.
+/// Semibold sans for branding, page titles and card values.
 pub fn display(size: f32) -> FontId {
     FontId::new(size, display_family())
 }
@@ -360,8 +362,11 @@ pub fn configure_fonts(ctx: &egui::Context) {
         Some(key.to_owned())
     };
     let win = |f: &str| format!(r"C:\Windows\Fonts\{f}");
-    let serif = load("serif", &[&win("constan.ttf"), &win("georgia.ttf"), &win("pala.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"]);
-    let serif_bold = load("serif_bold", &[&win("constanb.ttf"), &win("georgiab.ttf"), &win("palab.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"]);
+    // Display type is the same humanist sans as the site (Sora on the web,
+    // Segoe's semibold locally), not the old book serif: headings, cards and
+    // the hero now share one modern face.
+    let display_semi = load("display_semi", &[&win("seguisb.ttf"), &win("segoeuib.ttf"), &win("segoeui.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]);
+    let display_bold = load("display_bold_face", &[&win("segoeuib.ttf"), &win("seguisb.ttf"), &win("segoeui.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]);
     let sans = load("sans", &[&win("segoeui.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]);
     let sans_semi = load("sans_semi", &[&win("seguisb.ttf"), &win("segoeuib.ttf")]);
     let mono = load("mono", &[&win("CascadiaMono.ttf"), &win("consola.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]);
@@ -377,8 +382,8 @@ pub fn configure_fonts(ctx: &egui::Context) {
     let prop = chain(sans.clone(), &base_prop);
     fonts.families.insert(FontFamily::Proportional, prop.clone());
     fonts.families.insert(FontFamily::Monospace, chain(mono, &base_mono));
-    fonts.families.insert(display_family(), chain(serif.clone(), &prop));
-    fonts.families.insert(display_bold_family(), chain(serif_bold.or(serif), &prop));
+    fonts.families.insert(display_family(), chain(display_semi, &prop));
+    fonts.families.insert(display_bold_family(), chain(display_bold, &prop));
     fonts.families.insert(semibold_family(), chain(sans_semi.or(sans), &prop));
     ctx.set_fonts(fonts);
 }
@@ -434,7 +439,7 @@ pub fn apply(ctx: &egui::Context, scheme: Scheme) {
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     // Every control on a row — a button, a combo box, a text field — is the
     // same height, so a toolbar reads as one line.
-    style.spacing.interact_size.y = 32.0;
+    style.spacing.interact_size.y = 34.0;
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_PILL);

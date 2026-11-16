@@ -26,6 +26,7 @@ mod deps;
 mod mods;
 mod pad;
 mod perf;
+mod report;
 mod snapshots;
 mod updater;
 mod saves;
@@ -99,6 +100,7 @@ impl ToastAction {
 /// A question the user must answer before an action runs.
 pub enum Confirm {
     ResetBindings,
+    SafeGraphics,
     CancelJob(JobKind),
 }
 
@@ -134,6 +136,7 @@ pub struct App {
     screenshot: Option<(std::path::PathBuf, u32)>,
     applied: theme::Scheme,
     pub saves_ui: pages::saves::Ui,
+    pub trouble_ui: pages::troubleshoot::Ui,
     pub mods_ui: pages::mods::Ui,
     pub cheats_ui: pages::cheats::Ui,
     /// The game's `[pad]` settings as the Controls page last read them.
@@ -200,6 +203,7 @@ impl App {
             play_after_repair: false,
             screenshot: None,
             saves_ui: Default::default(),
+            trouble_ui: Default::default(),
             mods_ui: Default::default(),
             cheats_ui: Default::default(),
             tuning: None,
@@ -234,6 +238,11 @@ impl App {
             app.notify(w, Tone::Warn);
         }
         app.note("Launcher started", Tone::Neutral);
+        // Say this at startup, while the player is still on Overview: a folder from an older release is fixed there, before Play.
+        if let Some((built, now)) = crate::engine::stale_build() {
+            let built = built.unwrap_or_else(|| "an older release".to_string());
+            app.notify(format!("This game folder was built by {built}; Overview has Repair / Rebuild now to update it to {now}."), Tone::Warn);
+        }
         app.start(JobKind::Detect);
         if app.config.updates.check {
             app.check_updates();
@@ -523,6 +532,19 @@ impl App {
             .show(ctx, |ui| {
                 let strip = ui.available_rect_before_wrap();
                 widgets::glass_panel(ui, strip, &p, egui::CornerRadius::same(14));
+                // The bar is the window's title bar now. Empty parts of it drag
+                // the window; the buttons added later sit above this response.
+                let drag = ui.interact(strip, ui.id().with("shell-drag"), egui::Sense::click_and_drag());
+                if drag.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if drag.double_clicked() {
+                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                }
+                if drag.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                }
                 ui.horizontal_centered(|ui| {
                     ui.add_space(14.0);
                     // The brand mark: a lit diamond, as on the reference bar.
@@ -543,7 +565,19 @@ impl App {
                     ui.add_space(11.0);
                     widgets::tracked(ui, &self.page.label().to_uppercase(), 9.5, p.accent_hi, theme::TRACK_MID);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(14.0);
+                        // Right to left: close is the rightmost button, then
+                        // maximize, minimize, and the quiet version/frame text.
+                        if shell_button(ui, &p, "✕", "Close", p.bad).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                        if shell_button(ui, &p, if maximized { "❐" } else { "□" }, "Maximize / restore", p.body).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        if shell_button(ui, &p, "—", "Minimize", p.body).clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                        ui.add_space(8.0);
                         if self.config.hud.fps {
                             if ui.small_button("✕").on_hover_text("Hide the frame rate").clicked() {
                                 self.config.hud.fps = false;
@@ -552,6 +586,7 @@ impl App {
                         } else {
                             ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(11.0)).color(p.muted));
                         }
+                        ui.add_space(8.0);
                     });
                 });
             });
@@ -609,7 +644,7 @@ impl App {
             ("Play", &[Page::Overview, Page::Setup]),
             ("Library", &[Page::Saves, Page::Mods, Page::Cheats]),
             ("Runtime", &[Page::Recompile, Page::Graphics, Page::Audio, Page::Controls]),
-            ("System", &[Page::Appearance, Page::Diagnostics, Page::Requirements, Page::Log, Page::About]),
+            ("System", &[Page::Appearance, Page::Diagnostics, Page::Troubleshoot, Page::Requirements, Page::Log, Page::About]),
         ];
         let p = self.config.theme.palette();
         egui::SidePanel::left("nav")
@@ -820,6 +855,7 @@ impl App {
         if let Some(confirm) = &self.confirm {
             let (title, body, action) = match confirm {
                 Confirm::ResetBindings => ("Reset controls?", "Every binding returns to its default. This cannot be undone.", "Reset"),
+                Confirm::SafeGraphics => ("Reset graphics?", "Resolution, window mode, upscaling, sharpening and shader settings return to their defaults. Saves, mods and game files are not touched. This is the first thing to try for a black screen.", "Reset graphics"),
                 Confirm::CancelJob(k) => ("Stop this task?", k.title(), "Stop"),
             };
             let mut decision = None;
@@ -845,6 +881,11 @@ impl App {
                         Some(Confirm::ResetBindings) => {
                             self.config.input.bindings = config::default_bindings();
                             self.notify("Controls reset to their defaults", Tone::Ok);
+                        }
+                        Some(Confirm::SafeGraphics) => {
+                            self.config.graphics = crate::config::Graphics::default();
+                            self.config.audio = crate::config::Audio::default();
+                            self.notify("Graphics and audio settings reset to safe defaults. The next Play writes them.", Tone::Ok);
                         }
                         Some(Confirm::CancelJob(kind)) => {
                             if let Some(j) = self.jobs.iter().find(|j| j.kind == kind && !j.finished()) {
@@ -914,6 +955,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        shell_resize(ctx);
         if self.config.theme != self.applied {
             self.applied = self.config.theme;
             theme::apply(ctx, self.config.theme);
@@ -1010,6 +1052,57 @@ impl eframe::App for App {
         }
         let _ = self.config.save();
     }
+}
+
+/// A borderless window has no native resize handles, so the thin edge of the
+/// client area starts the same drag winit would start on a decorated window.
+fn shell_resize(ctx: &egui::Context) {
+    let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+    let r = ctx.screen_rect();
+    const EDGE: f32 = 7.0;
+    let left = pos.x <= r.left() + EDGE;
+    let right = pos.x >= r.right() - EDGE;
+    let top = pos.y <= r.top() + EDGE;
+    let bottom = pos.y >= r.bottom() - EDGE;
+    if !(left || right || top || bottom) {
+        return;
+    }
+    let dir = match (left, right, top, bottom) {
+        (true, _, true, _) => egui::ResizeDirection::NorthWest,
+        (_, true, true, _) => egui::ResizeDirection::NorthEast,
+        (true, _, _, true) => egui::ResizeDirection::SouthWest,
+        (_, true, _, true) => egui::ResizeDirection::SouthEast,
+        (true, ..) => egui::ResizeDirection::West,
+        (_, true, ..) => egui::ResizeDirection::East,
+        (_, _, true, _) => egui::ResizeDirection::North,
+        (_, _, _, true) => egui::ResizeDirection::South,
+        _ => return,
+    };
+    ctx.set_cursor_icon(match dir {
+        egui::ResizeDirection::North | egui::ResizeDirection::South => egui::CursorIcon::ResizeVertical,
+        egui::ResizeDirection::East | egui::ResizeDirection::West => egui::CursorIcon::ResizeHorizontal,
+        egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => egui::CursorIcon::ResizeNwSe,
+        egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => egui::CursorIcon::ResizeNeSw,
+    });
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+    }
+}
+
+/// A flat window button for the custom shell. The native buttons are gone, so
+/// these carry the hover colour and the accessible tooltip themselves.
+fn shell_button(ui: &mut egui::Ui, p: &theme::Palette, glyph: &str, tip: &str, hover: egui::Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), egui::Sense::click());
+    let bg = if response.hovered() { theme::alpha(hover, 28) } else { egui::Color32::TRANSPARENT };
+    ui.painter().rect_filled(rect.shrink(2.0), egui::CornerRadius::same(7), bg);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        theme::semibold(13.0),
+        if response.hovered() { hover } else { p.body },
+    );
+    response.on_hover_text(tip)
 }
 
 pub(crate) fn window_icon() -> Option<egui::IconData> {
@@ -1231,9 +1324,13 @@ fn main() -> eframe::Result<()> {
         let path = args.get(i + 1).map(|s| s.as_str());
         std::process::exit(verify_log_cli(path));
     }
+    // The launcher draws its own top bar and window buttons. Keeping the
+    // native title bar would put a stock Windows strip above that design.
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([1120.0, 720.0])
+        .with_decorations(false)
+        .with_resizable(true)
         .with_title("EmblemWeave");
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);

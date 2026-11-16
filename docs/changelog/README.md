@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.34](0.1.34.md) | 2026-11-16 | Saves load again, shader compilation stops pinning every core, vibration can be tested, and the launcher has a modern dashboard. |
 | [0.1.33](0.1.33.md) | 2026-11-16 | The launcher builds the lifted code for the processor it is running on, and Diagnostics says which build that is. |
 | [0.1.32](0.1.32.md) | 2026-11-15 | Code mods: a DLL in a mod's `exefs` now runs inside the game, and a mod can bring the hook sites it needs |
 | [0.1.31](0.1.31.md) | 2026-11-15 | A `.nx` plays from the archive again, and a build folder that lost its compiler starts over instead of failing |

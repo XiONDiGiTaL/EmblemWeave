@@ -6,6 +6,7 @@
 
 #include <vector>
 
+#include "extras/upscaler_paths.h"
 #include "nxrt/config.h"
 #include "nxrt/extras.h"
 #include "nxrt/log.h"
@@ -67,6 +68,12 @@ std::vector<std::wstring> default_dirs() {
     if (!launcher.empty()) add(launcher + L"upscalers\\fsr\\");
     add(run + L"upscalers\\fsr\\");
     add(exe + L"upscalers\\fsr3\\");
+    // The engine checkout is several folders above the built executable. A
+    // player who unzipped AMD's SDK into engine/fefw-recomp/upscalers (or the
+    // upstream spelling, upscaler) used to be told the files were missing
+    // (#26); the ancestor walk makes that copy work without rewriting the ini.
+    for (const std::wstring& d : upscaler_paths::vendor_dirs(L"fsr")) add(d);
+    for (const std::wstring& d : upscaler_paths::vendor_dirs(L"fsr3")) add(d);
     add(exe);
     return v;
 }

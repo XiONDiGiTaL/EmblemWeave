@@ -199,10 +199,10 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     widgets::section(ui, &p, "Shader compilation (CPU)", |ui| {
         ui.label(
             RichText::new(
-                "While a new area loads, the engine compiles the shader parts and whole pipelines its cache has \
-                 never seen, on background threads. The defaults keep them below normal priority in Windows' \
-                 efficiency mode; on a laptop that still raises clocks and fans, so the count and the priority \
-                 are here.",
+                "While a new area loads, the engine compiles shader parts, whole pipelines and the boot prewarm on \
+                 background threads. Two threads at idle priority in efficiency mode are the defaults now: a 24-thread \
+                 laptop used to start up to ten compiler threads at normal-ish priority, which is the 6 GHz burst and the \
+                 fan noise in the report. Lower counts trade a little first-draw stutter for a quieter machine.",
             )
             .size(12.5)
             .color(p.muted),
@@ -210,8 +210,31 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(
             ui,
             &p,
+            "CPU preset",
+            "One press for the three values below. Quiet is for a laptop on battery; Fast spends more CPU to remove first-draw stutter.",
+            |ui| {
+                if widgets::button(ui, &p, "Quiet", true).on_hover_text("1 thread, idle priority, efficiency mode").clicked() {
+                    g.compile_threads = 1;
+                    g.compile_priority = "Idle".into();
+                    g.compile_eco = true;
+                }
+                if widgets::button(ui, &p, "Balanced", true).on_hover_text("2 threads, idle priority, efficiency mode").clicked() {
+                    g.compile_threads = 2;
+                    g.compile_priority = "Idle".into();
+                    g.compile_eco = true;
+                }
+                if widgets::button(ui, &p, "Fast", true).on_hover_text("4 threads, below normal priority, efficiency mode off").clicked() {
+                    g.compile_threads = 4;
+                    g.compile_priority = "Below normal".into();
+                    g.compile_eco = false;
+                }
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
             "Compile threads",
-            "Background threads that compile shaders while playing. Automatic leaves the engine's own count, min(4, cpus / 6), which on a 24-thread laptop is 4. Applies at the next start.",
+            "Background threads for whole pipelines, boot prewarm and shader parts together. Automatic leaves the engine's own count; the default is 2. Applies at the next start.",
             |ui| {
                 combo_num(ui, "cthreads", &mut g.compile_threads, COMPILE_THREADS);
             },
@@ -220,7 +243,7 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &p,
             "Compile priority",
-            "Thread priority for those compiles. Idle keeps them off the fast cores entirely; Normal brings back the stutter-free first draw but competes with the game.",
+            "Thread priority for those compiles. Idle is the default and keeps them off the fast cores; Normal brings back the stutter-free first draw but competes with the game.",
             |ui| {
                 combo(ui, "cprio", &mut g.compile_priority, COMPILE_PRIORITIES);
             },
@@ -272,19 +295,31 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The vendor DLLs the engine cannot ship, whether they are on disk, and the two buttons that make finding them the launcher's job rather
-/// than the player's. A report that says "not running" without saying what is missing and where it goes is how #26 was filed.
+const FSR_SDK_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases";
+const FSR_114_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v1.1.4";
+const STREAMLINE_URL: &str = "https://github.com/NVIDIA-RTX/Streamline/releases";
+const XESS_URL: &str = "https://github.com/intel/xess/releases";
+
+/// The vendor DLLs the engine cannot ship, whether they are on disk, and the
+/// buttons that make finding them the launcher's job rather than the player's.
+/// Missing files get the vendor's own download page next to them; the guide
+/// spells out the names and destinations so nobody has to guess.
 fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     let sdk = crate::engine::sdk();
     let dir = crate::engine::upscalers_dir();
+    let fsr_missing = sdk.fsr3.is_none();
+    let fsr_framegen_missing = !sdk.fsr_framegen();
+    let dlss_missing = sdk.dlss.is_none();
+    let dlss_framegen_missing = !sdk.dlss_framegen();
+    let xess_missing = sdk.xess.is_none();
     let fsr = match &sdk.fsr3 {
-        Some(d) if sdk.fsr_framegen() => format!("found in {}, with frame generation", d.display()),
+        Some(d) if !fsr_framegen_missing => format!("found in {}, with frame generation", d.display()),
         Some(d) => format!("found in {}; frame generation still needs amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4)", d.display()),
         None => "missing: amd_fidelityfx_upscaler_vk.dll with amd_fidelityfx_loader_vk.dll (FSR SDK v2.4), or amd_fidelityfx_vk.dll (v1.1.4)".to_string(),
     };
     let dlss = match &sdk.dlss {
-        Some(d) if sdk.dlss_framegen() => format!("found in {}, with frame generation", d.display()),
+        Some(d) if !dlss_framegen_missing => format!("found in {}, with frame generation", d.display()),
         Some(d) => format!("found in {}; frame generation still needs sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll, nvngx_dlssg.dll and NvLowLatencyVk.dll", d.display()),
         None => "missing: sl.interposer.dll, sl.common.dll, sl.dlss.dll and nvngx_dlss.dll from Streamline".to_string(),
     };
@@ -296,10 +331,46 @@ fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
         Some(d) => format!("Put them in {} (fsr, streamline and xess), or in an upscalers folder beside the game.", d.display()),
         None => "Put them in an upscalers folder beside the game.".to_string(),
     };
+    let guide_id = egui::Id::new("upscaler-guide-open");
+    let mut guide_open = ui.ctx().data(|d| d.get_temp::<bool>(guide_id).unwrap_or(false));
+
     widgets::section(ui, &p, "Upscaler files", |ui| {
-        widgets::status_line(ui, &p, if sdk.fsr3.is_some() { Tone::Ok } else { Tone::Bad }, "FSR 3.1", &fsr);
-        widgets::status_line(ui, &p, if sdk.dlss.is_some() { Tone::Ok } else { Tone::Bad }, "DLSS", &dlss);
-        widgets::status_line(ui, &p, if sdk.xess.is_some() { Tone::Ok } else { Tone::Bad }, "XeSS", &xess);
+        upscaler_line(
+            ui,
+            &p,
+            if fsr_missing { Tone::Bad } else if fsr_framegen_missing { Tone::Warn } else { Tone::Ok },
+            "FSR 3.1",
+            &fsr,
+            if fsr_missing {
+                Some(("Get FSR SDK", FSR_SDK_URL))
+            } else if fsr_framegen_missing {
+                Some(("Get FSR v1.1.4", FSR_114_URL))
+            } else {
+                None
+            },
+        );
+        upscaler_line(
+            ui,
+            &p,
+            if dlss_missing { Tone::Bad } else if dlss_framegen_missing { Tone::Warn } else { Tone::Ok },
+            "DLSS",
+            &dlss,
+            if dlss_missing {
+                Some(("Get Streamline", STREAMLINE_URL))
+            } else if dlss_framegen_missing {
+                Some(("Get Streamline", STREAMLINE_URL))
+            } else {
+                None
+            },
+        );
+        upscaler_line(
+            ui,
+            &p,
+            if xess_missing { Tone::Bad } else { Tone::Ok },
+            "XeSS",
+            &xess,
+            xess_missing.then_some(("Get XeSS SDK", XESS_URL)),
+        );
         ui.add_space(theme::SPACE_S);
         let note = format!(
             "{} AMD, NVIDIA and Intel do not let these travel with EmblemWeave, so the game falls back to its own temporal upscaler until they are there; the F1 menu's Graphics tab then names them under Files found.",
@@ -307,13 +378,10 @@ fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
         );
         ui.label(RichText::new(note).size(12.5).color(p.body));
         ui.add_space(theme::SPACE_S);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, &p, "Open the upscalers folder", dir.is_some()).clicked() {
                 if let Some(d) = &dir {
-                    for f in ["fsr", "streamline", "xess"] {
-                        let _ = std::fs::create_dir_all(d.join(f));
-                    }
-                    let _ = std::process::Command::new("explorer").arg(d).spawn();
+                    reveal_upscalers(d);
                 }
             }
             if widgets::button(ui, &p, "Look for the files", true)
@@ -325,8 +393,122 @@ fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
                     Err(e) => app.notify(e, Tone::Bad),
                 }
             }
+            if widgets::button(ui, &p, "Setup guide", true)
+                .on_hover_text("Which files to download, what they are called and exactly where they go")
+                .clicked()
+            {
+                guide_open = true;
+            }
         });
     });
+
+    if guide_open {
+        let mut open = guide_open;
+        egui::Window::new("Upscaler setup guide")
+            .id(egui::Id::new("upscaler-setup-guide"))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(660.0)
+            .max_width(760.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                egui::ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Vendor DLLs are not shipped with EmblemWeave because their licences do not allow it. Copy the files into the folders below, then press Look for the files. The engine reads them at the next start.")
+                            .size(12.5)
+                            .color(p.body),
+                    );
+                    ui.add_space(theme::SPACE_S);
+                    guide_block(
+                        ui,
+                        &p,
+                        "FSR 3.1 and FSR 3 frame generation",
+                        &[
+                            "Download the FidelityFX SDK release. From the SDK's Windows x64 output, copy amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll into upscalers\\fsr.",
+                            "For FSR 3 frame generation, use the FidelityFX SDK v1.1.4 release and copy amd_fidelityfx_vk.dll into the same upscalers\\fsr folder.",
+                            "All three files can sit in that one folder; do not rename them.",
+                        ],
+                        Some(("Open FSR SDK releases", FSR_SDK_URL)),
+                    );
+                    guide_block(
+                        ui,
+                        &p,
+                        "DLSS and DLSS Frame Generation",
+                        &[
+                            "Download the NVIDIA Streamline SDK release for Windows x64. From its bin\\x64 folder, copy sl.interposer.dll, sl.common.dll, sl.dlss.dll and nvngx_dlss.dll into upscalers\\streamline.",
+                            "For DLSS Frame Generation also copy sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll, nvngx_dlssg.dll and NvLowLatencyVk.dll into the same folder.",
+                            "DLSS needs an RTX card. Frame generation needs an RTX 40 or newer card and Windows hardware-accelerated GPU scheduling.",
+                        ],
+                        Some(("Open Streamline releases", STREAMLINE_URL)),
+                    );
+                    guide_block(
+                        ui,
+                        &p,
+                        "XeSS",
+                        &[
+                            "Download the Intel XeSS SDK release. Copy libxess.dll from its Windows x64 output into upscalers\\xess.",
+                            "Install the Microsoft Visual C++ 2015-2022 Redistributable (x64) if Windows reports a missing runtime. XeSS runs on any GPU with DP4a, and is fastest on Intel Arc.",
+                        ],
+                        Some(("Open XeSS releases", XESS_URL)),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Do not copy the whole SDK folder: the engine looks for these exact file names at the top of fsr, streamline and xess. If a file is renamed, the game will not see it.")
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                    ui.add_space(theme::SPACE_S);
+                    if widgets::button(ui, &p, "Open the upscalers folder", dir.is_some()).clicked() {
+                        if let Some(d) = &dir {
+                            reveal_upscalers(d);
+                        }
+                    }
+                });
+            });
+        guide_open = open;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(guide_id, guide_open));
+}
+
+fn upscaler_line(ui: &mut egui::Ui, p: &theme::Palette, tone: Tone, label: &str, detail: &str, download: Option<(&str, &str)>) {
+    ui.horizontal(|ui| {
+        let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(10.0), egui::Sense::hover());
+        ui.painter().circle_filled(dot.center(), 4.0, tone.colour(p));
+        ui.vertical(|ui| {
+            let reserve = if download.is_some() { 148.0 } else { 0.0 };
+            ui.set_max_width((ui.available_width() - reserve).max(120.0));
+            ui.label(RichText::new(label).font(theme::semibold(13.5)).color(p.ink));
+            ui.add(egui::Label::new(RichText::new(detail).size(12.5).color(p.body)).wrap());
+        });
+        if let Some((text, url)) = download {
+            if widgets::button(ui, p, text, true)
+                .on_hover_text("Opens the official download page in your browser")
+                .clicked()
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        }
+    });
+    ui.add_space(4.0);
+}
+
+fn guide_block(ui: &mut egui::Ui, p: &theme::Palette, title: &str, lines: &[&str], link: Option<(&str, &str)>) {
+    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(p.ink));
+    for line in lines {
+        ui.add(egui::Label::new(RichText::new(*line).size(12.5).color(p.body)).wrap());
+    }
+    if let Some((text, url)) = link {
+        ui.hyperlink_to(text, url);
+    }
+    ui.add_space(theme::SPACE_S);
+}
+
+fn reveal_upscalers(dir: &std::path::Path) {
+    for f in ["fsr", "streamline", "xess"] {
+        let _ = std::fs::create_dir_all(dir.join(f));
+    }
+    let _ = std::process::Command::new("explorer").arg(dir).spawn();
 }
 
 pub fn audio(app: &mut App, ui: &mut egui::Ui) {

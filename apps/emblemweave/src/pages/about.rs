@@ -4,7 +4,9 @@
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::{logo, updater, App, UpdateState};
+use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, RichText};
+use std::time::Duration;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
@@ -19,6 +21,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
     ui.add_space(theme::SPACE_L);
 
+    links(ui, &p);
+    credits(ui, &p);
     updates(app, ui, &p);
     storage(app, ui, &p);
 
@@ -30,29 +34,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             widgets::kv(ui, &p, "Profile", if cfg!(debug_assertions) { "debug" } else { "release" });
             widgets::kv(ui, &p, "Runtime", "EmblemWeave (in development)");
             widgets::kv(ui, &p, "Baseline", "fefw-recomp, for play today");
-            ui.add_space(theme::SPACE_S);
-            ui.hyperlink_to("github.com/XiONDiGiTaL/EmblemWeave", "https://github.com/XiONDiGiTaL/EmblemWeave");
-            ui.hyperlink_to("xiondigital.net", "https://xiondigital.net/arcade/");
         });
-        widgets::section(&mut cols[1], &p, "Credits", |ui| {
-            for (who, what) in [
-                ("XiØN", "design, engineering and the EmblemWeave identity"),
-                ("Goldoire", "fefw-recomp, the baseline engine, and everyone who contributed to that project"),
-                ("Obersteinn", "preserving the final fefw-recomp 0.2.0 release after its repository was removed"),
-                ("Ryujinx", "shader translation, whose shader code the build uses (MIT)"),
-                ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
-                ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),
-                ("GameBanana", "hosts the community mods the Mods page installs; each belongs to its author"),
-                ("libm", "musl's math library, ported to Rust (MIT)"),
-                ("lz4_flex, ruzstd", "module and asset decompression (MIT / Apache-2.0)"),
-                ("Unicorn", "independent AArch64 oracle used in development"),
-                ("zbic", "the ZBIC development bridge"),
-            ] {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(who).font(theme::semibold(13.5)).color(p.ink));
-                    ui.label(RichText::new(what).size(13.0).color(p.body));
-                });
-            }
+        widgets::section(&mut cols[1], &p, "Project", |ui| {
+            ui.label(
+                RichText::new(
+                    "EmblemWeave is an independent project by XiØN. The source and every release live on GitHub; the other \
+                     links above are mirrors and a fallback for when the main site or GitHub is unavailable.",
+                )
+                .size(13.0)
+                .color(p.body),
+            );
+            ui.add_space(theme::SPACE_S);
+            widgets::kv(ui, &p, "Site", "xiondigital.net/EmblemWeave");
+            widgets::kv(ui, &p, "Mirrors", "GitHub, GitLab, GitGud");
+            widgets::kv(ui, &p, "Fallback", "emblemweave.xiondigital.workers.dev");
+            ui.add_space(theme::SPACE_S);
+            ui.label(
+                RichText::new("The tiles at the top of this page open each one in your browser. No account is needed to read the mirror or the fallback.")
+                    .size(12.5)
+                    .color(p.muted),
+            );
         });
     });
 
@@ -67,6 +68,248 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .size(13.0)
             .color(p.body),
         );
+    });
+}
+
+/// The canonical site and its mirrors, as one row of brand-coloured tiles. The
+/// old page linked only GitHub and the arcade site; the mirror and fallback are
+/// first-class links now, because the main host can be blocked.
+fn links(ui: &mut egui::Ui, p: &theme::Palette) {
+    widgets::section(ui, p, "Links", |ui| {
+        ui.label(
+            RichText::new("The project site, the source, its mirrors, and a fallback if the domain cannot be reached.")
+                .size(13.0)
+                .color(p.body),
+        );
+        ui.add_space(theme::SPACE_S);
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        ui.horizontal_wrapped(|ui| {
+            link_tile(
+                ui,
+                p,
+                "◆",
+                "Website",
+                "project site",
+                "https://xiondigital.net/EmblemWeave/",
+                p.accent_hi,
+            );
+            link_tile(
+                ui,
+                p,
+                "GH",
+                "GitHub",
+                "source + releases",
+                "https://github.com/XiONDiGiTaL/EmblemWeave",
+                egui::Color32::from_rgb(226, 232, 240),
+            );
+            link_tile(
+                ui,
+                p,
+                "GL",
+                "GitLab",
+                "mirror",
+                "https://gitlab.com/XiONDiGiTaL/emblemweave",
+                egui::Color32::from_rgb(252, 109, 38),
+            );
+            link_tile(
+                ui,
+                p,
+                "GG",
+                "GitGud",
+                "mirror",
+                "https://gitgud.io/xiondigital/EmblemWeave",
+                egui::Color32::from_rgb(132, 96, 255),
+            );
+            link_tile(
+                ui,
+                p,
+                "↗",
+                "Fallback",
+                "if the domain is blocked",
+                "https://emblemweave.xiondigital.workers.dev",
+                p.warn,
+            );
+        });
+        ui.add_space(theme::SPACE_XS);
+        ui.label(
+            RichText::new("Each tile opens in your browser. The mirrors carry the same source and releases, and none of them need an account.")
+                .size(12.0)
+                .color(p.muted),
+        );
+    });
+}
+
+fn link_tile(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    glyph: &str,
+    name: &str,
+    detail: &str,
+    url: &str,
+    tint: egui::Color32,
+) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(112.0, 88.0), egui::Sense::click());
+    let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
+    let tile = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 25.0), egui::vec2(50.0, 50.0));
+    let radius = egui::CornerRadius::same(13);
+    let painter = ui.painter();
+
+    if hover > 0.04 {
+        painter.rect_filled(tile.expand(4.0), egui::CornerRadius::same(17), theme::alpha(tint, (22.0 * hover) as u8));
+    }
+    painter.rect_filled(tile, radius, p.bg_deep);
+    widgets::gradient_fill(
+        painter,
+        tile.shrink(1.0),
+        12.0,
+        theme::alpha(tint, (42.0 + 20.0 * hover) as u8),
+        egui::Color32::TRANSPARENT,
+    );
+    painter.rect_stroke(
+        tile,
+        radius,
+        egui::Stroke::new(1.0_f32, theme::alpha(tint, (92.0 + 90.0 * hover) as u8)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        tile.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        theme::semibold(if glyph.len() > 1 { 13.0 } else { 18.0 }),
+        tint,
+    );
+    painter.text(
+        egui::pos2(rect.center().x, rect.top() + 57.0),
+        egui::Align2::CENTER_TOP,
+        name,
+        theme::semibold(11.5),
+        if hover > 0.5 { p.ink } else { p.body },
+    );
+    painter.text(
+        egui::pos2(rect.center().x, rect.top() + 72.0),
+        egui::Align2::CENTER_TOP,
+        detail,
+        egui::FontId::proportional(9.5),
+        p.muted,
+    );
+
+    if response.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+    response.on_hover_text(url);
+}
+
+/// A slow, continuous credits strip. It is deliberately one laid-out line
+/// rather than a list: the page should feel like the project has a pulse, not
+/// like a legal appendix. Hovering pauses it so a name can be read.
+fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
+    widgets::section(ui, p, "Credits", |ui| {
+        ui.label(
+            RichText::new("A project is never one person. This is everyone whose work EmblemWeave stands on.")
+                .size(13.0)
+                .color(p.body),
+        );
+        ui.add_space(theme::SPACE_S);
+
+        let entries = [
+            ("XiØN", "design, engineering and the EmblemWeave identity"),
+            ("Goldoire", "fefw-recomp, the baseline engine, and everyone who contributed to that project"),
+            ("Obersteinn", "preserving the final fefw-recomp 0.2.0 release after its repository was removed"),
+            ("Ryujinx", "shader translation, whose shader code the build uses (MIT)"),
+            ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
+            ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),
+            ("GameBanana", "hosts the community mods the Mods page installs; each belongs to its author"),
+            ("libm", "musl's math library, ported to Rust (MIT)"),
+            ("lz4_flex, ruzstd", "module and asset decompression (MIT / Apache-2.0)"),
+            ("Unicorn", "independent AArch64 oracle used in development"),
+            ("zbic", "the ZBIC development bridge"),
+        ];
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = f32::INFINITY;
+        for (i, (who, what)) in entries.iter().enumerate() {
+            if i > 0 {
+                job.append(
+                    "     ◆     ",
+                    0.0,
+                    TextFormat {
+                        font_id: theme::semibold(10.0),
+                        color: p.muted,
+                        ..Default::default()
+                    },
+                );
+            }
+            job.append(
+                who,
+                0.0,
+                TextFormat {
+                    font_id: theme::semibold(13.5),
+                    color: p.ink,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                "  ",
+                0.0,
+                TextFormat {
+                    font_id: egui::FontId::proportional(13.0),
+                    color: p.body,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                what,
+                0.0,
+                TextFormat {
+                    font_id: egui::FontId::proportional(13.0),
+                    color: p.body,
+                    ..Default::default()
+                },
+            );
+        }
+        let galley = ui.fonts(|f| f.layout_job(job));
+        let span = galley.size().x.max(1.0) + 48.0;
+        let width = ui.available_width().max(240.0);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::hover());
+        let id = ui.id().with("credits-scroll");
+        let mut offset = ui.ctx().data(|d| d.get_temp::<f32>(id).unwrap_or(0.0));
+        if !response.hovered() {
+            offset += ui.input(|i| i.unstable_dt.min(0.05)) * 18.0;
+        }
+        offset %= span;
+        ui.ctx().data_mut(|d| d.insert_temp(id, offset));
+        ui.ctx().request_repaint_after(Duration::from_millis(33));
+
+        let painter = ui.painter();
+        let radius = egui::CornerRadius::same(10);
+        painter.rect_filled(rect, radius, p.bg_deep);
+        painter.rect_stroke(rect, radius, egui::Stroke::new(1.0_f32, p.line), egui::StrokeKind::Inside);
+        let strip = painter.with_clip_rect(rect);
+        let y = rect.center().y - galley.size().y * 0.5;
+        for k in -1..=2 {
+            let x = rect.left() - offset + k as f32 * span;
+            if x < rect.right() && x + galley.size().x > rect.left() {
+                strip.galley(egui::pos2(x, y), galley.clone(), p.ink);
+            }
+        }
+        for i in 0..26 {
+            let t = i as f32 / 26.0;
+            let a = (232.0 * (1.0 - t)) as u8;
+            let left = rect.left() + i as f32;
+            let right = rect.right() - i as f32 - 1.0;
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(left, rect.top() + 1.0), egui::pos2(left + 1.0, rect.bottom() - 1.0)),
+                0.0,
+                theme::alpha(p.bg_deep, a),
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(right, rect.top() + 1.0), egui::pos2(right + 1.0, rect.bottom() - 1.0)),
+                0.0,
+                theme::alpha(p.bg_deep, a),
+            );
+        }
+        ui.add_space(theme::SPACE_XS);
+        ui.label(RichText::new("Hover over the credit line to pause it.").size(11.5).color(p.muted));
+        response.on_hover_text("Pause the credits");
     });
 }
 

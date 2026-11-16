@@ -13,6 +13,7 @@ pub mod recompile;
 pub mod requirements;
 pub mod saves;
 pub mod setup;
+pub mod troubleshoot;
 
 use crate::App;
 use eframe::egui;
@@ -30,13 +31,14 @@ pub enum Page {
     Controls,
     Appearance,
     Diagnostics,
+    Troubleshoot,
     Log,
     About,
     Requirements,
 }
 
 impl Page {
-    pub const ALL: [Page; 14] = [
+    pub const ALL: [Page; 15] = [
         Page::Overview,
         Page::Setup,
         Page::Saves,
@@ -48,6 +50,7 @@ impl Page {
         Page::Controls,
         Page::Appearance,
         Page::Diagnostics,
+        Page::Troubleshoot,
         Page::Log,
         Page::About,
         Page::Requirements,
@@ -66,6 +69,7 @@ impl Page {
             Page::Controls => "Controls",
             Page::Appearance => "Appearance",
             Page::Diagnostics => "Diagnostics",
+            Page::Troubleshoot => "Troubleshooter",
             Page::Log => "Game Log",
             Page::About => "About",
             Page::Requirements => "Requirements",
@@ -86,6 +90,7 @@ impl Page {
             Page::Controls => "🎮",
             Page::Appearance => "🎨",
             Page::Diagnostics => "🔍",
+            Page::Troubleshoot => "🛠",
             Page::Log => "📄",
             Page::About => "ℹ",
             Page::Requirements => "🧩",
@@ -106,6 +111,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::Controls => controls::show(app, ui),
         Page::Appearance => appearance::show(app, ui),
         Page::Diagnostics => diagnostics::show(app, ui),
+        Page::Troubleshoot => troubleshoot::show(app, ui),
         Page::Log => log::show(app, ui),
         Page::About => about::show(app, ui),
         Page::Requirements => requirements::show(app, ui),

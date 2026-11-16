@@ -1,0 +1,70 @@
+name: Mirror
+
+# GitGud is a GitLab instance, so its project can be updated by a normal git
+# push. This runs after every push to main or a release tag, and once a day in
+# case a push was missed. It mirrors main and the tags: origin/HEAD is a
+# symbolic ref and cannot be pushed as a branch. One-time setup: create a GitGud access token with
+# write_repository and add it to this repository's Actions secrets as
+# GITGUD_TOKEN. Without the secret the job explains what is missing and leaves
+# both repositories alone; it does not fail unrelated CI.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-gitgud
+  cancel-in-progress: true
+
+jobs:
+  gitgud:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push main and tags to GitGud
+        env:
+          GITGUD_TOKEN: ${{ secrets.GITGUD_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GITGUD_TOKEN:-}" ]; then
+            echo "::warning title=GitGud mirror not configured::Add a GITGUD_TOKEN Actions secret to enable the mirror."
+            {
+              echo "### GitGud mirror skipped"
+              echo
+              echo "Add a repository secret named GITGUD_TOKEN with a GitGud access token that has write_repository."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git fetch --prune --tags origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*'
+          git remote add gitgud https://gitgud.io/xiondigital/EmblemWeave.git
+
+          # Keep the token out of the remote URL and out of `git push` output.
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' xiondigital ;;
+            *) printf '%s\n' "$GITGUD_TOKEN" ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
+
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+            git push gitgud \
+              '+refs/remotes/origin/main:refs/heads/main' \
+              '+refs/tags/*:refs/tags/*'

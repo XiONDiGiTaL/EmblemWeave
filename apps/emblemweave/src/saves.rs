@@ -20,8 +20,19 @@ use std::path::{Path, PathBuf};
 pub const FALLBACK_TITLE_ID: u64 = 0x0400_7EF0_1F8A_E000;
 
 /// Emulators that keep saves as `<root>/nand/user/save/...` under
-/// `%APPDATA%`.
-const EMULATOR_DIRS: &[&str] = &["yuzu", "suyu", "sudachi", "citron", "eden", "torzu", "Ryujinx-yuzu"];
+/// `%APPDATA%`: yuzu and the forks that inherited its layout, including
+/// Lichii, Fritchii and Eden.
+const EMULATOR_DIRS: &[&str] = &[
+    "yuzu",
+    "suyu",
+    "sudachi",
+    "citron",
+    "eden",
+    "torzu",
+    "Ryujinx-yuzu",
+    "lichii",
+    "fritchii",
+];
 
 /// A save found on this PC.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,29 +47,57 @@ pub struct Found {
 }
 
 /// Saves for `title_id` under every known emulator in `appdata`.
+///
+/// The save tree changed slightly between yuzu forks: most use
+/// `save/0000000000000000/<profile>/<title>`, Eden can use another save id,
+/// and a portable or migrated install can omit the profile level. Scanning
+/// the save directory rather than assuming one profile id finds all of them.
 pub fn find(appdata: &Path, title_id: u64) -> Vec<Found> {
     let name = format!("{title_id:016X}");
     let mut out = Vec::new();
     for emu in EMULATOR_DIRS {
-        let users = appdata.join(emu).join("nand").join("user").join("save").join("0000000000000000");
-        let Ok(entries) = std::fs::read_dir(&users) else { continue };
-        for user in entries.flatten() {
-            let path = user.path().join(&name);
-            if path.is_dir() {
-                let (files, modified) = summary(&path);
-                if files > 0 {
-                    out.push(Found { source: emu.to_string(), path, files, modified });
+        let save_root = appdata.join(emu).join("nand").join("user").join("save");
+        let Ok(ids) = std::fs::read_dir(&save_root) else { continue };
+        for id in ids.flatten() {
+            if !id.path().is_dir() {
+                continue;
+            }
+            push_found(&mut out, emu, &id.path().join(&name));
+            let Ok(profiles) = std::fs::read_dir(id.path()) else { continue };
+            for profile in profiles.flatten() {
+                if profile.path().is_dir() {
+                    push_found(&mut out, emu, &profile.path().join(&name));
                 }
             }
         }
     }
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.dedup_by(|a, b| a.path == b.path);
     out
 }
 
-/// Saves under the current user's `%APPDATA%`.
+fn push_found(out: &mut Vec<Found>, source: &str, path: &Path) {
+    if !path.is_dir() {
+        return;
+    }
+    let (files, modified) = summary(path);
+    if files > 0 {
+        out.push(Found { source: source.to_string(), path: path.to_path_buf(), files, modified });
+    }
+}
+
+/// Saves under the current user's `%APPDATA%` and `%LOCALAPPDATA%`.
+/// The second root covers portable-style forks that keep their NAND there.
 pub fn find_here(title_id: u64) -> Vec<Found> {
-    std::env::var_os("APPDATA").map(|a| find(Path::new(&a), title_id)).unwrap_or_default()
+    let mut out = Vec::new();
+    for key in ["APPDATA", "LOCALAPPDATA"] {
+        if let Some(root) = std::env::var_os(key) {
+            out.extend(find(Path::new(&root), title_id));
+        }
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.dedup_by(|a, b| a.path == b.path);
+    out
 }
 
 /// File count and newest modification time below `dir`.
@@ -112,38 +151,17 @@ pub const DEFAULT_USER: &str = "0100000000000000706d635257464546";
 /// Save data and journal size the game asks for: 64 MiB each.
 const SAVE_SIZE: u64 = 64 << 20;
 
-/// The account save folder in the engine's save folder: the one the game last wrote, else the default
-/// user's.
+/// The account save folder the game reads: `account/DEFAULT_USER`.
 ///
 /// The engine names that folder after the save's owner, and more than one can be present: its built-in
-/// user, a console user id, or a folder an earlier import left empty. Picking the first by name put a
-/// loaded profile into a folder the game never reads, which is why loading a profile looked like it did
-/// nothing (the save in the game was unchanged). The one the game last wrote is the one it reads.
+/// user, a console user id, or a folder an earlier import left empty. Picking the first by name, or the
+/// newest, put a loaded profile into a folder the game never reads, which is why loading a profile looked
+/// like it did nothing (the save in the game was unchanged).
 pub fn account_dir(save_dir: &Path) -> PathBuf {
-    let account = save_dir.join("account");
-    let mut best: Option<(std::time::SystemTime, usize, String, PathBuf)> = None;
-    if let Ok(entries) = std::fs::read_dir(&account) {
-        for e in entries.flatten() {
-            let path = e.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let (files, modified) = summary(&path);
-            if files == 0 {
-                continue;
-            }
-            let when = modified.unwrap_or(std::time::UNIX_EPOCH);
-            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            let better = match &best {
-                None => true,
-                Some((t, f, n, _)) => (when, files, &name) > (*t, *f, n),
-            };
-            if better {
-                best = Some((when, files, name, path));
-            }
-        }
-    }
-    best.map(|(_, _, _, p)| p).unwrap_or_else(|| account.join(DEFAULT_USER))
+    // The engine's local user id is fixed (the title's `user_uid`, written as `account/<uid>`), and the game always opens that
+    // folder. More than one account folder can exist after imports or an older build. Choosing the newest one put a loaded profile
+    // into a folder the game never reads, which is why loading looked like it did nothing for some players (issue #10).
+    save_dir.join("account").join(DEFAULT_USER)
 }
 
 /// The `.meta` the engine writes for an account save of `title_id`.
@@ -266,6 +284,86 @@ pub fn store_profile(save_dir: &Path, name: &str, stamp: &str) -> Result<usize, 
 /// Make profile `p` the current save. The current save goes to the backups.
 pub fn load_profile(save_dir: &Path, p: &Profile, title_id: u64, stamp: &str) -> Result<Imported, String> {
     import(&p.path, save_dir, title_id, stamp)
+}
+
+/// What a profile's slot files look like before they replace the current save.
+/// A folder copied from a game version whose slot format this build cannot read
+/// would otherwise be installed, and the failure would only show up in play.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileCheck {
+    pub slots: usize,
+    pub readable: usize,
+    pub problems: Vec<String>,
+}
+
+impl ProfileCheck {
+    pub fn ok(&self) -> bool {
+        self.problems.is_empty() && self.slots > 0 && self.readable == self.slots
+    }
+}
+
+pub fn check_profile(p: &Profile) -> ProfileCheck {
+    let mut slots = 0;
+    let mut readable = 0;
+    let mut problems = Vec::new();
+    let mut stack = vec![p.path.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some() {
+                continue;
+            }
+            slots += 1;
+            match crate::savefile::Slot::open(&path) {
+                Ok(_) => readable += 1,
+                Err(err) => problems.push(format!("{}: {err}", path.file_name().unwrap_or_default().to_string_lossy())),
+            }
+        }
+    }
+    if slots == 0 {
+        problems.push("the profile holds no slot files".into());
+    }
+    ProfileCheck { slots, readable, problems }
+}
+
+/// A whole save kept by an import or a profile removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backup {
+    pub name: String,
+    pub path: PathBuf,
+    pub files: usize,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Save folders under `backups`, newest first. Slot files moved aside by the
+/// Saves page live there too, but a slot is restored by copying it back into
+/// the save folder; only whole folders are listed here.
+pub fn backups(save_dir: &Path) -> Vec<Backup> {
+    let mut out: Vec<Backup> = std::fs::read_dir(save_dir.join("backups"))
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .map(|path| {
+                    let (files, modified) = summary(&path);
+                    Backup { name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path, files, modified }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name)));
+    out
+}
+
+/// Put a whole backup folder back as the current save. The save it replaces is
+/// moved to the backups first, so a restore can be undone.
+pub fn restore_backup(save_dir: &Path, b: &Backup, title_id: u64, stamp: &str) -> Result<Imported, String> {
+    import(&b.path, save_dir, title_id, stamp)
 }
 
 /// Move a profile to the backups folder.
@@ -392,6 +490,25 @@ mod tests {
     }
 
     #[test]
+    fn finds_lichii_fritchii_eden_and_alternate_save_ids() {
+        let root = temp("find-forks");
+        let lichii = root.join("lichii/nand/user/save/0000000000000000/5A3C/04007EF01F8AE000");
+        let fritchii = root.join("fritchii/nand/user/save/0000000000000000/04007EF01F8AE000");
+        let eden = root.join("eden/nand/user/save/0000000000000001/5A3C/04007EF01F8AE000");
+        write(&lichii.join("000/Auto"), "l");
+        write(&fritchii.join("000/Auto"), "f");
+        write(&eden.join("000/Auto"), "e");
+        let found = find(&root, FALLBACK_TITLE_ID);
+        let sources: Vec<&str> = found.iter().map(|f| f.source.as_str()).collect();
+        assert_eq!(found.len(), 3, "{sources:?}");
+        assert!(sources.contains(&"lichii"));
+        assert!(sources.contains(&"fritchii"));
+        assert!(sources.contains(&"eden"));
+        assert!(found.iter().any(|f| f.path == eden));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn import_backs_up_and_leaves_the_source_alone() {
         let root = temp("import");
         let (src, save) = (root.join("src"), root.join("app/save"));
@@ -438,6 +555,7 @@ mod tests {
         let save = root.join("save");
         let user = save.join("account").join(DEFAULT_USER);
         write(&user.join("000/Auto"), "first");
+        // The test's slot is not a real save container; check_profile is exercised separately.
         store_profile(&save, "Run A", "1").unwrap();
         write(&user.join("000/Auto"), "second");
         let ps = profiles(&save);
@@ -453,26 +571,32 @@ mod tests {
     }
 
     #[test]
-    fn the_account_folder_is_the_one_the_game_last_wrote() {
+    fn the_account_folder_is_always_the_titles_user() {
         let root = temp("account");
         let save = root.join("save");
-        // The built-in user's folder sorts first but is older; the game writes the other one.
-        let older = save.join("account").join(DEFAULT_USER);
+        // A newer folder for another user must not win: the game always opens the title's fixed user id.
+        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "old");
         let newer = save.join("account").join("0A3C5F00000000000000000000000001");
-        write(&older.join("000/Auto"), "old");
         write(&newer.join("000/Auto"), "new");
-        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
-        let new = old + std::time::Duration::from_secs(60);
-        std::fs::File::options().write(true).open(older.join("000/Auto")).unwrap().set_modified(old).unwrap();
-        std::fs::File::options().write(true).open(newer.join("000/Auto")).unwrap().set_modified(new).unwrap();
-        assert_eq!(account_dir(&save), newer);
-        // With nothing in either, the default user's folder is the answer (a first save goes there).
-        let empty = temp("account-empty");
-        let s2 = empty.join("save");
-        std::fs::create_dir_all(s2.join("account").join("0A3C5F00000000000000000000000001")).unwrap();
-        assert_eq!(account_dir(&s2), s2.join("account").join(DEFAULT_USER));
+        let now = std::time::SystemTime::now();
+        std::fs::File::options().write(true).open(newer.join("000/Auto")).unwrap().set_modified(now).unwrap();
+        assert_eq!(account_dir(&save), save.join("account").join(DEFAULT_USER));
         let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    #[test]
+    fn the_saves_page_keeps_reading_the_games_own_account_folder() {
+        let root = temp("account-fixed");
+        let save = root.join("save");
+        // An import once left a newer folder for another user: the game still reads DEFAULT_USER.
+        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "mine");
+        let other = save.join("account").join("0A3C5F00000000000000000000000001");
+        write(&other.join("000/Auto"), "theirs");
+        let now = std::time::SystemTime::now();
+        std::fs::File::options().write(true).open(other.join("000/Auto")).unwrap().set_modified(now).unwrap();
+        assert_eq!(account_dir(&save), save.join("account").join(DEFAULT_USER));
+        assert_eq!(crate::saves::account_dir(&save).join("000/Auto"), save.join("account").join(DEFAULT_USER).join("000/Auto"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EmblemWeave — a recompilation launcher for Fire Emblem: Fortune's Weave</title>
+<title>EmblemWeave: a recompilation launcher for Fire Emblem: Fortune's Weave</title>
 <meta name="theme-color" content="#050607">
 <meta name="description" content="EmblemWeave builds Fire Emblem: Fortune's Weave from your own dump and plays it natively on Windows, with mods, saves, cheats and an in-game menu.">
 <meta property="og:title" content="EmblemWeave">
@@ -13,7 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="site.css">
+<link rel="stylesheet" href="site.css?v=0.1.34-2" id="site-css">
 </head>
 <body>
 <div class="grid" aria-hidden="true"></div>
@@ -32,7 +32,7 @@
     <a class="docs" href="https://github.com/XiONDiGiTaL/EmblemWeave#readme">Docs</a>
   </nav>
   <div class="hud-right">
-    <span class="build" id="version">v0.1.33</span>
+    <span class="build" id="version">v0.1.34</span>
     <button id="sound" class="icon" title="Sound on or off" aria-pressed="true">♪</button>
   </div>
 </header>
@@ -47,11 +47,11 @@
       <h1>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>, with integrated mod management and in-game enhancements.</h1>
       <p class="lede">EmblemWeave builds the game ahead of time from your own dump and plays it natively, with no emulator. Mods, save profiles, cheats, an in-game menu and a recompilation pipeline you can watch run.</p>
       <div class="cta">
-        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/latest" data-sfx="coin">Download for Windows</a>
+        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/download/v0.1.34/EmblemWeave-v0.1.34-windows-x64.zip" data-sfx="coin">Download for Windows</a>
         <a class="btn ghost" href="https://github.com/XiONDiGiTaL/EmblemWeave" data-sfx="click">Source on GitHub</a>
       </div>
       <ul class="badges">
-        <li id="badge-release">release 0.1.32</li>
+        <li id="badge-release">release 0.1.34</li>
         <li>Windows x64</li>
         <li>GPL-3.0</li>
         <li>No game code included</li>
@@ -62,12 +62,12 @@
   <section id="features" class="section">
     <h2><span>01</span> What the launcher does</h2>
     <div class="cards">
-      <article><h3>Build once, then play</h3><p>Validates your dump, unpacks the console's compressed main, lifts six modules and links <code>fefw.exe</code>. Later builds only redo what changed.</p></article>
-      <article><h3>Mods, both kinds</h3><p>RomFS mods with on/off switches, profiles and conflict listing. Code mods load as DLLs with the hook sites they bring, through the engine's versioned interface.</p></article>
-      <article><h3>Saves and cheats</h3><p>Save profiles, a slot editor, imports from yuzu, suyu, sudachi, citron, eden and torzu. Atmosphere codes and Cheat Engine tables, live.</p></article>
-      <article><h3>Graphics choices</h3><p>TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with a real availability check. HDR output and frame pacing in the engine.</p></article>
-      <article><h3>An in-game menu</h3><p><kbd>F10</kbd> pauses the game, takes a screenshot, restarts or stops it, and reaches quick cheats, display settings and controls.</p></article>
-      <article><h3>Diagnostics that explain</h3><p>Every stage reports, engine logs are read back, crashes are decoded, and the CPU, GPU and toolchain are recorded for bug reports.</p></article>
+      <article data-sfx-hover="hover"><h3>Build once, then play</h3><p>Validates your dump, unpacks the console's compressed main, lifts six modules and links <code>fefw.exe</code>. Later builds only redo what changed.</p></article>
+      <article data-sfx-hover="hover"><h3>Mods, both kinds</h3><p>RomFS mods with on/off switches, profiles and conflict listing. Code mods load as DLLs with the hook sites they bring, through the engine's versioned interface.</p></article>
+      <article data-sfx-hover="hover"><h3>Saves and cheats</h3><p>Save profiles, a slot editor, imports from yuzu, suyu, sudachi, citron, Eden, Lichii, Fritchii and torzu. Atmosphere codes and Cheat Engine tables, live.</p></article>
+      <article data-sfx-hover="hover"><h3>Graphics choices</h3><p>TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with a real availability check. HDR output and frame pacing in the engine.</p></article>
+      <article data-sfx-hover="hover"><h3>An in-game menu</h3><p><kbd>F10</kbd> pauses the game, takes a screenshot, restarts or stops it, and reaches quick cheats, display settings and controls.</p></article>
+      <article data-sfx-hover="hover"><h3>Diagnostics that explain</h3><p>Every stage reports, engine logs are read back, crashes are decoded, and the CPU, GPU and toolchain are recorded for bug reports.</p></article>
     </div>
   </section>
 
@@ -91,21 +91,25 @@
 
   <section id="screens" class="section">
     <h2><span>03</span> In the launcher</h2>
+    <p class="lede small">Select any screenshot to open it full size. Use the arrow keys to move through the gallery and Escape to close it.</p>
     <div class="shots">
-      <figure><img src="screenshots/overview.png" alt="The Overview page" loading="lazy"><figcaption>Overview: play, rebuild, readiness</figcaption></figure>
-      <figure><img src="screenshots/mods.png" alt="The Mods page" loading="lazy"><figcaption>Mods, switches and profiles</figcaption></figure>
-      <figure><img src="screenshots/saves.png" alt="The Saves page" loading="lazy"><figcaption>Saves and the slot editor</figcaption></figure>
-      <figure><img src="screenshots/recompilation.png" alt="The Recompilation page" loading="lazy"><figcaption>The build pipeline</figcaption></figure>
-      <figure><img src="screenshots/appearance.png" alt="The Appearance page" loading="lazy"><figcaption>Six colour schemes</figcaption></figure>
-      <figure><img src="screenshots/diagnostics.png" alt="The Diagnostics page" loading="lazy"><figcaption>Diagnostics and export</figcaption></figure>
+      <figure class="feature"><a class="shot" href="screenshots/overview.png" data-sfx="hover" data-label="Open full size"><img src="screenshots/overview.png" alt="The Overview page" loading="lazy" decoding="async"></a><figcaption>Overview: play, rebuild, readiness</figcaption></figure>
+      <figure><a class="shot" href="screenshots/mods.png" data-sfx="hover" data-label="Open full size"><img src="screenshots/mods.png" alt="The Mods page" loading="lazy" decoding="async"></a><figcaption>Mods, switches and profiles</figcaption></figure>
+      <figure><a class="shot" href="screenshots/saves.png" data-sfx="hover" data-label="Open full size"><img src="screenshots/saves.png" alt="The Saves page" loading="lazy" decoding="async"></a><figcaption>Saves and the slot editor</figcaption></figure>
+      <figure><a class="shot" href="screenshots/recompilation.png" data-sfx="hover" data-label="Open full size"><img src="screenshots/recompilation.png" alt="The Recompilation page" loading="lazy" decoding="async"></a><figcaption>The build pipeline</figcaption></figure>
+      <figure><a class="shot" href="screenshots/appearance.png" data-sfx="hover" data-label="Open full size"><img src="screenshots/appearance.png" alt="The Appearance page" loading="lazy" decoding="async"></a><figcaption>Six colour schemes</figcaption></figure>
+      <figure><a class="shot" href="screenshots/diagnostics.png" data-sfx="hover" data-label="Open full size"><img src="screenshots/diagnostics.png" alt="The Diagnostics page" loading="lazy" decoding="async"></a><figcaption>Diagnostics and export</figcaption></figure>
     </div>
   </section>
 
   <section id="mirrors" class="section">
     <h2><span>04</span> Where else to find it</h2>
-    <p class="lede small">The repository, its source mirror and a static copy of this page. Each is checked when the page loads.</p>
+    <p class="lede small">The repository, its GitLab and GitGud source mirrors, and a static copy of this page. Each is checked when the page loads.</p>
     <ul id="mirror-list" class="mirrors">
-      <li class="loading">Checking mirrors…</li>
+      <li><a href="https://github.com/XiONDiGiTaL/EmblemWeave" rel="noopener">GitHub</a><span class="why">source, releases, issues</span><span class="state">unchecked</span></li>
+      <li><a href="https://gitlab.com/XiONDiGiTaL/emblemweave" rel="noopener">GitLab</a><span class="why">source mirror</span><span class="state">unchecked</span></li>
+      <li><a href="https://gitgud.io/xiondigital/EmblemWeave" rel="noopener">GitGud</a><span class="why">source mirror</span><span class="state">unchecked</span></li>
+      <li><a href="https://emblemweave.xiondigital.workers.dev" rel="noopener">Fallback page</a><span class="why">static copy of this page</span><span class="state">unchecked</span></li>
     </ul>
     <p class="note">Releases, saves and your own files stay where you put them.</p>
   </section>
@@ -117,10 +121,19 @@
 </main>
 
 <footer class="foot">
-  <p>Built by <a href="https://github.com/XiONDiGiTaL">XiØN</a>. Engine by <a href="https://github.com/Goldoire/fefw-recomp">Goldoire</a> and contributors, preserved by <a href="https://github.com/Obersteinn">Obersteinn</a>. Code mods by <a href="https://github.com/ranbinrang-rgb">ranbinrang-rgb</a>.</p>
-  <p class="tiny">EmblemWeave is free software under the GNU General Public License, version 3. Third-party code keeps its own licence.</p>
+  <p>Built, designed and hosted by <a href="https://github.com/XiONDiGiTaL">XiØN</a>.</p>
+  <p class="tiny">EmblemWeave is free software under the GNU General Public License, version 3. Third-party code keeps its own licence and notices in the repository.</p>
 </footer>
 
-<script src="site.js"></script>
+<dialog id="lightbox" class="lightbox" aria-label="Screenshot viewer">
+  <button class="lightbox-close" type="button" data-close aria-label="Close the screenshot">&times;</button>
+  <img id="lightbox-img" alt="">
+  <div class="lightbox-foot">
+    <p id="lightbox-caption"></p>
+    <p class="lightbox-keys">Arrow keys change image. Escape closes.</p>
+  </div>
+</dialog>
+
+<script src="site.js?v=0.1.34-2"></script>
 </body>
 </html>

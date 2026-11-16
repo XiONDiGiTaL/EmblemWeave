@@ -67,29 +67,28 @@ pub fn status_dot(ui: &mut egui::Ui, p: &Palette, tone: Tone) {
     painter.circle_filled(rect.center(), 2.6, c);
 }
 
-/// A glass strip painted behind a panel's content, with a lit rim.
+/// A flat surface behind the navigation rail and the top bar. The old glass
+/// rim and accent outline made every strip glow; a dashboard's chrome should
+/// recede, so this is one quiet panel with a single hairline.
 pub fn glass_panel(ui: &egui::Ui, rect: Rect, p: &Palette, radius: CornerRadius) {
     let painter = ui.painter();
-    painter.rect_filled(rect, radius, lerp(p.surface, p.bg_deep, 0.15));
-    gradient_fill(painter, rect.shrink(1.0), radius.nw as f32 - 1.0, alpha(p.accent, 20), Color32::TRANSPARENT);
-    // Light catching the upper rim, as on the reference's liquid glass.
-    let rim = Rect::from_min_max(rect.min + Vec2::new(radius.nw as f32, 1.0), Pos2::new(rect.max.x - radius.ne as f32, rect.max.y));
-    painter.line_segment([rim.left_top(), rim.right_top()], Stroke::new(1.0_f32, alpha(Color32::WHITE, 34)));
-    painter.rect_stroke(rect, radius, Stroke::new(1.0_f32, alpha(p.accent, 46)), StrokeKind::Inside);
+    painter.rect_filled(rect, radius, p.panel);
+    gradient_fill(painter, rect.shrink(1.0), radius.nw as f32 - 1.0, alpha(p.accent, 12), Color32::TRANSPARENT);
+    painter.rect_stroke(rect, radius, Stroke::new(1.0_f32, p.line), StrokeKind::Inside);
 }
 
-/// Page title in the display serif with a one-line description, over an
-/// accent eyebrow that names the section of the app.
+/// Page title in the semibold display sans with a one-line description, over
+/// a quiet eyebrow that names the section of the app.
 pub fn page_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
     ui.add_space(theme::SPACE_L);
     eyebrow(ui, p, title);
     ui.add_space(2.0);
-    ui.label(RichText::new(title).font(theme::display(27.0)).color(p.ink));
+    ui.label(RichText::new(title).font(theme::display(29.0)).color(p.ink));
     ui.add_space(3.0);
     ui.label(RichText::new(subtitle).size(13.0).color(p.body));
     ui.add_space(theme::SPACE_M - 2.0);
     let r = ui.available_rect_before_wrap();
-    ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0_f32, alpha(p.accent, 34)));
+    ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0_f32, p.line));
     ui.add_space(theme::SPACE_M);
 }
 
@@ -111,27 +110,25 @@ pub fn section<R>(ui: &mut egui::Ui, p: &Palette, title: &str, add: impl FnOnce(
     r.inner
 }
 
-/// The frame of a raised card: tinted glass, an accent hairline, and the
-/// squared bottom-right corner the reference panels carry.
+/// The frame of a raised card: a quiet surface, one hairline, and a shadow
+/// that lifts it off the page without glowing.
 pub fn card_frame(p: &Palette, margin: Margin) -> egui::Frame {
     egui::Frame::new()
-        .fill(lerp(p.surface, p.bg_deep, 0.18))
-        .stroke(Stroke::new(1.0_f32, alpha(p.accent, 34)))
+        .fill(lerp(p.surface, p.bg_deep, 0.10))
+        .stroke(Stroke::new(1.0_f32, p.line))
         .corner_radius(theme::CARD)
-        .shadow(egui::epaint::Shadow { offset: [0, 12], blur: 30, spread: 0, color: Color32::from_black_alpha(120) })
+        .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 26, spread: 0, color: Color32::from_black_alpha(105) })
         .inner_margin(margin)
 }
 
-/// The face of a card: an accent wash from the top left, a hairline of light
-/// along the top edge, and a faint bloom along the bottom.
+/// The face of a card: a low accent wash from the top edge and a hairline of
+/// light, subtle enough that the content is the bright thing.
 pub fn card_face(r: Rect, p: &Palette) -> egui::Shape {
     let radius = theme::CARD;
-    let top = Rect::from_min_max(r.min + Vec2::new(24.0, 1.0), Pos2::new(r.max.x - 24.0, r.min.y + 2.0));
-    let bloom = Rect::from_min_max(Pos2::new(r.left() + 12.0, r.bottom() - 22.0), Pos2::new(r.max.x - 12.0, r.bottom() - 1.0));
+    let top = Rect::from_min_max(r.min + Vec2::new(26.0, 1.0), Pos2::new(r.max.x - 26.0, r.min.y + 2.0));
     egui::Shape::Vec(vec![
-        gradient_shape(r.shrink(1.0), radius.nw as f32 - 1.0, alpha(p.accent, 14), alpha(p.bg_deep, 55)),
-        egui::Shape::rect_filled(bloom, CornerRadius::same(10), alpha(p.accent, 8)),
-        egui::Shape::rect_filled(top, CornerRadius::same(1), alpha(Color32::WHITE, 24)),
+        gradient_shape(r.shrink(1.0), radius.nw as f32 - 1.0, alpha(p.accent, 7), Color32::TRANSPARENT),
+        egui::Shape::rect_filled(top, CornerRadius::same(1), alpha(Color32::WHITE, 14)),
     ])
 }
 
@@ -207,65 +204,59 @@ pub fn gradient_shape(rect: Rect, radius: f32, top: Color32, bottom: Color32) ->
     egui::Shape::mesh(mesh)
 }
 
-/// Every button in the launcher: one height, one type size, one pill radius.
-/// The finish is liquid glass — a tinted body with a specular band across the
-/// top, a lit rim and a soft glow in the scheme's accent — so a button reads as
-/// the same physical material in every scheme, in that scheme's colour.
+/// Every button in the launcher: one height, one type size, one soft radius.
+/// Primary is a solid accent with a gentle top light; secondary is a quiet
+/// surface that brightens on hover. No outer glow, no specular bands: the
+/// dashboard's one bright element should be the action itself.
 fn button_core(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool, primary: bool) -> egui::Response {
-    const HEIGHT: f32 = 32.0;
+    const HEIGHT: f32 = 34.0;
     let font = theme::semibold(13.0);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, p.ink);
     let size = Vec2::new(galley.size().x + if primary { 38.0 } else { 28.0 }, HEIGHT);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let (slot, response) = ui.allocate_exact_size(size, sense);
-    if ui.is_rect_visible(slot) {
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    if ui.is_rect_visible(rect) {
         let hover = ui.ctx().animate_bool(response.id.with("hover"), enabled && response.hovered());
         let pressed = enabled && response.is_pointer_button_down_on();
-        let rect = slot.translate(Vec2::new(0.0, -hover + if pressed { 1.0 } else { 0.0 }));
         let radius = theme::RADIUS_PILL;
         let painter = ui.painter();
         if !enabled {
-            painter.rect_filled(rect, CornerRadius::same(radius), alpha(Color32::WHITE, 5));
+            painter.rect_filled(rect, CornerRadius::same(radius), alpha(Color32::WHITE, 4));
             painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, p.line), StrokeKind::Inside);
-            painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, alpha(p.muted, 210));
+            painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, alpha(p.muted, 200));
             return response;
         }
-        // The glow: two faint rings of the accent under the body.
-        for (i, a) in [(1.0_f32, 14u8), (2.2, 8)] {
-            painter.rect_filled(rect.expand(i * (1.0 + hover)), CornerRadius::same(radius), alpha(p.accent, a));
-        }
         if primary {
-            let base = if pressed { p.accent_deep } else { lerp(lerp(p.accent, p.accent_deep, 0.22), p.accent_hi, hover * 0.3) };
+            let base = if pressed {
+                p.accent_deep
+            } else if hover > 0.0 {
+                lerp(p.accent, p.accent_hover, hover)
+            } else {
+                p.accent
+            };
             painter.rect_filled(rect, CornerRadius::same(radius), base);
-            // The body's own shading: light from the top, weight at the bottom.
-            gradient_fill(painter, Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.center().y)), radius as f32, alpha(Color32::WHITE, (34.0 + 26.0 * hover) as u8), Color32::TRANSPARENT);
-            gradient_fill(painter, Rect::from_min_max(Pos2::new(rect.min.x, rect.center().y), rect.max), radius as f32, Color32::TRANSPARENT, alpha(Color32::BLACK, 46));
-            // A specular hot spot across the upper third, as glass catches light:
-            // thin pills of falling opacity, which keep their edges clean at
-            // this size where a gradient mesh does not.
-            let inner = rect.shrink2(Vec2::new(radius as f32 * 0.9, 1.0));
-            for (dy, h, a) in [(0.5_f32, 2.5_f32, 54u8), (3.6, 3.0, 26), (7.0, 3.0, 10)] {
-                let strip = Rect::from_min_size(inner.min + Vec2::new(0.0, dy), Vec2::new(inner.width(), h));
-                painter.rect_filled(strip, CornerRadius::same((h * 0.5) as u8), alpha(Color32::WHITE, (a as f32 * (0.75 + 0.5 * hover)) as u8));
-            }
-            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, alpha(Color32::WHITE, 46)), StrokeKind::Inside);
-            painter.rect_stroke(rect.shrink(1.0), CornerRadius::same(radius - 1), Stroke::new(1.0_f32, alpha(p.accent_hi, 90)), StrokeKind::Inside);
+            gradient_fill(
+                painter,
+                Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.center().y)),
+                radius as f32,
+                alpha(Color32::WHITE, (18.0 + 12.0 * hover) as u8),
+                Color32::TRANSPARENT,
+            );
+            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, alpha(Color32::WHITE, 36)), StrokeKind::Inside);
         } else {
-            let base = lerp(alpha(Color32::WHITE, 4), alpha(p.accent, 20), hover);
+            let base = lerp(p.panel_hi, lerp(p.panel_hi, p.accent, 0.22), hover);
             painter.rect_filled(rect, CornerRadius::same(radius), base);
-            gradient_fill(painter, Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.center().y + 2.0)), radius as f32, alpha(Color32::WHITE, (16.0 + 14.0 * hover) as u8), Color32::TRANSPARENT);
-            let inner = rect.shrink2(Vec2::new(radius as f32 * 0.9, 1.0));
-            for (dy, h, a) in [(0.5_f32, 2.0_f32, 26u8), (3.2, 2.5, 10)] {
-                let strip = Rect::from_min_size(inner.min + Vec2::new(0.0, dy), Vec2::new(inner.width(), h));
-                painter.rect_filled(strip, CornerRadius::same((h * 0.5) as u8), alpha(Color32::WHITE, a));
-            }
-            let rim = lerp(alpha(Color32::WHITE, 26), alpha(p.accent, 130), hover);
-            painter.rect_stroke(rect, CornerRadius::same(radius), Stroke::new(1.0_f32, rim), StrokeKind::Inside);
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(radius),
+                Stroke::new(1.0_f32, lerp(p.line_strong, p.accent, hover * 0.8)),
+                StrokeKind::Inside,
+            );
         }
         if response.has_focus() {
-            painter.rect_stroke(rect.expand(2.5), CornerRadius::same(radius), Stroke::new(1.5_f32, p.accent_hi), StrokeKind::Outside);
+            painter.rect_stroke(rect.expand(2.0), CornerRadius::same(radius + 2), Stroke::new(1.5_f32, p.accent_hi), StrokeKind::Outside);
         }
-        let ink = if primary { p.on_accent } else { lerp(p.ink, Color32::WHITE, hover) };
+        let ink = if primary { p.on_accent } else { p.ink };
         painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, ink);
     }
     if enabled {
@@ -559,30 +550,21 @@ pub fn stage_list(ui: &mut egui::Ui, p: &Palette, stages: &[Stage]) {
     }
 }
 
-/// A navigation entry: a pill that fills with the accent when it is the
-/// current page, with the label in tracked small caps.
+/// A navigation entry: a softly rounded row that fills with the accent when it
+/// is the current page, with a quiet icon and a semibold label.
 pub fn nav_item(ui: &mut egui::Ui, p: &Palette, icon: &str, label: &str, selected: bool) -> egui::Response {
-    let size = Vec2::new(ui.available_width(), 28.0);
+    let size = Vec2::new(ui.available_width(), 34.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let hover = ui.ctx().animate_bool(response.id.with("h"), response.hovered());
         let sel = ui.ctx().animate_bool(response.id.with("s"), selected);
-        let bg = rect.shrink2(Vec2::new(4.0, 2.0));
+        let bg = rect.shrink2(Vec2::new(8.0, 2.0));
         let painter = ui.painter();
         if sel > 0.0 {
-            // A glowing tinted pill, brightest at the left edge.
-            for i in (1..=4).rev() {
-                let g = bg.expand(i as f32 * 2.0).translate(Vec2::new(0.0, 2.0));
-                painter.rect_filled(g, CornerRadius::same(theme::RADIUS_PILL), alpha(p.accent, ((22.0 / i as f32) * sel) as u8));
-            }
-            painter.rect_filled(bg, CornerRadius::same(theme::RADIUS_PILL), alpha(p.accent, (44.0 * sel) as u8));
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(bg.left() + 3.0, bg.center().y - 7.0), Pos2::new(bg.left() + 5.5, bg.center().y + 7.0)),
-                CornerRadius::same(2),
-                alpha(p.accent_hi, 235),
-            );
+            painter.rect_filled(bg, CornerRadius::same(theme::RADIUS_PILL), alpha(p.accent, (210.0 * sel) as u8));
+            painter.rect_stroke(bg, CornerRadius::same(theme::RADIUS_PILL), Stroke::new(1.0_f32, alpha(p.accent_hi, (80.0 * sel) as u8)), StrokeKind::Inside);
         } else if hover > 0.0 {
-            painter.rect_filled(bg, CornerRadius::same(theme::RADIUS_PILL), alpha(Color32::WHITE, (9.0 * hover) as u8));
+            painter.rect_filled(bg, CornerRadius::same(theme::RADIUS_PILL), alpha(Color32::WHITE, (7.0 * hover) as u8));
         }
         if response.has_focus() {
             painter.rect_stroke(bg, CornerRadius::same(theme::RADIUS_PILL), Stroke::new(1.0_f32, p.electric), StrokeKind::Inside);
@@ -590,12 +572,12 @@ pub fn nav_item(ui: &mut egui::Ui, p: &Palette, icon: &str, label: &str, selecte
         let ink = if selected { Color32::WHITE } else { lerp(p.body, p.ink, hover) };
         let icon_colour = if selected { Color32::WHITE } else { lerp(p.muted, p.accent_hi, hover) };
         painter.text(Pos2::new(bg.left() + 15.0, bg.center().y), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(13.0), icon_colour);
-        let font = theme::semibold(11.5);
+        let font = theme::semibold(12.0);
         let mut x = bg.left() + 31.0;
         for c in label.chars() {
             let w = ui.fonts(|f| f.layout_no_wrap(c.to_string(), font.clone(), ink).size().x);
             ui.painter().text(Pos2::new(x, bg.center().y), egui::Align2::LEFT_CENTER, c, font.clone(), ink);
-            x += w + 0.6;
+            x += w + 0.4;
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)

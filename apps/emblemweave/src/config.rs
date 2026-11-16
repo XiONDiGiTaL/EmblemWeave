@@ -113,8 +113,10 @@ impl Default for Graphics {
             dlss_upscaler: "Automatic".into(),
             astc_quality: "High".into(),
             gpu: "Automatic".into(),
-            compile_threads: 0,
-            compile_priority: "Below normal".into(),
+            // Two workers, below idle and in efficiency mode: a laptop stays a laptop. Players who want the
+            // fastest first draw can raise this on Graphics.
+            compile_threads: 2,
+            compile_priority: "Idle".into(),
             compile_eco: true,
         }
     }

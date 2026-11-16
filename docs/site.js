@@ -54,7 +54,17 @@
     fanfare() {
       [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.07, 0.16, 'triangle', 0.02));
     },
+    lightbox() {
+      tone(659, 0, 0.06, 'sine', 0.02);
+      tone(988, 0.055, 0.12, 'triangle', 0.018);
+    },
   };
+
+  // A hover is not a user gesture a browser accepts for audio. Once the player
+  // clicks or presses a key anywhere, resume the context so later hovers play.
+  const unlockAudio = () => audio();
+  document.addEventListener('pointerdown', unlockAudio, { once: true });
+  document.addEventListener('keydown', unlockAudio, { once: true });
 
   const soundButton = document.getElementById('sound');
   function paintSound() {
@@ -69,26 +79,133 @@
     paintSound();
   });
 
-  // Every element that asks for a sound.
+  // Every element that asks for a sound. Cards ask for the hover sound only,
+  // since clicking them has no action of its own.
   document.querySelectorAll('[data-sfx]').forEach((el) => {
     el.addEventListener('pointerenter', () => !reduced && sfx[el.dataset.sfx]?.());
     el.addEventListener('click', () => sfx.click());
   });
+  document.querySelectorAll('[data-sfx-hover]').forEach((el) => {
+    el.addEventListener('pointerenter', () => !reduced && sfx[el.dataset.sfxHover]?.());
+  });
   document.getElementById('logo')?.addEventListener('pointerenter', () => !reduced && sfx.fanfare(), { once: true });
 
-  /* ---------- version ---------- */
+  /* ---------- screenshot viewer ----------
+     A click opens the original file in a native dialog, not the gallery
+     thumbnail. The anchors keep their href, so the image still opens when
+     JavaScript is unavailable. */
 
-  fetch('https://api.github.com/repos/XiONDiGiTaL/EmblemWeave/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
+  const lightbox = document.getElementById('lightbox');
+  const lightboxImg = document.getElementById('lightbox-img');
+  const lightboxCaption = document.getElementById('lightbox-caption');
+  const shots = Array.from(document.querySelectorAll('.shot'));
+  let shotIndex = 0;
+  let returnFocus = null;
+
+  function paintShot(index) {
+    if (!lightbox || !lightboxImg || !shots.length) return;
+    shotIndex = (index + shots.length) % shots.length;
+    const shot = shots[shotIndex];
+    const image = shot.querySelector('img');
+    const caption = shot.closest('figure')?.querySelector('figcaption');
+    lightboxImg.src = shot.getAttribute('href');
+    lightboxImg.alt = image?.alt || '';
+    if (lightboxCaption) lightboxCaption.textContent = caption?.textContent?.trim() || image?.alt || '';
+  }
+
+  shots.forEach((shot, index) => {
+    shot.addEventListener('click', (event) => {
+      if (!lightbox || typeof lightbox.showModal !== 'function') return;
+      event.preventDefault();
+      returnFocus = document.activeElement;
+      paintShot(index);
+      lightbox.showModal();
+      if (!reduced) sfx.lightbox();
+    });
+  });
+
+  lightbox?.querySelector('[data-close]')?.addEventListener('click', () => lightbox.close());
+  lightbox?.addEventListener('click', (event) => {
+    if (event.target === lightbox) lightbox.close();
+  });
+  lightbox?.addEventListener('close', () => {
+    if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (!lightbox?.open) return;
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      paintShot(shotIndex + 1);
+      sfx.click();
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      paintShot(shotIndex - 1);
+      sfx.click();
+    }
+  });
+
+  /* ---------- version and download ----------
+     release.json is stamped by the release workflow; the GitHub API is the
+     fallback. The badge, the download and the stylesheet query all move
+     together, so a release never needs a badge edit and a cached site.css
+     cannot outlive the release that changed it. */
+
+  // Compare release numbers without treating the cache revision as a release.
+  const releaseRank = (value) => {
+    const p = String(value).split(/[.-]/).map((n) => parseInt(n, 10) || 0);
+    return (p[0] || 0) * 1000000 + (p[1] || 0) * 1000 + (p[2] || 0);
+  };
+
+  function paintRelease(rel, fromApi) {
+    if (!rel) return;
+    const version = String(rel.version || rel.tag_name || '').replace(/^v/, '');
+    const tag = String(rel.tag || rel.tag_name || (version ? 'v' + version : ''));
+    if (!version) return;
+    const chip = document.getElementById('version');
+    if (chip) chip.textContent = 'v' + version;
+    const badge = document.getElementById('badge-release');
+    if (badge) badge.textContent = 'release ' + version;
+    document.documentElement.dataset.release = version;
+
+    // The stylesheet URL carries the release, so a new release cannot be served
+    // with an old cached stylesheet. Stamped HTML already has it; this covers a
+    // page deployed before release.json caught up.
+    const css = document.getElementById('site-css');
+    if (css) {
+      const current = css.getAttribute('href') || '';
+      const currentVersion = (current.match(/[?&]v=([^&]+)/) || [])[1] || '';
+      // Keep a cache revision such as 0.1.34-2: it belongs to this release but
+      // the page has not necessarily been stamped again for it. Do not let an
+      // older GitHub release downgrade the stylesheet while that revision is
+      // what carries the current styles.
+      if (!currentVersion || releaseRank(version) > releaseRank(currentVersion)) {
+        css.setAttribute('href', 'site.css?v=' + encodeURIComponent(version));
+      }
+    }
+
+    const download = document.getElementById('download');
+    if (download) {
+      const assets = Array.isArray(rel.assets) ? rel.assets : [];
+      const zip = assets.find((a) => /(windows|win)/i.test(a.name || '') && /\.zip$/i.test(a.name || '')) ||
+        assets.find((a) => /\.zip$/i.test(a.name || ''));
+      if (zip && zip.browser_download_url) download.href = zip.browser_download_url;
+      else if (rel.download) download.href = rel.download;
+      else if (tag) download.href = 'https://github.com/XiONDiGiTaL/EmblemWeave/releases/tag/' + encodeURIComponent(tag);
+      if (fromApi && rel.published_at) download.title = 'Published ' + rel.published_at.slice(0, 10);
+    }
+  }
+
+  fetch('release.json', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
-    .then((rel) => {
-      if (!rel || !rel.tag_name) return;
-      const v = String(rel.tag_name);
-      const chip = document.getElementById('version');
-      if (chip) chip.textContent = v;
-      const badge = document.getElementById('badge-release');
-      if (badge) badge.textContent = 'release ' + v.replace(/^v/, '');
+    .then((local) => {
+      paintRelease(local, false);
+      return fetch('https://api.github.com/repos/XiONDiGiTaL/EmblemWeave/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((api) => {
+          if (api && api.tag_name) paintRelease(api, true);
+        });
     })
-    .catch(() => { /* offline or rate-limited: the static version stays */ });
+    .catch(() => { /* offline or rate-limited: the stamped version stays */ });
 
   /* ---------- mirrors ----------
      mirrors.json lists the copies of the repository. Each one is checked with a
@@ -97,6 +214,16 @@
      if GitHub is gone, this page is gone too, and a mirror is where to look. */
 
   const list = document.getElementById('mirror-list');
+
+  // The HTML carries the mirrors that must remain visible when release.json
+  // or this script fails. A fetch that fails leaves those links in place.
+  function keepStaticMirrors() {
+    if (!list) return;
+    list.querySelectorAll('.state').forEach((state) => {
+      state.textContent = 'not checked';
+      state.classList.remove('up', 'down');
+    });
+  }
 
   function addMirror(name, url, note) {
     const li = document.createElement('li');
@@ -133,18 +260,15 @@
   fetch('mirrors.json', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
     .then((data) => {
-      list.textContent = '';
       if (!data || !Array.isArray(data.mirrors) || !data.mirrors.length) {
-        addMirror('GitHub', 'https://github.com/XiONDiGiTaL/EmblemWeave', 'the primary copy').textContent = 'unknown';
+        keepStaticMirrors();
         return;
       }
+      list.textContent = '';
       for (const m of data.mirrors) {
         const state = addMirror(m.name, m.url, m.note);
         check(state, m.url);
       }
     })
-    .catch(() => {
-      list.textContent = '';
-      addMirror('GitHub', 'https://github.com/XiONDiGiTaL/EmblemWeave', 'the primary copy').textContent = 'unknown';
-    });
+    .catch(keepStaticMirrors);
 })();

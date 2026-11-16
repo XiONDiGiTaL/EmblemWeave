@@ -103,13 +103,13 @@ the loader file name is `libvulkan.so.1` (`platform::vulkan_loader_file()`), whi
 ### External commands
 
 The build's steps call `pwsh`, `cmake`, `ninja`, `clang-cl`, `lld-link`, `dotnet`, `git`, `robocopy` and `tar`
-(`tools/package_release.ps1`). Release packaging is PowerShell as well, because it is the release machine's
-shell. A Linux release step would be a script of its own that calls the same `tools/verify_archive.py`, which is
-the part that has to agree between the two.
+(`tools/package_release.ps1`). The Windows half of release packaging is PowerShell, run on the Windows job;
+the Linux translator has its own Ubuntu job, and both call the same `tools/verify_archive.py`, which is the part
+that has to agree between the two.
 
 ## What is verified, and what is not
 
-* Verified here: `cargo test -p emblemweave` on Windows (112 tests), and `cargo check -p emblemweave --target
+* Verified here: `cargo test -p emblemweave` on Windows (136 passed, 10 ignored), and `cargo check -p emblemweave --target
   x86_64-unknown-linux-gnu` exiting 0. The Linux check compiles the launcher including `eframe`, so the
   separation is real code, not a comment.
 * Verified here: the packaged translator builds for Linux (`dotnet publish -r linux-x64`) as an ELF binary and

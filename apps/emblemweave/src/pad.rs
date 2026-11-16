@@ -75,6 +75,37 @@ pub fn poll() -> Option<Live> {
     None
 }
 
+/// Buzz the first connected pad for a moment: the one check a player can make
+/// without starting the game. The pulse is stopped on its own thread because
+/// XInput keeps the last motor state until a new one is sent.
+#[cfg(windows)]
+pub fn rumble_test() -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::XboxController::*;
+    let slot = (0..4)
+        .find(|slot| {
+            let mut st: XINPUT_STATE = unsafe { std::mem::zeroed() };
+            (unsafe { XInputGetState(*slot, &mut st) }) == 0
+        })
+        .ok_or("No XInput controller is connected. Plug one in; Windows' Xbox and most third-party pads use XInput.")?;
+    let mut on: XINPUT_VIBRATION = unsafe { std::mem::zeroed() };
+    on.wLeftMotorSpeed = 48_000;
+    on.wRightMotorSpeed = 38_000;
+    if unsafe { XInputSetState(slot, &on) } != 0 {
+        return Err("Windows refused to start the controller's motors".into());
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        let off: XINPUT_VIBRATION = unsafe { std::mem::zeroed() };
+        unsafe { XInputSetState(slot, &off) };
+    });
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn rumble_test() -> Result<(), String> {
+    Err("Controller vibration is only wired on Windows".into())
+}
+
 /// The `[pad]` values the game reads, as the page shows them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tuning {
@@ -202,6 +233,27 @@ pub fn write_flag(path: &Path, key: &str, on: bool) -> Result<(), String> {
     write_text(path, key, if on { "1" } else { "0" })
 }
 
+/// The haptics backend the engine's file names, or `auto` when it names none.
+pub fn haptic_mode(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    match value(&text, "pad", "haptic").map(|v| v.trim().to_ascii_lowercase()) {
+        Some(m) if matches!(m.as_str(), "off" | "auto" | "rumble" | "standard" | "dualsense") => {
+            if m == "standard" { "rumble".into() } else { m }
+        }
+        _ => "auto".into(),
+    }
+}
+
+/// Write the haptics backend as the engine reads it: `auto`, `rumble` (the standard two motors, the most
+/// compatible path) or `dualsense`.
+pub fn write_haptic_mode(path: &Path, mode: &str) -> Result<(), String> {
+    let mode = match mode {
+        "off" | "rumble" | "dualsense" => mode,
+        _ => "auto",
+    };
+    write_text(path, "haptic", mode)
+}
+
 /// The haptics switch, as the engine reads it: `[pad] haptic`. Off writes `off`; on keeps a backend the file
 /// already names (`dualsense`, `rumble`) and writes `auto` when there is none or when it reads `off`, so a mode
 /// chosen in the in-game menu survives a trip through this page.
@@ -295,6 +347,8 @@ rumble_scale = 0.20
         write_haptic(&path, false).unwrap();
         write_haptic(&path, true).unwrap();
         assert_eq!(value(&std::fs::read_to_string(&path).unwrap(), "pad", "haptic"), Some("auto"));
+        write_haptic_mode(&path, "rumble").unwrap();
+        assert_eq!(haptic_mode(&path), "rumble");
         let _ = std::fs::remove_file(&path);
     }
 

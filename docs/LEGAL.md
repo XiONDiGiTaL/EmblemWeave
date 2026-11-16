@@ -38,6 +38,7 @@ adapted into it. That project's repository has since been removed; its final rel
 | `eframe`/`egui` | MIT/Apache-2.0 | launcher UI |
 | `libm` | MIT/Apache-2.0 | the C math library, a port of musl's libm, so results match the console's |
 | `rfd` | MIT | native folder and file dialogs in the launcher |
+| `zip`, `flate2` | MIT / MIT OR Apache-2.0 | the diagnostic report archive the Troubleshooter writes |
 | `winresource` | MIT | build-time embedding of the launcher icon and version information |
 | Unicorn | GPL-2.0 | development-only CPU oracle (`tools/oracle_lockstep.py`), used from Python as a separate process; not linked, not shipped |
 | `zstandard`, Pillow | BSD-3-Clause / HPND | development-only helpers for checking assets and generating the icon; not shipped |

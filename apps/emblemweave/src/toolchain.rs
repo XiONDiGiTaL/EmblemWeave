@@ -454,6 +454,16 @@ pub fn parse_clang_version(text: &str) -> Option<String> {
     None
 }
 
+/// The leading numeric version of a token: `4.5.0-rc3`, `3.31.2`, and `v1.13.2` keep their numbers and lose the
+/// distributor's suffix. `version_parts` alone rejects a prerelease suffix, which made an installed `4.5.0-rc3` look
+/// missing while the Requirements page (whose parser already trimmed it) said installed (issue 35).
+fn leading_version(token: &str) -> Option<String> {
+    let token = token.trim_end_matches(',').trim_start_matches('v');
+    let end = token.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(token.len());
+    let head = token[..end].trim_end_matches('.');
+    version_parts(head).filter(|p| p.len() >= 2).map(|_| head.to_string())
+}
+
 fn version_of(program: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(program);
     // The same PATH every build step gets. A CMake or Ninja in `C:\Program Files\CMake\bin`, in winget's Links folder or
@@ -462,10 +472,8 @@ fn version_of(program: &str, args: &[&str]) -> Option<String> {
     cmd.args(args).env("PATH", tool_path());
     let out = hidden(&mut cmd).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    // `cmake version 3.31.2`, `1.12.1` (ninja prints only the number)
-    text.lines()
-        .flat_map(|l| l.split_whitespace())
-        .find_map(|token| version_parts(token).filter(|p| p.len() >= 2).map(|_| token.trim_end_matches(',').to_string()))
+    // `cmake version 3.31.2`, `1.12.1` (ninja prints only the number), `4.5.0-rc3`
+    text.lines().flat_map(|l| l.split_whitespace()).find_map(leading_version)
 }
 
 pub fn cmake_version() -> Option<String> {
@@ -997,6 +1005,16 @@ SOME_MISSING:STRING=value-NOTFOUND
         assert!(cache_mismatch(&facts, compiler, "Ninja", "").unwrap().contains("Visual Studio 17 2022"));
         let facts = cache_facts("CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=C:/old/cmake/clang-cl.cmake\n");
         assert!(cache_mismatch(&facts, compiler, "Ninja", "cmake/clang-cl.cmake").unwrap().contains("toolchain file"));
+    }
+
+    #[test]
+    fn a_prerelease_version_is_still_a_version() {
+        // CMake 4.5.0-rc3 is what the reporter of issue 35 had installed, while the build said "CMake was not found".
+        assert_eq!(leading_version("4.5.0-rc3"), Some("4.5.0".into()));
+        assert_eq!(leading_version("cmake"), None);
+        assert_eq!(leading_version("version"), None);
+        assert_eq!(leading_version("4.4.4,"), Some("4.4.4".into()));
+        assert_eq!(leading_version("v1.13.2"), Some("1.13.2".into()));
     }
 
     #[test]

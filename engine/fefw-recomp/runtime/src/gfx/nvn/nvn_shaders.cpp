@@ -1356,7 +1356,7 @@ void ShaderCache::start_preload() {
             pos = nl + 1;
         }
     }
-    const int64_t threads = std::clamp<int64_t>(nxrt::config_get_int("nvn", "shader_preload_threads", 6), 0, 16);
+    const int64_t threads = std::clamp<int64_t>(nxrt::config_get_int("nvn", "shader_preload_threads", 4), 0, 16);
     pre_budget_ = static_cast<size_t>(std::max<int64_t>(64, nxrt::config_get_int("nvn", "shader_preload_mb", 1024))) << 20;
     if (pre_list_.empty() || threads == 0) return;
     NXLOG_I("nvn", "shader preload: %zu shaders from %s on %lld threads", pre_list_.size(), order_path_.c_str(),

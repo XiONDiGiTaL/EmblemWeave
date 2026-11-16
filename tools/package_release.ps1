@@ -49,13 +49,22 @@ try {
     if (Test-Path $pkg) { Remove-Item -Recurse -Force $pkg }
     New-Item -ItemType Directory -Force $pkg | Out-Null
     Copy-Item $exe (Join-Path $pkg 'EmblemWeave.exe')
+    # A fresh download is portable without anyone finding the About page: every
+    # path, save and build cache lives in `data` beside this file. An existing
+    # profile is left alone by the launcher's own first-run check.
+    New-Item -ItemType File -Force (Join-Path $pkg 'portable.txt') | Out-Null
     foreach ($f in 'LICENSE', 'README.md') { Copy-Item (Join-Path $repo $f) $pkg }
     # The README links docs/PACKAGE.md and the changelog, so both travel at the paths it names. Copying
     # `docs\PACKAGE.md` into the package root used to leave it as `PACKAGE.md`, where nothing looks for it;
     # tools/verify_archive.py is what noticed.
     New-Item -ItemType Directory -Force (Join-Path $pkg 'docs') | Out-Null
-    Copy-Item (Join-Path $repo 'docs\PACKAGE.md') (Join-Path $pkg 'docs\PACKAGE.md')
+    # Every page the README links, not only PACKAGE: the new guide pages would
+    # otherwise work on GitHub and 404 inside the downloaded zip.
+    foreach ($doc in (Get-ChildItem (Join-Path $repo 'docs') -Filter '*.md' -File)) {
+        Copy-Item $doc.FullName (Join-Path (Join-Path $pkg 'docs') $doc.Name)
+    }
     Copy-Item (Join-Path $repo 'docs\changelog') (Join-Path $pkg 'docs\changelog') -Recurse
+    Copy-Item (Join-Path $repo 'docs\screenshots') (Join-Path $pkg 'docs\screenshots') -Recurse
 
     # The dump, the build output, the fetched third-party sources and the engine's own unused launcher stay out.
     $xd = @(
@@ -119,7 +128,9 @@ try {
     if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
     if (-not $py) { throw 'python is needed to verify the release archive (tools/verify_archive.py)' }
     $required = @(
-        'EmblemWeave.exe', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/changelog/README.md',
+        'EmblemWeave.exe', 'portable.txt', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/INSTALL.md',
+        'docs/USAGE.md', 'docs/BUILDING.md', 'docs/SECURITY.md', 'docs/TERMS.md', 'docs/PRIVACY.md',
+        'docs/screenshots/overview.png', 'docs/changelog/README.md',
         'engine/fefw-recomp/runtime/CMakeLists.txt', 'engine/fefw-recomp/game-build/fefw/CMakeLists.txt',
         'engine/fefw-recomp/recomp/requirements.txt', 'engine/fefw-recomp/tools/shaders/harness/Program.cs',
         # The CMake configure reads this before it builds anything; a zip without it failed every build (issues #16, #17).
@@ -161,8 +172,15 @@ try {
             # One child shell, so the configure sees the same INCLUDE, LIB and clang-cl the engine's own build script gives it.
             $clang = (Join-Path $llvm 'clang-cl.exe').Replace('\', '/')
             $cfg = "call `"$envCmd`" >nul 2>&1 && cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`""
+            # CMake writes warnings to stderr; Windows PowerShell 5.1 turns a
+            # native command's stderr into an error record, and $ErrorActionPreference
+            # is Stop here. The exit code is the result, not the warning text.
+            $oldErrorAction = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
             & cmd /c $cfg *> $checkLog
-            if ($LASTEXITCODE -ne 0) {
+            $configureExit = $LASTEXITCODE
+            $ErrorActionPreference = $oldErrorAction
+            if ($configureExit -ne 0) {
                 $tail = @(Get-Content -LiteralPath $checkLog -Tail 30)
                 Write-Host ($tail -join [Environment]::NewLine)
                 throw "the zip does not configure: $bd (log: $checkLog). A source tree the build reads is missing from the package, or a path in it is wrong; do not publish this zip."
@@ -177,46 +195,14 @@ try {
     Write-Host "$zip ($mb MB)"
     Write-Host "sha256: $hash"
 
-    # 5. The Linux translator, published from the same sources, as a release asset of its own. The archive keeps the
-    # executable bit when it is made on Linux; the notes say `chmod +x` for archives built elsewhere.
-    $linuxDir = Join-Path $repo 'engine\fefw-recomp\tools\shaders\prebuilt\linux-x64'
-    if (Test-Path (Join-Path $linuxDir 'spirv_harness')) {
-        $tar = Join-Path (Split-Path $zip) "$name-shader-translator-linux-x64.tar.gz"
-        if (Test-Path $tar) { Remove-Item -Force $tar }
-        # Run from the target folder and name the archive bare: GNU tar reads `C:\...` as a remote host otherwise.
-        # The files are named one by one rather than `-C dir .`, which would write `./spirv_harness`: every entry is a
-        # plain relative path, the same rule the zip follows, so one spelling extracts everywhere.
-        $items = @(Get-ChildItem -LiteralPath $linuxDir -Force | ForEach-Object { $_.Name })
-        Push-Location (Split-Path $zip)
-        try {
-            # Windows has no executable bit to record, so stamp one in: `--mode` is GNU tar, and bsdtar (which lacks it)
-            # gets a plain archive with the `chmod +x` note in PACKAGE.md.
-            tar --mode=u+rwx,go+rx -czf (Split-Path $tar -Leaf) -C $linuxDir @items
-            if ($LASTEXITCODE -ne 0) { tar -czf (Split-Path $tar -Leaf) -C $linuxDir @items }
-            if ($LASTEXITCODE -ne 0) { throw "tar failed ($LASTEXITCODE)" }
-        }
-        finally { Pop-Location }
-        # The tarball gets the same check: relative `/` names, no `..`, the translator at the root and executable (the
-        # bit a Windows-built tar has to be given, since NTFS has none to record).
-        & $py.Source @('tools/verify_archive.py', $tar, '--require', 'spirv_harness')
-        if ($LASTEXITCODE -ne 0) { throw 'the translator tarball failed verification (tools/verify_archive.py)' }
-        $tmb = [math]::Round((Get-Item $tar).Length / 1MB, 1)
-        Write-Host "$tar ($tmb MB), verified"
-        Write-Host "sha256: $((Get-FileHash $tar -Algorithm SHA256).Hash.ToLower())"
-    } else {
-        Write-Host "no linux-x64 translator published; skipping its tarball"
-    }
-
-    # 7. What was built, for the release script: names and hashes, so the notes and the upload cannot disagree.
-    $tarPath = Join-Path (Split-Path $zip) "$name-shader-translator-linux-x64.tar.gz"
+    # 5. What was built, for the release script: names and hashes, so the notes and the upload cannot disagree. The
+    # Linux translator is a separate job on an Ubuntu runner (`.github/workflows/release.yml`): it is the only place
+    # that can write the executable bit without lying about it, and a Windows package run must not pretend to.
     $manifest = [ordered]@{
         version = $Version
         zip     = [System.IO.Path]::GetFileName($zip)
         zipSha  = $hash
         zipSize = (Get-Item $zip).Length
-        tar     = if (Test-Path $tarPath) { [System.IO.Path]::GetFileName($tarPath) } else { $null }
-        tarSha  = if (Test-Path $tarPath) { (Get-FileHash $tarPath -Algorithm SHA256).Hash.ToLower() } else { $null }
-        tarSize = if (Test-Path $tarPath) { (Get-Item $tarPath).Length } else { $null }
     }
     $manifest | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path (Split-Path $zip) 'manifest.json')
     Write-Host "manifest: $(Join-Path (Split-Path $zip) 'manifest.json')"
