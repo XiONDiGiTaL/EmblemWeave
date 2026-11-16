@@ -414,6 +414,19 @@ fn missing_program(reason: &str) -> Option<String> {
     Some(reason[start..end].to_string())
 }
 
+/// A failed build that a cache clear can repair: a cache made by another compiler or CMake, or
+/// Ninja's "manifest 'build.ninja' still dirty after 100 tries" loop (issue #34). The latter is
+/// normally prevented by CMAKE_SUPPRESS_REGENERATION in build_game.cmd; the retry keeps an old
+/// extracted folder usable when its build.ninja is already trapped in that loop.
+fn needs_cache_reset(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("cache")
+        || error.contains("CMake Generate step failed")
+        || error.contains("regenerated")
+        || lower.contains("still dirty")
+        || lower.contains("manifest 'build.ninja'")
+}
+
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -1379,7 +1392,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         // saying that. Clear it and configure once more before giving up, so an
         // earlier failed attempt does not condemn every one after it.
         let build = root.join("work").join("build").join("fefw");
-        let stale = e.to_lowercase().contains("cache") || e.contains("CMake Generate step failed") || e.contains("regenerated") || driver_flags_rejected(&e);
+        let stale = needs_cache_reset(&e) || driver_flags_rejected(&e);
         if !stale {
             return Err(e);
         }
@@ -2909,6 +2922,18 @@ mod tests {
         assert!(driver_flags_rejected("clang++: error: unknown argument: '-clang:-fmacro-prefix-map=F:/Games/EmblemWeave-windows-x64=.\'"));
         assert!(driver_flags_rejected("clang: error: no such file or directory: '/W3'"));
         assert!(!driver_flags_rejected("ninja: build stopped: subcommand failed."));
+    }
+
+    #[test]
+    fn the_build_ninja_regeneration_loop_requests_a_cache_reset() {
+        // The end of the #34 log: CMake is re-run until Ninja gives up. Clearing CMakeFiles and the
+        // cache lets the next configure write a fresh manifest without the stale dependency.
+        let log = "[0/2] Re-checking globbed directories...\n[1/2] Re-running CMake...\nninja: error: manifest 'build.ninja' still dirty after 100 tries, perhaps system time is not set";
+        assert!(needs_cache_reset(log));
+        assert!(needs_cache_reset("CMake Generate step failed.  Build files cannot be regenerated correctly."));
+        assert!(needs_cache_reset("the cache was made by another compiler"));
+        assert!(!needs_cache_reset("ninja: build stopped: subcommand failed."));
+        assert!(!needs_cache_reset("'bit' file not found"));
     }
 
     #[test]

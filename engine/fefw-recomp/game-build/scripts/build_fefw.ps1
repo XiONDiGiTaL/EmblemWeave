@@ -35,7 +35,7 @@ $llvm_rc = if (Test-Path (Join-Path $llvm_bin 'llvm-rc.exe')) { (Join-Path $llvm
 $env:CC = $clang_cl
 $env:CXX = $clang_cl
 if ($llvm_rc) { $env:RC = $llvm_rc }
-$cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER:FILEPATH=`"$clang_cl`" -DCMAKE_CXX_COMPILER:FILEPATH=`"$clang_cl`""
+$cfg = "cmake -S `"$src`" -B `"$bd`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_C_COMPILER:FILEPATH=`"$clang_cl`" -DCMAKE_CXX_COMPILER:FILEPATH=`"$clang_cl`" -DCMAKE_SUPPRESS_REGENERATION=ON"
 if ($llvm_rc) { $cfg += " -DCMAKE_RC_COMPILER:FILEPATH=`"$llvm_rc`"" }
 $sccache = (Get-Command sccache -ErrorAction SilentlyContinue).Source
 if (-not $sccache -and $env:NX_TOOLCHAIN -and (Test-Path (Join-Path $env:NX_TOOLCHAIN 'bin\sccache.exe'))) { $sccache = Join-Path $env:NX_TOOLCHAIN 'bin\sccache.exe' }

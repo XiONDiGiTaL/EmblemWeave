@@ -24,7 +24,11 @@ if not defined NX_JOBS set "NX_JOBS=20"
 if not defined SCCACHE_DIR set "SCCACHE_DIR=%ROOT%\work\build\sccache"
 if not defined SCCACHE_SERVER_PORT set "SCCACHE_SERVER_PORT=24339"
 if not defined SCCACHE_CACHE_SIZE set "SCCACHE_CACHE_SIZE=20G"
-call "%HERE%nx_env.cmd" cmake -S "%HERE%..\games\%GAME%" -B "%NX_BUILD%" -G Ninja -DCMAKE_TOOLCHAIN_FILE="%HERE%..\cmake\clang-cl.cmake" -DCMAKE_BUILD_TYPE=Release -DNX_ROOT="%ROOT%"
+rem CMAKE_SUPPRESS_REGENERATION: the configure on the next line runs on every build, and Ninja must not
+rem re-run it from a timestamp comparison. A release extracted with files newer than the clock, or an
+rem output written in the same tick as an input, otherwise loops "Re-running CMake" until Ninja's
+rem 100-try limit (issue #34).
+call "%HERE%nx_env.cmd" cmake -S "%HERE%..\games\%GAME%" -B "%NX_BUILD%" -G Ninja -DCMAKE_TOOLCHAIN_FILE="%HERE%..\cmake\clang-cl.cmake" -DCMAKE_BUILD_TYPE=Release -DNX_ROOT="%ROOT%" -DCMAKE_SUPPRESS_REGENERATION=ON
 if errorlevel 1 exit /b 1
 call "%HERE%nx_env.cmd" cmake --build "%NX_BUILD%" --target %GAME%_modules -- -j %NX_JOBS%%ARGS%
 exit /b %errorlevel%
