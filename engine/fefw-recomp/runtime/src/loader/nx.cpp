@@ -164,7 +164,6 @@ std::array<uint8_t, 32> sha256(const std::vector<uint8_t>& b) {
 struct Header {
     uint64_t generation = 0;
     uint16_t version = 0;
-    uint16_t required_features = 0, optional_features = 0;
     uint64_t archive_size = 0;
     uint64_t catalog_offset = 0, catalog_size = 0;
     uint64_t media_offset = 0, media_size = 0;
@@ -192,8 +191,6 @@ bool read_slot(const std::vector<uint8_t>& page, size_t at, Header& out) {
         if (page[at + i] != 0) return false;
     out.generation = u64(page, at + 216);
     out.version = version;
-    out.required_features = u16(page, at + 12);
-    out.optional_features = u16(page, at + 14);
     out.archive_size = u64(page, at + 16);
     out.catalog_offset = u64(page, at + 24);
     out.catalog_size = u64(page, at + 32);
@@ -253,6 +250,7 @@ struct Reader::Impl {
         uint64_t id = 0;
         uint8_t flags = 0;
         uint32_t first = 0, count = 0;
+        uint32_t first_program = 0, program_count = 0;
     };
     std::vector<App> apps;
     struct Snap {
@@ -341,14 +339,14 @@ bool Reader::Impl::parse_catalog(const std::vector<uint8_t>& c, std::string* err
     if (n_apps < 1 || n_apps > 4096 || n_progs > 16384 || n_snaps < 1 || n_snaps > 65536 || n_localized > 16384 ||
         n_deps > 32768 || n_ext > 4096)
         return fail(err, "the catalog table counts are out of range").empty();
-    auto table_ok = [&](uint64_t off, uint32_t count, uint64_t row, const char* name) {
+    auto table_ok = [&](uint64_t off, uint32_t count, uint64_t row) {
         if (count == 0) return off == 0;
         const uint64_t len = static_cast<uint64_t>(count) * row;
-        return off % 8 == 0 && off <= c.size() && len <= c.size() - off;
+        return off >= 128 && off % 8 == 0 && off <= c.size() && len <= c.size() - off;
     };
-    if (!table_ok(u64(c, 48), n_apps, 80, "application") || !table_ok(u64(c, 56), n_progs, 64, "program") ||
-        !table_ok(u64(c, 64), n_snaps, 120, "snapshot") || !table_ok(u64(c, 72), n_localized, 24, "localized") ||
-        !table_ok(u64(c, 80), n_deps, 56, "dependency") || !table_ok(u64(c, 88), n_ext, 32, "extension"))
+    if (!table_ok(u64(c, 48), n_apps, 80) || !table_ok(u64(c, 56), n_progs, 64) ||
+        !table_ok(u64(c, 64), n_snaps, 120) || !table_ok(u64(c, 72), n_localized, 24) ||
+        !table_ok(u64(c, 80), n_deps, 56) || !table_ok(u64(c, 88), n_ext, 32))
         return fail(err, "a catalog table is out of range").empty();
     const uint64_t pool_off = u64(c, 96), pool_len = u64(c, 104);
     if (pool_off % 8 != 0 || pool_off > c.size() || pool_len > c.size() - pool_off) return fail(err, "the catalog string pool is out of range").empty();
@@ -364,12 +362,15 @@ bool Reader::Impl::parse_catalog(const std::vector<uint8_t>& c, std::string* err
         if (at + 80 > c.size()) return fail(err, "the catalog application table is truncated").empty();
         App a;
         a.id = u64(c, at);
-        // NxApplication: id at 0, platform at 8, flags (u8) at 9, reserved at 10.
+        // NxApplication: id at 0, platform at 8, flags at 9, reserved0 at 10,
+        // program range at 12/16, snapshot range at 20/24.
         a.flags = c[at + 9];
         a.first = u32(c, at + 20);
         a.count = u32(c, at + 24);
-        if (a.id == 0 || (a.flags & ~3u) != 0)
-            return fail(err, "a catalog application has no id or unknown flags").empty();
+        a.first_program = u32(c, at + 12);
+        a.program_count = u32(c, at + 16);
+        if (a.id == 0 || (a.flags & ~3u) != 0 || u16(c, at + 10) != 0)
+            return fail(err, "a catalog application has no id, unknown flags or nonzero reserved bytes").empty();
         std::string title;
         if (!string_at(u32(c, at + 28), u32(c, at + 32), title)) return fail(err, "a catalog title is out of range").empty();
         apps.push_back(a);
@@ -396,10 +397,11 @@ bool Reader::Impl::parse_catalog(const std::vector<uint8_t>& c, std::string* err
         s.root = u32(c, at + 12);
         snaps.push_back(s);
     }
-    if (snaps.empty()) return fail(err, "the catalog holds no snapshots").empty();
     for (const App& a : apps) {
         if (a.count == 0 || static_cast<uint64_t>(a.first) + a.count > snaps.size())
             return fail(err, "an application's snapshot range is out of bounds").empty();
+        if (static_cast<uint64_t>(a.first_program) + a.program_count > n_progs)
+            return fail(err, "an application's program range is out of bounds").empty();
     }
     // Catalog extensions: NX 0.3 records Source Resources here. Unknown required
     // types fail closed; optional types are skipped after their range is checked.
@@ -552,14 +554,12 @@ bool Reader::Impl::list_dir(uint32_t dir, const std::string& prefix, bool romfs_
 }
 
 bool Reader::Impl::build_content(Content& out, std::string* err) {
-    if (apps.empty()) return fail(err, "the catalog holds no application").empty();
     size_t pick = 0;
     for (size_t i = 1; i < apps.size(); i++)
         if (apps[i].count > apps[pick].count) pick = i;
     const App& a = apps[pick];
     out.title = a.id;
     const size_t first = a.first, last = std::min<size_t>(static_cast<size_t>(a.first) + a.count, snaps.size());
-    if (first >= last) return fail(err, "the application has no snapshot").empty();
     int64_t best = -1;
     for (size_t i = first; i < last; i++) {
         const Snap& s = snaps[i];

@@ -64,6 +64,8 @@ pub struct Application {
     pub flags: u8,
     pub title: String,
     pub publisher: String,
+    pub first_program: u32,
+    pub program_count: u32,
     pub first_snapshot: u32,
     pub snapshot_count: u32,
 }
@@ -479,12 +481,15 @@ impl Nx {
         let mut at = u64_at(c, 48) as usize;
         for _ in 0..apps {
             let b = c.get(at..at + 80).ok_or_else(|| anyhow!("the application table is truncated"))?;
+            ensure!(u16_at(b, 10) == 0, "a catalog application has nonzero reserved bytes");
             self.apps.push(Application {
                 id: u64_at(b, 0),
                 platform: b[8],
                 flags: b[9],
                 title: string(u32_at(b, 28), u32_at(b, 32))?,
                 publisher: string(u32_at(b, 36), u32_at(b, 40))?,
+                first_program: u32_at(b, 12),
+                program_count: u32_at(b, 16),
                 first_snapshot: u32_at(b, 20),
                 snapshot_count: u32_at(b, 24),
             });
@@ -520,15 +525,14 @@ impl Nx {
             });
             at += 120;
         }
-        ensure!(!self.snapshots.is_empty(), "the catalog holds no snapshots");
-        for (i, app) in self.apps.iter().enumerate() {
+        for app in &self.apps {
             ensure!(app.id != 0 && app.flags & !3 == 0, "a catalog application has no id or unknown flags");
             ensure!(app.snapshot_count >= 1, "a catalog application has no snapshot");
             let first = app.first_snapshot as usize;
             let count = app.snapshot_count as usize;
             ensure!(first.checked_add(count).is_some_and(|end| end <= self.snapshots.len()), "an application's snapshot range is out of bounds");
-            let first_program = u32_at(c, u64_at(c, 48) as usize + i * 80 + 12) as usize;
-            let program_count = u32_at(c, u64_at(c, 48) as usize + i * 80 + 16) as usize;
+            let first_program = app.first_program as usize;
+            let program_count = app.program_count as usize;
             ensure!(first_program.checked_add(program_count).is_some_and(|end| end <= self.programs.len()), "an application's program range is out of bounds");
         }
         // Catalog extensions are where NX 0.3 records Source Resources. A
@@ -797,6 +801,20 @@ mod tests {
         bytes
     }
 
+    fn patched_catalog(name: &str, patch: impl Fn(&mut [u8])) -> Vec<u8> {
+        let mut bytes = std::fs::read(fixture(name)).expect("fixture");
+        let off = u64_at(&bytes, 24) as usize;
+        let size = u64_at(&bytes, 32) as usize;
+        patch(&mut bytes[off..off + size]);
+        let digest = sha256(&bytes[off..off + size]);
+        for at in [0usize, 4096] {
+            bytes[at + 120..at + 152].copy_from_slice(&digest);
+            let crc = crc32c(&bytes[at..at + 252]);
+            bytes[at + 252..at + 256].copy_from_slice(&crc.to_le_bytes());
+        }
+        bytes
+    }
+
     fn open_bytes(bytes: &[u8]) -> Result<Nx> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -828,6 +846,22 @@ mod tests {
         assert_eq!(nx.applications().len(), 1);
         let tree = nx.tree(nx.current(0).expect("a snapshot")).expect("tree");
         assert!(!tree.is_empty(), "the 0.3 fixture holds a RomFS file");
+    }
+
+    #[test]
+    fn a_malformed_application_row_is_rejected() {
+        let bad_range = patched_catalog("minimal_valid.nx", |c| {
+            let apps = u64_at(c, 48) as usize;
+            c[apps + 12..apps + 16].copy_from_slice(&1u32.to_le_bytes());
+            c[apps + 16..apps + 20].copy_from_slice(&1u32.to_le_bytes());
+        });
+        assert!(open_bytes(&bad_range).is_err(), "a program range past the program table must fail");
+
+        let reserved = patched_catalog("minimal_valid.nx", |c| {
+            let apps = u64_at(c, 48) as usize;
+            c[apps + 10] = 1;
+        });
+        assert!(open_bytes(&reserved).is_err(), "a nonzero application reserved byte must fail");
     }
 
     #[test]
