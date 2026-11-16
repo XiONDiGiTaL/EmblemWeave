@@ -40,6 +40,13 @@ fn upscaler_help(current: &str, sdk: &crate::engine::Sdk) -> String {
 
 fn combo(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str]) {
     egui::ComboBox::from_id_salt(id).selected_text(value.clone()).width(200.0).show_ui(ui, |ui| {
+        // A value the engine wrote (an aspect of 1.777…, a newer upscaler name) is
+        // kept as the current choice instead of disappearing from the list.
+        let current = value.clone();
+        if !current.is_empty() && !options.iter().any(|o| *o == current) {
+            ui.selectable_value(value, current.clone(), current);
+            ui.separator();
+        }
         for o in options {
             ui.selectable_value(value, o.to_string(), *o);
         }
@@ -74,8 +81,12 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
          but draw commands are recorded and counted, not rendered yet. Everything on this page except Quality and Precompile shaders is handed to the engine \
          in its ini files before every start, so the game itself uses it.",
     );
+    memory_profile(app, ui);
     upscaler_files(app, ui);
     let g = &mut app.config.graphics;
+    // The engine resolves `auto` to a float such as 1.7777777777777777. Show the
+    // ratio it means, and keep the value itself when it is a custom shape.
+    g.aspect = crate::engine::aspect_label(&g.aspect);
     widgets::section(ui, &p, "Display", |ui| {
         widgets::setting_row(ui, &p, "Resolution", "The picture's size and the window's, taken at the game's next start. Native display keeps the game's own console size.", |ui| {
             combo(ui, "res", &mut g.resolution, &["Native display", "1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"]);
@@ -293,6 +304,143 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
             widgets::kv(ui, &p, "Aspect", &l.aspect);
             waiting_line(ui, &p, pending, kept);
         });
+    }
+}
+
+/// The hardware facts, the Low Memory recommendation and the explicit apply /
+/// restore controls. The profile is never applied by detection alone.
+fn memory_profile(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.config.theme.palette();
+    let snap = crate::memory::snapshot();
+    let advice = crate::memory::assess(&snap);
+    let active = app.config.graphics_preset.low_memory;
+    let dismissed = app.config.graphics_preset.dismissed;
+    let summary = if active {
+        "Low Memory on".to_string()
+    } else if advice.recommend_low_memory {
+        "Low Memory recommended".to_string()
+    } else if advice.pressure {
+        "memory pressure".to_string()
+    } else if advice.known {
+        "standard".to_string()
+    } else {
+        "memory facts unavailable".to_string()
+    };
+    let open = active || (advice.recommend_low_memory && !dismissed);
+    let (mut apply, mut dismiss, mut restore) = (false, false, false);
+    widgets::section_drawer(ui, &p, "memory-profile", "Memory profile", &summary, open, |ui| {
+        let mut facts = Vec::new();
+        if let Some(installed) = snap.installed_mb.or(snap.total_mb) {
+            facts.push(format!("{} installed", crate::memory::gb(installed)));
+        }
+        if let Some(free) = snap.available_mb {
+            facts.push(format!("{} free now", crate::memory::gb(free)));
+        }
+        if let Some(commit) = snap.commit_free_mb {
+            facts.push(format!("{} commit free", crate::memory::gb(commit)));
+        }
+        if !facts.is_empty() {
+            ui.label(RichText::new(facts.join("  ·  ")).size(12.5).color(p.body));
+        }
+        if let Some(gpu) = &snap.gpu {
+            let kind = match gpu.shared {
+                Some(true) => "shared with the system",
+                Some(false) => "dedicated",
+                None => "kind not reported",
+            };
+            let mut text = format!("{} ({kind})", gpu.name);
+            if let Some(budget) = gpu.budget_mb {
+                text.push_str(&format!("  ·  {} video budget", crate::memory::gb(budget)));
+                if let Some(used) = gpu.used_mb {
+                    text.push_str(&format!(", {} used in the last run", crate::memory::gb(used)));
+                }
+            }
+            ui.label(RichText::new(text).size(12.5).color(p.muted));
+        }
+        ui.add_space(6.0);
+        if advice.recommend_low_memory && !active && !dismissed {
+            widgets::status_line(
+                ui,
+                &p,
+                Tone::Warn,
+                "This hardware is in the Low Memory class",
+                &format!(
+                    "{}. The profile lowers the output, render and scene sizes, turns frame generation off, uses Fast texture throughput and one idle shader-compile thread. It is a recommendation, not a claim that a previous crash was caused by memory.",
+                    advice.reasons.join("; ")
+                ),
+            );
+            ui.add_space(6.0);
+        } else if advice.pressure {
+            widgets::status_line(
+                ui,
+                &p,
+                Tone::Bad,
+                "Windows or the GPU is short of memory now",
+                &format!(
+                    "{}. Close overlays and background applications before a long session; keep the Windows page file system-managed. This warning does not identify a crash cause on its own.",
+                    advice.reasons.join("; ")
+                ),
+            );
+            ui.add_space(6.0);
+        } else if advice.known {
+            ui.label(RichText::new("No memory warning for the facts available now.").size(12.5).color(p.ok));
+        } else {
+            ui.label(
+                RichText::new("Windows memory facts and the engine's GPU log are not available yet. The profile can still be applied explicitly; no warning is inferred from missing data.")
+                    .size(12.5)
+                    .color(p.muted),
+            );
+        }
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if active {
+                if widgets::button(ui, &p, "Restore settings from before Low Memory", true)
+                    .on_hover_text("Puts back every graphics setting from before the first application. Audio, controls, saves and mods are untouched.")
+                    .clicked()
+                {
+                    restore = true;
+                }
+                widgets::pill(ui, &p, "applied", Tone::Ok);
+            } else if widgets::button(ui, &p, "Apply Low Memory", true)
+                .on_hover_text("Changes only the graphics settings listed below. The previous values are kept for one-press restore.")
+                .clicked()
+            {
+                apply = true;
+            }
+            if advice.recommend_low_memory && !active && !dismissed && widgets::button(ui, &p, "Not now", true).clicked() {
+                dismiss = true;
+            }
+        });
+        ui.add_space(6.0);
+        let preview = if let Some(previous) = &app.config.graphics_preset.previous {
+            crate::memory::changes(previous, &app.config.graphics)
+        } else {
+            let next = crate::memory::low_memory(&app.config.graphics);
+            crate::memory::changes(&app.config.graphics, &next)
+        };
+        if preview.is_empty() {
+            ui.label(RichText::new("The current graphics settings already match the profile.").size(12.5).color(p.muted));
+        } else {
+            for line in preview {
+                ui.label(RichText::new(format!("• {line}")).size(12.5).color(p.body));
+            }
+        }
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("The profile does not change audio, controls, saves, mods, the game dump or the engine's automatic texture-residency and BC1 choices. The engine still decides those from the GPU it finds. The next Play writes the settings; a build is not needed.")
+                .size(12.0)
+                .color(p.muted),
+        );
+    });
+    if apply {
+        let changes = app.config.apply_low_memory();
+        app.notify(format!("Low Memory applied: {}", changes.join("; ")), Tone::Ok);
+    }
+    if dismiss {
+        app.config.dismiss_low_memory();
+    }
+    if restore {
+        app.confirm = Some(crate::Confirm::RestoreGraphics);
     }
 }
 
@@ -552,7 +700,8 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
         let desired: std::collections::BTreeMap<String, String> =
             [("audio.volume".to_string(), format!("{:.2}", a.master.clamp(0.0, 1.0)))].into_iter().collect();
         let (pending, kept) = waiting(&desired, &l.values);
-        widgets::section_drawer(ui, &p, "audio-live", "What the game will start with", &format!("{:.0} %", l.volume * 100.0), false, |ui| {
+        let summary = format!("Master {:.0} %", l.volume * 100.0);
+        widgets::section_drawer(ui, &p, "audio-live", "What the game will start with", &summary, false, |ui| {
             widgets::kv(ui, &p, "Master volume", &format!("{:.0} %", l.volume * 100.0));
             waiting_line(ui, &p, pending, kept);
         });

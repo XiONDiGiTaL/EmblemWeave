@@ -237,17 +237,23 @@ and are not on the shipping path.
 <summary><strong>What is planned next, in priority order</strong></summary>
 
 
-1. Keep fefw-recomp integrated, updated and building from source, with its licence and notices intact.
-2. Compiler and toolchain reliability: clearer failures, fewer environment assumptions, validated releases.
-3. Processor compatibility: more build targets where they measurably help, and a compatibility report for every build.
-4. Recompilation performance and generated-code quality, measured before and after each change.
-5. Runtime stability and game compatibility, with diagnostics that separate engine faults from game faults.
-6. Graphics: correctness first, then performance, then more upscalers after the inputs they need are verified.
-7. Audio completeness and synchronization, particularly voice buffers and cutscenes.
-8. Input compatibility: more controllers, better defaults, profiles.
-9. Mod management and in-game enhancements.
-10. Portable installation, configuration and a simpler first run.
-11. Diagnostics, automated tests and long-term maintainability.
+1. **P0 — real-hardware release validation.** Build the current tree and run the
+   same matrix on 16 GB and 24 GB handhelds, discrete NVIDIA and AMD systems, and
+   a clean Windows profile. The Low Memory and ExeFS patch changes are not in the
+   0.1.36 release yet.
+2. **P1 — game 1.1.1 compatibility.** Map the 1.1.1 build ID, add it to the
+   tested manifest if upstream supports it, and refuse it early if not. Issue #41
+   is a 1.1.1 run and compatibility is still unverified.
+3. **P1 — controller trigger verification.** Record a physical ZL/ZR and
+   vibration pass, and make the report name the pad and the observed trigger
+   range.
+4. **P2 — Low Memory and ExeFS patch validation.** Prove the profile on the
+   hardware class it targets, and prove a real patch through the build.
+5. **P3–P5 — saves, upscaler discovery, diagnostics, shader resources, Linux
+   guidance and long-session telemetry.**
+
+The detailed roadmap, with scope, users, requirements, risks, effort and success
+criteria for each area, is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 
 </details>
@@ -264,8 +270,16 @@ and are not on the shipping path.
 | **Game Setup**: your dump detected and validated | **Appearance**: the XiØN, Arcade, FE, Ember, Verdant and Frost schemes |
 | ![Recompilation](docs/screenshots/recompilation.png) | ![Diagnostics](docs/screenshots/diagnostics.png) |
 | **Recompilation**: the nine-stage pipeline | **Diagnostics**: what the runtime did and where it stopped |
+| ![Graphics](docs/screenshots/graphics.png) | ![Audio](docs/screenshots/audio.png) |
+| **Graphics**: display, upscalers and the Low Memory profile | **Audio**: output, mix and what the game will start with |
+| ![Controls](docs/screenshots/controls.png) | |
+| **Controls**: the pad map, bindings, trigger travel and tuning | |
 
-The screenshots are the launcher's own rendering, saved with `EmblemWeave.exe --page <page> --screenshot <file.png>`.
+The screenshots are the launcher's own rendering from the current source tree,
+saved with `EmblemWeave.exe --page <page> --screenshot <file.png>`. The **Low
+Memory** card on the Graphics screenshot is implemented in this tree but is
+**not** part of the released 0.1.36 build; the same applies to the ExeFS patch
+support described on the Mods page.
 
 ## Key capabilities
 

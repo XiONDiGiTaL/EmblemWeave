@@ -1,17 +1,18 @@
-# EmblemWeave's own engine
+# Engine research and tooling
 
-EmblemWeave plays the game today through [fefw-recomp](https://github.com/Goldoire/fefw-recomp). The goal is to replace it with
-EmblemWeave's own runtime, in Rust, built on the recompiler in `crates/ew-lift` and the host services in `crates/ew-boot`, so the
-whole path from your dump to a running game is EmblemWeave's. fefw-recomp stays the reference while that happens: where it has
-already worked something out (how a service behaves, how NVN maps to Vulkan), EmblemWeave reads its code and docs, which its
-GPL-3.0 licence allows, and writes its own version.
+EmblemWeave plays the game through [fefw-recomp](https://github.com/Goldoire/fefw-recomp), its **permanent primary engine**: the
+lifter, generated game code, runtime, graphics, audio and services that Build the game and Play use. EmblemWeave is the launcher
+around it, and that division does not change.
 
-The order is set by what blocks playing, not by what is most visible.
+The Rust crates described here are supporting work: the recompiler in `crates/ew-lift` and the host services in `crates/ew-boot`,
+reached through the opt-in `ew-run`/`ew-native` research path. They exist to verify the lifter, test host-service behaviour and
+measure how NVN work maps to Vulkan. They are not a second shipping engine, they do not replace fefw-recomp, and Play does not
+start them. fefw-recomp remains the reference for every behaviour the launcher ships; where it has already worked something out,
+this work reads its code and docs, which its GPL-3.0 licence allows.
 
-This page is the engine's plan and is kept current with the code;
-[docs/STATUS.md](STATUS.md) records the project's state and the measurements taken on
-the game data. Native execution, below, is opt-in (`ew-run --native`), which is why the
-status page's older rows read as though the runtime only interpreted.
+This page is a research log, not a replacement roadmap. [docs/STATUS.md](STATUS.md) records the project's state and the
+measurements taken on the game data. Native execution below is opt-in (`ew-run --native`), which is why the status page's older
+rows read as though the runtime only interpreted.
 
 ## 1. Native execution (in the runtime, opt-in)
 
@@ -67,9 +68,12 @@ The game draws with NVN. EmblemWeave already tracks NVN's devices, memory pools,
 The audio renderer already runs the game's voices; its mixed output goes to the sound device. Keyboard and controller input go
 to the game's HID state (`hid.rs`), with the bindings from the launcher's Controls page.
 
-## 5. Launcher
+## 5. Launcher integration
 
-When the runtime can play, the launcher's **Play** starts it instead of fefw-recomp, and **Build the game** builds
-`ew_native.dll` and the shader cache. Saves and mods carry over as they are (the save layout and the mods folder are shared).
-Cheats need one change: fefw-recomp maps the game's memory at the game's own addresses, while EmblemWeave's runtime holds it in
-one host block, so the runtime will publish where that block is and the cheat engine will add the offset.
+There is no launcher switch to this research path. **Play** and **Build the game** continue to target fefw-recomp; the
+`ew-run`/`ew-native` binaries are built and tested separately, and are not shipped as the game. Saves and mods remain in the
+layout fefw-recomp uses, and any future experiment here must keep that layout and the launcher's existing workflows intact.
+
+The runtime already maps the game's memory in one host block rather than at the game's own addresses. That is a difference a
+cheat engine would have to account for, and one reason this path stays research until it can be proven without changing what
+EmblemWeave is.

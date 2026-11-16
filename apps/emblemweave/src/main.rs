@@ -17,6 +17,7 @@ mod exe_icon;
 mod gamedata;
 mod jobs;
 mod logo;
+mod memory;
 mod pages;
 mod cheats;
 mod platform;
@@ -25,6 +26,7 @@ mod crash;
 mod deps;
 mod mods;
 mod pad;
+mod patches;
 mod perf;
 mod report;
 mod snapshots;
@@ -101,6 +103,7 @@ impl ToastAction {
 pub enum Confirm {
     ResetBindings,
     SafeGraphics,
+    RestoreGraphics,
     CancelJob(JobKind),
 }
 
@@ -856,6 +859,16 @@ impl App {
             let (title, body, action) = match confirm {
                 Confirm::ResetBindings => ("Reset controls?", "Every binding returns to its default. This cannot be undone.", "Reset"),
                 Confirm::SafeGraphics => ("Reset graphics?", "Resolution, window mode, upscaling, sharpening and shader settings return to their defaults. Saves, mods and game files are not touched. This is the first thing to try for a black screen.", "Reset graphics"),
+                Confirm::RestoreGraphics if self.config.low_memory_drifted() => (
+                    "Restore the settings from before Low Memory?",
+                    "Graphics settings changed after Low Memory was applied. Restoring the saved snapshot replaces those changes too. Audio, controls, saves and mods are untouched.",
+                    "Restore anyway",
+                ),
+                Confirm::RestoreGraphics => (
+                    "Restore the settings from before Low Memory?",
+                    "Every graphics setting goes back to the value it had before the first Low Memory application. Audio, controls, saves and mods are untouched.",
+                    "Restore",
+                ),
                 Confirm::CancelJob(k) => ("Stop this task?", k.title(), "Stop"),
             };
             let mut decision = None;
@@ -886,6 +899,13 @@ impl App {
                             self.config.graphics = crate::config::Graphics::default();
                             self.config.audio = crate::config::Audio::default();
                             self.notify("Graphics and audio settings reset to safe defaults. The next Play writes them.", Tone::Ok);
+                        }
+                        Some(Confirm::RestoreGraphics) => {
+                            if self.config.restore_low_memory() {
+                                self.notify("Graphics settings restored from before Low Memory. The next Play writes them.", Tone::Ok);
+                            } else {
+                                self.notify("There is no saved pre-Low Memory graphics snapshot to restore.", Tone::Warn);
+                            }
                         }
                         Some(Confirm::CancelJob(kind)) => {
                             if let Some(j) = self.jobs.iter().find(|j| j.kind == kind && !j.finished()) {
@@ -928,6 +948,13 @@ impl App {
     /// this window's frame, save it as PNG, and close. The image comes from
     /// the GPU frame itself, so other windows can never appear in it.
     fn take_screenshot(&mut self, ctx: &egui::Context) {
+        // A capture is documentation, not a moment in use: a five-second toast
+        // that happens to be up hides the controls it is drawn over. Clear the
+        // transient messages well before the frame is requested; persistent
+        // cards and warnings stay in the picture.
+        if self.screenshot.as_ref().is_some_and(|(_, frames)| *frames == 80) {
+            self.toasts.clear();
+        }
         let Some((path, frames)) = &mut self.screenshot else { return };
         *frames += 1;
         ctx.request_repaint();

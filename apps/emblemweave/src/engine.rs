@@ -1326,11 +1326,38 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         ctx.end(0, StageStatus::Done, "tools\\.venv ready (pip)");
     }
 
-    // 2. ExeFS.
+    // 2. ExeFS, including the active IPS/IPS32/pchtxt patches. They are
+    // applied to the launcher-owned uncompressed copy here, before the lifter
+    // reads it; the user's dump and the built Windows exe are never touched.
     ctx.start(1);
     let ex = exefs.display().to_string();
     run(ctx, &root, &py, &["-I", "tools\\nso\\prepare_exefs.py", "--exefs", &ex])?;
-    ctx.end(1, StageStatus::Done, "game\\dump\\exefs ready");
+    let mods_dir = run_dir().map(|d| d.join("mods")).unwrap_or_default();
+    let main = exefs.join("main");
+    let patch_plan = crate::patches::inspect(
+        &mods_dir,
+        crate::patches::main_build_id(&main),
+        std::fs::metadata(&main).ok().map(|m| m.len()),
+    );
+    if !patch_plan.can_build() {
+        return Err(format!(
+            "the installed ExeFS patches cannot be applied, so the build stopped before lifting any code:\n{}",
+            patch_plan.refusal()
+        ));
+    }
+    let patch_applied = crate::patches::apply(&patch_plan, &main)?;
+    if patch_applied.count > 0 {
+        ctx.log(format!(
+            "exefs patches: {} active file(s), {} record(s), main {} -> {}",
+            patch_plan.patches.iter().filter(|p| p.error.is_none() && !p.records.is_empty()).count(),
+            patch_applied.count,
+            &patch_applied.original_sha256[..12],
+            &patch_applied.patched_sha256[..12]
+        ));
+    } else {
+        ctx.log("exefs patches: none active");
+    }
+    ctx.end(1, StageStatus::Done, format!("game\\dump\\exefs ready{}", if patch_applied.count > 0 { format!(" + {} patch record(s)", patch_applied.count) } else { String::new() }));
 
     // 3. Game code: ninja rebuilds only what changed.
     ctx.start(2);
@@ -1378,7 +1405,6 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     }
     // Hook sites code mods bring (sites.rs): main is lifted with main.sites plus theirs. The list is only rewritten when it
     // changes, and with no such mods it is main.sites itself, so ninja lifts main again only when the sites really change.
-    let mods_dir = run_dir().map(|d| d.join("mods")).unwrap_or_default();
     let (site_list, mod_sites) = crate::sites::prepare(&root, &mods_dir)?;
     if mod_sites.is_empty() {
         ctx.log("hook sites: main.sites (no installed mod adds any)");
@@ -1667,6 +1693,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     );
     std::fs::write(dir.join("fefw.ini"), ini).map_err(|e| format!("writing fefw.ini: {e}"))?;
     ctx.end(7, StageStatus::Done, format!("{}", dir.join("fefw.ini").display()));
+    // The executable is current only after the whole build succeeded. Recording
+    // this identity here is what lets Play tell a fresh build from a stale one.
+    if let Err(e) = crate::patches::record(&patch_plan, &patch_applied) {
+        ctx.log(format!("the patch state could not be recorded: {e}; Play will ask for a rebuild"));
+    }
     Ok(JobResult::Engine(dir))
 }
 
@@ -2406,6 +2437,25 @@ fn output_label(mode: &str) -> Option<&'static str> {
     })
 }
 
+/// The page's name for an aspect the engine wrote. The engine accepts a `W:H`
+/// ratio or a number from 1.0 to 5.0; both arrive here. Standard ratios become
+/// the label the combo lists, and any other number keeps its value in a form a
+/// person can read instead of the engine's full float expansion.
+pub fn aspect_label(value: &str) -> String {
+    let t = value.trim();
+    if let Ok(n) = t.parse::<f32>() {
+        for (label, ratio) in [("16:9", 16.0 / 9.0), ("16:10", 16.0 / 10.0), ("21:9", 21.0 / 9.0), ("32:9", 32.0 / 9.0)] {
+            if (n - ratio).abs() < 0.001 {
+                return label.to_string();
+            }
+        }
+        if (1.0..=5.0).contains(&n) {
+            return format!("{n:.3}:1");
+        }
+    }
+    t.to_string()
+}
+
 fn window_mode_label(mode: &str) -> Option<&'static str> {
     Some(match mode {
         "windowed" => "Windowed",
@@ -2463,9 +2513,10 @@ fn adopt_from(
     }
     if let Some(v) = take_back(desired, applied, on_file, "display.aspect") {
         // "auto" is the engine's own default; leaving it out keeps the page's
-        // list of ratios intact.
+        // list of ratios intact. The engine resolves auto to a number such as
+        // 1.7777777777777777, so a numeric value is shown as the ratio it is.
         if !v.is_empty() && !v.eq_ignore_ascii_case("auto") {
-            changed |= put(&mut g.aspect, v.to_string());
+            changed |= put(&mut g.aspect, aspect_label(v));
         }
     }
     if let Some(v) = take_back(desired, applied, on_file, "upscale.quality") {
@@ -2786,6 +2837,24 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     }
     if packed_package_without_overlay().is_some() {
         return Err("this package keeps some of its files packed: press Play again and the launcher writes them into your work folder first".into());
+    }
+    // ExeFS patches are compiled into the built executable. If the active set
+    // has changed since the last successful build, Play must not start a game
+    // that silently lacks them (or still contains a removed one).
+    let main = root.join("game").join("dump").join("exefs").join("main");
+    let patch_plan = crate::patches::inspect(
+        &dir.join("mods"),
+        crate::patches::main_build_id(&main),
+        std::fs::metadata(&main).ok().map(|m| m.len()),
+    );
+    if !patch_plan.can_build() {
+        return Err(format!(
+            "the installed ExeFS patches cannot be applied: {}",
+            patch_plan.refusal()
+        ));
+    }
+    if crate::patches::needs_build(&patch_plan) {
+        return Err("the active ExeFS patches have changed since the last build: press Build the game, then Play again".into());
     }
     // The haptics backend is loaded from beside `fefw.exe` and is not part of a game folder that was built by an earlier
     // release, so it is put there on the way in as well as after a build: updating the launcher should not quietly drop
@@ -3555,6 +3624,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         file.insert("display.window_mode".into(), "exclusive".into());
         file.insert("display.vsync".into(), "0".into());
         file.insert("display.fps_limit".into(), "120".into());
+        file.insert("display.aspect".into(), "1.7777777777777777".into());
         file.insert("audio.volume".into(), "0.35".into());
         assert!(
             adopt_from(&mut adopt_g, &mut adopt_au, &desired, &desired, &file),
@@ -3565,6 +3635,11 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(adopt_g.display_mode, "Exclusive fullscreen");
         assert!(!adopt_g.vsync);
         assert_eq!(adopt_g.frame_limit, 120);
+        assert_eq!(adopt_g.aspect, "16:9", "the engine's resolved float is shown as the ratio it is");
+        assert_eq!(aspect_label("1.600"), "16:10");
+        assert_eq!(aspect_label("2.3333333"), "21:9");
+        assert_eq!(aspect_label("1.5"), "1.500:1");
+        assert_eq!(aspect_label("auto"), "auto");
         assert!((adopt_au.master - 0.35).abs() < 0.001);
         let second = desired_values(&adopt_g, &adopt_au);
         assert!(!adopt_from(&mut adopt_g, &mut adopt_au, &second, &second, &file), "nothing left to take");

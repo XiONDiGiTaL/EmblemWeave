@@ -6,8 +6,9 @@
 //! how a mod is switched off. A mod's `exefs/` may hold code mods: DLLs the
 //! engine loads at start (`runtime/include/nxrt/mod_api.h`) and the hook sites
 //! they need (`*.sites`, built in by Build the game; see `sites.rs`).
-//! `exefs/` patches (`.ips`, `.pchtxt`) cannot apply, because the game's code
-//! is compiled ahead of time; an import keeps them but says so.
+//! `exefs/` patches (`.ips`, `.ips32`, `.pchtxt`) are applied to the launcher's
+//! uncompressed copy of `main` before lifting and compiling; see `patches.rs`.
+//! They are never applied to the user's dump or to the built Windows exe.
 //!
 //! Archives are unpacked with Windows' own `tar.exe` (libarchive), which reads
 //! zip, 7z and rar. GameBanana is read through its public API with Windows'
@@ -41,7 +42,7 @@ pub struct Mod {
     pub has_exefs: bool,
     /// `exefs/` holds a code mod: a `.dll` or `.sites`.
     pub has_code: bool,
-    /// `exefs/` holds `.ips` / `.pchtxt` patches, which cannot apply.
+    /// `exefs/` holds `.ips` / `.ips32` / `.pchtxt` patches.
     pub has_patches: bool,
 }
 
@@ -61,6 +62,15 @@ fn exefs_has(dir: &Path, exts: &[&str]) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// Patch files may sit in a subfolder of `exefs/`; `patches::inspect` walks
+/// that tree, so installation and the Mods page must see the same files.
+fn exefs_has_patches(dir: &Path) -> bool {
+    exefs_has(dir, &["ips", "ips32", "pchtxt"])
+        || std::fs::read_dir(dir)
+            .map(|d| d.flatten().filter(|e| e.path().is_dir()).any(|e| exefs_has_patches(&e.path())))
+            .unwrap_or(false)
 }
 
 /// An `exefs` folder that holds a code mod for this engine (a DLL or hook sites).
@@ -110,7 +120,7 @@ pub fn list(mods: &Path) -> Vec<Mod> {
         find_named(&path, "romfs", 3, &mut r);
         find_named(&path, "exefs", 3, &mut x);
         let has_code = x.iter().any(|d| is_code_exefs(d));
-        let has_patches = x.iter().any(|d| exefs_has(d, &["ips", "pchtxt"]));
+        let has_patches = x.iter().any(|d| exefs_has_patches(d));
         out.push(Mod {
             files: crate::saves::summary(&path).0,
             path,
@@ -268,8 +278,11 @@ const ROMFS_TOP: &[&str] = &["Animation", "Character", "Effect", "Font", "GameDa
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
     pub mods: Vec<String>,
+    /// A mod with only hook sites or a DLL and no RomFS.
     pub exefs_only: bool,
-    /// A mod brought hook sites (`exefs/*.sites`): the game needs building again before its code works.
+    /// A mod with only ExeFS patches and no RomFS or code.
+    pub patch_only: bool,
+    /// A mod brought hook sites or patches: the game needs building again before they take effect.
     pub needs_build: bool,
 }
 
@@ -304,18 +317,34 @@ pub fn install_from(staged: &Path, mods: &Path, info: &Info) -> Result<Installed
     find_named(staged, "exefs", 4, &mut exefs);
     exefs.sort();
     let code: Vec<PathBuf> = exefs.iter().filter(|e| is_code_exefs(e)).cloned().collect();
-    if romfs.is_empty() && code.is_empty() {
+    let patches: Vec<PathBuf> = exefs.iter().filter(|e| exefs_has_patches(e)).cloned().collect();
+    let content: Vec<PathBuf> = exefs
+        .iter()
+        .filter(|e| is_code_exefs(e) || exefs_has_patches(e))
+        .cloned()
+        .collect();
+    if romfs.is_empty() && content.is_empty() {
         if !exefs.is_empty() {
-            return Ok(Installed { mods: Vec::new(), exefs_only: true, needs_build: false });
+            return Ok(Installed { mods: Vec::new(), exefs_only: true, patch_only: false, needs_build: false });
         }
-        return Err("no romfs folder or game files were found in it".into());
+        return Err("no romfs folder, patches or game files were found in it".into());
     }
-    // What each mod is made of: its romfs and/or a code exefs from the same folder.
-    let units: Vec<(Option<PathBuf>, Option<PathBuf>)> = if romfs.is_empty() {
-        code.iter().map(|x| (None, Some(x.clone()))).collect()
+    let patch_only = romfs.is_empty() && code.is_empty() && !patches.is_empty();
+    let exefs_only = romfs.is_empty() && patches.is_empty() && !code.is_empty();
+    // What each mod is made of: its romfs and/or an exefs from the same folder.
+    let mut units: Vec<(Option<PathBuf>, Option<PathBuf>)> = if romfs.is_empty() {
+        content.iter().map(|x| (None, Some(x.clone()))).collect()
     } else {
-        romfs.iter().map(|r| (Some(r.clone()), code.iter().find(|x| x.parent() == r.parent()).cloned())).collect()
+        romfs.iter().map(|r| (Some(r.clone()), content.iter().find(|x| x.parent() == r.parent()).cloned())).collect()
     };
+    if !romfs.is_empty() {
+        for x in &content {
+            let paired = romfs.iter().any(|r| r.parent() == x.parent());
+            if !paired {
+                units.push((None, Some(x.clone())));
+            }
+        }
+    }
     std::fs::create_dir_all(mods).map_err(|e| e.to_string())?;
     let base = clean_name(&info.title);
     let mut names = Vec::new();
@@ -339,14 +368,14 @@ pub fn install_from(staged: &Path, mods: &Path, info: &Info) -> Result<Installed
         }
         if let Some(x) = x {
             copy_tree(x, &folder.join("exefs"))?;
-            needs_build |= exefs_has(x, &["sites"]);
+            needs_build |= exefs_has(x, &["sites"]) || exefs_has_patches(x);
         }
         let mut info = info.clone();
         info.title = name.clone();
         let _ = std::fs::write(folder.join("emblemweave.json"), serde_json::to_string_pretty(&info).unwrap_or_default());
         names.push(name);
     }
-    Ok(Installed { mods: names, exefs_only: false, needs_build })
+    Ok(Installed { mods: names, exefs_only, patch_only, needs_build })
 }
 
 fn staging() -> Result<PathBuf, String> {
@@ -528,7 +557,11 @@ mod tests {
         // exefs only
         let c = root.join("c");
         write(&c.join("60 FPS/exefs/fps.pchtxt"));
-        assert!(install_from(&c, &mods, &Info { title: "fps".into(), ..Info::default() }).unwrap().exefs_only);
+        write(&c.join("60 FPS/exefs/extra/nested.ips"));
+        let patch = install_from(&c, &mods, &Info { title: "fps".into(), ..Info::default() }).unwrap();
+        assert!(patch.patch_only && patch.needs_build && !patch.exefs_only, "{patch:?}");
+        assert!(mods.join("fps/exefs/fps.pchtxt").is_file());
+        assert!(mods.join("fps/exefs/extra/nested.ips").is_file(), "a patch in an exefs subfolder is installed too");
         // variants: second one off
         let d = root.join("d");
         write(&d.join("Light/romfs/Msg/a"));

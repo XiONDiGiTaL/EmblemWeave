@@ -22,7 +22,7 @@ takes the chosen scheme's accent, glow and rim.
 | **Overview** | **Play** starts the game; **Build the game** compiles it from your dump. Load a save profile and jump to the save editor, mods and cheats. Also readiness, the boot test of the Rust runtime, next steps, and recent activity. |
 | **Game Setup** | Choose and validate your game data (a `.nup`, `.nx`, `.nsp` package, a plaintext `.xci` game card or a folder) and set the language and profile. |
 | **Saves** | Save profiles: keep the current save under a name and load any profile later (the save it replaces goes to the backups folder). Lists the slots in the current save, with an editor for gold, renown and each unit's level, experience, max HP, stat gains, weapon masteries, items and spells; names come from your own game data. Imports saves from yuzu, suyu, sudachi, citron, eden and torzu, from any folder, and exports to the emulator layout. |
-| **Mods** | Installed RomFS mods, switched on and off with a toggle. Installs from a .zip, .7z or .rar archive, a folder, a GameBanana link, or the game's GameBanana list browsed in the launcher. Code mods made for the engine (a DLL in the mod's `exefs`, `engine/fefw-recomp/runtime/include/nxrt/mod_api.h`) are installed and load when the game starts; one that brings hook sites (`exefs/*.sites`) asks for Build the game once after it is installed, updated or removed. Mods that only patch the game's code with `.ips` / `.pchtxt` are recognised and not installed, since those patches cannot apply to a recompiled game. |
+| **Mods** | Installed RomFS mods, switched on and off with a toggle. Installs from a .zip, .7z or .rar archive, a folder, a GameBanana link, or the game's GameBanana list browsed in the launcher. Code mods made for the engine (a DLL in the mod's `exefs`, `engine/fefw-recomp/runtime/include/nxrt/mod_api.h`) are installed and load when the game starts; one that brings hook sites (`exefs/*.sites`) asks for Build the game once after it is installed, updated or removed. Patch-only mods with `.ips`, `.ips32` or IPSwitch `.pchtxt` files are installed and applied to the launcher's uncompressed copy of `main` before lifting, so they also need a build; the [ExeFS code patches](PATCHES.md) page has the naming, syntax, conflict and rebuild rules. This patch support is in the current source tree but is **not** in the released 0.1.36 build. |
 | **Cheats** | Atmosphere cheat codes, pasted or imported as `.txt`, each switched on and off and applied about 60 times a second while the game runs (data writes, pointer chains, conditionals, loops and controller-button tests work; instruction patches do not). Cheat Engine tables (`.CT`): `aobscan`/`aobscanregion` entries search the game's memory, and the values below them show live, can be typed in, and can be frozen. |
 | **In-game menu** | While the game runs, F10 (or Back + RB on a controller) opens EmblemWeave's menu on top of it: pause and resume, a screenshot of the game window (saved to Pictures\EmblemWeave), restart at the title screen, stop and return to the launcher, quick cheats, cheat codes and tables, display settings (window mode, picture size, frame rate counter) and the controls in use. |
 | **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). The same switches are on the launcher's Cheats page and the in-game menu's Quick tab (F10); search again after a map loads. |
@@ -43,6 +43,29 @@ The game runs from the launcher's `play` folder (`data\play` in a portable insta
 where the launcher writes its `fefw.ini`. RomFS mods go in that folder's `mods` folder, one folder per mod holding
 `romfs/` (the layout emulators use). Every engine option is described in
 `engine/fefw-recomp/runtime/docs/CONFIG.md`.
+
+## ExeFS code patches
+
+Code patches are installed like any other mod, as `mods/<mod name>/exefs/*.ips`,
+`*.ips32` or `*.pchtxt`. They are **not** applied to your game dump and they are
+not applied by the engine at run time. After **Build the game** has copied and
+uncompressed `main` into the launcher's `game/dump/exefs`, the launcher validates
+the active patch files, applies them to that copy, and only then starts the
+lifter. The built `fefw.exe` therefore contains the patched code. A change to the
+active set makes Play unavailable until the game is built again.
+
+Only `main` is supported. The other ExeFS modules are refused because the build
+pipeline does not write them uncompressed. An `.ips`/`.ips32` file must be named
+with the 40-hex build ID of `main` (a 32-hex prefix is also accepted); a generic
+`main.ips` is refused because it cannot be tied to a build. A `.pchtxt` must
+start with `@nsobid-<build id>` and may use `@enabled` / `@disabled`, `@stop`,
+comments and `@flag offset_shift`. Full syntax, the conflict rules and the
+troubleshooting table are in [docs/PATCHES.md](PATCHES.md).
+
+The game must be rebuilt after installing, editing, enabling, disabling or
+removing a patch. The Mods page shows the patch state, the build reason and any
+conflict before Play. This support is implemented in the current source tree but
+is not released in 0.1.36; the game version 1.1.1 is not verified.
 
 ## Display settings
 

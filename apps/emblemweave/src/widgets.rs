@@ -128,7 +128,9 @@ pub fn section_drawer(
     let face = ui.painter().add(egui::Shape::Noop);
     let r = card_frame(p, Margin::symmetric(20, 16)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+        // 34 px is a full-height header, not just the text: the whole row opens
+        // the drawer, which matters on a handheld where a thumb is the pointer.
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked() {
             open = !open;

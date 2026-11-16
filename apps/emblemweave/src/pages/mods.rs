@@ -41,12 +41,22 @@ fn take<T>(slot: &Option<Slot<T>>) -> Option<Result<T, String>> {
 
 fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone) {
     match r {
-        Ok(i) if i.exefs_only => (
-            format!("{what} only patches the game's code (exefs), which cannot apply to a recompiled game. Nothing was installed."),
+        Ok(i) if i.mods.is_empty() => (
+            format!("{what} had an exefs folder, but no DLL, hook sites or supported patch file was found in it. Nothing was installed."),
+            Tone::Warn,
+        ),
+        Ok(i) if i.needs_build && i.patch_only => (
+            format!(
+                "Installed {}. It is an ExeFS patch mod: press Build the game before playing. The patch is applied to the launcher's uncompressed copy of main before recompilation, never to your game dump.",
+                i.mods.join(", ")
+            ),
             Tone::Warn,
         ),
         Ok(i) if i.needs_build => (
-            format!("Installed {}. It adds hook sites to the game's code: press Build the game before playing, or its code mod cannot work.", i.mods.join(", ")),
+            format!(
+                "Installed {}. It adds hook sites or ExeFS patches: press Build the game before playing, or its code change cannot take effect.",
+                i.mods.join(", ")
+            ),
             Tone::Warn,
         ),
         Ok(i) if i.mods.len() > 1 => (format!("Installed {what} as {} variants; only the first is switched on: {}", i.mods.len(), i.mods.join(", ")), Tone::Ok),
@@ -63,7 +73,7 @@ pub fn load_gamebanana(app: &mut App) {
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Mods", "RomFS mods laid over the game's files when it starts, from an archive, a folder or GameBanana.");
+    widgets::page_header(ui, &p, "Mods", "RomFS mods laid over the game's files when it starts, and ExeFS patches applied before the game is rebuilt, from an archive, a folder or GameBanana.");
     let Some(dir) = mods::dir() else { return };
     let mut message: Option<(String, Tone)> = None;
     let busy = app.mods_ui.installing.is_some() || app.mods_ui.fetching.is_some() || app.mods_ui.listing.is_some();
@@ -120,10 +130,57 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         let list = mods::list(&dir);
         if list.is_empty() {
-            ui.label(RichText::new("No mods installed. A mod is a folder here with a romfs/ folder inside it, or install one from an archive below.").color(p.muted));
+            ui.label(RichText::new("No mods installed. A mod is a folder here with a romfs/ folder, an exefs/ code mod or an ExeFS patch, or install one from an archive below.").color(p.muted));
         }
         // Code mods whose hook sites the built game lacks (installed or updated since the last build).
         let engine = crate::engine::root();
+        let main = engine.as_deref().map(|r| r.join("game").join("dump").join("exefs").join("main"));
+        let main_build = main.as_deref().and_then(|m| crate::patches::main_build_id(m));
+        let main_size = main.as_deref().and_then(|m| std::fs::metadata(m).ok()).map(|m| m.len());
+        let plan = crate::patches::inspect(&dir, main_build, main_size);
+        let patch_errors = plan.errors();
+        if !patch_errors.is_empty() {
+            let detail = patch_errors
+                .iter()
+                .map(|p| format!("{}: {}", p.label(), p.error.as_deref().unwrap_or("invalid patch")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            widgets::status_line(ui, &p, Tone::Bad, "An ExeFS patch cannot be used", &detail);
+            ui.add_space(6.0);
+        }
+        let differing: Vec<&crate::patches::Conflict> = plan.conflicts.iter().filter(|c| c.differing).collect();
+        if !differing.is_empty() {
+            let detail = differing
+                .iter()
+                .map(|c| format!("{} and {} write 0x{:X}-0x{:X} differently", c.left, c.right, c.start, c.end))
+                .collect::<Vec<_>>()
+                .join("\n");
+            widgets::status_line(ui, &p, Tone::Bad, "Two ExeFS patches disagree", &detail);
+            ui.add_space(6.0);
+        }
+        let duplicates: Vec<&crate::patches::Conflict> = plan.conflicts.iter().filter(|c| !c.differing).collect();
+        if !duplicates.is_empty() {
+            let detail = duplicates
+                .iter()
+                .map(|c| format!("{} and {} write the same bytes at 0x{:X}-0x{:X}", c.left, c.right, c.start, c.end))
+                .collect::<Vec<_>>()
+                .join("\n");
+            widgets::status_line(ui, &p, Tone::Warn, "Two ExeFS patches make the same write", &detail);
+            ui.add_space(6.0);
+        }
+        let patch_stale = crate::patches::needs_build(&plan);
+        if patch_stale && plan.can_build() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("ExeFS patches changed since the last build: build the game again, or Play stays unavailable.")
+                        .size(12.5)
+                        .color(p.warn),
+                );
+                if widgets::button(ui, &p, "Build the game now", !app.busy()).clicked() {
+                    app.start(crate::jobs::JobKind::Engine);
+                }
+            });
+        }
         // A problem in a .sites file stops the build: say which file and line before it is pressed.
         if let Some(e) = engine.as_deref().filter(|_| list.iter().any(|m| m.has_code)).and_then(|r| crate::sites::problem(r, &dir)) {
             ui.label(RichText::new(format!("A code mod's hook sites cannot be used: {e}")).size(12.5).color(p.bad));
@@ -166,9 +223,37 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         bits.push(if missing { "code mod: needs Build the game".into() } else { "code mod".into() });
                     }
                     if m.has_patches {
-                        bits.push("its .ips / .pchtxt patches cannot apply".into());
+                        let own = plan.for_mod(&m.name);
+                        let formats: Vec<&str> = own.iter().map(|x| x.format.label()).collect();
+                        let bad = own.iter().filter(|x| x.error.is_some()).count();
+                        let state = if !own.is_empty() && bad > 0 {
+                            "check failed"
+                        } else if own.iter().any(|x| !x.records.is_empty()) && patch_stale {
+                            "needs Build"
+                        } else {
+                            "matches the build"
+                        };
+                        bits.push(format!("ExeFS patches: {} · {state}", formats.join("/")));
+                        let detail = if own.is_empty() {
+                            "The patch files are not in an exefs folder the launcher reads.".to_string()
+                        } else {
+                            own.iter()
+                                .map(|x| {
+                                    format!(
+                                        "{}  →  {}  ·  build {}\n{}",
+                                        x.file,
+                                        x.module,
+                                        x.build_id.as_deref().unwrap_or("not declared"),
+                                        x.error.clone().unwrap_or_else(|| "valid".into())
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        };
+                        ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted)).on_hover_text(detail);
+                    } else {
+                        ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted));
                     }
-                    ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::button(ui, &p, "Remove", true).on_hover_text("Moves the mod to the mods-removed folder").clicked() {
@@ -188,7 +273,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(4.0);
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("Changes apply the next time the game starts. When two mods change the same file, the one later in the list wins. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust.").size(12.5).color(p.muted));
+        ui.label(RichText::new("RomFS changes apply the next time the game starts; when two mods change the same file, the one later in the list wins. ExeFS patches are applied before recompilation and require Build the game. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust.").size(12.5).color(p.muted));
     });
 
     // The rest of the page reads the folder once, after the toggles above.
@@ -411,7 +496,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.mods_ui.listing = Some(spawn(move || mods::gb_list(n)));
         }
         ui.add_space(4.0);
-        ui.label(RichText::new("Mods are made by their authors and installed as they are; code mods made for this engine (a DLL in exefs) load at start, but .ips / .pchtxt patches cannot apply.").size(12.5).color(p.muted));
+        ui.label(RichText::new("Mods are made by their authors and installed as they are. Code mods made for this engine (a DLL in exefs) load at start; ExeFS .ips, .ips32 and .pchtxt patches are applied to the launcher's uncompressed main before the game is rebuilt, never to your game dump.").size(12.5).color(p.muted));
     });
 
     if let Some((text, tone)) = message {

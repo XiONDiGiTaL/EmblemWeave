@@ -57,7 +57,7 @@ impl Default for Runtime {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Graphics {
     pub resolution: String,
@@ -226,6 +226,20 @@ pub struct ModProfile {
     pub enabled: Vec<String>,
 }
 
+/// The Low Memory profile's state: what the user had before it was applied, and
+/// what it set, so the previous settings can be restored without touching any
+/// section the preset does not own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GraphicsPreset {
+    pub low_memory: bool,
+    /// The recommendation was shown and the user said not now; it stays quiet
+    /// until it is applied or the card is opened again.
+    pub dismissed: bool,
+    pub previous: Option<Graphics>,
+    pub applied: Option<Graphics>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -237,6 +251,7 @@ pub struct Config {
     pub input: Input,
     pub theme: Scheme,
     pub updates: Updates,
+    pub graphics_preset: GraphicsPreset,
     pub hud: Hud,
     pub profiles: Vec<ModProfile>,
     /// The profile last applied, for the Mods page.
@@ -293,6 +308,43 @@ impl Config {
     /// Writable directory for decoded modules and lift output.
     pub fn work_dir() -> Option<PathBuf> {
         Self::dir().map(|d| d.join("work"))
+    }
+
+    /// Apply the Low Memory graphics profile, keeping the settings it replaces.
+    /// Returns the settings that actually changed, for the page to name. The
+    /// first application snapshots every graphics setting; later applications
+    /// keep the original snapshot, so one press restores the player's setup.
+    pub fn apply_low_memory(&mut self) -> Vec<String> {
+        if !self.graphics_preset.low_memory {
+            self.graphics_preset.previous = Some(self.graphics.clone());
+        }
+        let next = crate::memory::low_memory(&self.graphics);
+        let changes = crate::memory::changes(&self.graphics, &next);
+        self.graphics = next.clone();
+        self.graphics_preset.applied = Some(next);
+        self.graphics_preset.low_memory = true;
+        self.graphics_preset.dismissed = false;
+        changes
+    }
+
+    /// Keep the recommendation quiet for this profile. It changes no setting.
+    pub fn dismiss_low_memory(&mut self) {
+        self.graphics_preset.dismissed = true;
+    }
+
+    /// Put back every graphics setting from before the first Low Memory apply.
+    pub fn restore_low_memory(&mut self) -> bool {
+        let Some(previous) = self.graphics_preset.previous.take() else { return false };
+        self.graphics = previous;
+        self.graphics_preset.low_memory = false;
+        self.graphics_preset.applied = None;
+        true
+    }
+
+    /// Whether a setting changed after the profile was applied, which a restore
+    /// would overwrite. The page asks before it does that.
+    pub fn low_memory_drifted(&self) -> bool {
+        self.graphics_preset.low_memory && self.graphics_preset.applied.as_ref().is_some_and(|a| *a != self.graphics)
     }
 }
 

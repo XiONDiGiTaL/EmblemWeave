@@ -187,7 +187,7 @@ page lists the DLC it found.
 RomFS mods go in the `mods\` folder next to the launcher (**Play** > **Open mods folder**), in the layout emulators use:
 `mods\<mod name>\romfs\...`. Files in a mod replace the game's files at the same path. If two mods change the same file, the mod
 whose name sorts last wins, so you can name them `01-...` and `02-...`. Rename a mod to start with `-` or `_` to turn it off. Code
-mods (exefs `.ips` / `.pchtxt` patches) do not work, because the game code is compiled ahead of time.
+mods (a DLL and its `.sites` file) are loaded by the runtime. The engine does not apply `exefs/` `.ips` / `.pchtxt` patches at run time, because the game code is compiled ahead of time; EmblemWeave's launcher can instead apply supported patches to its uncompressed copy of `main` before the lift. That launcher support is not in the released 0.1.36 build.
 
 ### Updating to a new release
 
