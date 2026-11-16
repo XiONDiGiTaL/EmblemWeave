@@ -420,11 +420,16 @@ fn missing_program(reason: &str) -> Option<String> {
 /// extracted folder usable when its build.ninja is already trapped in that loop.
 fn needs_cache_reset(error: &str) -> bool {
     let lower = error.to_lowercase();
-    lower.contains("cache")
-        || error.contains("CMake Generate step failed")
-        || error.contains("regenerated")
-        || lower.contains("still dirty")
-        || lower.contains("manifest 'build.ninja'")
+    [
+        "cmakecache.txt",
+        "cache was made by another compiler",
+        "cmake generate step failed",
+        "build files cannot be regenerated",
+        "still dirty after",
+        "manifest 'build.ninja'",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
@@ -2956,8 +2961,12 @@ mod tests {
         assert!(needs_cache_reset(log));
         assert!(needs_cache_reset("CMake Generate step failed.  Build files cannot be regenerated correctly."));
         assert!(needs_cache_reset("the cache was made by another compiler"));
+        assert!(needs_cache_reset("CMake Error: The current CMakeCache.txt directory is different"));
         assert!(!needs_cache_reset("ninja: build stopped: subcommand failed."));
         assert!(!needs_cache_reset("'bit' file not found"));
+        // A shader or texture cache message is not a configure cache that needs deleting.
+        assert!(!needs_cache_reset("nvn: shader cache: 12088 records"));
+        assert!(!needs_cache_reset("nvn.texdata: BC7 data from cache C:/cache/27/x.bc7"));
     }
 
     #[test]
