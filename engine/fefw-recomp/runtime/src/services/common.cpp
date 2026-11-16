@@ -417,12 +417,20 @@ std::vector<RomfsMod> installed_mods() {
     std::vector<RomfsMod> out;
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::u8path(mods_dir());
-    if (mods_dir().empty() || !std::filesystem::is_directory(root, ec)) return out;
+    if (mods_dir().empty()) return out;
+    if (!std::filesystem::is_directory(root, ec)) {
+        // Name the folder even when it is absent: "no mods loaded" in a report should say where the engine looked (#39).
+        const std::filesystem::path abs = std::filesystem::absolute(root, ec);
+        NXLOG_W("mods", "mods folder %s does not exist", u8str(ec ? root : abs).c_str());
+        return out;
+    }
     try {
         find_mods(root, "", 0, out);
     } catch (const std::exception& e) {   // the iterators' increment throws on an I/O error despite ec; boot must not end over the mods folder
         NXLOG_W("mods", "reading %s stopped: %s", mods_dir().c_str(), e.what());
     }
+    const std::filesystem::path abs = std::filesystem::absolute(root, ec);
+    NXLOG_I("mods", "mods folder %s: %zu installed", u8str(ec ? root : abs).c_str(), out.size());
     std::sort(out.begin(), out.end(), [](const RomfsMod& a, const RomfsMod& b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; });
     return out;
 }

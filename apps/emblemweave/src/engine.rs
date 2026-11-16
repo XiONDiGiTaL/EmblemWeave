@@ -1033,6 +1033,10 @@ pub struct RunConfig {
     pub exefs: PathBuf,
     pub romfs: PathBuf,
     pub save_dir: PathBuf,
+    /// The launcher's mods folder, written as an absolute path. The engine accepts a relative `mods`, but then it is
+    /// resolved against whatever working directory the game was started from; a shortcut or a direct `fefw.exe` start
+    /// made the same mods invisible (#39). Play still starts in the run folder, so this only removes the ambiguity.
+    pub mods: PathBuf,
     /// Files the package cannot serve in place (its zstd entries), written out by the build; the engine lays this folder over the package.
     pub romfs_overlay: Option<PathBuf>,
 }
@@ -1045,7 +1049,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
     format!(
         "; Written by EmblemWeave. Every key is described in engine/fefw-recomp/runtime/docs/CONFIG.md.\n\
          [log]\npath = fefw.log\n\
-         [fs]\nexefs = {}\nromfs = {}\n{}\nsave_dir = {}\nmods = mods\n\
+         [fs]\nexefs = {}\nromfs = {}\n{}\nsave_dir = {}\nmods = {}\n\
          [nvn]\nshader_cache = {}\nbc7_cache = {}\n\
          [upscale]\nmode = off\n\
          [dlss]\nupscaler = auto\n\
@@ -1056,6 +1060,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
         fwd(&run.romfs),
         overlay.trim_end(),
         fwd(&run.save_dir),
+        fwd(&run.mods),
         fwd(&root.join("work").join("shaders").join("spirv")),
         fwd(&root.join("work").join("bc7_cache")),
         env!("CARGO_PKG_VERSION"),
@@ -1645,7 +1650,16 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let save_dir = Config::save_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     std::fs::create_dir_all(dir.join("mods")).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let ini = ini_text(&root, &RunConfig { exefs: root.join("game").join("dump").join("exefs"), romfs, save_dir, romfs_overlay: overlay });
+    let ini = ini_text(
+        &root,
+        &RunConfig {
+            exefs: root.join("game").join("dump").join("exefs"),
+            romfs,
+            save_dir,
+            mods: dir.join("mods"),
+            romfs_overlay: overlay,
+        },
+    );
     std::fs::write(dir.join("fefw.ini"), ini).map_err(|e| format!("writing fefw.ini: {e}"))?;
     ctx.end(7, StageStatus::Done, format!("{}", dir.join("fefw.ini").display()));
     Ok(JobResult::Engine(dir))
@@ -3064,12 +3078,18 @@ mod tests {
     fn the_ini_points_at_the_dump_saves_and_shaders() {
         let ini = ini_text(
             Path::new(r"C:\x\engine\fefw-recomp"),
-            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s"), romfs_overlay: None },
+            &RunConfig {
+                exefs: PathBuf::from(r"C:\e"),
+                romfs: PathBuf::from(r"E:\g.nup"),
+                save_dir: PathBuf::from(r"C:\s"),
+                mods: PathBuf::from(r"C:\play\mods"),
+                romfs_overlay: None,
+            },
         );
         assert!(ini.contains("romfs = E:/g.nup"));
         assert!(ini.contains("save_dir = C:/s"));
         assert!(ini.contains("shader_cache = C:/x/engine/fefw-recomp/work/shaders/spirv"));
-        assert!(ini.contains("mods = mods"));
+        assert!(ini.contains("mods = C:/play/mods"));
         // A cold start takes over 10 s to reach the first frame here, so the
         // watchdog's default would dump a freeze that never happened.
         assert!(ini.contains("watchdog_seconds = 30"));
@@ -3111,7 +3131,13 @@ mod tests {
     fn the_upscaler_replaces_its_own_key_and_keeps_the_rest() {
         let ini = ini_text(
             Path::new(r"C:\x\engine\fefw-recomp"),
-            &RunConfig { exefs: PathBuf::from(r"C:\e"), romfs: PathBuf::from(r"E:\g.nup"), save_dir: PathBuf::from(r"C:\s"), romfs_overlay: None },
+            &RunConfig {
+                exefs: PathBuf::from(r"C:\e"),
+                romfs: PathBuf::from(r"E:\g.nup"),
+                save_dir: PathBuf::from(r"C:\s"),
+                mods: PathBuf::from(r"C:\play\mods"),
+                romfs_overlay: None,
+            },
         );
         let patched = set_ini_key(&ini, "upscale", "mode", "fsr3");
         assert!(patched.contains("[upscale]\nmode = fsr3"));

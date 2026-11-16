@@ -108,9 +108,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     widgets::section(ui, &p, "Installed", |ui| {
+        // Name the exact folder the engine reads. A mod placed elsewhere, or a game started outside the launcher, is
+        // then visible as the reason it does not load (#39), instead of only "no mods installed".
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Folder: {}", dir.display())).size(12.5).color(p.muted));
+            if widgets::button(ui, &p, "Open folder", true).clicked() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+            }
+        });
+        ui.add_space(4.0);
         let list = mods::list(&dir);
         if list.is_empty() {
-            ui.label(RichText::new("No mods installed.").color(p.muted));
+            ui.label(RichText::new("No mods installed. A mod is a folder here with a romfs/ folder inside it, or install one from an archive below.").color(p.muted));
         }
         // Code mods whose hook sites the built game lacks (installed or updated since the last build).
         let engine = crate::engine::root();
