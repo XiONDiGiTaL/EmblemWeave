@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include <zstd.h>
+
 #include "../src/services/fs_romfs.h"
 #include "test_framework.h"
 
@@ -713,16 +715,25 @@ NXTEST(romfs_concurrent_reads_identical) {
     CHECK_EQ(bad.load(), 0);
 }
 
-// A minimal .nup (SPEC.md v1, written here by hand): one update package whose romfs holds /a.bin and /d/b.bin, stored raw. The image
-// built from the package must serve the same bytes as the files; a compressed file is refused.
+// A minimal .nup (SPEC.md v1, written here by hand): one update package whose romfs holds /a.bin and /d/b.bin, stored raw or
+// as one zstd frame each. The image built from the package must serve the same bytes as the files in both cases.
 namespace {
 std::vector<uint8_t> tiny_nup(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, uint8_t codec) {
     auto put = [](std::vector<uint8_t>& v, size_t o, uint64_t x, int n) { for (int i = 0; i < n; i++) v[o + i] = static_cast<uint8_t>(x >> (8 * i)); };
+    auto pack = [&](const std::vector<uint8_t>& src) {
+        if (!codec) return src;
+        std::vector<uint8_t> out(ZSTD_compressBound(src.size()));
+        const size_t n = ZSTD_compress(out.data(), out.size(), src.data(), src.size(), 3);
+        if (ZSTD_isError(n)) return std::vector<uint8_t>{};
+        out.resize(n);
+        return out;
+    };
+    const std::vector<uint8_t> sa = pack(a), sb = pack(b);
     const std::string pool = "romfsda.binb.bin";                  // romfs@0 d@5 a.bin@6 b.bin@11
     const size_t dirs = 3, files = 2, slots = 4;
     const size_t dir_at = 0x30 + 0x40, file_at = dir_at + 0x18 * dirs, child_at = file_at + 0x50 * files, pool_at = child_at + 4 * slots;
     const size_t toc_size = pool_at + pool.size(), blob = (0x80 + toc_size + 15) & ~size_t(15);
-    const size_t a_at = blob, b_at = (a_at + a.size() + 15) & ~size_t(15), total = b_at + b.size();
+    const size_t a_at = blob, b_at = (a_at + sa.size() + 15) & ~size_t(15), total = b_at + sb.size();
     std::vector<uint8_t> v(total, 0);
     std::memcpy(v.data(), "NUP\x01", 4);
     put(v, 0x04, 0x80, 2); put(v, 0x06, 1, 2); put(v, 0x08, 0x80, 8); put(v, 0x10, toc_size, 8); put(v, 0x38, blob, 8);
@@ -734,17 +745,17 @@ std::vector<uint8_t> tiny_nup(const std::vector<uint8_t>& a, const std::vector<u
     put(v, t + 0x30 + 0x14, 655360, 4); v[t + 0x30 + 0x18] = 1;                                            // update
     const uint32_t dir_rec[3][4] = {{0, 0, 0, 1}, {0, 5, 1, 2}, {5, 1, 3, 1}};                             // name off, len, first, count
     for (size_t i = 0; i < dirs; i++) for (int k = 0; k < 4; k++) put(v, t + dir_at + 0x18 * i + 4 * k, dir_rec[i][k], 4);
-    const uint64_t fr[2][4] = {{6, 5, a.size(), a_at}, {11, 5, b.size(), b_at}};
+    const uint64_t fr[2][5] = {{6, 5, a.size(), a_at, sa.size()}, {11, 5, b.size(), b_at, sb.size()}};
     for (size_t i = 0; i < files; i++) {
         const size_t r = t + file_at + 0x50 * i;
-        put(v, r, fr[i][0], 4); put(v, r + 4, fr[i][1], 4); put(v, r + 8, fr[i][2], 8); put(v, r + 0x10, fr[i][3], 8); put(v, r + 0x18, fr[i][2], 8);
+        put(v, r, fr[i][0], 4); put(v, r + 4, fr[i][1], 4); put(v, r + 8, fr[i][2], 8); put(v, r + 0x10, fr[i][3], 8); put(v, r + 0x18, fr[i][4], 8);
         v[r + 0x40] = codec;
     }
     const uint32_t kids[4] = {1, 3, 2, 4};                       // root: romfs; romfs: a.bin, d; d: b.bin (ids >= 3 are files)
     for (size_t i = 0; i < slots; i++) put(v, t + child_at + 4 * i, kids[i], 4);
     std::memcpy(v.data() + t + pool_at, pool.data(), pool.size());
-    std::memcpy(v.data() + a_at, a.data(), a.size());
-    std::memcpy(v.data() + b_at, b.data(), b.size());
+    std::memcpy(v.data() + a_at, sa.data(), sa.size());
+    std::memcpy(v.data() + b_at, sb.data(), sb.size());
     return v;
 }
 }  // namespace
@@ -758,11 +769,6 @@ NXTEST(romfs_from_nup_package) {
         { std::ofstream(path, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
         RomfsImage img;
         std::string err;
-        if (codec) {
-            CHECK(!img.build(utf8(path), &err));
-            CHECK(err.find("compressed") != std::string::npos);
-            continue;
-        }
         REQUIRE(img.build(utf8(path), &err));
         CHECK_EQ(img.stats().files, 2u);
         CHECK_EQ(img.stats().dirs, 2u);
@@ -774,6 +780,7 @@ NXTEST(romfs_from_nup_package) {
             REQUIRE(img.read(off, got.data(), size));
             CHECK(got == *want);
         }
+        if (codec) continue;   // the oracle parses the image's directory, not the package's compressed extents
         Oracle o(img);
         REQUIRE(o.load());
         o.check_layout(2, 2);
