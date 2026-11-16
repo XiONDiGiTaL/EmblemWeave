@@ -221,6 +221,15 @@ uint64_t memguard_footprint() {
 void memguard_set_discount(uint64_t (*gpu_bytes)()) { g_discount.store(gpu_bytes); }
 void memguard_set_video(void (*fn)(MemGuardVideo*)) { g_video.store(fn); }
 
+bool memguard_video(MemGuardVideo* out) {
+    if (!out) return false;
+    *out = MemGuardVideo{};
+    auto fn = g_video.load();
+    if (!fn) return false;
+    fn(out);
+    return out->heap != 0;
+}
+
 uint64_t memguard_footprint_host() {
     const uint64_t f = memguard_footprint();
     auto fn = g_discount.load();

@@ -25,6 +25,13 @@ std::atomic<int> g_calls{0};
 
 void set_flag_cb(uint64_t, uint64_t, void*) { g_trip_flag.store(true); }
 void count_cb(uint64_t, uint64_t, void*) { g_calls.fetch_add(1); }
+void fake_video_cb(nxrt::MemGuardVideo* v) {
+    v->usage = 3ull << 30;
+    v->budget = 4ull << 30;
+    v->heap = 8ull << 30;
+    v->driver_bytes = 1ull << 30;
+    v->exact = true;
+}
 
 // Commits and touches kTouchBytes of private memory; returns the block (null on failure).
 void* commit_and_touch() {
@@ -52,6 +59,19 @@ NXTEST(footprint_tracks_private_commit) {
     CHECK(f1 > (1ull << 20));
 
     VirtualFree(p, 0, MEM_RELEASE);
+}
+
+NXTEST(video_memory_snapshot_is_available_to_diagnostics) {
+    nxrt::memguard_set_video(&fake_video_cb);
+    nxrt::MemGuardVideo v;
+    CHECK(nxrt::memguard_video(&v));
+    CHECK_EQ(v.usage, uint64_t{3} << 30);
+    CHECK_EQ(v.budget, uint64_t{4} << 30);
+    CHECK_EQ(v.heap, uint64_t{8} << 30);
+    CHECK_EQ(v.driver_bytes, uint64_t{1} << 30);
+    CHECK(v.exact);
+    nxrt::memguard_set_video(nullptr);
+    CHECK(!nxrt::memguard_video(&v));
 }
 
 NXTEST(limit_gb_parsing) {

@@ -26,6 +26,9 @@ void memguard_set_discount(uint64_t (*gpu_bytes)());
 // size, driver_bytes every vkAllocateMemory of this process (host imports included).
 struct MemGuardVideo { uint64_t usage = 0, budget = 0, heap = 0, driver_bytes = 0; bool exact = false; };
 void memguard_set_video(void (*fn)(MemGuardVideo*));
+// Fills out with the current video-memory figures and returns true when a device has registered them. Safe from
+// the watchdog thread: it calls the device's lock-free snapshot callback, never the renderer.
+bool memguard_video(MemGuardVideo* out);
 uint64_t memguard_footprint_host();  // memguard_footprint() minus the discount (what the guard compares with the limit)
 double memguard_limit_gb(const char* env_text);   // positive number or 8.0
 void memguard_start(const MemGuardOptions& opt = {});

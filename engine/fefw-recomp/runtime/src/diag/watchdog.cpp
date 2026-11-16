@@ -211,6 +211,13 @@ std::string memory_text() {
                       static_cast<double>(ms.ullAvailPageFile) / gb, static_cast<double>(ms.ullTotalPageFile) / gb);
         out += b;
     }
+    MemGuardVideo video;
+    if (memguard_video(&video)) {
+        std::snprintf(b, sizeof b, "  video memory %.2f GB in use of a %.2f GB budget (%s, heap %.2f GB), driver allocations %.2f GB\n",
+                      static_cast<double>(video.usage) / gb, static_cast<double>(video.budget) / gb, video.exact ? "driver figures" : "estimates",
+                      static_cast<double>(video.heap) / gb, static_cast<double>(video.driver_bytes) / gb);
+        out += b;
+    }
     std::snprintf(b, sizeof b, "  presented frames %llu\n", static_cast<unsigned long long>(diag_frame_count()));
     out += b;
     return out;
