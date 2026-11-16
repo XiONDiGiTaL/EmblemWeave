@@ -148,15 +148,25 @@ pub fn set_portable(exe_dir: &std::path::Path, on: bool) -> Result<Option<std::p
     let data = exe_dir.join("data");
     std::fs::create_dir_all(&data).map_err(|e| format!("creating {}: {e}", data.display()))?;
     std::fs::write(&marker, b"").map_err(|e| format!("writing {}: {e}", marker.display()))?;
-    // The saves are the part a player cannot get back, so they follow the switch; a copy that cannot be made does not undo it.
+    // The saves are the part a player cannot get back, so they follow the switch; a copy that cannot be made does not undo it. The
+    // settings come too (theme, chosen folders, save profiles), and so do installed mods: a mod the player added is their own file, and
+    // making them find and install it again after pressing a button is not "everything in this folder".
     let mut copied = None;
     if let Some(profile) = data_root_from(&|k| std::env::var(k).ok()) {
         let from = profile.join("save");
         let to = data.join("save");
-        if from.is_dir() && !to.exists() {
-            if crate::saves::copy_tree(&from, &to).is_ok() {
-                copied = Some(to);
-            }
+        if from.is_dir() && !to.exists() && crate::saves::copy_tree(&from, &to).is_ok() {
+            copied = Some(to);
+        }
+        let settings = profile.join("config.json");
+        let target = data.join("config.json");
+        if settings.is_file() && !target.exists() {
+            let _ = std::fs::copy(&settings, &target);
+        }
+        let mods = profile.join("play").join("mods");
+        let target = data.join("play").join("mods");
+        if mods.is_dir() && !target.exists() {
+            let _ = crate::saves::copy_tree(&mods, &target);
         }
     }
     Ok(copied)

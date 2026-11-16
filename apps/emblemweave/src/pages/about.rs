@@ -99,7 +99,7 @@ fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             if widgets::button(ui, p, "Keep everything in this folder", true).clicked() {
                 match exe.as_deref().map(|d| crate::platform::set_portable(d, true)) {
                     Some(Ok(copied)) => {
-                        let saves = if copied.is_some() { " Your saves were copied across." } else { "" };
+                        let saves = if copied.is_some() { " Your saves, settings and installed mods were copied across." } else { " Your settings and installed mods were copied across." };
                         app.notify(
                             format!("Portable mode is on. Restart EmblemWeave to use it; the game is built into this folder on the next build.{saves}"),
                             Tone::Ok,
@@ -113,8 +113,9 @@ fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         ui.label(
             RichText::new(
                 "Everything then lives in a `data` folder beside the program, so the whole thing can be moved, copied or kept on a stick, \
-                 and no other copy on this PC sees its saves. A game folder that is already built stays where it is and is built again here \
-                 on the next build.",
+                 and no other copy on this PC sees its saves. The game folder that is already built stays where it was, and is built again \
+                 inside this folder on the next build; nothing in the old profile is deleted. An unpacked release zip is portable from the \
+                 start, with no button to press.",
             )
             .size(13.0)
             .color(p.muted),

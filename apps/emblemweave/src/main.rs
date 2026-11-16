@@ -1182,6 +1182,32 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    // About's portable switch without the window: the same call the button makes, for a script or a support reply.
+    if let Some(i) = args.iter().position(|a| a == "--portable") {
+        let on = !matches!(args.get(i + 1).map(String::as_str), Some("off") | Some("0"));
+        let Some(dir) = platform::exe_dir() else {
+            eprintln!("portable: the folder this copy runs from could not be found");
+            std::process::exit(1);
+        };
+        match platform::set_portable(&dir, on) {
+            Ok(copied) => {
+                let where_to = dir.join("data");
+                if on {
+                    println!("portable mode is on: {} (restart to use it)", where_to.display());
+                    if let Some(save) = copied {
+                        println!("saves copied to {}", save.display());
+                    }
+                } else {
+                    println!("portable mode is off; the data folder is left in place");
+                }
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("portable: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     // The Graphics page's "Look for the files" without the window, for a support report or a script.
     if args.iter().any(|a| a == "--adopt-upscalers") {
         match engine::adopt_upscaler_files() {
