@@ -277,20 +277,151 @@ pub fn install_hint(tool: &str) -> &'static str {
         .unwrap_or("see docs/TROUBLESHOOTING.md")
 }
 
-/// Whether the engine's virtual environment can actually run the lifter. A folder
-/// left by another release or Python install can still contain `python.exe` while
-/// that interpreter cannot start (the `python311.dll` conflict in issue #43), and
-/// the old check only looked for the file. The imports are the ones the build's
-/// Python steps need; a partial pip install is repaired the same way.
-fn python_env_ready(python: &Path) -> bool {
-    Command::new(python)
-        .args(["-I", "-c", "import capstone, lz4, zstandard, zbic, elftools, unicorn"])
+/// What the engine's Python probe found. The executable path is not enough: a
+/// `tools/.venv` left by another release or Python install can still contain
+/// `python.exe` while that interpreter cannot start (the `python311.dll`
+/// conflict in issue #43), silently runs a different interpreter, or has lost
+/// some of its pinned packages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PythonEnv {
+    Healthy { version: String, executable: String },
+    Missing,
+    Stale { version: String, executable: String, why: String },
+    Broken { why: String },
+}
+
+impl PythonEnv {
+    fn reason(&self) -> String {
+        match self {
+            PythonEnv::Healthy { .. } => "ready".into(),
+            PythonEnv::Missing => "the interpreter is missing".into(),
+            PythonEnv::Stale { why, .. } => why.clone(),
+            PythonEnv::Broken { why } => why.clone(),
+        }
+    }
+}
+
+/// The probe prints one machine-readable line after checking the interpreter
+/// identity, its virtual-environment root, its version and every lifter import.
+/// Python computes `identity` itself so Windows path normalisation (case,
+/// short names, junctions) is the platform's own rather than a string compare
+/// here. `sys.prefix != sys.base_prefix` rejects a global interpreter that was
+/// copied into `tools/.venv`; `sys.executable` names what actually ran.
+const PYTHON_PROBE: &str = r#"import json, os, sys
+modules = ("capstone", "lz4", "zstandard", "zbic", "elftools", "unicorn")
+errors = []
+for name in modules:
+    try:
+        __import__(name)
+    except BaseException as exc:
+        errors.append("{}: {}: {}".format(name, type(exc).__name__, exc))
+expected = os.path.normcase(os.path.realpath(sys.argv[1]))
+actual = os.path.normcase(os.path.realpath(sys.executable))
+print("EW_PY_PROBE " + json.dumps({
+    "version": "{}.{}.{}".format(*sys.version_info[:3]),
+    "executable": sys.executable,
+    "venv": sys.prefix != sys.base_prefix,
+    "identity": actual == expected,
+    "imports": errors,
+}))
+sys.exit(1 if errors else 0)
+"#;
+
+/// Parse the probe's stdout without starting Python, so healthy, stale and
+/// failed-import environments can be tested on every platform.
+fn parse_python_probe(success: bool, stdout: &str, stderr: &str) -> PythonEnv {
+    let Some(line) = stdout.lines().rev().find_map(|l| l.strip_prefix("EW_PY_PROBE ")) else {
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .or_else(|| stdout.lines().rev().find(|l| !l.trim().is_empty()))
+            .unwrap_or("the interpreter printed nothing");
+        return PythonEnv::Broken {
+            why: format!("the interpreter did not report its version: {}", detail.trim()),
+        };
+    };
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(line) else {
+        return PythonEnv::Broken { why: "the interpreter's probe report is not valid JSON".into() };
+    };
+    let version = report.get("version").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let executable = report
+        .get("executable")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if version.is_empty() || executable.is_empty() {
+        return PythonEnv::Broken { why: "the interpreter's probe report does not name its version and executable".into() };
+    }
+    let parts = crate::toolchain::version_parts(&version).unwrap_or_default();
+    if parts.len() < 2 || (parts[0], parts[1]) < (3, 9) {
+        let why = format!("Python {version} is older than the engine's 3.9 minimum");
+        return PythonEnv::Stale { version, executable, why };
+    }
+    if !report.get("venv").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        let why = format!("Python {version} at {executable} is not a virtual environment");
+        return PythonEnv::Stale { version, executable, why };
+    }
+    if !report.get("identity").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        let why = format!("the interpreter reports {executable}, not the tools\\.venv python.exe the launcher started");
+        return PythonEnv::Stale { version, executable, why };
+    }
+    let imports: Vec<String> = report
+        .get("imports")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.iter().filter_map(serde_json::Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    if !imports.is_empty() {
+        return PythonEnv::Broken {
+            why: format!("required lifter module(s) do not import: {}", imports.join("; ")),
+        };
+    }
+    if !success {
+        return PythonEnv::Broken { why: "the interpreter's probe exited with an error after its imports".into() };
+    }
+    PythonEnv::Healthy { version, executable }
+}
+
+/// Probe the existing interpreter before reusing it. A missing file is not an
+/// error: it is the normal first build.
+fn probe_python_env(python: &Path) -> PythonEnv {
+    if !python.is_file() {
+        return PythonEnv::Missing;
+    }
+    let output = Command::new(python)
+        .args(["-I", "-c", PYTHON_PROBE])
+        .arg(python)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output();
+    match output {
+        Ok(output) => parse_python_probe(
+            output.status.success(),
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        ),
+        Err(e) => PythonEnv::Broken { why: format!("could not start {}: {e}", python.display()) },
+    }
+}
+
+/// Remove only the generated engine environment, never a global Python or an
+/// arbitrary directory. The path is built from the engine root, and a link is
+/// refused because deleting it could mean deleting its target.
+fn remove_engine_venv(root: &Path) -> Result<(), String> {
+    let tools = root.join("tools");
+    let venv = tools.join(".venv");
+    if venv.parent() != Some(tools.as_path()) {
+        return Err(format!("refusing to remove {}: it is not the engine's tools\\.venv", venv.display()));
+    }
+    match std::fs::symlink_metadata(&venv) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("checking {}: {e}", venv.display())),
+        Ok(m) if m.file_type().is_symlink() => Err(format!(
+            "{} is a link, not the engine's generated environment; remove the link yourself and press Build the game again",
+            venv.display()
+        )),
+        Ok(m) if !m.is_dir() => Err(format!("{} is not a directory; remove it yourself and press Build the game again", venv.display())),
+        Ok(_) => std::fs::remove_dir_all(&venv).map_err(|e| format!("removing the unusable {}: {e}", venv.display())),
+    }
 }
 
 /// Run one command in `cwd`, its output (stdout and stderr) into the job
@@ -1319,32 +1450,58 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             ));
         }
     }
-    let python = root.join("tools").join(".venv").join("Scripts").join("python.exe");
+    let venv = root.join("tools").join(".venv");
+    let python = venv.join("Scripts").join("python.exe");
     let py = python.display().to_string();
 
     // 1. Python environment. `uv` is quicker when it is installed, but it is one more thing to install for one virtualenv, so
-    // without it the interpreter the build already needs makes the environment and pip installs the same pinned list.
+    // without it the interpreter the build already needs makes the environment and pip installs the same pinned list. The
+    // existing environment is reused only after it proves it is the interpreter the launcher starts, is a venv, and can
+    // import every lifter package. Its own pip is used, never a global Python's.
     ctx.start(0);
-    if python.is_file() && !python_env_ready(&python) {
-        ctx.log("the existing tools\\.venv Python cannot start or is missing the lifter's packages; recreating the environment");
-        std::fs::remove_dir_all(root.join("tools").join(".venv"))
-            .map_err(|e| format!("removing the unusable tools\\.venv: {e}"))?;
-    }
-    if python.is_file() {
-        ctx.end(0, StageStatus::Skipped, "already set up");
-    } else if which_tool("uv") {
-        run(ctx, &root, "uv", &["venv", "tools\\.venv", "--python", "3.13"])?;
-        run(ctx, &root, "uv", &["pip", "install", "--python", "tools\\.venv", "-r", "recomp\\requirements.txt"])?;
-        ctx.end(0, StageStatus::Done, "tools\\.venv ready");
-    } else {
-        ctx.log("uv is not installed: the Python environment is made with the interpreter on this PC and pip installs its packages");
-        if run(ctx, &root, "py", &["-3", "-m", "venv", "tools\\.venv"]).is_err() {
-            run(ctx, &root, "python", &["-m", "venv", "tools\\.venv"]).map_err(|e| {
-                format!("creating tools\\.venv needs a Python 3.9 or newer: {e}. Install Python with `winget install Python.Python.3.12`, restart the launcher, then press Build the game again")
-            })?;
+    match probe_python_env(&python) {
+        PythonEnv::Healthy { version, executable } => {
+            ctx.log(format!("Python environment: {executable} (Python {version}) passed the interpreter and import probe"));
+            ctx.end(0, StageStatus::Skipped, "already set up");
         }
-        run(ctx, &root, &py, &["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", "recomp\\requirements.txt"])?;
-        ctx.end(0, StageStatus::Done, "tools\\.venv ready (pip)");
+        found => {
+            match &found {
+                PythonEnv::Missing => ctx.log(format!("Python environment: {} is missing; creating it", venv.display())),
+                other => {
+                    ctx.log(format!("Python environment: {} failed the probe: {}", python.display(), other.reason()));
+                    ctx.log(format!("removing only the engine's generated {} and recreating it", venv.display()));
+                    remove_engine_venv(&root)?;
+                }
+            }
+            let used_uv = which_tool("uv");
+            if used_uv {
+                run(ctx, &root, "uv", &["venv", "tools\\.venv", "--python", "3.13"])?;
+                run(ctx, &root, "uv", &["pip", "install", "--python", "tools\\.venv", "-r", "recomp\\requirements.txt"])?;
+            } else {
+                ctx.log("uv is not installed: the Python environment is made with the interpreter on this PC and pip installs its packages");
+                if run(ctx, &root, "py", &["-3", "-m", "venv", "tools\\.venv"]).is_err() {
+                    run(ctx, &root, "python", &["-m", "venv", "tools\\.venv"]).map_err(|e| {
+                        format!("creating tools\\.venv needs a Python 3.9 or newer: {e}. Install Python with `winget install Python.Python.3.12`, restart the launcher, then press Build the game again")
+                    })?;
+                }
+                run(ctx, &root, &py, &["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", "recomp\\requirements.txt"])?;
+            }
+            match probe_python_env(&python) {
+                PythonEnv::Healthy { version, executable } => {
+                    ctx.log(format!("Python environment verified: {executable} (Python {version}) imports every lifter package"));
+                    let detail = if used_uv { "tools\\.venv ready" } else { "tools\\.venv ready (pip)" };
+                    ctx.end(0, StageStatus::Done, detail);
+                }
+                failed => {
+                    let why = failed.reason();
+                    ctx.end(0, StageStatus::Failed, why.clone());
+                    return Err(format!(
+                        "tools\\.venv was created but does not pass the Python probe: {why}. Delete {} and press Build the game again; do not uninstall other Python versions, because only this generated environment is replaced.",
+                        venv.display()
+                    ));
+                }
+            }
+        }
     }
 
     // 2. ExeFS, including the active IPS/IPS32/pchtxt patches. They are
@@ -2921,6 +3078,98 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe_line(version: &str, executable: &str, venv: bool, identity: bool, imports: &[&str]) -> String {
+        format!(
+            "EW_PY_PROBE {}",
+            serde_json::json!({
+                "version": version,
+                "executable": executable,
+                "venv": venv,
+                "identity": identity,
+                "imports": imports,
+            })
+        )
+    }
+
+    #[test]
+    fn a_healthy_python_environment_is_reused() {
+        let line = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", true, true, &[]);
+        assert_eq!(
+            super::parse_python_probe(true, &line, ""),
+            PythonEnv::Healthy {
+                version: "3.13.5".into(),
+                executable: r"C:\engine\tools\.venv\Scripts\python.exe".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_old_or_foreign_interpreter_is_stale() {
+        let old = probe_line("3.8.10", r"C:\Python38\python.exe", true, true, &[]);
+        let said = super::parse_python_probe(true, &old, "");
+        assert!(matches!(said, PythonEnv::Stale { .. }), "{said:?}");
+        assert!(said.reason().contains("older than"), "{}", said.reason());
+
+        // A global interpreter copied into the venv folder reports the same
+        // executable but is not a virtual environment.
+        let global = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", false, true, &[]);
+        let said = super::parse_python_probe(true, &global, "");
+        assert!(said.reason().contains("not a virtual environment"), "{}", said.reason());
+
+        // A launcher path that resolves to another executable is not the
+        // interpreter that was probed.
+        let other = probe_line("3.13.5", r"C:\Python313\python.exe", true, false, &[]);
+        let said = super::parse_python_probe(true, &other, "");
+        assert!(said.reason().contains("reports"), "{}", said.reason());
+    }
+
+    #[test]
+    fn a_missing_lifter_import_is_broken_and_names_the_module() {
+        let line = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", true, true, &["capstone: ImportError: no module named capstone"]);
+        let said = super::parse_python_probe(false, &line, "");
+        assert!(matches!(said, PythonEnv::Broken { .. }), "{said:?}");
+        assert!(said.reason().contains("capstone"), "{}", said.reason());
+    }
+
+    #[test]
+    fn an_interpreter_that_cannot_start_reports_the_dll_conflict() {
+        let said = super::parse_python_probe(
+            false,
+            "",
+            "ImportError: Module use of python311.dll conflicts with this version of Python.\n",
+        );
+        assert!(matches!(said, PythonEnv::Broken { .. }), "{said:?}");
+        assert!(said.reason().contains("python311.dll"), "{}", said.reason());
+        // A report that is not the probe's own JSON is not reused either.
+        assert!(matches!(super::parse_python_probe(true, "EW_PY_PROBE {oops", ""), PythonEnv::Broken { .. }));
+    }
+
+    #[test]
+    fn recreation_removes_only_the_engine_venv() {
+        let root = std::env::temp_dir().join(format!("ew-venv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let venv = root.join("tools").join(".venv");
+        let other = root.join("tools").join("other");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("python.exe"), b"stale").unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(root.join("python.exe"), b"global").unwrap();
+
+        super::remove_engine_venv(&root).unwrap();
+        assert!(!venv.exists(), "the generated environment is gone");
+        assert!(other.join("keep.txt").is_file(), "a sibling under tools is kept");
+        assert!(root.join("python.exe").is_file(), "an interpreter outside tools is kept");
+        // Removing it again is fine: a missing environment is the normal first build.
+        super::remove_engine_venv(&root).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_venv_is_not_an_error() {
+        assert_eq!(super::probe_python_env(Path::new(r"C:\no\such\tools\.venv\Scripts\python.exe")), PythonEnv::Missing);
+    }
 
     #[test]
     fn the_repair_writes_its_key_into_the_section_it_belongs_to() {
