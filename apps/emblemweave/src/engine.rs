@@ -1037,13 +1037,32 @@ pub fn built_by() -> Option<String> {
     ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned()
 }
 
-/// Whether the game folder was built by a release older than `major.minor.patch`. A folder with no `built_by` predates the key itself,
+/// Whether `dir` was built by a release older than `major.minor.patch`. A folder with no `built_by` predates the key itself,
 /// which every build has written since 0.1.20, so it counts as old.
-fn game_build_is_older_than(major: u32, minor: u32, patch: u32) -> bool {
-    let Some(text) = built_by() else { return true };
+fn build_is_older_than(dir: &Path, major: u32, minor: u32, patch: u32) -> bool {
+    let Some(text) = ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned() else { return true };
     let mut parts = text.split('.').filter_map(|p| p.trim().parse::<u32>().ok());
     let found = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
     found < (major, minor, patch)
+}
+
+/// The refusal Play gives for `dir` when it was built by an engine from before 0.1.20, which cannot read a package that keeps
+/// files packed, and its `[fs] romfs` keeps some packed (#34). Mixing a new `EmblemWeave.exe` into an old extracted release is
+/// the usual cause. None means this guard has nothing to say; Play's other checks still run.
+fn play_blocker_in(dir: &Path) -> Option<String> {
+    if !build_is_older_than(dir, 0, 1, 20) {
+        return None;
+    }
+    let ini = ini_map(&dir.join("fefw.ini"));
+    let pkg = PathBuf::from(ini.get("fs.romfs")?);
+    if !pkg.is_file() || crate::gamedata::packed_romfs(&pkg).is_none() {
+        return None;
+    }
+    let by = ini.get("engine.built_by").cloned().unwrap_or_else(|| "0.1.19 or older".into());
+    Some(format!(
+        "this game folder was built by EmblemWeave {by}, whose engine cannot read a package that keeps some files packed. \
+         Press Build the game to rebuild it with this release."
+    ))
 }
 
 /// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
@@ -2587,19 +2606,8 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     // A game folder built by a release before 0.1.20 carries an engine that cannot read a package which keeps some files packed, and a
     // launcher-side overlay does not help it: the reader that decompresses those files arrived with 0.1.20. Mixed folders are the usual
     // cause (a new EmblemWeave.exe dropped into an old extracted folder), and its log says "main.npdm is compressed in the .nup" (#34).
-    if game_build_is_older_than(0, 1, 20) {
-        if let Some(dir) = run_dir() {
-            let ini = ini_map(&dir.join("fefw.ini"));
-            if let Some(pkg) = ini.get("fs.romfs").map(PathBuf::from) {
-                if pkg.is_file() && crate::gamedata::packed_romfs(&pkg).is_some() {
-                    return Err(format!(
-                        "this game folder was built by EmblemWeave {}, whose engine cannot read a package that keeps some files packed. \
-                         Press Build the game to rebuild it with this release.",
-                        built_by().unwrap_or_else(|| "0.1.19 or older".into())
-                    ));
-                }
-            }
-        }
+    if let Some(note) = play_blocker_in(&dir) {
+        return Err(note);
     }
     if packed_package_without_overlay().is_some() {
         return Err("this package keeps some of its files packed: press Play again and the launcher writes them into your work folder first".into());
@@ -2662,6 +2670,83 @@ mod tests {
         // A file with no [fs] section at all gets one.
         let plain = set_ini_value("[log]\npath = fefw.log\n", "fs", "romfs_overlay", "C:/w");
         assert!(plain.contains("[fs]\nromfs_overlay = C:/w\n"), "{plain}");
+    }
+
+    /// A minimal .nup with one base package whose RomFS holds one zstd-marked file, enough for `gamedata::packed_romfs`.
+    fn write_packed_nup(path: &Path) {
+        use sha2::{Digest, Sha256};
+        let names: Vec<u8> = b"romfsdata.bin".to_vec(); // romfs at 0..5, data.bin at 5..13
+        let toc_size = 0x30 + 0x40 + 2 * 0x18 + 0x50 + 2 * 4 + names.len();
+        let data_off = 0x80 + toc_size;
+        let payload: Vec<u8> = vec![0x28, 0xb5, 0x2f, 0xfd]; // zstd magic; the guard never decompresses it
+        let mut toc = vec![0u8; toc_size];
+        toc[0..4].copy_from_slice(b"TOC\x01");
+        toc[4..8].copy_from_slice(&1u32.to_le_bytes());
+        toc[8..16].copy_from_slice(&2u64.to_le_bytes());
+        toc[16..24].copy_from_slice(&1u64.to_le_bytes());
+        let pool_off = toc_size - names.len();
+        toc[24..32].copy_from_slice(&(pool_off as u64).to_le_bytes());
+        toc[32..40].copy_from_slice(&(names.len() as u64).to_le_bytes());
+        let pkg = 0x30;
+        toc[pkg..pkg + 8].copy_from_slice(&0x0400_7EF0_0000_0000u64.to_le_bytes());
+        toc[pkg + 16..pkg + 20].copy_from_slice(&1u32.to_le_bytes()); // romfs directory
+        let dir_at = pkg + 0x40;
+        toc[dir_at + 12..dir_at + 16].copy_from_slice(&1u32.to_le_bytes()); // root: one child
+        let d1 = dir_at + 0x18;
+        toc[d1 + 4..d1 + 8].copy_from_slice(&5u32.to_le_bytes()); // "romfs"
+        toc[d1 + 8..d1 + 12].copy_from_slice(&1u32.to_le_bytes());
+        toc[d1 + 12..d1 + 16].copy_from_slice(&1u32.to_le_bytes());
+        let file_at = dir_at + 2 * 0x18;
+        toc[file_at..file_at + 4].copy_from_slice(&5u32.to_le_bytes());
+        toc[file_at + 4..file_at + 8].copy_from_slice(&8u32.to_le_bytes());
+        toc[file_at + 8..file_at + 16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        toc[file_at + 16..file_at + 24].copy_from_slice(&(data_off as u64).to_le_bytes());
+        toc[file_at + 24..file_at + 32].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        toc[file_at + 32..file_at + 64].copy_from_slice(&Sha256::digest(&payload));
+        toc[file_at + 64] = 1; // one zstd frame
+        let child_at = file_at + 0x50;
+        toc[child_at..child_at + 4].copy_from_slice(&1u32.to_le_bytes()); // root -> romfs
+        toc[child_at + 4..child_at + 8].copy_from_slice(&2u32.to_le_bytes()); // romfs -> file 0
+        toc[pool_off..].copy_from_slice(&names);
+        let mut head = vec![0u8; 0x80];
+        head[0..4].copy_from_slice(b"NUP\x01");
+        head[4..6].copy_from_slice(&0x80u16.to_le_bytes());
+        head[6..8].copy_from_slice(&1u16.to_le_bytes());
+        head[8..16].copy_from_slice(&0x80u64.to_le_bytes());
+        head[16..24].copy_from_slice(&(toc_size as u64).to_le_bytes());
+        head[24..56].copy_from_slice(&Sha256::digest(&toc));
+        head[56..64].copy_from_slice(&(data_off as u64).to_le_bytes());
+        head[0x40..0x48].copy_from_slice(&((data_off + payload.len()) as u64).to_le_bytes());
+        head[0x48..0x4C].copy_from_slice(&1u32.to_le_bytes());
+        let mut out = head;
+        out.extend(toc);
+        out.extend(payload);
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn an_old_build_pointing_at_a_packed_package_is_refused() {
+        let dir = std::env::temp_dir().join(format!("ew-play-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("FEFW.nup");
+        write_packed_nup(&nup);
+        std::fs::write(
+            dir.join("fefw.ini"),
+            format!("[engine]\nbuilt_by = 0.1.10\n[fs]\nromfs = {}\n", nup.display()),
+        )
+        .unwrap();
+        let note = play_blocker_in(&dir).expect("an old build with a packed package is refused");
+        assert!(note.contains("0.1.10"), "{note}");
+        assert!(note.contains("Press Build the game"), "{note}");
+        // The same folder, built by this release, is not refused by this guard.
+        std::fs::write(
+            dir.join("fefw.ini"),
+            format!("[engine]\nbuilt_by = 0.1.33\n[fs]\nromfs = {}\n", nup.display()),
+        )
+        .unwrap();
+        assert_eq!(play_blocker_in(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
