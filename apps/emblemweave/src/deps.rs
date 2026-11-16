@@ -762,7 +762,10 @@ mod tests {
             let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let open = text.find(start).unwrap_or_else(|| panic!("{rel} has no {start}"));
             let close = text[open..].find(end).expect("unterminated requirements block") + open;
-            let have = text[open + start.len()..close].trim_start_matches(['\r', '\n']).trim_end();
+            // A Windows checkout with `core.autocrlf` gives this file CRLF line endings; the table generated from the registry
+            // never has them, and the comparison is about content, not endings.
+            let block = text[open + start.len()..close].replace("\r\n", "\n");
+            let have = block.trim_start_matches(['\r', '\n']).trim_end();
             assert_eq!(
                 have,
                 want.trim_end(),
