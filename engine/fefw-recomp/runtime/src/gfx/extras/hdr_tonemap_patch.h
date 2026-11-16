@@ -30,4 +30,12 @@ bool spirv_hdr_tonemap(const std::vector<uint32_t>& in, std::vector<uint32_t>& o
 // Returns false (out untouched) when the shader is not one, or peak_ratio <= 1.001.
 bool spirv_hdr_tonemap_lut(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out);
 
+
+// HDR patch of a GT-style tone curve (Fire Emblem Fortune's Weave, ImageProcessing.bfsha aa98bfc2796de9bf): per channel a power toe, a linear
+// middle and an exponential shoulder that approaches P = cb.data[2].x, then BT.2020 -> BT.709 and max(0, .), with no clamp at 1. The curve is
+// built from P in the shader (the linear section's length and the shoulder follow it), so every load of P becomes max(P, R) with R the peak
+// ratio: shadows and mid-tones are unchanged and highlights roll off to the display's peak instead of paper white. Matched by structure: a
+// fragment shader with the four BT.2020 -> BT.709 coefficients, at least three exp2 and float loads of (constant buffer, 0, 2, 0).
+bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out);
+
 }  // namespace nxrt::extras
