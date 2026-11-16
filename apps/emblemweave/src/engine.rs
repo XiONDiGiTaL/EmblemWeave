@@ -1167,6 +1167,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
 
     // 3. Game code: ninja rebuilds only what changed.
     ctx.start(2);
+    // NASM only adds the AV1 decoder's assembly; the engine's CMake turns that off by itself when nasm is missing, and the
+    // build stays valid, so say what the difference is instead of failing the way the requirements page does not.
+    if !which_tool("nasm") {
+        ctx.log("NASM is not installed: the AV1 decoder is built in C only, so cutscene movies play slower");
+    }
     // A build folder made with another compiler, generator or toolchain file
     // cannot be reused, and CMake says only "Build files cannot be regenerated
     // correctly" after a configure pass. Its cache names what it was made with,
