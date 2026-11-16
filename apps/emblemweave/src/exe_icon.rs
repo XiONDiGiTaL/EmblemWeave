@@ -165,8 +165,11 @@ mod tests {
     #[test]
     fn our_icon_parses() {
         let (images, group) = super::ours(1).unwrap();
-        assert_eq!(images.len(), 7);
-        assert_eq!(group.len(), 6 + 14 * 7);
+        // The count comes from the .ico itself, so replacing the artwork with a different set of sizes does not fail this.
+        let count = u16::from_le_bytes([super::OURS[4], super::OURS[5]]) as usize;
+        assert_eq!(images.len(), count);
+        assert!(count >= 7, "a taskbar icon needs at least the small sizes, this has {count}");
+        assert_eq!(group.len(), 6 + 14 * count);
         for (_, d) in &images {
             // each image is a BITMAPINFOHEADER or a PNG
             assert!(d[..4] == [40, 0, 0, 0] || d[..4] == [0x89, b'P', b'N', b'G']);
