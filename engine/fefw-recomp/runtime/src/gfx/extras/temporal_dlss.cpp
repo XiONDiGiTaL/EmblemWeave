@@ -313,9 +313,30 @@ private:
     static bool in_range(const Range& r, VkExtent2D e) {
         return e.width >= r.min_w && e.height >= r.min_h && e.width <= r.max_w && e.height <= r.max_h && r.max_w;
     }
+    // [dlss] preset: the DLSS model for every mode (DLAA included): default (the driver's / an override's choice), or a letter j, k, l or m
+    // (sl_dlss.h DLSSPreset; the older letters were removed or revert to the default). Read once.
+    static sl::DLSSPreset preset() {
+        static const sl::DLSSPreset p = [] {
+            std::string v = nxrt::config_get_str("dlss", "preset", "default");
+            for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (v.rfind("preset", 0) == 0) v = v.substr(6);
+            while (!v.empty() && (v[0] == ' ' || v[0] == '_')) v.erase(0, 1);
+            sl::DLSSPreset r = sl::DLSSPreset::eDefault;
+            if (v == "j") r = sl::DLSSPreset::ePresetJ;
+            else if (v == "k") r = sl::DLSSPreset::ePresetK;
+            else if (v == "l") r = sl::DLSSPreset::ePresetL;
+            else if (v == "m") r = sl::DLSSPreset::ePresetM;
+            else if (v != "default" && !v.empty()) NXLOG_W("dlss", "[dlss] preset = %s is not one of default, j, k, l, m: default", v.c_str());
+            if (r != sl::DLSSPreset::eDefault) NXLOG_I("dlss", "[dlss] preset = %s: every DLSS mode uses preset %c", v.c_str(), static_cast<char>(std::toupper(v[0])));
+            return r;
+        }();
+        return p;
+    }
     static sl::DLSSOptions options(sl::DLSSMode m, VkExtent2D out) {
         sl::DLSSOptions o;
         o.mode = m;
+        const sl::DLSSPreset p = preset();
+        o.dlaaPreset = o.qualityPreset = o.balancedPreset = o.performancePreset = o.ultraPerformancePreset = o.ultraQualityPreset = p;
         o.outputWidth = out.width;
         o.outputHeight = out.height;
         o.colorBuffersHDR = sl::Boolean::eTrue;
