@@ -21,9 +21,10 @@ disabling or removing a patch requires **Build the game** before **Play**.
 The file name of an `.ips` or `.ips32` must start with the 40-hex build ID of
 `main`; a 32-hex prefix is also accepted. A generic `main.ips` is refused because
 it cannot be tied to a build. A `.pchtxt` carries its build ID in its
-`@nsobid-` header instead, so its file name can be descriptive; do not name it
-`main.pchtxt`, `sdk.pchtxt` or after another module, because the module name is
-checked first.
+`@nsobid-` header instead, so its file name can be descriptive. Do not name it
+after `sdk`, `subsdk0`–`subsdk2` or `rtld`: the module name is checked before the
+header, and those modules are refused. `main.pchtxt` is accepted, but a
+descriptive name is clearer.
 
 Only `main` is supported. `sdk`, `subsdk0`–`subsdk2` and `rtld` are refused by
 name. The build pipeline writes only `main` uncompressed, and a patch made
