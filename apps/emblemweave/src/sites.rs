@@ -222,6 +222,26 @@ pub fn mod_missing(root: &Path, mod_path: &Path) -> bool {
     false
 }
 
+/// Whether installed code mods bring sites the built game lacks, for pages drawn every frame (Overview's Play): the answer is
+/// kept for two seconds, so the mods folder is not read on every frame.
+pub fn stale_installed() -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap();
+    if let Some((at, v)) = *c {
+        if at.elapsed() < Duration::from_secs(2) {
+            return v;
+        }
+    }
+    let v = match (crate::engine::root(), crate::mods::dir()) {
+        (Some(root), Some(dir)) => crate::mods::list(&dir).iter().any(|m| m.has_code) && stale(&root, &dir) == Some(true),
+        _ => false,
+    };
+    *c = Some((Instant::now(), v));
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
