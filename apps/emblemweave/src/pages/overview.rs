@@ -107,6 +107,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 .color(p.warn),
                             );
                         }
+                        // Code mods installed or updated since the last build bring hook sites the game lacks (their code would not run),
+                        // or a .sites file has a problem that will stop the build.
+                        if let Some(note) = crate::sites::installed_note() {
+                            ui.label(RichText::new(note).size(12.5).color(p.warn));
+                        }
                     }
                     // One click for the tool everyone trips on: winget does the
                     // download and the permission prompt, the launcher only

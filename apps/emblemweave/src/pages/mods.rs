@@ -114,6 +114,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         // Code mods whose hook sites the built game lacks (installed or updated since the last build).
         let engine = crate::engine::root();
+        // A problem in a .sites file stops the build: say which file and line before it is pressed.
+        if let Some(e) = engine.as_deref().filter(|_| list.iter().any(|m| m.has_code)).and_then(|r| crate::sites::problem(r, &dir)) {
+            ui.label(RichText::new(format!("A code mod's hook sites cannot be used: {e}")).size(12.5).color(p.bad));
+        }
         let stale = list.iter().any(|m| m.has_code) && engine.as_deref().and_then(|r| crate::sites::stale(r, &dir)) == Some(true);
         if stale {
             ui.horizontal(|ui| {

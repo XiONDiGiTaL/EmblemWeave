@@ -178,6 +178,13 @@ pub fn prepare(root: &Path, mods: &Path) -> Result<(PathBuf, Vec<Site>), String>
     Ok((path, sites))
 }
 
+/// A problem in the installed mods' .sites files (the first one, with the build's message), which stops the build; None when
+/// there is none or main's build ID cannot be read yet.
+pub fn problem(root: &Path, mods: &Path) -> Option<String> {
+    let bid = main_build_id(root)?;
+    collect(mods, &bid).and_then(|sites| merged(root, &sites)).err()
+}
+
 /// Whether the built game lacks hook sites the installed mods need: `Some(true)` when the game should be built again,
 /// `Some(false)` when it has them all, `None` when that cannot be told (no game built yet, or built before fefw.sites).
 pub fn stale(root: &Path, mods: &Path) -> Option<bool> {
@@ -222,6 +229,33 @@ pub fn mod_missing(root: &Path, mod_path: &Path) -> bool {
     false
 }
 
+/// What the installed code mods need from the next build, for pages drawn every frame (Overview's Play): a problem in a .sites
+/// file (its message), or a note that they bring sites the built game lacks; None when nothing is needed. The answer is kept
+/// for two seconds, so the mods folder is not read on every frame.
+pub fn installed_note() -> Option<String> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap();
+    if let Some((at, v)) = c.as_ref() {
+        if at.elapsed() < Duration::from_secs(2) {
+            return v.clone();
+        }
+    }
+    let v = match (crate::engine::root(), crate::mods::dir()) {
+        (Some(root), Some(dir)) if crate::mods::list(&dir).iter().any(|m| m.has_code) => problem(&root, &dir)
+            .map(|e| format!("A code mod's hook sites cannot be used: {e}"))
+            .or_else(|| {
+                (stale(&root, &dir) == Some(true)).then(|| {
+                    "Code mods bring hook sites the built game does not have yet: press Rebuild, or their code will not run.".to_string()
+                })
+            }),
+        _ => None,
+    };
+    *c = Some((Instant::now(), v.clone()));
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +269,36 @@ mod tests {
         assert!(!bid_matches(&BID[..16], BID)); // a shorter ID matches only when the rest is zeros
         assert!(bid_matches(&format!("{BID}000000"), BID));
         assert!(!bid_matches("0123456789ABCDEF", BID));
+    }
+
+    /// A problem in an installed mod's .sites file is reported with the build's message (for the Mods and Overview pages).
+    #[test]
+    fn problems_are_reported() {
+        let root = std::env::temp_dir().join(format!("ew-sites-problem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exefs = root.join("game").join("dump").join("exefs");
+        std::fs::create_dir_all(&exefs).unwrap();
+        let mut nso = vec![0u8; 0x60];
+        nso[0x18..0x1C].copy_from_slice(&0x0200_0000u32.to_le_bytes()); // .text size
+        nso[0x40..0x48].copy_from_slice(&[0xDB, 0x93, 0xB0, 0x12, 0x5F, 0x48, 0x50, 0x60]);
+        std::fs::write(exefs.join("main"), &nso).unwrap();
+        std::fs::create_dir_all(base_list(&root).parent().unwrap()).unwrap();
+        std::fs::write(base_list(&root), "inline 0x71007bf1c0\n").unwrap();
+        let mods = root.join("mods");
+        let ex = mods.join("Some_Mod").join("exefs");
+        std::fs::create_dir_all(&ex).unwrap();
+        std::fs::write(ex.join("a.dll"), b"MZ").unwrap();
+        let f = ex.join("a.sites");
+
+        std::fs::write(&f, "@nsobid DB93B0125F485060\nmidhook 0x71016f21f4\n").unwrap();
+        assert_eq!(problem(&root, &mods), None);
+        std::fs::write(&f, "midhook 0x71016f21f4\n").unwrap();
+        assert!(problem(&root, &mods).unwrap().contains("Some_Mod/exefs/a.sites has no @nsobid line"));
+        std::fs::write(&f, "@nsobid DB93B0125F485060\npatch 0x71016f21f4\n").unwrap();
+        assert!(problem(&root, &mods).unwrap().contains("a.sites:2: \"patch\" is not a site a mod can add"));
+        std::fs::write(&f, "@nsobid DB93B0125F485060\nmidhook 0x7104000000\n").unwrap();
+        assert!(problem(&root, &mods).unwrap().contains("0x7104000000 is outside main's code"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

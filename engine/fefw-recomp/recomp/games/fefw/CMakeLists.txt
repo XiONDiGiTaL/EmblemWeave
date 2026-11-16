@@ -32,7 +32,7 @@ set(FEFW_SITES "${CMAKE_CURRENT_LIST_DIR}/main.sites" CACHE FILEPATH "hook sites
 # A launcher that merges main.sites with the installed mods' hook sites (mods/<mod>/exefs/*.sites) names the merged list in the
 # environment; main is lifted again whenever that file changes (nxrecomp_add_module depends on it).
 if(DEFINED ENV{FEFW_SITES} AND NOT "$ENV{FEFW_SITES}" STREQUAL "")
-    set(FEFW_SITES "$ENV{FEFW_SITES}" CACHE FILEPATH "hook sites of main for this build" FORCE)
+    set(FEFW_SITES "$ENV{FEFW_SITES}")  # this run only: a later build without it lifts with main.sites again
 endif()
 # a copy beside the libraries: the game build puts it next to the exe as <exe>.sites, the list the runtime checks code mods'
 # hooks and sites against (runtime/src/services/mods_dll.cpp)
