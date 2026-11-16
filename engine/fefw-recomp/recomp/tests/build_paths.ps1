@@ -118,8 +118,14 @@ int main() { return path_probe_value() == 42 ? 0 : 1; }
     }
 
     # CMake 4.4 no longer documents CMAKE_NINJA_FORCE_RESPONSE_FILE but uses response files for these
-    # rules by default; older supported CMs need the setting. The build and run above are the regression
-    # check either way, and rules.ninja lets a failure be traced to the command line.
+    # rules by default; older supported CMs need the setting. Check both the generated rules and the run.
+    $rules = Join-Path $build 'CMakeFiles\rules.ninja'
+    if (-not (Test-Path -LiteralPath $rules) -or -not (Select-String -LiteralPath $rules -Pattern '^\s*rspfile\s*=' -Quiet)) {
+        Write-Host "FAIL no response-file rule: $($case.name)" -ForegroundColor Red
+        $failed++
+        continue
+    }
+
     & (Join-Path $build 'path_probe.exe')
     if ($LASTEXITCODE -ne 0) {
         Write-Host "FAIL run: $($case.name)" -ForegroundColor Red
