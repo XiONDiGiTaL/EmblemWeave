@@ -194,7 +194,7 @@ struct DisplaySettings {
     double view_distance = 1.0;
     // ---- S38 GPU paths, at the next start; [nvn] pool_mirror and pass_barriers in mpr.ini or the environment win over these.
     bool fast_gpu_memory = true;   // device-local copies of the pools draws read ([nvn] pool_mirror = on); costs up to 2 GiB of video memory
-    bool fewer_gpu_waits = true;   // no full barrier after passes that only wrote their attachments ([nvn] pass_barriers = tracked)
+    bool fewer_gpu_waits = true;   // no full barrier after passes that only wrote their attachments ([nvn] pass_barriers = tracked); off also sets [nvn] lean_barriers = false
     bool shader_prewarm = true;    // build the pipelines recorded by earlier runs ahead of the draws ([nvn] prewarm); at the next start, [nvn] prewarm in the ini wins
     std::string astc_quality = "high";   // ASTC texture quality on this GPU: fast, high or uncompressed (RGBA8, lots of video memory); becomes [gfx] astc_quality at the next start unless the ini or the environment set it
     std::string astc_bc = "auto";        // ASTC storage: auto, off (BC7) or bc1 (opaque textures as BC1, half the video memory); becomes [gfx] astc_bc at the next start unless the ini or the environment set it

@@ -6,11 +6,16 @@
 # what meson writes for NASM on x86_64 Windows.
 # NASM: on PATH, in NXRT_NASM_DIR (cache variable) or in $ENV{NX_TOOLCHAIN}/bin, or name the exe with -DNXRT_NASM=<path>.
 set(NXRT_NASM_DIR "$ENV{NX_TOOLCHAIN}/bin" CACHE PATH "extra folder searched for nasm.exe")
-find_program(NXRT_NASM nasm HINTS "${NXRT_NASM_DIR}")
+# also the folders of NASM's own installer and of `winget install NASM.NASM`
+find_program(NXRT_NASM nasm HINTS "${NXRT_NASM_DIR}" "$ENV{ProgramFiles}/NASM" "$ENV{LOCALAPPDATA}/bin/NASM")
 if(NXRT_NASM)
     set(_d1d_asm_default ON)
 else()
     set(_d1d_asm_default OFF)
+    # Loud on purpose: without the assembly a 1440p AV1 picture takes ~3x as long (30-50 ms on 4 threads of a Ryzen 7 3700X vs 10-15),
+    # so the movies play below their 30 fps and drift from their sound. Release packages must be built with NASM.
+    message(WARNING "dav1d: nasm not found (PATH, NXRT_NASM_DIR=${NXRT_NASM_DIR}): AV1 movies decode C only, several times slower. "
+                    "Install NASM 2.14+ or pass -DNXRT_NASM=<path to nasm.exe> -DNXRT_DAV1D_ASM=ON (an existing build folder keeps ASM OFF in its cache).")
 endif()
 option(NXRT_DAV1D_ASM "Build dav1d's x86-64 assembly (needs NASM 2.14+)" ${_d1d_asm_default})
 file(GLOB _d1d_src CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
