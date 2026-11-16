@@ -117,8 +117,10 @@ target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_fefw nxrt_gfx nxrt nxr
 target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)
 
 # The shared-font fallback (runtime src/services/pl.cpp looks in fonts\ next to the exe) and the ASTC decoder DLLs when the transcoder is in.
-add_custom_command(TARGET fefw POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:fefw>/fonts/DejaVuSans.ttf")
+# These two files are copied when the build is configured, not in a POST_BUILD step: CMake wraps that step in cmd.exe's
+# `cd /D "<build dir>"`, and an `&` in the path splits the command (issue #38).
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fonts")
+configure_file("${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "${CMAKE_CURRENT_BINARY_DIR}/fonts/DejaVuSans.ttf" COPYONLY)
 # The processor features this build's lifted libraries need (recomp/games/fefw/CMakeLists.txt FEFW_CPU_VARIANT): the stub passes the
 # them to the runtime, which checks the processor before the first game instruction (fefw_cpu.h). The launcher names the variant in
 # FEFW_CPU_VARIANT (apps/emblemweave/src/cpu.rs): fma (FMA3 + AVX, the default) or compat (SSE4.2 + POPCNT).
@@ -133,8 +135,7 @@ else()
 endif()
 # The site list the libraries were lifted with (recomp/games/fefw/CMakeLists.txt), as fefw.sites for the runtime's checks of code mods.
 if(EXISTS "${FEFW_LIB_DIR}/main.sites")
-    add_custom_command(TARGET fefw POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${FEFW_LIB_DIR}/main.sites" "$<TARGET_FILE_DIR:fefw>/fefw.sites")
+    configure_file("${FEFW_LIB_DIR}/main.sites" "${CMAKE_CURRENT_BINARY_DIR}/fefw.sites" COPYONLY)
 endif()
 foreach(dll ${NXRT_A2B_DLLS})
     add_custom_command(TARGET fefw POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:fefw>")
