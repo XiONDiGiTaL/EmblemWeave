@@ -362,11 +362,12 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Open a `.nx` archive: copy its ExeFS out (it is small) and its RomFS out too,
-/// then use the copy the way a dump is used. An NX snapshot is a complete file
-/// tree, and a tree packed from an extracted dump keeps `exefs/`, `romfs/` and an
-/// optional `data/` at its root. The engine serves a `.nup` itself but knows
-/// nothing of NXFormat, so the RomFS has to be materialised for it (issue 28).
+/// Open a `.nx` archive: copy its ExeFS out (it is small), then hand the archive
+/// itself to the engine for the RomFS. An NX snapshot is a complete file tree,
+/// and a tree packed from an extracted dump keeps `exefs/`, `romfs/` and an
+/// optional `data/` at its root. The engine reads NXFormat's blocks directly
+/// (`runtime/src/loader/nx.cpp`), so the 29 GB RomFS is not materialised (issue
+/// 28).
 fn use_nx(g: &mut GameData, path: &Path) -> Package {
     let nx = match ew_format::nx::Nx::open(path) {
         Ok(n) => n,

@@ -69,6 +69,11 @@ if(NXRT_BUILD_TESTS)
     # nxrt calls into the graphics shell (switch2.cpp: HDR metadata, tt_core.cpp: screenshot writes), so the tests link it when it is built
     target_link_libraries(nxrt_tests PRIVATE nxrt $<TARGET_NAME_IF_EXISTS:nxrt_gfx>)
     target_compile_definitions(nxrt_tests PRIVATE NXRT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    # The NXFormat conformance fixtures are shared with the launcher's Rust reader; keep one copy, not two.
+    set(NXRT_EW_NX_FIXTURES "${CMAKE_CURRENT_SOURCE_DIR}/../../../crates/ew-format/tests/nx-fixtures")
+    if(EXISTS "${NXRT_EW_NX_FIXTURES}/minimal_valid.nx")
+        target_compile_definitions(nxrt_tests PRIVATE EW_NX_FIXTURE_DIR="${NXRT_EW_NX_FIXTURES}")
+    endif()
     # A linker map next to the exe: the crash handler and the watchdog name host code from it. Keep host allocations low
     # (HIGHENTROPYVA:NO) so the guest ranges at 0x71_0000_0000 and up are free; a 64 MiB main stack.
     target_link_options(nxrt_tests PRIVATE /MAP /STACK:67108864 /HIGHENTROPYVA:NO /DEBUG)

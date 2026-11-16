@@ -27,5 +27,5 @@ EmblemWeave's reader.
 | EmblemWeave file | Adapted from |
 | --- | --- |
 | `crates/ew-format/src/nx.rs` | an independent reader written from NXFormat's `docs/SPEC.md` |
-| `crates/ew-format/tests/nx-fixtures/*.nx` | `tests/fixtures/` from NXFormat V1.0.3, unmodified |
+| `crates/ew-format/tests/nx-fixtures/*.nx` | `tests/fixtures/` from NXFormat V1.0.3 and V1.0.4, unmodified (the 0.3 wire-format fixture is `source_resource_v103.nx`) |
 | `engine/fefw-recomp/runtime/src/loader/nx.cpp` | the same reader in the engine, written from that specification |

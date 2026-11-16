@@ -17,6 +17,7 @@
 #include <mutex>
 #include <set>
 #include <system_error>
+#include <tuple>
 #include <vector>
 
 #include "nxrt/log.h"
@@ -37,9 +38,14 @@ constexpr uint8_t kCodecRaw = 0, kCodecZstd = 1;
 
 std::filesystem::path fs_path(const std::string& utf8) { return std::filesystem::path(std::u8string(utf8.begin(), utf8.end())); }
 
+// The bool-returning parsers use `fail(...).empty()` as their false value. The
+// returned string must therefore be nonempty: returning {} made every one of
+// those checks report success while still setting err. Some callers use the
+// string only through .empty(), and the ones returning a pointer use
+// `fail(...).empty(), nullptr`.
 std::string fail(std::string* err, std::string msg) {
     if (err) *err = std::move(msg);
-    return {};
+    return "failed";
 }
 
 uint16_t u16(const std::vector<uint8_t>& b, uint64_t o) {
@@ -157,8 +163,12 @@ std::array<uint8_t, 32> sha256(const std::vector<uint8_t>& b) {
 // ---- header -------------------------------------------------------------------------------------------------------------------
 struct Header {
     uint64_t generation = 0;
+    uint16_t version = 0;
+    uint16_t required_features = 0, optional_features = 0;
     uint64_t archive_size = 0;
     uint64_t catalog_offset = 0, catalog_size = 0;
+    uint64_t media_offset = 0, media_size = 0;
+    uint64_t data_offset = 0, data_size = 0;
     uint64_t manifest_offset = 0, manifest_size = 0;
     uint64_t block_index_offset = 0, block_count = 0;
     uint64_t integrity_offset = 0, integrity_size = 0;
@@ -175,11 +185,22 @@ bool read_slot(const std::vector<uint8_t>& page, size_t at, Header& out) {
     const uint16_t version = u16(page, at + 6);
     if (version < 2 || version > 3) return false;
     if (u32(page, at + 8) != kHeaderSize) return false;
-    if ((u16(page, at + 12) & 1) != 1) return false;
-    if (u16(page, at + 14) != 0) return false;
+    // Feature bit 0 (separate header pages) is the only required bit; no
+    // optional bit is defined. All reserved bytes are zero.
+    if (u16(page, at + 12) != 1 || u16(page, at + 14) != 0) return false;
+    for (size_t i = 228; i < 252; i++)
+        if (page[at + i] != 0) return false;
+    out.generation = u64(page, at + 216);
+    out.version = version;
+    out.required_features = u16(page, at + 12);
+    out.optional_features = u16(page, at + 14);
     out.archive_size = u64(page, at + 16);
     out.catalog_offset = u64(page, at + 24);
     out.catalog_size = u64(page, at + 32);
+    out.media_offset = u64(page, at + 40);
+    out.media_size = u64(page, at + 48);
+    out.data_offset = u64(page, at + 56);
+    out.data_size = u64(page, at + 64);
     out.manifest_offset = u64(page, at + 72);
     out.manifest_size = u64(page, at + 80);
     out.block_index_offset = u64(page, at + 88);
@@ -189,7 +210,6 @@ bool read_slot(const std::vector<uint8_t>& page, size_t at, Header& out) {
     std::memcpy(out.catalog_sha.data(), b + 120, 32);
     std::memcpy(out.manifest_sha.data(), b + 152, 32);
     std::memcpy(out.index_sha.data(), b + 184, 32);
-    out.generation = u64(page, at + 216);
     out.check_size = u32(page, at + 224);
     return true;
 }
@@ -207,6 +227,7 @@ struct Block {
 struct Reader::Impl {
     std::string path;
     uint64_t archive_size = 0;
+    uint16_t version = 0;
     uint32_t check_size = kCheckSize;
 
     // Manifest tables.
@@ -230,6 +251,7 @@ struct Reader::Impl {
     // Catalog rows.
     struct App {
         uint64_t id = 0;
+        uint8_t flags = 0;
         uint32_t first = 0, count = 0;
     };
     std::vector<App> apps;
@@ -271,14 +293,16 @@ struct Reader::Impl {
     // Where each of a file's blocks starts in the file: block_count + 1 entries, the last being the file's size. A block can hold
     // several integrity slices, so this cannot be derived from the slice size and is built once per file and kept.
     mutable std::mutex span_mu;
-    mutable std::map<uint32_t, std::shared_ptr<const std::vector<uint64_t>>> spans;   // by first_block
+    // The key includes the file's block count and size: a damaged manifest can give two files the same first_block,
+    // and a first_block-only cache would then serve one file's spans for the other.
+    mutable std::map<std::tuple<uint32_t, uint32_t, uint64_t>, std::shared_ptr<const std::vector<uint64_t>>> spans;
     std::shared_ptr<const std::vector<uint64_t>> spans_of(const File& f, std::string* err);
 };
 
 std::shared_ptr<const std::vector<uint64_t>> Reader::Impl::spans_of(const File& f, std::string* err) {
     {
         std::lock_guard<std::mutex> lk(span_mu);
-        auto it = spans.find(f.first_block);
+        auto it = spans.find({f.first_block, f.block_count, f.size});
         if (it != spans.end()) return it->second;
     }
     auto starts = std::make_shared<std::vector<uint64_t>>(static_cast<size_t>(f.block_count) + 1);
@@ -286,23 +310,48 @@ std::shared_ptr<const std::vector<uint64_t>> Reader::Impl::spans_of(const File& 
     for (uint32_t i = 0; i < f.block_count; i++) {
         (*starts)[i] = at;
         const uint32_t ref = block_refs[static_cast<size_t>(f.first_block) + i];
-        if (ref >= blocks.size()) return fail(err, "a file names a block that does not exist").empty(), nullptr;
+        if (ref >= blocks.size()) {
+            fail(err, "a file names a block that does not exist");
+            return nullptr;
+        }
         at += blocks[ref].logical;
-        if (at > f.size) return fail(err, "a file's blocks hold more bytes than the file").empty(), nullptr;
+        if (at > f.size) {
+            fail(err, "a file's blocks hold more bytes than the file");
+            return nullptr;
+        }
     }
     (*starts)[f.block_count] = at;
-    if (at != f.size) return fail(err, "a file's blocks hold fewer bytes than the file").empty(), nullptr;
+    if (at != f.size) {
+        fail(err, "a file's blocks hold fewer bytes than the file");
+        return nullptr;
+    }
     std::lock_guard<std::mutex> lk(span_mu);
-    spans[f.first_block] = starts;
+    spans[{f.first_block, f.block_count, f.size}] = starts;
     return starts;
 }
 
 bool Reader::Impl::parse_catalog(const std::vector<uint8_t>& c, std::string* err) {
     if (c.size() < 128 || std::memcmp(c.data(), "NXCT", 4) != 0) return fail(err, "the catalog header is missing").empty();
     if (u16(c, 4) != 1 || u16(c, 6) != 128) return fail(err, "the catalog is a version this build does not know").empty();
+    if (u64(c, 8) != c.size() || u32(c, 16) != 0 || u32(c, 44) != 0 ||
+        std::any_of(c.begin() + 112, c.begin() + 128, [](uint8_t b) { return b != 0; }))
+        return fail(err, "the catalog header has nonzero flags or reserved bytes").empty();
     const uint32_t n_apps = u32(c, 20), n_progs = u32(c, 24), n_snaps = u32(c, 28);
+    const uint32_t n_localized = u32(c, 32), n_deps = u32(c, 36), n_ext = u32(c, 40);
+    if (n_apps < 1 || n_apps > 4096 || n_progs > 16384 || n_snaps < 1 || n_snaps > 65536 || n_localized > 16384 ||
+        n_deps > 32768 || n_ext > 4096)
+        return fail(err, "the catalog table counts are out of range").empty();
+    auto table_ok = [&](uint64_t off, uint32_t count, uint64_t row, const char* name) {
+        if (count == 0) return off == 0;
+        const uint64_t len = static_cast<uint64_t>(count) * row;
+        return off % 8 == 0 && off <= c.size() && len <= c.size() - off;
+    };
+    if (!table_ok(u64(c, 48), n_apps, 80, "application") || !table_ok(u64(c, 56), n_progs, 64, "program") ||
+        !table_ok(u64(c, 64), n_snaps, 120, "snapshot") || !table_ok(u64(c, 72), n_localized, 24, "localized") ||
+        !table_ok(u64(c, 80), n_deps, 56, "dependency") || !table_ok(u64(c, 88), n_ext, 32, "extension"))
+        return fail(err, "a catalog table is out of range").empty();
     const uint64_t pool_off = u64(c, 96), pool_len = u64(c, 104);
-    if (pool_off > c.size() || pool_len > c.size() - pool_off) return fail(err, "the catalog string pool is out of range").empty();
+    if (pool_off % 8 != 0 || pool_off > c.size() || pool_len > c.size() - pool_off) return fail(err, "the catalog string pool is out of range").empty();
     auto string_at = [&](uint32_t off, uint32_t len, std::string& out) -> bool {
         if (off == 0xFFFFFFFFu || len == 0) return true;
         if (static_cast<uint64_t>(off) + len > pool_len) return false;
@@ -315,36 +364,106 @@ bool Reader::Impl::parse_catalog(const std::vector<uint8_t>& c, std::string* err
         if (at + 80 > c.size()) return fail(err, "the catalog application table is truncated").empty();
         App a;
         a.id = u64(c, at);
+        // NxApplication: id at 0, platform at 8, flags (u8) at 9, reserved at 10.
+        a.flags = c[at + 9];
         a.first = u32(c, at + 20);
         a.count = u32(c, at + 24);
+        if (a.id == 0 || (a.flags & ~3u) != 0)
+            return fail(err, "a catalog application has no id or unknown flags").empty();
         std::string title;
         if (!string_at(u32(c, at + 28), u32(c, at + 32), title)) return fail(err, "a catalog title is out of range").empty();
         apps.push_back(a);
     }
     at = u64(c, 56);
-    for (uint32_t i = 0; i < n_progs; i++, at += 64)
+    for (uint32_t i = 0; i < n_progs; i++, at += 64) {
         if (at + 64 > c.size()) return fail(err, "the catalog program table is truncated").empty();
+        if (u64(c, at) == 0 || u32(c, at + 8) >= apps.size())
+            return fail(err, "a catalog program is out of range").empty();
+    }
     at = u64(c, 64);
     for (uint32_t i = 0; i < n_snaps; i++, at += 120) {
         if (at + 120 > c.size()) return fail(err, "the catalog snapshot table is truncated").empty();
         Snap s;
         s.kind = c[at + 4];
+        const uint8_t flags = c[at + 5];
+        const uint32_t program = u32(c, at);
+        bool build_id = false;
+        for (size_t b = at + 88; b < at + 120; b++) build_id = build_id || c[b] != 0;
+        if (s.kind > 4 || (flags & ~3u) != 0 || ((flags & 1) != 0) != build_id ||
+            (program != 0xffffffffu && program >= n_progs))
+            return fail(err, "a catalog snapshot has an unknown kind, flags or program").empty();
         s.version = u32(c, at + 8);
         s.root = u32(c, at + 12);
         snaps.push_back(s);
     }
     if (snaps.empty()) return fail(err, "the catalog holds no snapshots").empty();
+    for (const App& a : apps) {
+        if (a.count == 0 || static_cast<uint64_t>(a.first) + a.count > snaps.size())
+            return fail(err, "an application's snapshot range is out of bounds").empty();
+    }
+    // Catalog extensions: NX 0.3 records Source Resources here. Unknown required
+    // types fail closed; optional types are skipped after their range is checked.
+    bool has_resource = false;
+    std::set<std::tuple<uint32_t, uint16_t, uint32_t>> seen_ext;
+    const uint64_t ext_at = u64(c, 88);
+    for (uint32_t i = 0; i < n_ext; i++) {
+        const uint64_t e_at = ext_at + i * 32;
+        const uint32_t type_id = u32(c, e_at);
+        const uint32_t flags = u32(c, e_at + 4);
+        const uint16_t owner_kind = u16(c, e_at + 8);
+        const uint32_t owner_index = u32(c, e_at + 12);
+        const uint64_t off = u64(c, e_at + 16), size = u64(c, e_at + 24);
+        if ((flags & ~1u) != 0 || owner_kind > 3 || off > c.size() || size > c.size() - off ||
+            (owner_kind == 0) != (owner_index == 0xffffffffu) ||
+            !seen_ext.insert({type_id, owner_kind, owner_index}).second)
+            return fail(err, "a catalog extension has invalid flags, owner, range or duplicate key").empty();
+        if ((flags & 1) != 0 && type_id != 0x00010004u && type_id != 0x00010005u && type_id != 0x00010008u)
+            return fail(err, "the catalog has an unknown required extension").empty();
+        if (type_id == 0x00010008u) {
+            if (version != 3 || size < 16 || std::memcmp(c.data() + off, "NXSR", 4) != 0 || u16(c, off + 4) != 1 ||
+                u16(c, off + 6) != 16)
+                return fail(err, "a Source Resource payload is malformed").empty();
+            const uint32_t records = u32(c, off + 8);
+            if (records < 1 || records > 4096 || u32(c, off + 12) != 0 || size != 16 + static_cast<uint64_t>(records) * 8)
+                return fail(err, "a Source Resource payload has an unusable count").empty();
+            has_resource = true;
+        }
+        if (type_id == 0x00010005u) {
+            if (size < 16 || std::memcmp(c.data() + off, "NXNM", 4) != 0 || u16(c, off + 4) != 1 ||
+                u16(c, off + 6) != 16)
+                return fail(err, "Snapshot Native Metadata is malformed").empty();
+            const uint32_t records = u32(c, off + 8);
+            if (records < 1 || records > snaps.size() || u32(c, off + 12) != 0 ||
+                size != 16 + static_cast<uint64_t>(records) * 16)
+                return fail(err, "Snapshot Native Metadata has an unusable count").empty();
+        }
+    }
+    if (has_resource != (version == 3)) return fail(err, "the header version does not match its Source Resources").empty();
     return true;
 }
 
 bool Reader::Impl::parse_manifest(const std::vector<uint8_t>& m, std::string* err) {
     if (m.size() < 96 || std::memcmp(m.data(), "NXMF", 4) != 0) return fail(err, "the manifest header is missing").empty();
     if (u16(m, 4) != 1 || u16(m, 6) != 96) return fail(err, "the manifest is a version this build does not know").empty();
+    if (u64(m, 8) != m.size() || std::any_of(m.begin() + 80, m.begin() + 96, [](uint8_t b) { return b != 0; }))
+        return fail(err, "the manifest header has a wrong size or nonzero reserved bytes").empty();
     const uint32_t n_dirs = u32(m, 16), n_files = u32(m, 20), n_entries = u32(m, 24), n_refs = u32(m, 28);
+    if (n_dirs < 1 || n_dirs > 16777216u || n_files > 33554432u || n_entries > 50331648u)
+        return fail(err, "the manifest table counts are out of range").empty();
+    auto table_ok = [&](uint64_t off, uint32_t count, uint64_t row) {
+        if (count == 0) return off == 0;
+        const uint64_t len = static_cast<uint64_t>(count) * row;
+        return off % 8 == 0 && off <= m.size() && len <= m.size() - off;
+    };
+    if (!table_ok(u64(m, 32), n_dirs, 16) || !table_ok(u64(m, 40), n_files, 64) ||
+        !table_ok(u64(m, 48), n_entries, 24) || (n_refs > 0 && u64(m, 56) % 4 != 0))
+        return fail(err, "a manifest table is out of range").empty();
 
     uint64_t at = u64(m, 32);
     for (uint32_t i = 0; i < n_dirs; i++, at += 16) {
         if (at + 16 > m.size()) return fail(err, "the manifest directory table is truncated").empty();
+        if (u32(m, at + 8) != 0 || u32(m, at + 12) != 0)
+            return fail(err, "a manifest directory has nonzero flags or reserved bytes").empty();
         dirs.emplace_back(u32(m, at), u32(m, at + 4));
     }
     at = u64(m, 40);
@@ -354,6 +473,15 @@ bool Reader::Impl::parse_manifest(const std::vector<uint8_t>& m, std::string* er
         r.size = u64(m, at);
         r.first_block = u32(m, at + 8);
         r.block_count = u32(m, at + 12);
+        const uint8_t chunk_log2 = m[at + 16];
+        if (chunk_log2 < 16 || chunk_log2 > 20)
+            return fail(err, "a manifest file has an unknown chunk size").empty();
+        const uint64_t chunk = 1ull << chunk_log2;
+        if (r.size > static_cast<uint64_t>(INT64_MAX) || m[at + 17] != 0 ||
+            u16(m, at + 18) != 0 ||
+            std::any_of(m.begin() + at + 52, m.begin() + at + 64, [](uint8_t b) { return b != 0; }) ||
+            r.block_count != static_cast<uint32_t>((r.size + chunk - 1) / chunk))
+            return fail(err, "a manifest file has invalid size, chunk, flags or block count").empty();
         files.push_back(r);
     }
     // Entry names are stored as (offset, length) from the start of the Manifest, not from the path pool inside it.
@@ -363,13 +491,16 @@ bool Reader::Impl::parse_manifest(const std::vector<uint8_t>& m, std::string* er
         Entry e;
         const uint64_t off = u64(m, at), len = u32(m, at + 8);
         if (off > m.size() || len > m.size() - off) return fail(err, "a manifest entry name is out of range").empty();
-        if (len > 255) return fail(err, "a manifest entry name is too long").empty();
+        if (len == 0 || len > 4096) return fail(err, "a manifest entry name is too long or empty").empty();
         e.name.assign(reinterpret_cast<const char*>(m.data() + off), static_cast<size_t>(len));
-        if (e.name.empty() || e.name == "." || e.name == ".." || e.name.find_first_of("/\\:") != std::string::npos ||
+        if (e.name == "." || e.name == ".." || e.name.find_first_of("/\\:") != std::string::npos ||
             e.name.find('\0') != std::string::npos)
             return fail(err, "the manifest holds an invalid name").empty();
+        const uint8_t kind = m[at + 16];
+        if ((kind != 1 && kind != 2) || m[at + 17] != 0 || u16(m, at + 18) != 0 || u32(m, at + 20) != 0)
+            return fail(err, "a manifest entry has an unknown kind, flags or reserved bytes").empty();
         e.target = u32(m, at + 12);
-        e.dir = m[at + 16] == 1;
+        e.dir = kind == 1;
         entries.push_back(std::move(e));
     }
     at = u64(m, 56);
@@ -377,12 +508,12 @@ bool Reader::Impl::parse_manifest(const std::vector<uint8_t>& m, std::string* er
         if (at + 4 > m.size()) return fail(err, "the manifest block reference table is truncated").empty();
         block_refs.push_back(u32(m, at));
     }
+    for (const auto& d : dirs) {
+        if (static_cast<uint64_t>(d.first) + d.second > entries.size())
+            return fail(err, "a manifest directory range is out of bounds").empty();
+    }
     // Check the file records once here, so no read has to.
     for (const Rec& r : files) {
-        if (r.block_count == 0) {
-            if (r.size != 0) return fail(err, "the manifest has a file with no blocks").empty();
-            continue;
-        }
         if (static_cast<uint64_t>(r.first_block) + r.block_count > block_refs.size())
             return fail(err, "the manifest has a file whose blocks are out of range").empty();
     }
@@ -440,7 +571,9 @@ bool Reader::Impl::build_content(Content& out, std::string* err) {
         for (size_t i = first; i < last; i++)
             if (snaps[i].kind == kKindBase) best = static_cast<int64_t>(i);
     }
-    if (best < 0) best = static_cast<int64_t>(first);
+    // A DLC-only application has no playable base or update; do not mount its
+    // DLC tree as if it were the game.
+    if (best < 0) return fail(err, "the application has no base or update snapshot").empty();
     out.version = snaps[best].version;
     out.snapshot_kind = snaps[best].kind;
 
@@ -546,7 +679,7 @@ Reader::Reader(const std::string& path) : p_(std::make_unique<Impl>()) {
         err_ = path + " has no intact .nx header";
         return;
     }
-    if (h.archive_size > len) {
+    if (h.archive_size > len || h.archive_size > static_cast<uint64_t>(INT64_MAX)) {
         err_ = path + " claims more bytes than the file has";
         return;
     }
@@ -555,7 +688,30 @@ Reader::Reader(const std::string& path) : p_(std::make_unique<Impl>()) {
         err_ = path + " has a table this build cannot use";
         return;
     }
+    if (h.catalog_offset % 16 != 0 || h.manifest_offset % 16 != 0 ||
+        (h.block_count > 0 && (h.block_index_offset % 16 != 0 || h.integrity_offset % 16 != 0))) {
+        err_ = path + " has an unaligned metadata region";
+        return;
+    }
+    if (h.block_count > 0xffffffffull) {
+        err_ = path + " has too many blocks";
+        return;
+    }
+    if (h.data_size > 0) {
+        if (h.data_offset != kHeaderPage * 2 || h.data_offset > h.archive_size || h.data_size > h.archive_size - h.data_offset) {
+            err_ = path + " has an invalid data region";
+            return;
+        }
+    } else if (h.data_offset != 0) {
+        err_ = path + " has a data offset without a data region";
+        return;
+    }
+    if ((h.media_size == 0) != (h.media_offset == 0)) {
+        err_ = path + " has an incomplete media region";
+        return;
+    }
     p_->check_size = h.check_size;
+    p_->version = h.version;
 
     std::vector<uint8_t> catalog, manifest;
     if (!p_->read_at(h.catalog_offset, h.catalog_size, catalog, &err_) ||
@@ -573,6 +729,10 @@ Reader::Reader(const std::string& path) : p_(std::make_unique<Impl>()) {
 
     // Block index and integrity table, checked together against the digest the header holds.
     if (h.block_count > 0) {
+        if (h.block_index_offset == 0 || h.integrity_offset == 0 || h.data_size == 0) {
+            err_ = "a block region of " + path + " has a zero offset or no data region";
+            return;
+        }
         std::vector<uint8_t> index, integrity;
         if (!p_->read_at(h.block_index_offset, h.block_count * 24, index, &err_) ||
             !p_->read_at(h.integrity_offset, h.integrity_size, integrity, &err_))
@@ -587,7 +747,10 @@ Reader::Reader(const std::string& path) : p_(std::make_unique<Impl>()) {
             err_ = "the integrity table of " + path + " is not whole";
             return;
         }
+        p_->checks.resize(integrity.size() / 4);
+        for (size_t i = 0; i < p_->checks.size(); i++) p_->checks[i] = u32(integrity, i * 4);
         p_->blocks.resize(static_cast<size_t>(h.block_count));
+        uint64_t expected_check = 0;
         for (size_t i = 0; i < p_->blocks.size(); i++) {
             const uint64_t at = i * 24;
             Block& blk = p_->blocks[i];
@@ -596,24 +759,37 @@ Reader::Reader(const std::string& path) : p_(std::make_unique<Impl>()) {
             blk.logical = u32(index, at + 12);
             blk.codec = index[at + 16];
             blk.first_check = u32(index, at + 20);
-            if (blk.offset > h.archive_size || blk.stored > h.archive_size - blk.offset) {
-                err_ = "a block of " + path + " lies outside the file";
+            if (blk.offset < h.data_offset || blk.offset > h.archive_size || blk.stored > h.archive_size - blk.offset ||
+                blk.offset - h.data_offset > h.data_size || blk.stored > h.data_size - (blk.offset - h.data_offset)) {
+                err_ = "a block of " + path + " lies outside the data region";
+                return;
+            }
+            if (blk.offset % 16 != 0 || blk.stored == 0 || blk.stored > 1024 * 1024 + 64 * 1024 || blk.logical < 1 ||
+                blk.logical > 1024 * 1024 || index[at + 17] != 0 || index[at + 18] != 0 || index[at + 19] != 0) {
+                err_ = "a block of " + path + " has an invalid size, alignment or flags";
                 return;
             }
             if (blk.codec != kCodecRaw && blk.codec != kCodecZstd) {
                 err_ = "a block of " + path + " uses a codec this build does not know";
                 return;
             }
-            // A block is made of whole integrity slices, so its logical size is a multiple of the slice size at most; the
-            // per-slice checks below are what actually validates it.
-            if (blk.logical > 0 && static_cast<uint64_t>(blk.first_check) + (blk.logical + kCheckSize - 1) / kCheckSize >
-                                       static_cast<uint64_t>(h.integrity_size / 4)) {
-                err_ = "the integrity table of " + path + " does not cover a block";
+            const uint32_t slices = (blk.logical + kCheckSize - 1) / kCheckSize;
+            if (blk.first_check != expected_check || static_cast<uint64_t>(blk.first_check) + slices > p_->checks.size()) {
+                err_ = "the integrity table of " + path + " does not cover a block in order";
+                return;
+            }
+            expected_check += slices;
+        }
+        if (expected_check != p_->checks.size()) {
+            err_ = "the integrity table of " + path + " has unused entries";
+            return;
+        }
+        for (uint32_t ref : p_->block_refs) {
+            if (ref >= p_->blocks.size()) {
+                err_ = "a file of " + path + " names a block that does not exist";
                 return;
             }
         }
-        p_->checks.resize(integrity.size() / 4);
-        for (size_t i = 0; i < p_->checks.size(); i++) p_->checks[i] = u32(integrity, i * 4);
     } else if (h.integrity_size != 0) {
         err_ = "an archive without blocks has an integrity table";
         return;

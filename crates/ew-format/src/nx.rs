@@ -39,6 +39,8 @@ pub const STANDALONE_UPDATE: u8 = 3;
 #[derive(Debug, Clone, Copy)]
 pub struct Header {
     pub generation: u64,
+    /// The wire minor version: 2 without Source Resources, 3 with them.
+    pub version: u16,
     pub archive_size: u64,
     pub catalog_offset: u64,
     pub catalog_size: u64,
@@ -173,6 +175,21 @@ fn array32(b: &[u8], off: usize) -> [u8; 32] {
     v
 }
 
+/// A Catalog table must be entirely inside the Catalog, 8-byte aligned, and
+/// absent tables (count zero) must use offset zero, as the specification says.
+fn table_range(c: &[u8], off: u64, count: usize, row: usize, name: &str) -> Result<()> {
+    if count == 0 {
+        ensure!(off == 0, "the catalog has a nonempty {name} table offset with no rows");
+        return Ok(());
+    }
+    ensure!(off % 8 == 0, "the catalog {name} table is not aligned");
+    let start = usize::try_from(off).map_err(|_| anyhow!("the catalog {name} table offset is too large"))?;
+    let len = count.checked_mul(row).ok_or_else(|| anyhow!("the catalog {name} table overflows"))?;
+    let end = start.checked_add(len).ok_or_else(|| anyhow!("the catalog {name} table overflows"))?;
+    ensure!(start >= 128 && end <= c.len(), "the catalog {name} table is out of range");
+    Ok(())
+}
+
 /// One header slot, if it is intact: magic, size, version, feature bits, CRC.
 fn read_slot(page: &[u8], at: usize) -> Option<Header> {
     let b = page.get(at..at + HEADER_SIZE)?;
@@ -182,10 +199,16 @@ fn read_slot(page: &[u8], at: usize) -> Option<Header> {
     if u16_at(b, 4) != 0 || !(2..=3).contains(&u16_at(b, 6)) {
         return None;
     }
-    if u32_at(b, 8) as usize != HEADER_SIZE || u16_at(b, 12) & 1 != 1 || u16_at(b, 14) != 0 {
+    // Feature bit 0 (separate header pages) is the only defined required bit,
+    // no optional bit is defined, and bytes 228..251 are reserved and zero.
+    if u32_at(b, 8) as usize != HEADER_SIZE || u16_at(b, 12) != 1 || u16_at(b, 14) != 0 {
+        return None;
+    }
+    if b[228..252].iter().any(|byte| *byte != 0) {
         return None;
     }
     Some(Header {
+        version: u16_at(b, 6),
         archive_size: u64_at(b, 16),
         catalog_offset: u64_at(b, 24),
         catalog_size: u64_at(b, 32),
@@ -231,12 +254,13 @@ impl Nx {
             (None, None) => bail!("{} has no intact NX header", path.display()),
         };
         ensure!(
-            header.archive_size <= len,
+            header.archive_size <= len && header.archive_size <= i64::MAX as u64,
             "{} claims {} bytes but is {} long",
             path.display(),
             header.archive_size,
             len
         );
+        ensure!(header.catalog_offset % 16 == 0 && header.manifest_offset % 16 == 0, "{} has an unaligned metadata region", path.display());
         ensure!(header.catalog_size >= 128 && header.catalog_size <= MAX_CATALOG, "{} has an unusable catalog size", path.display());
         ensure!(
             header.manifest_size >= 96 && header.manifest_size <= MAX_MANIFEST,
@@ -318,7 +342,7 @@ impl Nx {
         if best.is_some() {
             return best;
         }
-        (first..last.min(self.snapshots.len())).find(|i| self.snapshots[*i].kind == BASE).or(Some(first))
+        (first..last.min(self.snapshots.len())).find(|i| self.snapshots[*i].kind == BASE)
     }
 
     /// Every file under a snapshot's root as `(path, file id, size)`, with the
@@ -394,12 +418,19 @@ impl Nx {
             other => bail!("a block uses codec {other}, which this build does not know"),
         };
         ensure!(data.len() as u32 == b.logical, "a block decodes to the wrong size");
-        // The integrity table is one CRC-32C per 16 KiB slice of a block.
+        // The integrity table is one CRC-32C per 16 KiB slice of a block, and
+        // every slice must have one: a missing entry is damage, not permission
+        // to return unchecked bytes.
         for (k, slice) in data.chunks(self.header.check_size as usize).enumerate() {
-            let want = self.checks.get(b.first_check as usize + k);
-            if let Some(want) = want {
-                ensure!(*want == crc32c(slice), "a block failed its integrity check");
-            }
+            let idx = b
+                .first_check
+                .checked_add(k as u32)
+                .ok_or_else(|| anyhow!("a block's integrity index overflows"))?;
+            let want = self
+                .checks
+                .get(idx as usize)
+                .ok_or_else(|| anyhow!("the integrity table does not cover a block"))?;
+            ensure!(*want == crc32c(slice), "a block failed its integrity check");
         }
         Ok(data)
     }
@@ -407,11 +438,32 @@ impl Nx {
     fn parse_catalog(&mut self, c: &[u8]) -> Result<()> {
         ensure!(c.len() >= 128 && &c[0..4] == b"NXCT", "the catalog header is missing");
         ensure!(u16_at(c, 4) == 1 && u16_at(c, 6) == 128, "the catalog is a version this build does not know");
+        ensure!(u64_at(c, 8) == c.len() as u64, "the catalog size does not match its header");
+        ensure!(u32_at(c, 16) == 0 && u32_at(c, 44) == 0, "the catalog has nonzero flags or reserved bytes");
+        ensure!(c[112..128].iter().all(|byte| *byte == 0), "the catalog has nonzero reserved bytes");
         let apps = u32_at(c, 20) as usize;
         let programs = u32_at(c, 24) as usize;
         let snapshots = u32_at(c, 28) as usize;
+        let localized = u32_at(c, 32) as usize;
+        let dependencies = u32_at(c, 36) as usize;
+        let extensions = u32_at(c, 40) as usize;
+        ensure!((1..=4096).contains(&apps), "the catalog application count is out of range");
+        ensure!(programs <= 16384, "the catalog program count is out of range");
+        ensure!((1..=65536).contains(&snapshots), "the catalog snapshot count is out of range");
+        ensure!(localized <= 16384 && dependencies <= 32768 && extensions <= 4096, "a catalog table count is out of range");
+        for (off, count, row, name) in [
+            (48, apps, 80, "application"),
+            (56, programs, 64, "program"),
+            (64, snapshots, 120, "snapshot"),
+            (72, localized, 24, "localized-entry"),
+            (80, dependencies, 56, "dependency"),
+            (88, extensions, 32, "extension"),
+        ] {
+            table_range(c, u64_at(c, off), count, row, name)?;
+        }
         let pool_off = u64_at(c, 96) as usize;
         let pool_len = u64_at(c, 104) as usize;
+        ensure!(pool_off % 8 == 0, "the catalog string pool is not aligned");
         let pool = c
             .get(pool_off..pool_off.checked_add(pool_len).ok_or_else(|| anyhow!("the catalog string pool overflows"))?)
             .ok_or_else(|| anyhow!("the catalog string pool is out of range"))?;
@@ -441,24 +493,88 @@ impl Nx {
         let mut at = u64_at(c, 56) as usize;
         for _ in 0..programs {
             let b = c.get(at..at + 64).ok_or_else(|| anyhow!("the program table is truncated"))?;
-            self.programs.push((u64_at(b, 0), u32_at(b, 8)));
+            let program = u64_at(b, 0);
+            let application = u32_at(b, 8) as usize;
+            ensure!(program != 0 && application < self.apps.len(), "a catalog program is out of range");
+            self.programs.push((program, application as u32));
             at += 64;
         }
         let mut at = u64_at(c, 64) as usize;
         for _ in 0..snapshots {
             let b = c.get(at..at + 120).ok_or_else(|| anyhow!("the snapshot table is truncated"))?;
+            let program = u32_at(b, 0);
+            let kind = b[4];
+            let flags = b[5];
+            let build_id = array32(b, 88);
+            ensure!((kind <= 4) && (flags & !3 == 0), "a snapshot has an unknown kind or flags");
+            ensure!((flags & 1 != 0) == build_id.iter().any(|byte| *byte != 0), "a snapshot's build-id flag does not match its build id");
+            ensure!(program == u32::MAX || (program as usize) < self.programs.len(), "a snapshot names a program that does not exist");
             self.snapshots.push(Snapshot {
-                program: u32_at(b, 0),
-                kind: b[4],
+                program,
+                kind,
                 version: u32_at(b, 8),
                 root: u32_at(b, 12),
                 logical_size: u64_at(b, 16),
                 display_version: string(u32_at(b, 24), u32_at(b, 28))?,
-                build_id: array32(b, 88),
+                build_id,
             });
             at += 120;
         }
         ensure!(!self.snapshots.is_empty(), "the catalog holds no snapshots");
+        for (i, app) in self.apps.iter().enumerate() {
+            ensure!(app.id != 0 && app.flags & !3 == 0, "a catalog application has no id or unknown flags");
+            ensure!(app.snapshot_count >= 1, "a catalog application has no snapshot");
+            let first = app.first_snapshot as usize;
+            let count = app.snapshot_count as usize;
+            ensure!(first.checked_add(count).is_some_and(|end| end <= self.snapshots.len()), "an application's snapshot range is out of bounds");
+            let first_program = u32_at(c, u64_at(c, 48) as usize + i * 80 + 12) as usize;
+            let program_count = u32_at(c, u64_at(c, 48) as usize + i * 80 + 16) as usize;
+            ensure!(first_program.checked_add(program_count).is_some_and(|end| end <= self.programs.len()), "an application's program range is out of bounds");
+        }
+        // Catalog extensions are where NX 0.3 records Source Resources. A
+        // required type this reader does not implement must fail closed; an
+        // optional one may be skipped after its range was checked.
+        let mut has_resource = false;
+        let mut seen = HashSet::new();
+        let ext_count = u32_at(c, 40) as usize;
+        let ext_at = u64_at(c, 88) as usize;
+        for i in 0..ext_count {
+            let at = ext_at + i * 32;
+            let e = c.get(at..at + 32).ok_or_else(|| anyhow!("the extension table is truncated"))?;
+            let type_id = u32_at(e, 0);
+            let flags = u32_at(e, 4);
+            let owner_kind = u16_at(e, 8);
+            let owner_index = u32_at(e, 12);
+            let off = u64_at(e, 16);
+            let size = u64_at(e, 24);
+            ensure!(flags & !1 == 0 && owner_kind <= 3, "a catalog extension has unknown flags or an owner");
+            ensure!((owner_kind == 0) == (owner_index == u32::MAX), "a catalog extension's owner index does not match its owner kind");
+            ensure!(seen.insert((type_id, owner_kind, owner_index)), "a catalog extension is repeated");
+            let start = usize::try_from(off).map_err(|_| anyhow!("an extension payload is too large"))?;
+            let len = usize::try_from(size).map_err(|_| anyhow!("an extension payload is too large"))?;
+            let payload = c
+                .get(start..start.checked_add(len).ok_or_else(|| anyhow!("an extension payload overflows"))?)
+                .ok_or_else(|| anyhow!("an extension payload is out of range"))?;
+            if flags & 1 != 0 && !matches!(type_id, 0x0001_0004 | 0x0001_0005 | 0x0001_0008) {
+                bail!("the catalog has an unknown required extension {type_id:#010x}");
+            }
+            if type_id == 0x0001_0008 {
+                ensure!(self.header.version == 3, "a Source Resource is in an NX 0.2 archive");
+                ensure!(payload.len() >= 16 && &payload[0..4] == b"NXSR", "a Source Resource payload is missing its header");
+                ensure!(u16_at(payload, 4) == 1 && u16_at(payload, 6) == 16, "a Source Resource payload has an unknown version");
+                let records = u32_at(payload, 8) as usize;
+                ensure!((1..=4096).contains(&records) && u32_at(payload, 12) == 0, "a Source Resource payload has an unusable count");
+                ensure!(payload.len() == 16 + records * 8, "a Source Resource payload has the wrong size");
+                has_resource = true;
+            }
+            if type_id == 0x0001_0005 && payload.len() >= 16 {
+                ensure!(&payload[0..4] == b"NXNM" && u16_at(payload, 4) == 1 && u16_at(payload, 6) == 16, "Snapshot Native Metadata is malformed");
+                let records = u32_at(payload, 8) as usize;
+                ensure!((1..=self.snapshots.len()).contains(&records) && u32_at(payload, 12) == 0, "Snapshot Native Metadata has an unusable count");
+                ensure!(payload.len() == 16 + records * 16, "Snapshot Native Metadata has the wrong size");
+            }
+        }
+        ensure!(has_resource == (self.header.version == 3), "the header version does not match its Source Resources");
         Ok(())
     }
 
@@ -512,6 +628,7 @@ impl Nx {
     }
 
     fn parse_blocks(&mut self, f: &mut File) -> Result<()> {
+        ensure!(self.header.block_count <= u32::MAX as u64, "the block count is too large");
         let n = self.header.block_count as usize;
         if n == 0 {
             ensure!(self.header.integrity_size == 0, "an archive without blocks must have no integrity table");
@@ -524,19 +641,49 @@ impl Nx {
         both.extend_from_slice(&integrity);
         ensure!(sha256(&both) == self.header.index_sha256, "the block index does not match its digest");
         ensure!(integrity.len() % 4 == 0, "the integrity table is not whole");
+        for i in 0..integrity.len() / 4 {
+            self.checks.push(u32_at(&integrity, i * 4));
+        }
+        let mut expected_check = 0u32;
         for i in 0..n {
             let b = &index[i * 24..i * 24 + 24];
-            self.blocks.push(Block {
+            let block = Block {
                 offset: u64_at(b, 0),
                 stored: u32_at(b, 8),
                 logical: u32_at(b, 12),
                 codec: b[16],
                 first_check: u32_at(b, 20),
-            });
+            };
+            ensure!(
+                block.offset >= 8192,
+                "a block lies before the data region"
+            );
+            ensure!(block.offset % 16 == 0, "a block is not 16-byte aligned");
+            ensure!(block.stored > 0 && block.stored <= 1024 * 1024 + 64 * 1024, "a block has an unusable stored size");
+            ensure!((1..=1024 * 1024).contains(&block.logical), "a block has an unusable logical size");
+            ensure!(block.codec <= 1, "a block uses an unknown codec");
+            ensure!(
+                block.offset.checked_add(block.stored as u64).is_some_and(|end| end <= self.header.archive_size),
+                "a block lies outside the archive"
+            );
+            ensure!(
+                b[17] == 0 && b[18] == 0 && b[19] == 0,
+                "a block has nonzero flags or reserved bytes"
+            );
+            ensure!(block.first_check == expected_check, "a block's integrity range is not cumulative");
+            let slices = (block.logical + self.header.check_size - 1) / self.header.check_size;
+            ensure!(
+                block.first_check.checked_add(slices).is_some_and(|end| end as usize <= self.checks.len()),
+                "the integrity table does not cover a block"
+            );
+            expected_check = expected_check.checked_add(slices).ok_or_else(|| anyhow!("the integrity count overflows"))?;
+            self.blocks.push(block);
         }
-        for i in 0..integrity.len() / 4 {
-            self.checks.push(u32_at(&integrity, i * 4));
-        }
+        ensure!(expected_check as usize == self.checks.len(), "the integrity table has unused entries");
+        ensure!(
+            self.block_refs.iter().all(|r| (*r as usize) < self.blocks.len()),
+            "a file names a block that does not exist"
+        );
         Ok(())
     }
 
@@ -638,6 +785,57 @@ mod tests {
     fn damaged_archives_are_rejected() {
         assert!(Nx::open(&fixture("corrupted_manifest.nx")).is_err());
         assert!(Nx::open(&fixture("truncated_archive.nx")).is_err());
+    }
+
+    fn patched_header(name: &str, patch: impl Fn(&mut [u8])) -> Vec<u8> {
+        let mut bytes = std::fs::read(fixture(name)).expect("fixture");
+        for at in [0usize, 4096] {
+            patch(&mut bytes[at..at + 256]);
+            let crc = crc32c(&bytes[at..at + 252]);
+            bytes[at + 252..at + 256].copy_from_slice(&crc.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn open_bytes(bytes: &[u8]) -> Result<Nx> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "ew-nx-header-{}-{}.nx",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&p, bytes).unwrap();
+        let result = Nx::open(&p);
+        let _ = std::fs::remove_file(&p);
+        result
+    }
+
+    #[test]
+    fn an_unknown_required_feature_or_reserved_header_byte_is_rejected() {
+        let unknown = patched_header("minimal_valid.nx", |h| h[12..14].copy_from_slice(&3u16.to_le_bytes()));
+        assert!(open_bytes(&unknown).is_err(), "an unknown required feature bit must fail closed");
+        let reserved = patched_header("minimal_valid.nx", |h| h[228] = 1);
+        assert!(open_bytes(&reserved).is_err(), "reserved header bytes must be zero");
+        let version = patched_header("minimal_valid.nx", |h| h[6..8].copy_from_slice(&4u16.to_le_bytes()));
+        assert!(open_bytes(&version).is_err(), "an unknown wire version must fail closed");
+    }
+
+    #[test]
+    fn a_source_resource_archive_is_wire_version_3() {
+        let nx = Nx::open(&fixture("source_resource_v103.nx")).expect("NX 0.3 archive opens");
+        assert_eq!(nx.header().version, 3);
+        assert_eq!(nx.applications().len(), 1);
+        let tree = nx.tree(nx.current(0).expect("a snapshot")).expect("tree");
+        assert!(!tree.is_empty(), "the 0.3 fixture holds a RomFS file");
+    }
+
+    #[test]
+    fn a_missing_integrity_slice_is_an_error_not_an_unchecked_read() {
+        let mut nx = Nx::open(&fixture("raw_only.nx")).expect("raw archive opens");
+        nx.checks.pop();
+        let (_, id, _) = nx.tree(nx.current(0).unwrap()).expect("tree")[0].clone();
+        assert!(nx.read(id).is_err(), "a block without its CRC entry must not be returned");
     }
 
     #[test]
