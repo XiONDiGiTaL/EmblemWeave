@@ -205,6 +205,13 @@ fn hidden(cmd: &mut Command) -> &mut Command {
 /// The tools folder the launcher puts first on PATH, as the engine scripts
 /// expect it.
 pub fn tool_path() -> String {
+    // Every version probe asks for this, and each call would run `clang-cl --version` again through `find_clang`: ten probes cost
+    // seconds of a page that has to answer at once, so the answer is kept.
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE.get_or_init(build_tool_path).clone()
+}
+
+fn build_tool_path() -> String {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let mut dirs: Vec<String> = Vec::new();
     if let Some(clang) = find_clang() {
@@ -435,7 +442,10 @@ pub fn parse_clang_version(text: &str) -> Option<String> {
 
 fn version_of(program: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(program);
-    cmd.args(args);
+    // The same PATH every build step gets. A CMake or Ninja in `C:\Program Files\CMake\bin`, in winget's Links folder or
+    // anywhere else the launcher adds is what `deps` reports as installed, and a bare lookup here said "CMake was not
+    // found on PATH" right next to that line (issue 30).
+    cmd.args(args).env("PATH", tool_path());
     let out = hidden(&mut cmd).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     // `cmake version 3.31.2`, `1.12.1` (ninja prints only the number)

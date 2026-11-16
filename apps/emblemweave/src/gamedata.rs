@@ -360,16 +360,22 @@ fn use_nup(g: &mut GameData, path: &Path) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Open a `.nx` archive: copy its ExeFS out once (it is small) and hand the
-/// archive itself to the engine as the RomFS, the way a `.nup` is used. An NX
-/// snapshot is a complete file tree, and a tree packed from an extracted dump
-/// keeps `exefs/`, `romfs/` and an optional `data/` at its root.
-fn use_nx(g: &mut GameData, path: &Path) -> Option<PathBuf> {
+/// Open a `.nx` archive: copy its ExeFS out (it is small) and its RomFS out too,
+/// then use the copy the way a dump is used. An NX snapshot is a complete file
+/// tree, and a tree packed from an extracted dump keeps `exefs/`, `romfs/` and an
+/// optional `data/` at its root. The engine serves a `.nup` itself but knows
+/// nothing of NXFormat, so the RomFS has to be materialised for it (issue 28).
+fn use_nx(
+    g: &mut GameData,
+    path: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Package {
     let nx = match ew_format::nx::Nx::open(path) {
         Ok(n) => n,
         Err(e) => {
             g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
-            return None;
+            return Package::Failed;
         }
     };
     // The launcher is built for one game; take its application when the archive
@@ -380,12 +386,12 @@ fn use_nx(g: &mut GameData, path: &Path) -> Option<PathBuf> {
     let app_index = wanted.and_then(|id| nx.application(id)).or_else(|| (nx.applications().len() == 1).then_some(0));
     let Some(app_index) = app_index else {
         g.checks.push(Check::new(Severity::Error, "Game file", "the .nx holds no application for this game"));
-        return None;
+        return Package::Failed;
     };
     let app = &nx.applications()[app_index];
     let Some(snapshot) = nx.current(app_index) else {
         g.checks.push(Check::new(Severity::Error, "Game file", "the .nx holds no snapshot for this game"));
-        return None;
+        return Package::Failed;
     };
     let snap = &nx.snapshots()[snapshot];
     let version = if snap.display_version.is_empty() { snap.version.to_string() } else { snap.display_version.clone() };
@@ -393,7 +399,7 @@ fn use_nx(g: &mut GameData, path: &Path) -> Option<PathBuf> {
         Ok(t) => t,
         Err(e) => {
             g.checks.push(Check::new(Severity::Error, "Game file", format!("{e:#}")));
-            return None;
+            return Package::Failed;
         }
     };
     let (compressed, _) = nx.compression();
@@ -428,25 +434,27 @@ fn use_nx(g: &mut GameData, path: &Path) -> Option<PathBuf> {
         .collect();
     if modules.is_empty() {
         g.checks.push(Check::new(Severity::Error, "ExeFS", "the .nx has no exefs/ folder at the root of this version"));
-        return None;
+        return Package::Failed;
     }
     if !modules.iter().any(|(name, _, _)| name == MAIN_MODULE) {
         g.checks.push(Check::new(Severity::Error, "ExeFS", "the .nx has no exefs/main module"));
-        return None;
+        return Package::Failed;
     }
-    let dir = Config::work_dir()?.join("nx").join(format!("{:016X}-v{}", app.id, snap.version)).join("exefs");
+    let Some(work) = Config::work_dir() else { return Package::Failed };
+    let base = work.join("nx").join(format!("{:016X}-v{}", app.id, snap.version));
+    let dir = base.join("exefs");
     let current = modules.iter().all(|(name, _, size)| file_len(&dir.join(name)) == Some(*size));
     if !current {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             g.checks.push(Check::new(Severity::Error, "ExeFS", format!("creating {}: {e}", dir.display())));
-            return None;
+            return Package::Failed;
         }
         for (name, id, _) in &modules {
             match nx.read(*id).map_err(|e| format!("{e:#}")).and_then(|b| std::fs::write(dir.join(name), b).map_err(|e| e.to_string())) {
                 Ok(()) => {}
                 Err(e) => {
                     g.checks.push(Check::new(Severity::Error, "ExeFS", format!("copying {name}: {e}")));
-                    return None;
+                    return Package::Failed;
                 }
             }
         }
@@ -455,19 +463,85 @@ fn use_nx(g: &mut GameData, path: &Path) -> Option<PathBuf> {
     let romfs: Vec<&(String, u32, u64)> = tree.iter().filter(|(p, _, _)| p.starts_with("romfs/")).collect();
     if romfs.is_empty() {
         g.checks.push(Check::new(Severity::Error, "RomFS", "the .nx has no romfs/ folder at the root of this version"));
-        return None;
+        return Package::Failed;
     }
     let mut tops: Vec<&str> = romfs.iter().filter_map(|(p, _, _)| p.strip_prefix("romfs/")).filter_map(|rest| rest.split('/').next()).collect();
     tops.sort_unstable();
     tops.dedup();
     g.romfs_entries = tops.len();
-    g.romfs = Some(path.to_path_buf());
+
+    // The engine reads a RomFS folder: its reader knows a .nup, not NXFormat, so the tree is written out once and the folder handed
+    // over. A .nx has no in-place path the engine could serve, unlike a .nup, so this copies the RomFS to disk (issue 28).
+    let romfs_dir = base.join("romfs");
+    let stamp = format!("{}-{}", path.display(), modified_stamp(path));
+    let marker = base.join("romfs.txt");
+    let cached = std::fs::read_to_string(&marker).ok().and_then(|t| {
+        let mut it = t.lines();
+        (it.next() == Some(stamp.as_str())).then(|| it.next().and_then(|l| Some(l.trim().to_string()))).flatten()
+    });
+    if cached.is_none() {
+        let total = romfs.len() as u64;
+        g.checks.push(Check::new(
+            Severity::Info,
+            "Game file",
+            format!(
+                "writing the RomFS out of {} into {} once, {} entries; the engine reads a folder, not an NX container",
+                path.display(),
+                romfs_dir.display(),
+                total
+            ),
+        ));
+        let _ = std::fs::remove_dir_all(&romfs_dir);
+        if let Err(e) = std::fs::create_dir_all(&romfs_dir) {
+            g.checks.push(Check::new(Severity::Error, "RomFS", format!("creating {}: {e}", romfs_dir.display())));
+            return Package::Failed;
+        }
+        let mut done = 0u64;
+        let mut bytes = 0u64;
+        for (p, id, _) in &romfs {
+            let rel = p.strip_prefix("romfs/").unwrap_or(p);
+            if rel.is_empty() || rel.ends_with('/') {
+                continue;
+            }
+            if cancelled() {
+                let _ = std::fs::remove_dir_all(&romfs_dir);
+                g.checks.push(Check::new(Severity::Info, "Game file", "the RomFS copy was cancelled and removed; Detect starts it again"));
+                return Package::Cancelled;
+            }
+            let out = romfs_dir.join(rel.replace('\\', "/"));
+            if let Some(parent) = out.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match nx.read(*id) {
+                Ok(b) => {
+                    if let Err(e) = std::fs::write(&out, &b) {
+                        g.checks.push(Check::new(Severity::Error, "RomFS", format!("writing {}: {e}", out.display())));
+                        return Package::Failed;
+                    }
+                    bytes += b.len() as u64;
+                }
+                Err(e) => {
+                    g.checks.push(Check::new(Severity::Error, "RomFS", format!("reading {rel} from the .nx: {e:#}")));
+                    return Package::Failed;
+                }
+            }
+            done += 1;
+            if done % 128 == 0 {
+                progress(done, total);
+            }
+        }
+        progress(done, total);
+        if std::fs::write(&marker, format!("{stamp}\n{done} {bytes}\n")).is_err() {
+            g.checks.push(Check::new(Severity::Warn, "Game file", format!("the RomFS copy was not recorded in {}", marker.display())));
+        }
+    }
+    g.romfs = Some(romfs_dir.clone());
     g.nx = Some(path.to_path_buf());
     g.title_id = Some(app.id);
     if !app.title.is_empty() {
         g.title = Some((app.title.clone(), version));
     }
-    Some(dir)
+    Package::Ready(dir)
 }
 
 /// Open a `.nsp` package: unpack its ExeFS, RomFS and control metadata once
@@ -615,8 +689,10 @@ pub fn detect_with(paths: &Paths, progress: &mut dyn FnMut(u64, u64), cancelled:
     // An .nx archive does the same, in NXFormat's own container.
     if let Some(r) = root.as_ref().filter(|r| r.is_file() && ew_format::nx::is_nx(r)) {
         let r = r.clone();
-        if let Some(exefs) = use_nx(&mut g, &r) {
-            g.exefs = non_empty(&paths.exefs).or(Some(exefs));
+        match use_nx(&mut g, &r, progress, cancelled) {
+            Package::Ready(exefs) => g.exefs = non_empty(&paths.exefs).or(Some(exefs)),
+            Package::Cancelled => return g,
+            Package::Failed => {}
         }
         return finish(g, paths);
     }
@@ -715,7 +791,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
         Some(_) if g.nx.is_some() => g.checks.push(Check::new(
             Severity::Ok,
             "RomFS",
-            format!("{} top-level entries, read in place from the .nx", g.romfs_entries),
+            format!("{} top-level entries, written out of the .nx once", g.romfs_entries),
         )),
         Some(dir) => {
             g.romfs_entries = std::fs::read_dir(dir).map(|rd| rd.count()).unwrap_or(0);

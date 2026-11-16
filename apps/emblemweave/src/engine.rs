@@ -1542,14 +1542,31 @@ pub fn sdk_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+fn has_files(dir: &Path, needed: &[&str], every: bool) -> bool {
+    if every {
+        needed.iter().all(|f| dir.join(f).is_file())
+    } else {
+        needed.iter().any(|f| dir.join(f).is_file())
+    }
+}
+
 fn sdk_in(dirs: &[PathBuf], folders: &[&str], needed: &[&str], every: bool) -> Option<PathBuf> {
-    dirs.iter().flat_map(|d| folders.iter().map(move |f| d.join("upscalers").join(f))).find(|d| {
-        if every {
-            needed.iter().all(|f| d.join(f).is_file())
-        } else {
-            needed.iter().any(|f| d.join(f).is_file())
+    let vendor = dirs.iter().flat_map(|d| folders.iter().map(move |f| d.join("upscalers").join(f)));
+    for dir in vendor {
+        if has_files(&dir, needed, every) {
+            return Some(dir);
         }
-    })
+        // An SDK unpacked whole keeps its DLLs a level down, in `bin` or `x64`: the folder a player drops in is the archive's
+        // own top folder far more often than a folder flattened by hand.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut sub: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            sub.sort();
+            if let Some(hit) = sub.into_iter().find(|s| has_files(s, needed, every)) {
+                return Some(hit);
+            }
+        }
+    }
+    None
 }
 
 /// Where the engine will look, in the same order: `upscalers\fsr` (and the older `upscalers\fsr3`), `upscalers\streamline`,
