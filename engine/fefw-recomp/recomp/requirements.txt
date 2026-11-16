@@ -1,6 +1,9 @@
-# Python 3.13 in tools\.venv (from the repository root):
+# Python in tools\.venv (from the repository root). uv is quicker and pins 3.13 when it is installed:
 # uv venv tools\.venv --python 3.13
 # uv pip install --python tools\.venv -r recomp\requirements.txt
+# Without uv, the interpreter the build already needs makes the same environment, and pip installs this list:
+# py -3 -m venv tools\.venv
+# tools\.venv\Scripts\python -m pip install -r recomp\requirements.txt
 unicorn==2.1.4      # reference CPU for the differential and end-to-end oracles
 capstone==5.0.9     # instruction decode for the tier-2 lifter and for corpus shape names
 lz4                 # NSO segment decompression (nxrecomp/nso.py)

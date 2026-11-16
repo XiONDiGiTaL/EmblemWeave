@@ -192,7 +192,7 @@ pub fn scrub(cmd: &mut Command) {
     }
 }
 
-fn hidden(cmd: &mut Command) -> &mut Command {
+pub(crate) fn hidden(cmd: &mut Command) -> &mut Command {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {

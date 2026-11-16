@@ -97,6 +97,23 @@ pub fn tool_path() -> String {
     crate::toolchain::tool_path()
 }
 
+/// Whether `name` answers along the PATH every build step gets.
+pub fn which_tool(name: &str) -> bool {
+    let mut cmd = Command::new(name);
+    cmd.arg("--version").env("PATH", tool_path()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    crate::toolchain::hidden(&mut cmd).status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// The PowerShell the engine's scripts run in: PowerShell 7 when it is installed, otherwise the Windows PowerShell that ships with
+/// Windows. The scripts use no syntax that only 7 understands, so the second is a working fallback rather than a degraded one.
+pub fn shell() -> &'static str {
+    if which_tool("pwsh") {
+        "pwsh"
+    } else {
+        "powershell"
+    }
+}
+
 /// The toolchain, probed once per process: `vswhere`, `clang-cl --version` and
 /// `cmake --version` are three processes, and several pages ask for the answer.
 fn probe() -> &'static crate::toolchain::Toolchain {
@@ -1122,14 +1139,24 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let python = root.join("tools").join(".venv").join("Scripts").join("python.exe");
     let py = python.display().to_string();
 
-    // 1. Python environment.
+    // 1. Python environment. `uv` is quicker when it is installed, but it is one more thing to install for one virtualenv, so
+    // without it the interpreter the build already needs makes the environment and pip installs the same pinned list.
     ctx.start(0);
     if python.is_file() {
         ctx.end(0, StageStatus::Skipped, "already set up");
-    } else {
+    } else if which_tool("uv") {
         run(ctx, &root, "uv", &["venv", "tools\\.venv", "--python", "3.13"])?;
         run(ctx, &root, "uv", &["pip", "install", "--python", "tools\\.venv", "-r", "recomp\\requirements.txt"])?;
         ctx.end(0, StageStatus::Done, "tools\\.venv ready");
+    } else {
+        ctx.log("uv is not installed: the Python environment is made with the interpreter on this PC and pip installs its packages");
+        if run(ctx, &root, "py", &["-3", "-m", "venv", "tools\\.venv"]).is_err() {
+            run(ctx, &root, "python", &["-m", "venv", "tools\\.venv"]).map_err(|e| {
+                format!("creating tools\\.venv needs a Python 3.9 or newer: {e}. Install Python with `winget install Python.Python.3.12`, restart the launcher, then press Build the game again")
+            })?;
+        }
+        run(ctx, &root, &py, &["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", "recomp\\requirements.txt"])?;
+        ctx.end(0, StageStatus::Done, "tools\\.venv ready (pip)");
     }
 
     // 2. ExeFS.
@@ -1222,7 +1249,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         ctx.end(3, StageStatus::Skipped, "already fetched");
     } else {
         ctx.log("the texture sources are missing or incomplete; fetching the pinned versions");
-        run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"])?;
+        run(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"])?;
         if !textures_fetched(&root) {
             return Err("the texture sources were fetched but are still incomplete. tools\\textures\\third_party needs astc-encoder, bc7enc_rdo and ispc; delete that folder and press Build the game again".into());
         }
@@ -1235,7 +1262,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         Some(vc) => vec![("NX_VCVARS", vc)],
         None => Vec::new(),
     };
-    let fefw = || run_env(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
+    let fefw = || run_env(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
     // Two failures the launcher can repair on its own, each once:
     //
     // - The runtime fetches its graphics dependencies into the build folder, and a
@@ -1320,7 +1347,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         ensure_ryubing_refs(ctx, &root)?;
         let setup = build_shaders.join("scripts").join("setup_ryujinx.ps1").display().to_string();
         let refs = root.join("work").join("refs").join("ryubing").display().to_string();
-        run(ctx, &root, "pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &setup, "-Ryubing", &refs])?;
+        run(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &setup, "-Ryubing", &refs])?;
         // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
         // .NET runtime alone satisfies `dotnet.exe` but cannot build a net10.0 project.
         let csproj = build_shaders.join("harness").join("SpirvHarness.csproj").display().to_string();
