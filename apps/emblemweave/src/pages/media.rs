@@ -555,7 +555,7 @@ fn reshade_settings(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.data_mut(|d| d.insert_temp(choice_id, choice.clone()));
             let hint = if status.configured {
-                "Copied beside fefw.exe. In game, F3 and F4 step through every preset and Home opens ReShade's overlay."
+                "Copied beside fefw.exe. In game, F3 steps to the next preset, F4 to the previous one, and Home opens ReShade's overlay."
             } else {
                 "ReShade.ini is written the first time the game runs with ReShade on; the preset can be applied then."
             };

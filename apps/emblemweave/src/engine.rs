@@ -228,8 +228,10 @@ pub fn apply_reshade_preset(name: &str) -> Result<String, String> {
     let text = set("PresetPath", format!(".\\{name}.ini"), &text);
     let text = set("EffectSearchPaths", r".\reshade-shaders\Shaders".into(), &text);
     let text = set("PresetShortcutPaths", shortcuts.join(","), &text);
-    let text = set("KeyNextPreset", "61,0,0,0".into(), &text);     // F3
-    let text = set("KeyPreviousPreset", "62,0,0,0".into(), &text); // F4
+    // ReShade.ini stores virtual-key codes, not scancodes: its own KeyOverlay=36 is VK_HOME, so F3 is 0x72 (114) and
+    // F4 is 0x73 (115).
+    let text = set("KeyNextPreset", "114,0,0,0".into(), &text);     // F3
+    let text = set("KeyPreviousPreset", "115,0,0,0".into(), &text); // F4
     std::fs::write(&ini, text).map_err(|e| format!("writing {}: {e}", ini.display()))?;
     Ok(format!("{name} is loaded: {copied} shaders beside the game, F3 and F4 step through the presets"))
 }
