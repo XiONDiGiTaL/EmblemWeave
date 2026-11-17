@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.37](0.1.37.md) | 2026-11-17 | A guided first run, RomFS mods that stay above package data, faster lifted code, HDR UI brightness, and a broad engine update. |
 | [0.1.36](0.1.36.md) | 2026-11-16 | The GT tone map is recognised by every HDR hook, build-cache resets only fire on real CMake errors, an existing mod folder uses its absolute path, and advanced settings fold into drawers. |
 | [0.1.35](0.1.35.md) | 2026-11-16 | Plaintext `.xci` game cards build with `.nup`, `.nsp`, `.nx` and dumps; the `.nx` and CMake fixes get named regressions. |
 | [0.1.34](0.1.34.md) | 2026-11-16 | Saves load again, shader compilation stops pinning every core, vibration can be tested, and the launcher has a modern dashboard. |
