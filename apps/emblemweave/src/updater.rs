@@ -122,6 +122,51 @@ pub fn release_from_json(body: &[u8]) -> Result<Release, String> {
     })
 }
 
+/// Where a downloaded update is unpacked. It is disposable: the new launcher
+/// is moved out of it before the swap script starts.
+pub fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join("emblemweave-update")
+}
+
+fn tree_bytes(dir: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Ok(m) = e.metadata() {
+                total += m.len();
+            }
+        }
+    }
+    total
+}
+
+/// Remove the previous update's download and unpack folders. A failed or
+/// interrupted update can leave a partial zip or an old executable here; none
+/// of it is needed once this launcher is running. Saves, profiles and the
+/// engine build are elsewhere and are never touched.
+pub fn clean_cache() -> u64 {
+    let dir = cache_dir();
+    let freed = tree_bytes(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    // The swap scripts delete themselves, but one interrupted by a reboot can
+    // stay behind. They hold no user data either.
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name.starts_with("emblemweave-update-") && name.ends_with(".cmd") {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    freed
+}
+
 /// The launcher running now.
 pub fn current_exe() -> Option<PathBuf> {
     std::env::current_exe().ok()
@@ -145,6 +190,8 @@ pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let zip = dir.join(crate::mods::clean_name(&name));
+    // An interrupted download must not be mistaken for the new zip.
+    let _ = std::fs::remove_file(&zip);
     let out = hidden(Command::new(system_tool("curl.exe")).args([
         "-sSfL",
         "--max-time",

@@ -30,6 +30,10 @@ pub struct Ingame {
     running: bool,
     /// The game process whose window has been given EmblemWeave's icon.
     branded: Option<u32>,
+    /// The frame rate last read from the game log, shown in the window title.
+    fps: Option<f32>,
+    /// How much of the game log the title has already read.
+    log_from: u64,
     last_check: Instant,
     key_down: bool,
     pad_down: bool,
@@ -41,7 +45,7 @@ pub struct Ingame {
 
 impl Default for Ingame {
     fn default() -> Self {
-        Ingame { open: false, tab: Tab::Quick, running: false, branded: None, last_check: Instant::now() - Duration::from_secs(10), key_down: false, pad_down: false, paused: false, confirm_stop: false, shot_at: None }
+        Ingame { open: false, tab: Tab::Quick, running: false, branded: None, fps: None, log_from: 0, last_check: Instant::now() - Duration::from_secs(10), key_down: false, pad_down: false, paused: false, confirm_stop: false, shot_at: None }
     }
 }
 
@@ -126,12 +130,26 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
         if app.ingame.running {
             if let Some(pid) = game_pid().filter(|p| app.ingame.branded != Some(*p)) {
                 // The window appears a moment after the process starts.
-                if session::brand(pid, "EmblemWeave — Fire Emblem: Fortune's Weave") {
+                let title = game_title(None);
+                if session::brand(pid, &title) {
                     app.ingame.branded = Some(pid);
+                    app.ingame.fps = None;
+                    // Skip the previous run's lines: only this run's frame rate
+                    // belongs in this run's title.
+                    app.ingame.log_from = game_log_len();
+                }
+            }
+            if let Some(pid) = app.ingame.branded {
+                refresh_title(pid, &mut app.ingame);
+                if app.config.discord.enabled && !app.discord.active() {
+                    app.discord.start(&app.config.discord.client_id, pid);
                 }
             }
         } else {
             app.ingame.branded = None;
+            app.ingame.fps = None;
+            app.ingame.log_from = 0;
+            app.discord.stop();
         }
         if app.ingame.running && !was {
             app.notify("Game started: press F10, or Back + RB on a controller, for the EmblemWeave menu", Tone::Ok);
@@ -273,6 +291,60 @@ fn controls(ui: &mut egui::Ui, p: &crate::theme::Palette) {
     });
 }
 
+/// The game window's title. The frame rate comes from the engine's own
+/// once-a-second line, so it is the rate the game is actually presenting, not
+/// the launcher's.
+fn game_title(fps: Option<f32>) -> String {
+    match fps {
+        Some(f) => format!("Fire Emblem: Fortune's Weave (FPS: {f:.0})"),
+        None => "Fire Emblem: Fortune's Weave (FPS: --)".to_string(),
+    }
+}
+
+fn game_log_path() -> Option<PathBuf> {
+    crate::engine::run_dir().map(|d| d.join("fefw.log"))
+}
+
+fn game_log_len() -> u64 {
+    game_log_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map_or(0, |m| m.len())
+}
+
+/// Read what the game appended to its log since the last call and put the
+/// newest `gfx: fps N` into the window title. The read is incremental, so a
+/// long session does not re-scan the whole log every second.
+#[cfg(windows)]
+fn refresh_title(pid: u32, ingame: &mut Ingame) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Some(path) = game_log_path() else { return };
+    let Ok(meta) = std::fs::metadata(&path) else { return };
+    let len = meta.len();
+    if ingame.log_from == 0 || len < ingame.log_from {
+        ingame.log_from = len;
+    }
+    if len == ingame.log_from {
+        return;
+    }
+    let mut text = String::new();
+    if let Ok(mut f) = std::fs::File::open(&path) {
+        if f.seek(SeekFrom::Start(ingame.log_from)).is_ok() {
+            let _ = f.take(len - ingame.log_from).read_to_string(&mut text);
+        }
+    }
+    ingame.log_from = len;
+    let Some(n) = text.rsplit("gfx: fps ").next() else { return };
+    let n = n.split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or_default();
+    let Ok(fps) = n.parse::<f32>() else { return };
+    if ingame.fps != Some(fps) {
+        ingame.fps = Some(fps);
+        session::set_title(pid, &game_title(Some(fps)));
+    }
+}
+
+#[cfg(not(windows))]
+fn refresh_title(_pid: u32, _ingame: &mut Ingame) {}
+
 /// Pausing, stopping and capturing the game's process from outside it.
 #[cfg(windows)]
 pub mod session {
@@ -362,6 +434,15 @@ pub mod session {
         let mut f = Find { pid, best: std::ptr::null_mut(), area: 0 };
         unsafe { EnumWindows(Some(each), &mut f as *mut Find as LPARAM) };
         (!f.best.is_null()).then_some(f.best)
+    }
+
+    /// Set the game window's title without touching its icon.
+    pub fn set_title(pid: u32, title: &str) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW;
+        let Some(w) = window(pid) else { return false };
+        let t: Vec<u16> = title.encode_utf16().chain([0]).collect();
+        unsafe { SetWindowTextW(w, t.as_ptr()) };
+        true
     }
 
     /// Give the game's window EmblemWeave's icon and title. The engine's

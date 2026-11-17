@@ -201,6 +201,22 @@ impl Default for Updates {
     }
 }
 
+/// Discord Rich Presence while the game runs. The client id is the public
+/// application id from Discord's Developer Portal; it is not a secret and no
+/// token is stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Discord {
+    pub enabled: bool,
+    pub client_id: String,
+}
+
+impl Default for Discord {
+    fn default() -> Self {
+        Discord { enabled: false, client_id: String::new() }
+    }
+}
+
 /// Which of the launcher's own readouts are shown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -292,6 +308,7 @@ pub struct Config {
     pub input: Input,
     pub theme: Scheme,
     pub updates: Updates,
+    pub discord: Discord,
     pub graphics_preset: GraphicsPreset,
     pub hud: Hud,
     pub nav: NavState,

@@ -384,6 +384,11 @@ pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
             || name.ends_with(".tmp")
             || name.ends_with(".orig")
             || name.ends_with(".before-restore")
+            // The game keeps `<slot>.bak` beside a slot. The current-save list
+            // already ignores them because they have an extension; the profile
+            // list did not, so a profile looked like it held two more slots
+            // than the save it was copied from.
+            || name.to_ascii_lowercase().ends_with(".bak")
         {
             continue;
         }
@@ -1063,6 +1068,27 @@ mod tests {
         let meta = profile_meta(&p, &crate::savefile::Ids::default());
         assert_eq!(meta.valid_slots, 1);
         assert_eq!((meta.gold, meta.renown), (None, None));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn game_bak_files_are_not_counted_as_slots() {
+        let root = temp("profile-bak");
+        let save = root.join("save");
+        let p = create_empty_profile(&save, "Run A").unwrap();
+        for i in 0..8 {
+            write_bytes(&p.path.join(format!("Chapter_{i}")), &valid_slot(b"payload"));
+        }
+        // The game's own backups have an extension, so the current-save list
+        // never counted them. A profile copied from that save did.
+        write_bytes(&p.path.join("Auto.bak"), &valid_slot(b"backup"));
+        write_bytes(&p.path.join("Chapter_0.bak"), &valid_slot(b"backup"));
+
+        let listed = profile_slots(&p, &crate::savefile::Ids::default());
+        assert_eq!(listed.len(), 8, "the eight slots, not the eight plus two .bak files");
+        assert!(listed.iter().all(|s| !s.name.to_ascii_lowercase().ends_with(".bak")));
+        let check = check_profile(&p);
+        assert_eq!((check.slots, check.readable), (8, 8));
         let _ = std::fs::remove_dir_all(root);
     }
 

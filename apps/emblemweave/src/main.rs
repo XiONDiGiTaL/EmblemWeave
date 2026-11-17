@@ -24,6 +24,7 @@ mod platform;
 mod ingame;
 mod crash;
 mod deps;
+mod discord;
 mod mods;
 mod onboarding;
 mod pad;
@@ -150,6 +151,7 @@ pub struct App {
     /// The launcher's own frame times.
     pub frames: perf::Frames,
     pub update: Updating,
+    pub discord: discord::Presence,
     pub ingame: ingame::Ingame,
     pub log_ui: pages::log::Ui,
     /// `--tour`: walk through the features by itself, for recordings.
@@ -201,6 +203,12 @@ impl App {
         // run); warming it here is what lets the Overview and Requirements
         // pages draw it without waiting.
         std::thread::spawn(|| crate::deps::warm());
+        // A failed or interrupted update used to leave its download behind in
+        // %TEMP%. It is never needed by the running launcher, so clear it at
+        // startup; saves, profiles, mods and the engine build live elsewhere.
+        std::thread::spawn(|| {
+            let _ = crate::updater::clean_cache();
+        });
         let mut app = App {
             applied: config.theme,
             config,
@@ -232,6 +240,7 @@ impl App {
             tuning: None,
             frames: Default::default(),
             update: Default::default(),
+            discord: Default::default(),
             ingame: Default::default(),
             log_ui: Default::default(),
             tour: None,

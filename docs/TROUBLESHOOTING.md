@@ -151,6 +151,46 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 | `main.npdm is compressed in the .nup`, `... is compressed in the .nup; the game reads RomFS files in place`, or the game exits two seconds after Play | 0.1.19 and older refused any `.nup` that packs some of its files with zstd (#24) | 0.1.20 and newer write those files into `engine\fefw-recomp\work\romfs-overlay` and the engine reads them from there: press Play, which writes them first and then starts the game, or **Check my game folder** on Game Setup if you would rather not start it yet. Neither compiles anything. A compressed ExeFS no longer matters at all |
 
+## `PYTHONPATH` and `PYTHONHOME` on Windows
+
+Two Python variables are meant for temporary experiments, but Windows programs and installers sometimes set them permanently. They break a virtual environment because they are inherited by every child process and override the environment's own paths:
+
+- `PYTHONPATH` prepends another Python's `Lib` and `DLLs` folders to `sys.path`. The engine's `tools\.venv` can then import an extension built for a different Python, which is the `Module use of python311.dll conflicts with this version of Python` failure from issue #43.
+- `PYTHONHOME` replaces the virtual environment's `sys.prefix`, so Python looks for its standard library in the other installation.
+
+Check them in the shell that starts the build:
+
+```powershell
+$env:PYTHONPATH
+$env:PYTHONHOME
+```
+
+```bat
+echo %PYTHONPATH%
+echo %PYTHONHOME%
+```
+
+Clear them for the current window:
+
+```powershell
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+```
+
+```bat
+set PYTHONPATH=
+set PYTHONHOME=
+```
+
+Clear them permanently for your user account (open a new terminal afterwards):
+
+```powershell
+[Environment]::SetEnvironmentVariable("PYTHONPATH", $null, "User")
+[Environment]::SetEnvironmentVariable("PYTHONHOME", $null, "User")
+```
+
+Since 0.1.38 every build step the launcher starts removes both variables and sets `PYTHONNOUSERSITE=1` itself, so an up-to-date launcher does not need this. A manual `build_fefw.ps1` run, an older release, or another build wrapper can still inherit them. Do not uninstall the other Python; clearing the variables is enough.
+
 ## Console windows during the recompilation pipeline
 
 The pipeline compiles the C it emits, one shard per process, using zig's clang (`python -m ziglang cc`), `zig`, or LLVM's

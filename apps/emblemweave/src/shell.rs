@@ -157,10 +157,17 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                 widgets::tracked(ui, &app.page.label().to_uppercase(), 8.5, p.accent_hi, theme::TRACK_MID);
 
                 ui.add_space(10.0);
-                if widgets::header_chip(ui, &p, "Game", data_text, data_tone).on_hover_text("Game data status · open Game Setup").clicked() {
+                // Keep the right-hand controls reachable at narrow widths:
+                // the chips are the first thing to go, not the window buttons
+                // or Settings.
+                if width >= 980.0
+                    && widgets::header_chip(ui, &p, "Game", data_text, data_tone).on_hover_text("Game data status · open Game Setup").clicked()
+                {
                     goto = Some(Page::Setup);
                 }
-                if widgets::header_chip(ui, &p, "Build", build_text, build_tone).on_hover_text("Compiled game status · open Recompilation").clicked() {
+                if width >= 1080.0
+                    && widgets::header_chip(ui, &p, "Build", build_text, build_tone).on_hover_text("Compiled game status · open Recompilation").clicked()
+                {
                     goto = Some(Page::Recompile);
                 }
                 if width >= 1250.0
@@ -187,12 +194,14 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
                     ui.add_space(8.0);
-                    ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(9.5)).color(p.muted));
-                    ui.add_space(6.0);
-                    if header_action(ui, &p, "SETTINGS", "Appearance and interface options").clicked() {
+                    if width >= 1040.0 {
+                        ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(9.5)).color(p.muted));
+                        ui.add_space(6.0);
+                    }
+                    if width >= 900.0 && header_action(ui, &p, "SETTINGS", "Appearance and interface options").clicked() {
                         goto = Some(Page::Appearance);
                     }
-                    if width >= 1320.0 && header_action(ui, &p, "REQUIREMENTS", "Build tools and dependency checks").clicked() {
+                    if width >= 1400.0 && header_action(ui, &p, "REQUIREMENTS", "Build tools and dependency checks").clicked() {
                         goto = Some(Page::Requirements);
                     }
                 });
@@ -334,7 +343,7 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                     ui.add(egui::Spinner::new().size(12.0).color(p.accent));
                     ui.label(RichText::new(kind.title().to_uppercase()).font(theme::semibold(9.0)).color(p.accent));
                     let clean = message.split('[').next().unwrap_or(&message).trim();
-                    let limit = if ctx.screen_rect().width() < 1300.0 { 46 } else { 72 };
+                    let limit = if ctx.screen_rect().width() < 1000.0 { 30 } else if ctx.screen_rect().width() < 1300.0 { 46 } else { 72 };
                     let clean = if clean.chars().count() > limit { format!("{}…", clean.chars().take(limit).collect::<String>()) } else { clean.to_string() };
                     ui.label(RichText::new(clean).size(10.5).color(p.body));
                     let frac = fraction.unwrap_or(0.0);
@@ -358,11 +367,13 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(RichText::new(super::clock()).font(theme::mono(9.5)).color(p.muted));
-                    if header_action(ui, &p, "LOG", "Open the game log").clicked() {
+                    if ctx.screen_rect().width() >= 880.0 {
+                        ui.label(RichText::new(super::clock()).font(theme::mono(9.5)).color(p.muted));
+                    }
+                    if ctx.screen_rect().width() >= 760.0 && header_action(ui, &p, "LOG", "Open the game log").clicked() {
                         app.page = Page::Log;
                     }
-                    if app.jobs.iter().any(|j| !j.finished()) {
+                    if ctx.screen_rect().width() >= 1120.0 && app.jobs.iter().any(|j| !j.finished()) {
                         let (done, all) = app.jobs.iter().filter(|j| !j.finished()).fold((0, 0), |(d, a), j| {
                             let d = d + j.snapshot(|pr| pr.stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done)).count());
                             let a = a + j.snapshot(|pr| pr.stages.len());

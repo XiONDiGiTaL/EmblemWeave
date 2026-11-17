@@ -4,6 +4,14 @@
 param([string]$Config = "Release", [switch]$Clean, [string]$LibDir = $env:FEFW_LIB_DIR, [string]$Target = "fefw",
       [int]$Jobs = $(if ($env:NX_JOBS) { [int]$env:NX_JOBS } else { 10 }), [string]$CMakeArgs = "", [string]$BuildDir = "")
 $ErrorActionPreference = "Stop"
+# A PYTHONPATH or PYTHONHOME left by another Python install is inherited by
+# every Python process this build starts, including the engine's own
+# tools\.venv, and can make it import an extension built for another version
+# (issue #43). The launcher clears them too; a manual build gets the same
+# treatment here. They are removed from this process only, never from the PC.
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+$env:PYTHONNOUSERSITE = "1"
 $root = Split-Path -Parent $PSScriptRoot
 $src = Join-Path $root "fefw"
 $bd = if ($BuildDir) { if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $src $BuildDir } }

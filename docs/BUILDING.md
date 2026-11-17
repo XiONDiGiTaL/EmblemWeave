@@ -19,6 +19,25 @@ cargo build --release -p emblemweave
 The launcher is `target\release\EmblemWeave.exe`. The command-line tools are
 built alongside it:
 
+### The engine build without the extra flags
+
+A normal checkout keeps the lifted libraries in
+`engine/fefw-recomp/work/build/fefw`, which is already the engine's default, so
+the game build is one command:
+
+```powershell
+pwsh -NoProfile -File engine/fefw-recomp/game-build/scripts/build_fefw.ps1
+```
+
+`-LibDir` is only for a checkout whose lifted libraries are somewhere else. The
+script now removes inherited `PYTHONPATH` and `PYTHONHOME` and sets
+`PYTHONNOUSERSITE=1` before it starts anything, the same environment the
+launcher's build uses, so a globally installed Python cannot leak into the
+engine's `tools\.venv`. If a build still fails after that, run
+`EmblemWeave.exe --check-toolchain` first; it checks the compiler, SDK and
+CMake before a twenty-minute build starts.
+
+
 | Tool | Purpose |
 | --- | --- |
 | `ew-inspect` | Inspect an ExeFS and RomFS |

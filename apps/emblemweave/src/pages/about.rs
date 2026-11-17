@@ -24,6 +24,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     links(ui, &p);
     credits(ui, &p);
     updates(app, ui, &p);
+    discord(app, ui, &p);
     storage(app, ui, &p);
 
     ui.columns(2, |cols| {
@@ -215,6 +216,8 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
             ("XiØN", "design, engineering and the EmblemWeave identity"),
             ("Goldoire", "fefw-recomp, the baseline engine, and everyone who contributed to that project"),
             ("Obersteinn", "preserving the final fefw-recomp 0.2.0 release after its repository was removed"),
+            ("moistman7", "the GT tone-curve HDR patch and the 0.2.3/0.2.4 engine improvements (PRs #40, #52-#55)"),
+            ("metrist38", "the fefw-recomp fork that supplies the 0.2.3 and 0.2.4 engine updates"),
             ("Ryujinx", "shader translation, whose shader code the build uses (MIT)"),
             ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
             ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),
@@ -363,6 +366,38 @@ fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             .size(13.0)
             .color(p.muted),
         );
+    });
+}
+
+/// Discord Rich Presence while the game is running. The application id is
+/// public; no Discord token is stored or needed.
+fn discord(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
+    widgets::section(ui, p, "Discord Rich Presence", |ui| {
+        let mut enabled = app.config.discord.enabled;
+        ui.horizontal(|ui| {
+            if widgets::toggle(ui, p, &mut enabled).changed() {
+                app.config.discord.enabled = enabled;
+            }
+            ui.label(RichText::new("Show \"Playing Fire Emblem: Fortune's Weave\" in Discord while the game runs").color(p.body));
+        });
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Application ID").size(12.5).color(p.muted));
+            ui.add(
+                egui::TextEdit::singleline(&mut app.config.discord.client_id)
+                    .hint_text("e.g. 123456789012345678")
+                    .desired_width(230.0)
+                    .font(theme::mono(12.0)),
+            );
+            ui.hyperlink_to("Create one", "https://discord.com/developers/applications");
+        });
+        ui.add_space(2.0);
+        let note = if enabled && app.config.discord.client_id.trim().is_empty() {
+            "Paste the Application ID from Discord's Developer Portal. It is public; the launcher stores no token. Presence appears after the next game start."
+        } else {
+            "The ID comes from your own Discord application; Rich Presence is not a bot and needs no token. The game's name is shown only while it runs."
+        };
+        ui.label(RichText::new(note).size(11.5).color(if enabled && app.config.discord.client_id.trim().is_empty() { p.warn } else { p.muted }));
     });
 }
 
