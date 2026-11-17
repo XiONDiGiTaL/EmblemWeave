@@ -361,6 +361,9 @@ void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists);
 void replay_end_submit(Frame& f);
 void replay_abort_submit();     // after a recording threw (its command buffer is discarded)
 void replay_request_trace();      // trace the next whole presented frame (any thread)
+// Render thread, at each present before the output pass: ends the frame's [hdr] ui_nits bookkeeping (extras::hdr_set_ui_white_frame) and
+// reads the settings for the next frame. again: the last frame shown once more (nothing changes).
+void replay_frame_presented(bool again);
 void replay_shutdown();           // destroys pipelines and layouts (render thread, device idle)
 
 // ---- shared facts (nvn_gpu.cpp) ----------------------------------------------------------------------------------------

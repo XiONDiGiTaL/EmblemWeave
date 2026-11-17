@@ -220,16 +220,18 @@ void hdr_refresh_levels() {
     hdr_set_state(hs);
 }
 
-float hdr_output_white_nits(const HdrState& hs) { return hs.scene_hdr && hs.ui_nits > 0 ? hs.ui_nits : hs.paper_white_nits; }
+namespace {
+std::atomic<bool> g_ui_white_frame{false};   // hdr_set_ui_white_frame
+}  // namespace
 
-float hdr_scene_gain() {
-    const HdrState hs = hdr_state();
-    return hs.scene_hdr && hs.ui_nits > 0 ? hs.paper_white_nits / hs.ui_nits : 1.0f;
-}
+bool hdr_ui_split(const HdrState& hs) { return hs.scene_hdr && hs.output != OutputKind::Sdr8 && hs.ui_nits > 0; }
 
-bool hdr_ui_split() {
-    const HdrState hs = hdr_state();
-    return hs.scene_hdr && hs.ui_nits > 0;
+float hdr_scene_gain(const HdrState& hs) { return hdr_ui_split(hs) ? hs.paper_white_nits / hs.ui_nits : 1.0f; }
+
+void hdr_set_ui_white_frame(bool on) { g_ui_white_frame.store(on, std::memory_order_relaxed); }
+
+float hdr_output_white_nits(const HdrState& hs) {
+    return hdr_ui_split(hs) && g_ui_white_frame.load(std::memory_order_relaxed) ? hs.ui_nits : hs.paper_white_nits;
 }
 
 bool hdr_mode_native() { return settings().hdr.mode == HdrMode::Native; }

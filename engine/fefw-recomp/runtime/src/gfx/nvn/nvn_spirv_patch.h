@@ -96,7 +96,7 @@ bool spirv_dual_source_output(const std::vector<uint32_t>& in, std::vector<uint3
 // False (out untouched) when the module has no such output or an unexpected shape; the caller then uses the unpatched module.
 bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out);
 // The same push constant (FRAGMENT offset 0, the alpha-test layout) as a factor on colour output 0's rgb before every return (alpha kept):
-// the HDR tone-map shader's scene gain for [hdr] ui_nits. Same failure rules as spirv_alpha_test.
+// the scene gain of [hdr] ui_nits, on the scene's last pass before the UI. Same failure rules as spirv_alpha_test.
 bool spirv_scale_output0(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
 // A fragment shader of a pass without colour attachments: every Location output becomes a private variable (the decorations go, and

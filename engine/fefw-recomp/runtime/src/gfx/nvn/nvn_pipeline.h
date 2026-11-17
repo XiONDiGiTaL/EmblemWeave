@@ -61,10 +61,11 @@ bool push_uniforms_on();
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);
 // The layout of `base` with the alpha-test push constant (cached per base; `base` itself when it has push constants of its own).
 const ProgLayout* alpha_layout(const ProgLayout& base);
-// [hdr] ui_nits: the gain variant of fs fits (colour output 0 scaled by the push constant at offset 0; GraphicsKey::alpha_pad[0] = 1
-// selects it). hdr_tonemap_shader: fs is the HDR tone-map shader (the scene's draw; the gain goes on the scene's next draw into a window texture).
-bool hdr_gain_shader(const ShaderInfo* fs);
+// [hdr] ui_nits, for the replay (render thread; each answer is worked out once per shader while the HDR scene runs, and not kept before):
+// hdr_tonemap_shader: fs is the HDR tone-map shader. hdr_gain_shader: the scene-gain variant of fs fits (colour output 0's rgb times the
+// push constant at offset 0, spirv_scale_output0; GraphicsKey::scene_gain selects it) and its words are ready for the pipeline.
 bool hdr_tonemap_shader(const ShaderInfo* fs);
+bool hdr_gain_shader(const ShaderInfo* fs);
 
 // Vertex input for the key.
 struct KeyAttr {
@@ -106,7 +107,9 @@ struct GraphicsKey {
     // alpha_layout = 1: built with the alpha-test layout (alpha_layout(): the program's sets plus the reference's push constant range). It is in
     // the key because begin_draw picks that layout before the pass is known: a draw whose pass then rules the variant out (no colour target 0,
     // dual-source blend) keeps alpha_func = 0 but still uses the other layout, and pipelines of incompatible layouts must not share a cache entry.
-    uint8_t alpha_func = 0, alpha_layout = 0, alpha_pad[6] = {};
+    // scene_gain = 1: [hdr] ui_nits, the fragment shader runs as its scene-gain variant (spirv_scale_output0), the factor in the same push
+    // constant (with alpha_layout = 1). Exclusive with alpha_func.
+    uint8_t alpha_func = 0, alpha_layout = 0, scene_gain = 0, alpha_pad[5] = {};
     bool operator==(const GraphicsKey& o) const;
     uint64_t hash() const;
 };

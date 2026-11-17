@@ -435,6 +435,15 @@ bool slider(Menu& m, const char* id, double* v, double lo, double hi, double ste
     return commit;
 }
 
+// A slider whose 0 means "auto" (zero_label) and whose other values start at lo: 1 .. lo-1 becomes lo, except when the value came down
+// from lo or above (a step left from the minimum), which goes to 0, so 0 is reachable with a gamepad or the keyboard too.
+bool zero_or_min_slider(Menu& m, const char* id, double* v, double lo, double hi, double step, const char* zero_label) {
+    const double before = *v;
+    if (!slider(m, id, v, 0, hi, step, *v <= 0 ? zero_label : "%.0f nits")) return false;
+    if (*v > 0 && *v < lo) *v = before >= lo && *v < before ? 0 : lo;
+    return true;
+}
+
 bool islider(Menu& m, const char* id, int* v, int lo, int hi, int step, const char* fmt) {
     int x = *v;
     const bool moved = ImGui::SliderInt(id, &x, lo, hi, fmt, ImGuiSliderFlags_AlwaysClamp);
@@ -803,22 +812,13 @@ void hdr_group(UiHost& host, Menu& m) {
         }
         pending_note(h.format != m.boot.extras.hdr.format, kHdrFormatNames[static_cast<int>(m.boot.extras.hdr.format)]);
         row(m, "Peak brightness", When::Live, "Nits of the brightest highlights; 0 = what the display reports.");
-        if (slider(m, "##pk", &h.peak_nits, 0, 4000, 50, h.peak_nits <= 0 ? "auto" : "%.0f nits")) {
-            if (h.peak_nits > 0 && h.peak_nits < 200) h.peak_nits = 200;
-            apply(host, m);
-        }
+        if (zero_or_min_slider(m, "##pk", &h.peak_nits, 200, 4000, 50, "auto")) apply(host, m);
         row(m, "Paper white", When::Live, "Nits of ordinary white; 0 = Windows' SDR content brightness (203 without it).");
-        if (slider(m, "##pw", &h.paper_white_nits, 0, 500, 10, h.paper_white_nits <= 0 ? "auto" : "%.0f nits")) {
-            if (h.paper_white_nits > 0 && h.paper_white_nits < 80) h.paper_white_nits = 80;
-            apply(host, m);
-        }
+        if (zero_or_min_slider(m, "##pw", &h.paper_white_nits, 80, 500, 10, "auto")) apply(host, m);
         row(m, "Highlight boost", When::Live, "0 keeps the SDR look, 1 lets highlights reach the peak, 2 pushes them further.");
         if (slider(m, "##hb", &h.highlight_boost, 0.0, 2.0, 0.1, "%.2f")) apply(host, m);
-        row(m, "UI brightness", When::Live, "Nits of white in menus, text and the HUD while the 3D scene keeps paper white; 0 = same as paper white.");
-        if (slider(m, "##ui", &h.ui_nits, 0, 500, 10, h.ui_nits <= 0 ? "same as paper white" : "%.0f nits")) {
-            if (h.ui_nits > 0 && h.ui_nits < 40) h.ui_nits = 40;
-            apply(host, m);
-        }
+        row(m, "UI brightness", When::Live, "Nits of white in menus, text and the HUD while the 3D scene keeps paper white; 0 = same as paper white. HDR output only.");
+        if (zero_or_min_slider(m, "##ui", &h.ui_nits, 40, 500, 10, "same as paper white")) apply(host, m);
         end_rows();
     }
     const extras::HdrState hs = extras::hdr_state();

@@ -341,47 +341,54 @@ static VkShaderModule hdr_fragment_module(const ShaderInfo* fs) {
     return m;
 }
 
-// [hdr] ui_nits: the fragment shader (its HDR variant when it is the tone-map shader) with colour output 0's rgb scaled by the push
-// constant (the scene gain, hdr_scene_gain). Empty when the scale patch does not fit; hdr_gain_shader is the replay's test for it.
-static std::vector<uint32_t> hdr_gain_words(const ShaderInfo* fs) {
-    std::vector<uint32_t> hdr, scaled;
-    if (!extras::hdr_scene_active() || fs->spirv.size() > 65536) return {};
-    const bool tonemap = extras::hdr_tonemap_variant(fs->spirv, fs->hash, hdr);
-    if (!spirv_scale_output0(tonemap ? hdr : fs->spirv, scaled)) return {};
-    return scaled;
+// [hdr] ui_nits. The answers are kept on the shader (ShaderInfo::hdr_ui, render thread) once the HDR scene runs; before that nothing is kept,
+// so a shader first seen while the HDR scene is off or switching is looked at again. The gain variant's words (the fragment shader, or its
+// HDR variant when it is the tone-map shader, with colour output 0's rgb times the push constant) wait in g_gain_words for hdr_gain_module.
+enum : uint8_t { kHdrUiTonemapKnown = 1, kHdrUiTonemap = 2, kHdrUiGainKnown = 4, kHdrUiGain = 8 };
+static std::unordered_map<const ShaderInfo*, std::vector<uint32_t>> g_gain_words;   // under g_module_mu
+
+static bool hdr_ui_can_look(const ShaderInfo* fs) { return extras::hdr_scene_active() && fs->spirv.size() <= 65536; }   // as hdr_fragment_module
+
+bool hdr_tonemap_shader(const ShaderInfo* fs) {
+    if (!(fs->hdr_ui & kHdrUiTonemapKnown)) {
+        if (!hdr_ui_can_look(fs)) return false;
+        std::vector<uint32_t> hdr;
+        const bool tonemap = extras::hdr_tonemap_variant(fs->spirv, fs->hash, hdr);
+        if (!extras::hdr_scene_active()) return false;   // it went off meanwhile: the answer is not kept
+        fs->hdr_ui |= kHdrUiTonemapKnown | (tonemap ? kHdrUiTonemap : 0);
+    }
+    return fs->hdr_ui & kHdrUiTonemap;
 }
 
 bool hdr_gain_shader(const ShaderInfo* fs) {
-    static std::mutex mu;
-    static std::unordered_map<const ShaderInfo*, bool> cache;
-    std::lock_guard<std::mutex> lk(mu);
-    auto it = cache.find(fs);
-    if (it != cache.end()) return it->second;
-    const bool ok = !hdr_gain_words(fs).empty();
-    if (ok) NXLOG_I(kTag, "%s: the scene's last pass before the UI gets the HDR scene gain ([hdr] ui_nits) from a push constant", fs->hash.c_str());
-    cache[fs] = ok;
-    return ok;
+    if (!(fs->hdr_ui & kHdrUiGainKnown)) {
+        if (!hdr_ui_can_look(fs)) return false;
+        std::vector<uint32_t> hdr, scaled;
+        const bool tonemap = hdr_tonemap_shader(fs) && extras::hdr_tonemap_variant(fs->spirv, fs->hash, hdr);
+        const bool ok = spirv_scale_output0(tonemap ? hdr : fs->spirv, scaled);
+        if (!extras::hdr_scene_active()) return false;
+        if (ok) {
+            std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+            g_gain_words.emplace(fs, std::move(scaled));
+            NXLOG_I(kTag, "%s: the scene's last pass before the UI gets the HDR scene gain ([hdr] ui_nits) from a push constant", fs->hash.c_str());
+        } else {
+            NXLOG_W(kTag, "%s: the scene's last pass before the UI has no vec4 colour output 0 to scale: no scene gain ([hdr] ui_nits)", fs->hash.c_str());
+        }
+        fs->hdr_ui |= kHdrUiGainKnown | (ok ? kHdrUiGain : 0);
+    }
+    return fs->hdr_ui & kHdrUiGain;
 }
 
-bool hdr_tonemap_shader(const ShaderInfo* fs) {
-    static std::mutex mu;
-    static std::unordered_map<const ShaderInfo*, bool> cache;
-    std::lock_guard<std::mutex> lk(mu);
-    auto it = cache.find(fs);
-    if (it != cache.end()) return it->second;
-    std::vector<uint32_t> hdr;
-    const bool ok = extras::hdr_scene_active() && fs->spirv.size() <= 65536 && extras::hdr_tonemap_variant(fs->spirv, fs->hash, hdr);
-    cache[fs] = ok;
-    return ok;
-}
-
+// The scene-gain variant (GraphicsKey::scene_gain). Only keys of draws whose shader passed hdr_gain_shader have it, so the words are there.
 static VkShaderModule hdr_gain_module(const ShaderInfo* fs) {
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
     static std::unordered_map<const ShaderInfo*, VkShaderModule> cache;
     auto it = cache.find(fs);
     if (it != cache.end()) return it->second;
-    const std::vector<uint32_t> w = hdr_gain_words(fs);
-    VkShaderModule m = w.empty() ? hdr_fragment_module(fs) : create_module(w, fs->hash.c_str());
+    auto w = g_gain_words.find(fs);
+    if (w == g_gain_words.end()) return hdr_fragment_module(fs);   // not kept: never expected
+    VkShaderModule m = create_module(w->second, fs->hash.c_str());
+    g_gain_words.erase(w);
     cache[fs] = m;
     return m;
 }
@@ -683,7 +690,7 @@ bool resolve_stage_modules(const GraphicsKey& key, StageModules* out) {
                            : (i == 1 && key.no_out)      ? no_output_module(key.stage[i])
                            : (i == 1 && key.dual_src)    ? dual_source_module(key.stage[i])
                            : (i == 1 && key.alpha_func) ? alpha_test_module(key.stage[i], key.alpha_func)
-                           : (i == 1 && key.alpha_pad[0]) ? hdr_gain_module(key.stage[i])
+                           : (i == 1 && key.scene_gain)  ? hdr_gain_module(key.stage[i])
                            : (i == 1)                    ? hdr_fragment_module(key.stage[i])
                                                          : shader_module(key.stage[i]);
         if (!m) return false;
