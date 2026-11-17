@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "extras/ffx_files.h"
@@ -28,6 +29,16 @@ void on_message(uint32_t type, const wchar_t* msg) {
     WideCharToMultiByte(CP_UTF8, 0, msg ? msg : L"", -1, buf, sizeof buf, nullptr, nullptr);
     if (type == FFX_API_MESSAGE_TYPE_ERROR) NXLOG_E(kTag, "%s", buf);
     else NXLOG_W(kTag, "%s", buf);
+}
+
+// FFX's backend asks for KHR aliases of core functions (vkGetBufferMemoryRequirements2KHR) and calls them unchecked; on a 1.3 device
+// without the old extensions those names give null: fall back to the core name. The frame generation path already does this.
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL device_proc(VkDevice d, const char* name) {
+    if (PFN_vkVoidFunction f = vkGetDeviceProcAddr(d, name)) return f;
+    const size_t n = name ? std::strlen(name) : 0;
+    if (n > 3 && std::strcmp(name + n - 3, "KHR") == 0) return vkGetDeviceProcAddr(d, std::string(name, n - 3).c_str());
+    NXLOG_W(kTag, "FFX asked for %s: the device has no such function", name ? name : "(null)");
+    return nullptr;
 }
 
 FfxApiResource resource(const TemporalImage& t, uint32_t state, uint32_t usage) {
@@ -126,7 +137,7 @@ private:
         be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
         be.deviceContext.vkDevice = dev_->device();
         be.deviceContext.vkPhysicalDevice = dev_->physical();
-        be.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
+        be.deviceContext.vkDeviceProcAddr = &device_proc;
         ffxCreateContextDescUpscale cd = {};
         cd.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
         cd.header.pNext = &be.header;
@@ -140,7 +151,7 @@ private:
             old.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_DEPRECATED;
             old.vkDevice = dev_->device();
             old.vkPhysicalDevice = dev_->physical();
-            old.vkDeviceProcAddr = vkGetDeviceProcAddr;
+            old.vkDeviceProcAddr = &device_proc;
             cd.header.pNext = &old.header;
             ctx_ = nullptr;
             r = create_(&ctx_, &cd.header, nullptr);
