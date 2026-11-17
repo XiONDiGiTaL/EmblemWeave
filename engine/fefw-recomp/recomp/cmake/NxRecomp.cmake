@@ -28,6 +28,13 @@ set(NX_PYTHON "${NXRECOMP_ROOT}/../tools/.venv/Scripts/python.exe" CACHE FILEPAT
 # /O2 (was /O1, which optimises for size; untuned since S1): in Fortune's Weave the software occlusion culler threads
 # (MOCull_Worker1/2) went from 29-49 % to 3-4 % of a core each, the main thread from 4.5-5.8 to 4.1-4.2 ms per frame, same scene.
 set(NX_OPT "/O2" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
+# The old default was /O1. CMake caches keep it, so migrate /O1 to /O2 once; any
+# other value is deliberate and untouched. NX_OPT_PRESERVE=ON keeps an intentional /O1.
+option(NX_OPT_PRESERVE "keep an intentional /O1; skip the one-time /O1 -> /O2 migration" OFF)
+if(NX_OPT STREQUAL "/O1" AND NOT NX_OPT_PRESERVE)
+  message(STATUS "NX_OPT: migrating the old /O1 default to /O2")
+  set(NX_OPT "/O2" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)" FORCE)
+endif()
 set(NX_EXTRA_FLAGS "" CACHE STRING "more compile flags of the lifted code, space-separated (a profile-guided build: -fprofile-instr-generate, then -fprofile-instr-use=<file>)")
 option(NX_USE_LAUNCHER "wrap lifted-code compiles in cmake/nx_cc_launcher.py (time-limit fallback to optnone / -O0)" OFF)
 
