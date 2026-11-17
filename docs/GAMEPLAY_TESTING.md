@@ -5,7 +5,10 @@ plan, not a compatibility claim: a successful compile, a boot to the title
 screen, or a short menu session is not a stable game.
 
 **Tested game build: 1.1.0 only.** A run on 1.1.1 is recorded as unverified even
-when it launches. The engine's own build and module checks are in
+when it launches. A decrypted tree labelled 1.1.1 that was checked carries the
+same seven ExeFS modules as the 1.1.0 manifest (`main` `616e7d90…`), so a 1.1.1
+dump with those hashes runs the supported code and is still tested here as its
+own build. The engine's own build and module checks are in
 [STATUS.md](STATUS.md); this page covers what a person does with the game.
 
 ## Before a run

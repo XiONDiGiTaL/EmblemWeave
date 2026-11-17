@@ -80,6 +80,14 @@ version it maps to; Game Setup accepts that dump or refuses it before a build
 with the supported IDs named; one full build boots, loads a 1.1.1 save, reaches
 the hub and exits cleanly; the 1.1.0 path still passes.
 
+**Checked 17 November 2026.** A decrypted tree presented as 1.1.1 was hashed
+against the manifest: all seven ExeFS modules agree (`main` `616e7d90…`, build
+`db93b012…`), so its executable is the update 131072 build the engine was tested
+with. What remains is data and save compatibility, not a different `main`. The
+status stays *unverified* until a full build of that tree boots and loads a save;
+the tree held no AddOnContent, and DLC is a separate title the launcher does not
+read.
+
 ## C. Controller trigger verification and diagnostics (P1)
 
 **Description.** Close the verification gap around analog triggers and
