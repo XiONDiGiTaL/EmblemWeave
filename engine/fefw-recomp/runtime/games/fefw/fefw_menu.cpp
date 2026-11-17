@@ -108,7 +108,7 @@ constexpr IniKey kIni[] = {
     {"dlss", "history_weight", "12", Norm::Number, true, "TAAU history"},
     {"media", "movies", "host", Norm::Text, true, "movies"},
     {"log", "level", "info", Norm::Text, false, "log level"},
-    {"gfx", "log_fps", "0", Norm::Bool, true, "frame rate log"},
+    {"gfx", "log_fps", "1", Norm::Bool, true, "frame rate log"},
     {"play", "log_status", "0", Norm::Bool, true, "play status log"},
     {"input", "jc2_mouse", "auto", Norm::Text, false, "mouse controls"},
     {"diag", "hitch_summary_s", "10", Norm::Number, true, "frame summary log"},

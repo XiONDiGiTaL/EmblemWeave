@@ -1004,15 +1004,29 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     if (!s.headless && s.latency) s.latency->present_end();
     s.st.frames++;
     s.frame_number++;
-    {   // [gfx] log_fps = 1: one line per second with the presented frame rate and the GPU time of the present command buffer (output pass, FSR 1)
-        static const bool log_fps = config_get_bool("gfx", "log_fps", false);
-        static uint64_t last_ns = 0, last_frames = 0;
+    {   // [gfx] log_fps: one line per second with the presented frame rate and the GPU time of the present command buffer (output pass, FSR 1).
+        // On by default: the launcher reads `gfx: fps` from this line for the game window's title bar.
+        static const bool log_fps = config_get_bool("gfx", "log_fps", true);
+        static uint64_t last_ns = 0, last_presents = 0, last_fg_total = 0;
         if (log_fps) {
             const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
             if (now - last_ns >= 1000000000ull) {
-                if (last_ns) NXLOG_I(kTag, "fps %.1f, present pass GPU %.3f ms avg", static_cast<double>(s.st.frames - last_frames) * 1e9 / static_cast<double>(now - last_ns), s.st.gpu_ms_avg);
+                // With FSR 3 frame generation the FFX swapchain counts what is actually shown (60 game + 60 generated = 120); otherwise
+                // the renderer's own present count is the same as the game's. The first FFX tick only sets the baseline.
+                const uint64_t fg_total = extras::ffx_fg_present_count();
+                const bool fg = fg_total > 0;
+                const uint64_t current = fg ? fg_total : s.st.presents;
+                if (last_ns) {
+                    if (!fg || last_fg_total) {
+                        const uint64_t previous = fg ? last_fg_total : last_presents;
+                        if (current >= previous)
+                            NXLOG_I(kTag, "fps %.1f, present pass GPU %.3f ms avg", static_cast<double>(current - previous) * 1e9 / static_cast<double>(now - last_ns),
+                                    s.st.gpu_ms_avg);
+                    }
+                }
                 last_ns = now;
-                last_frames = s.st.frames;
+                last_presents = s.st.presents;
+                last_fg_total = fg ? fg_total : 0;
             }
         }
     }
