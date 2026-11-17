@@ -1364,6 +1364,7 @@ int dummy_index(VkImageViewType type) {
 struct Shared {
     std::map<uint64_t, std::vector<std::pair<SamplerInfo, VkSampler>>> samplers;
     VkSampler dummy_sampler = VK_NULL_HANDLE;
+    VkSampler reserved_sampler = VK_NULL_HANDLE;   // sampler id 0 of a texel-fetch handle (reserved_sampler())
     Dummy color[6];
     Dummy sint[6], uint[6];
     Dummy depth[6];
@@ -2868,6 +2869,23 @@ VkSampler dummy_sampler() {
     return g_sh.dummy_sampler;
 }
 
+// Sampler id 0 is in the driver's reserved range ([nvn] device info: 256 reserved sampler descriptors), so the game never registers it. Its
+// texel-fetch handles (nvnDeviceGetTexelFetchHandle: sampler id 0) are still sampled with filtering by some shaders: Fortune's Weave's sky
+// samples its cloud texture through one. On the console that read uses the driver's descriptor 0 and the clouds are smooth; the nearest
+// dummy drew them as blocks of 7 to 9 pixels. This is the dummy with linear filtering (one level, clamped: what was tested).
+VkSampler reserved_sampler() {
+    if (g_sh.reserved_sampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo ci = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        ci.magFilter = ci.minFilter = VK_FILTER_LINEAR;
+        ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        ci.addressModeU = ci.addressModeV = ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        if (vkCreateSampler(vkdev(), &ci, nullptr, &g_sh.reserved_sampler) != VK_SUCCESS) g_sh.reserved_sampler = VK_NULL_HANDLE;
+        else vk_gauge_samplers().add(1);
+    }
+    return g_sh.reserved_sampler ? g_sh.reserved_sampler : dummy_sampler();
+}
+
 // The sampler as the display settings want it (nxrt/gfx_tuning.h): more anisotropy on filtering samplers, a LOD bias on every sampler
 // that samples colour. Nearest-filtered samplers, shadow comparison samplers and clamped single-level samplers are left as the game set them.
 SamplerInfo tuned_sampler(const SamplerInfo& in) {
@@ -3064,6 +3082,7 @@ void tex_shutdown() {
     g_sh.samplers.clear();
     for (SamplerLast& l : g_sampler_last) l = SamplerLast();
     if (g_sh.dummy_sampler != VK_NULL_HANDLE) { vkDestroySampler(vkdev(), g_sh.dummy_sampler, nullptr); vk_gauge_samplers().sub(1); }
+    if (g_sh.reserved_sampler != VK_NULL_HANDLE) { vkDestroySampler(vkdev(), g_sh.reserved_sampler, nullptr); vk_gauge_samplers().sub(1); }
     for (auto& kv : g_sh.storage) {
         if (kv.second.view != VK_NULL_HANDLE) { vkDestroyImageView(vkdev(), kv.second.view, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(kv.second.img);
