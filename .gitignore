@@ -21,3 +21,6 @@
 
 # Launch videos made with /brag (they contain game footage: keep them local)
 brag-output*/
+
+# Local captures and the scripts that take them: they hold the desktop and game footage, so they stay on the machine.
+shots/
