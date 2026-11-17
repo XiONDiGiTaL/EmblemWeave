@@ -155,6 +155,22 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 Two Python variables are meant for temporary experiments, but Windows programs and installers sometimes set them permanently. They break a virtual environment because they are inherited by every child process and override the environment's own paths:
 
+python.org's installer does not set either variable (it can add Python to `PATH`, which is harmless here). A value usually comes from one of these:
+
+- an installer or tool that ran `setx PYTHONPATH "..."` or `setx PYTHONHOME "..."`; `setx` writes the value to the user environment (`HKCU\Environment`), so every new program inherits it;
+- the **Environment Variables** dialog (System Properties > Advanced), where someone added either name under **User variables** or **System variables**;
+- an IDE, notebook, game engine or scientific/ML stack that sets them for its own Python and leaves them behind;
+- a shell profile or a `conda activate` / virtual-environment activation script. That kind lasts only for the current window, but the launcher inherits it if it was started from that shell.
+
+A value set in the current window with `set PYTHONPATH=...` is gone when the window closes; a value written with `setx` or the dialog survives restarts. To see which one you have, run the checks below, then look for the name in the registry:
+
+```bat
+reg query HKCU\Environment /v PYTHONPATH
+reg query HKCU\Environment /v PYTHONHOME
+```
+
+(Use `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` for a system-wide value.) Delete the value in the same place that set it, or use the permanent commands below.
+
 - `PYTHONPATH` prepends another Python's `Lib` and `DLLs` folders to `sys.path`. The engine's `tools\.venv` can then import an extension built for a different Python, which is the `Module use of python311.dll conflicts with this version of Python` failure from issue #43.
 - `PYTHONHOME` replaces the virtual environment's `sys.prefix`, so Python looks for its standard library in the other installation.
 
