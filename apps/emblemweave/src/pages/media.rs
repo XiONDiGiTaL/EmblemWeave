@@ -1,8 +1,6 @@
-//! Graphics and audio settings.
-//!
-//! The renderer and the audio backend do not exist yet, so every option here
-//! is stored for the day they land and none of them claims to do anything
-//! today. Each page says so at the top.
+//! Graphics and audio settings for the integrated engine plus the optional
+//! ReShade Vulkan layer. Values are written into the engine's ini files before
+//! every start; ReShade itself stays an external, user-installed tool.
 
 use crate::theme;
 use crate::widgets::{self, Tone};
@@ -73,16 +71,17 @@ fn combo_num(ui: &mut egui::Ui, id: &str, value: &mut u32, options: &[(u32, &str
 
 pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Graphics", "Display and rendering options, for the game's engine and for EmblemWeave's own renderer.");
+    widgets::page_header(ui, &p, "Graphics", "Display and rendering options for the game's integrated engine, plus the optional ReShade layer.");
     widgets::pending_note(
         ui,
         &p,
-        "The game creates its device, memory, textures, shaders, swap chain and command buffers through the host NVN layer on your GPU, \
-         but draw commands are recorded and counted, not rendered yet. Everything on this page except Quality and Precompile shaders is handed to the engine \
-         in its ini files before every start, so the game itself uses it.",
+        "The game renders through the host Vulkan NVN layer. Everything on this page except Quality and Precompile shaders is written \
+         into the engine's ini files before every start. FSR 3.1 and its frame generation need AMD's FidelityFX DLLs; ReShade is \
+         optional and stays user-installed.",
     );
     memory_profile(app, ui);
     upscaler_files(app, ui);
+    reshade_settings(app, ui);
     let g = &mut app.config.graphics;
     // The engine resolves `auto` to a float such as 1.7777777777777777. Show the
     // ratio it means, and keep the value itself when it is a custom shape.
@@ -148,8 +147,31 @@ pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(
             ui,
             &p,
+            "AMD preset",
+            "One press for the validated AMD path: FSR 3.1, FSR 3 frame generation, the FSR 3 DLSS replacement and Vsync off. On an RX 7900 XT at 2560 × 1440 this presented 120 fps from 60 rendered fps.",
+            |ui| {
+                let sdk = crate::engine::sdk();
+                let available = sdk.fsr3.is_some() && sdk.fsr_framegen();
+                if widgets::button(ui, &p, "FSR 3 + frame generation", available)
+                    .on_hover_text(if available {
+                        "Sets FSR 3.1, FSR 3 Frame Generation, FSR 3 as the DLSS replacement, and Vsync off. The next start uses it."
+                    } else {
+                        "Needs amd_fidelityfx_loader_vk.dll, amd_fidelityfx_upscaler_vk.dll and amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4) in upscalers\\fsr."
+                    })
+                    .clicked()
+                {
+                    g.upscaling = "FSR 3.1".into();
+                    g.frame_gen = "FSR 3 Frame Generation".into();
+                    g.dlss_upscaler = "FSR 3".into();
+                    g.vsync = false;
+                }
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
             "Frame generation",
-            "Generates the frames between two rendered ones. DLSS Frame Generation needs Windows' hardware-accelerated GPU scheduling, an RTX 40 or newer card and the Streamline files; FSR 3 needs amd_fidelityfx_vk.dll. Keep vsync and latency mode off.",
+            "Generates the frames between two rendered ones. FSR 3 is implemented and validated on the RX 7900 XT; it needs amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4) and Vsync off. DLSS Frame Generation needs Windows' hardware-accelerated GPU scheduling, an RTX 40 or newer card and the Streamline files.",
             |ui| {
                 combo(ui, "fg", &mut g.frame_gen, FRAME_GENERATION);
             },
@@ -448,6 +470,112 @@ const FSR_SDK_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityF
 const FSR_114_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v1.1.4";
 const STREAMLINE_URL: &str = "https://github.com/NVIDIA-RTX/Streamline/releases";
 const XESS_URL: &str = "https://github.com/intel/xess/releases";
+const RESHADE_URL: &str = "https://reshade.me";
+
+/// ReShade stays an external tool: its licence forbids redistributing the
+/// binaries or shader files, so the launcher only detects the install, starts
+/// the official setup for this build, and lets the user switch the layer off for
+/// this game. The add-on build is the one with full add-on support.
+fn reshade_settings(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.config.theme.palette();
+    let status = crate::engine::reshade_status();
+    let mut re_shade = app.config.graphics.re_shade;
+    let summary = if !status.installed {
+        "not installed".to_string()
+    } else if !status.enabled {
+        "installed · not enabled for this build".to_string()
+    } else if !re_shade {
+        "installed · off in EmblemWeave".to_string()
+    } else if !status.configured {
+        "installed · no ReShade.ini yet".to_string()
+    } else {
+        "installed · ready".to_string()
+    };
+    widgets::section_drawer(ui, &p, "reshade", "ReShade (optional)", &summary, false, |ui| {
+        ui.label(
+            RichText::new(
+                "ReShade adds its own post-processing layer and presets. Its Vulkan layer is installed once for Windows, \
+                 then ReShadeApps.ini decides which executables load it. The official setup tool writes both; EmblemWeave \
+                 opens it for this build's fefw.exe with Vulkan preselected. Nothing from ReShade is bundled.",
+            )
+            .size(12.5)
+            .color(p.body),
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Load ReShade",
+            "On lets the installed ReShade layer apply its presets while playing. Off sets the Vulkan loader's disable variable for this game only; it does not uninstall ReShade or touch other games.",
+            |ui| {
+                widgets::toggle(ui, &p, &mut re_shade);
+            },
+        );
+        let (tone, detail) = if !status.installed {
+            (Tone::Warn, "No ReShade64.dll and manifest were found in %ProgramData%\\ReShade. Run the official setup, choose this build's fefw.exe, then select Vulkan.".to_string())
+        } else if !status.enabled {
+            (Tone::Warn, "ReShade is installed, but this build's fefw.exe is not in ReShadeApps.ini. Run setup for this executable; it adds the allowlist entry.".to_string())
+        } else if !status.configured {
+            (Tone::Neutral, "The layer will load; ReShade.ini is created the first time the game runs.".to_string())
+        } else if !re_shade {
+            (Tone::Neutral, "ReShade is installed and allowed for this executable, but EmblemWeave disables it for the next start.".to_string())
+        } else if status.logged {
+            (Tone::Ok, "ReShade has loaded for this game before. Press Home in game to open its overlay and choose a preset.".to_string())
+        } else {
+            (Tone::Ok, "ReShade is installed and allowed for this executable. Press Home in game to open its overlay.".to_string())
+        };
+        ui.label(RichText::new(detail).size(12.5).color(tone.colour(&p)));
+        ui.add_space(theme::SPACE_S);
+        let game = crate::engine::game_folder();
+        ui.horizontal_wrapped(|ui| {
+            if widgets::button(ui, &p, "Set up ReShade…", true)
+                .on_hover_text("Opens the official ReShade setup for this build with Vulkan preselected. Windows asks for administrator approval when it registers the layer.")
+                .clicked()
+            {
+                let picked = crate::engine::find_reshade_setup().or_else(|| {
+                    rfd::FileDialog::new()
+                        .set_title("Choose ReShade Setup")
+                        .add_filter("ReShade Setup", &["exe"])
+                        .pick_file()
+                });
+                if let Some(path) = picked {
+                    match crate::engine::launch_reshade_setup(&path) {
+                        Ok(()) => app.notify("ReShade setup opened for fefw.exe. Choose Vulkan, effects and any add-ons there; Windows will ask for permission to register the layer.", Tone::Ok),
+                        Err(e) => app.notify(e, Tone::Bad),
+                    }
+                }
+            }
+            if widgets::button(ui, &p, "ReShade website", true).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(RESHADE_URL));
+            }
+            if let Some(dir) = game.as_ref().filter(|dir| dir.is_dir()) {
+                if widgets::button(ui, &p, "Open game folder", true).clicked() {
+                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                }
+                if status.configured {
+                    if widgets::button(ui, &p, "Open ReShade.ini", true).clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(format!("/select,{}", dir.join("ReShade.ini").display()))
+                            .spawn();
+                    }
+                }
+                if status.logged {
+                    if widgets::button(ui, &p, "Open ReShade log", true).clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(format!("/select,{}", dir.join("ReShade.log").display()))
+                            .spawn();
+                    }
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Use the Add-on build if you want ReShade add-ons: it loads .addon64 files from beside fefw.exe. Presets and shader packs also live there. Depth-based effects depend on the depth buffer the engine exposes, which is not guaranteed.")
+                .size(12.0)
+                .color(p.muted),
+        );
+    });
+    app.config.graphics.re_shade = re_shade;
+}
 
 /// The vendor DLLs the engine cannot ship, whether they are on disk, and the
 /// buttons that make finding them the launcher's job rather than the player's.

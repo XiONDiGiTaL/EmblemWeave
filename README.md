@@ -43,7 +43,8 @@ carries that engine forward as the launcher around it, and
 
 > **Current status: 0.1.38, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
 > AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes; it covered the title screen, the
-> save loaded through **Continue**, the hub, the in-game menu and the F1 settings overlay. Later releases are checked by
+> save loaded through **Continue**, the hub, the in-game menu and the F1 settings overlay. On the same GPU with Adrenalin
+> 26.10.1, FSR 3.1 + FSR 3 frame generation then rendered 60 fps and presented 120 fps at 2560 × 1440. Later releases are checked by
 > building and by headless runs of the real game, listed under [Development status](#development-status). The build needs
 > Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with its
 > own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
@@ -182,8 +183,12 @@ Requirements are listed under [System requirements](#system-requirements); failu
 - Vulkan 1.3 NVN shell, HDR output, swap-chain management, shader translation with a disk cache, GPU texture transcoding
   (BC, ASTC) and frame pacing.
 - Upscaling: built-in TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with its own availability
-  check; FSR 3 frame generation is implemented but cannot be used by this title, which provides no motion vectors.
-- The evaluation of further options (FSR 4, OptiScaler, ReShade, vkBasalt) and their status are in
+  check. **FSR 3 frame generation works**: with the FidelityFX SDK 1.1.4 DLLs, the engine turns 60 rendered fps into 120
+  presented fps on an RX 7900 XT. The Graphics page has a one-press AMD preset for FSR 3.1 + frame generation.
+- Optional **ReShade**: the launcher detects the 64-bit Vulkan layer, checks this build in `ReShadeApps.ini`, opens the
+  official setup for `fefw.exe` with Vulkan preselected, and can switch the layer off for this game only. ReShade stays a
+  separate user install; the add-on build supports `.addon64` files and user presets.
+- The evaluation of further options (FSR 4, OptiScaler, vkBasalt) and their status are in
   [docs/GRAPHICS.md](docs/GRAPHICS.md).
 
 ### Audio
@@ -221,7 +226,10 @@ and are not on the shipping path.
 
 - Encrypted retail `.xci` images are not decrypted: EmblemWeave reads plaintext/decrypted `.xci` files, and names the first encrypted NCA instead of unpacking garbage. A plaintext `.xci` is accepted like a plaintext `.nsp`; a folder, `.nsp`, `.nx` or `.nup` also works.
 - FSR 4 is not integrated. The FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader.
-- Frame generation is not offered for this title: the engine's FSR 3 path needs motion vectors the game does not give it.
+- FSR 3 frame generation is validated on the RX 7900 XT; other AMD GPUs and drivers still need a run. DLSS Frame Generation
+  is implemented but has not been tested on RTX 40 hardware in this project.
+- ReShade is installed through its official setup and configured by the user. The launcher detects it, but does not test
+  every preset; depth-based effects depend on the depth buffer the engine exposes.
 - Code mods are tested with the loader and site checks; a mod hooking a site that exists in the build, `make_function`,
   `make_writable` and `edit_file` have not been exercised end to end.
 - The compatibility matrix is small: a Ryzen 7 5700X3D with an RTX 5060 (development PC) and the 0.1.17 test PC. Other
@@ -271,15 +279,16 @@ criteria for each area, is in [docs/ROADMAP.md](docs/ROADMAP.md).
 | ![Recompilation](docs/screenshots/recompilation.png) | ![Diagnostics](docs/screenshots/diagnostics.png) |
 | **Recompilation**: the nine-stage pipeline | **Diagnostics**: what the runtime did and where it stopped |
 | ![Graphics](docs/screenshots/graphics.png) | ![Audio](docs/screenshots/audio.png) |
-| **Graphics**: display, upscalers and the Low Memory profile | **Audio**: output, mix and what the game will start with |
+| **Graphics**: display, upscalers, FSR 3 frame generation and optional ReShade | **Audio**: output, mix and what the game will start with |
 | ![Controls](docs/screenshots/controls.png) | |
 | **Controls**: the pad map, bindings, trigger travel and tuning | |
 
 The screenshots are the launcher's own rendering from the current source tree,
-saved with `EmblemWeave.exe --page <page> --screenshot <file.png>`. The **Low
-Memory** card on the Graphics screenshot is part of the 0.1.37 build, as is the
-ExeFS patch support described on the Mods page. The screenshots were captured
-from this tree.
+saved with `EmblemWeave.exe --page <page> --screenshot <file.png>`. The Graphics
+page shows the upscaler check, FSR 3 frame generation and the ReShade status card;
+the AMD preset and the display/rendering controls sit below the visible area. The
+Low Memory card and the ExeFS patch support on the Mods page are also in this tree.
+The screenshots were captured from this tree.
 
 ## Key capabilities
 

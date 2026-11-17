@@ -80,6 +80,9 @@ pub struct Graphics {
     pub scene_scale: u32,
     /// `[dlss] frame_gen`: off, DLSS Frame Generation or FSR 3 Frame Generation.
     pub frame_gen: String,
+    /// Load ReShade's Vulkan layer while the game runs. Off disables the layer
+    /// for this game process only; it does not uninstall ReShade.
+    pub re_shade: bool,
     /// `[dlss] upscaler`: what renders frames the game asks its console's DLSS to make.
     pub dlss_upscaler: String,
     /// `[display] astc_quality`: how the game's ASTC textures reach the GPU.
@@ -111,6 +114,7 @@ impl Default for Graphics {
             upscale_quality: "Native".into(),
             scene_scale: 100,
             frame_gen: "Off".into(),
+            re_shade: true,
             dlss_upscaler: "Automatic".into(),
             astc_quality: "High".into(),
             gpu: "Automatic".into(),

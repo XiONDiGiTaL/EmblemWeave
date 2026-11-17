@@ -82,6 +82,128 @@ pub fn run_dir() -> Option<PathBuf> {
     Config::dir().map(|d| d.join("play"))
 }
 
+/// The folder that holds the built `fefw.exe`. ReShade installs its per-game
+/// Vulkan configuration beside the executable it is given.
+pub fn game_folder() -> Option<PathBuf> {
+    let root = root()?;
+    game_exe(&root).parent().map(Path::to_path_buf)
+}
+
+/// What ReShade's Vulkan install looks like for this game. The layer itself is
+/// global; `ReShadeApps.ini` is the allowlist that decides which executables it
+/// loads for, and `ReShade.ini` beside the executable holds that game's shader
+/// paths and preset. None of this is bundled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReshadeStatus {
+    /// The 64-bit layer DLL and its manifest are in `%ProgramData%\ReShade`.
+    pub installed: bool,
+    /// This build's executable is in `ReShadeApps.ini`.
+    pub enabled: bool,
+    /// `ReShade.ini` exists beside the built executable.
+    pub configured: bool,
+    /// ReShade has written a log for this executable (it loaded at least once).
+    pub logged: bool,
+}
+
+fn program_data() -> PathBuf {
+    std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+}
+
+/// The path ReShade's setup tool writes its layer to.
+pub fn reshade_layer_dir() -> PathBuf {
+    program_data().join("ReShade")
+}
+
+/// Read ReShade's current state without changing anything. Missing files mean
+/// "not installed", not an error: ReShade is optional.
+pub fn reshade_status() -> ReshadeStatus {
+    let common = reshade_layer_dir();
+    let installed = common.join("ReShade64").join("ReShade64.dll").is_file()
+        && common.join("ReShade64.json").is_file();
+    let game = root().map(|r| game_exe(&r));
+    let enabled = installed
+        && game.as_deref().is_some_and(|exe| reshade_apps_contains(&common.join("ReShadeApps.ini"), exe));
+    let configured = game
+        .as_deref()
+        .and_then(Path::parent)
+        .is_some_and(|dir| dir.join("ReShade.ini").is_file());
+    let logged = game
+        .as_deref()
+        .and_then(Path::parent)
+        .is_some_and(|dir| dir.join("ReShade.log").is_file());
+    ReshadeStatus { installed, enabled, configured, logged }
+}
+
+/// Whether an INI `Apps=` list contains `game`. Windows paths compare without
+/// case and with either slash; the setup tool writes them absolute.
+fn reshade_apps_contains(path: &Path, game: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let wanted = game.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().eq_ignore_ascii_case("Apps") {
+            continue;
+        }
+        for entry in value.split(',') {
+            let entry = entry.trim().trim_matches('"').replace('/', "\\").to_ascii_lowercase();
+            if entry == wanted {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Find a ReShade setup executable the user already downloaded. This is a
+/// convenience only: the Graphics page also opens a file picker, because the
+/// user may keep installers on another drive.
+pub fn find_reshade_setup() -> Option<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join("Downloads"));
+        dirs.push(home.join("Desktop"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd);
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if name.starts_with("reshade_setup") && name.ends_with(".exe") {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Launch ReShade's official setup tool for this game's Vulkan executable. The
+/// tool asks for administrator approval itself when it registers the Vulkan
+/// layer; `--api vulkan` preselects the API so the user only chooses effects and
+/// add-ons. No ReShade binary travels with EmblemWeave.
+pub fn launch_reshade_setup(setup: &Path) -> Result<(), String> {
+    if !setup.is_file() {
+        return Err(format!("{} is not there", setup.display()));
+    }
+    let root = root().ok_or("the engine was not found")?;
+    let exe = game_exe(&root);
+    if !exe.is_file() {
+        return Err("the game is not built yet: build it before setting up ReShade".into());
+    }
+    Command::new(setup)
+        .arg(&exe)
+        .args(["--api", "vulkan"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("starting {}: {e}", setup.display()))
+}
+
 /// Whether the game has been built and configured, ready to play.
 pub fn ready() -> bool {
     match (root(), run_dir()) {
@@ -3056,17 +3178,23 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     }
     let log = dir.join("fefw.log");
     let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
-    let child = Command::new(&exe)
-        .current_dir(&dir)
+    let mut cmd = Command::new(&exe);
+    cmd.current_dir(&dir)
         // The runtime searches its executable, the working folder, and this folder for `upscalers/<vendor>` (#26).
         // The engine checkout is where the issue's FSR files were copied, and its ancestors cover a release layout.
         .env("NXRT_LAUNCHER_DIR", &root)
         .env("NXRT_DIAG_WATCHDOG_SECONDS", "30")
         // One line per second while frames are presented: the evidence the
         // watcher needs to tell a slow start from a black window.
-        .env("NXRT_GFX_LOG_FPS", "1")
-        .spawn()
-        .map_err(|e| format!("starting {}: {e}", exe.display()))?;
+        .env("NXRT_GFX_LOG_FPS", "1");
+    if !graphics.re_shade {
+        // ReShade's Vulkan layer is implicit and global. The loader's disable
+        // switches apply to this child only, so switching ReShade off here does
+        // not uninstall it or change any other game.
+        cmd.env("DISABLE_VK_LAYER_reshade_1", "1")
+            .env("DISABLE_VK_LAYER_reshade", "1");
+    }
+    let child = cmd.spawn().map_err(|e| format!("starting {}: {e}", exe.display()))?;
     watch_first_frame(child, log, from);
     Ok(())
 }
@@ -3074,6 +3202,20 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reshade_apps_matches_the_build_path_without_case_or_slashes() {
+        let dir = std::env::temp_dir().join(format!("ew-reshade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let apps = dir.join("ReShadeApps.ini");
+        std::fs::write(&apps, "[Apps]\nApps=C:\\Games\\fefw.exe, D:/Other/game.exe\n").unwrap();
+
+        assert!(reshade_apps_contains(&apps, Path::new(r"c:\games\FEFW.exe")));
+        assert!(reshade_apps_contains(&apps, Path::new(r"d:\other\GAME.exe")));
+        assert!(!reshade_apps_contains(&apps, Path::new(r"c:\games\other.exe")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn probe_line(version: &str, executable: &str, venv: bool, identity: bool, imports: &[&str]) -> String {
         format!(
