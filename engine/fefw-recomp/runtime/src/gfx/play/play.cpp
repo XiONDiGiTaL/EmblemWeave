@@ -528,7 +528,7 @@ void toggle_fullscreen() {
     st.dirty = true;
 }
 
-void toggle_fps_counter();       // defined after the settings page host
+void toggle_fps_counter(const char* why);   // defined after the settings page host; `why` is logged
 
 // The pad half of the frame rate counter's hotkey. A handheld has no F2, so the counter can also be flipped by holding one of a
 // pair of buttons and pressing the other. The pair follows `[fps] combo`; the SDL_GamepadButton numbers are the ones the platform
@@ -561,7 +561,7 @@ bool fps_combo_event(const FpsSettings& f, const input::Event& e) {
     else return false;
     if (down && g_fps_combo.a && g_fps_combo.b && !g_fps_combo.fired) {
         g_fps_combo.fired = true;
-        toggle_fps_counter();
+        toggle_fps_counter(fps_combo_name(f.combo));
     }
     if (!g_fps_combo.a && !g_fps_combo.b) g_fps_combo.fired = false;
     return true;
@@ -626,7 +626,7 @@ void handle_event(const input::Event& e, uint64_t now) {
     // The frame rate counter hotkey: flips the counter and never reaches the game (press, repeat and release).
     if (st.overlay && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && st.settings.fps.key.kind == InKind::Key &&
         e.u.key.scancode == st.settings.fps.key.code) {
-        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle_fps_counter();
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle_fps_counter("hotkey");
         return;
     }
     // The same switch from a pad, for a handheld or a pad with no keyboard: hold one button of the pair, press the other.
@@ -1239,9 +1239,11 @@ public:
 };
 Host g_host;
 
-void toggle_fps_counter() {
+// One place flips the counter, so one line says who did: the hotkey, a pad chord, or the settings page.
+void toggle_fps_counter(const char* why) {
     Settings s = g_host.settings();
     s.fps.show = !s.fps.show;
+    NXLOG_I(kTag, "fps counter %s (%s)", s.fps.show ? "on" : "off", why ? why : "unset");
     g_host.apply(s);
 }
 
