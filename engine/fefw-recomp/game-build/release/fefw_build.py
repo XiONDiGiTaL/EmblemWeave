@@ -80,7 +80,10 @@ CPU_VARIANTS = {
 }
 # recomp/cmake/NxRecomp.cmake flags for the lifted code, in clang (not clang-cl) syntax, plus NX_INLINE_INDIRECT
 # (recomp/games/fefw/CMakeLists.txt); -mcpu per variant. -ffp-contract=off: no multiply and add is fused that the guest kept apart.
-CXXFLAGS_COMMON = ['-std=c++20', '-O1', '-w', '-fno-exceptions', '-fno-rtti', '-fno-strict-aliasing', '-ffp-contract=off', '-fno-math-errno',
+# -O2 matches NX_OPT and #47: the release package is the path players actually build with, so leaving this at /O1 would
+# have kept the slow occlusion-culler code even after the CMake migration. The build stamp includes these flags, so an
+# existing fefw.exe is rebuilt once on the first launch after the update.
+CXXFLAGS_COMMON = ['-std=c++20', '-O2', '-w', '-fno-exceptions', '-fno-rtti', '-fno-strict-aliasing', '-ffp-contract=off', '-fno-math-errno',
                    '-fno-threadsafe-statics', '-DNX_INLINE_INDIRECT']
 
 
