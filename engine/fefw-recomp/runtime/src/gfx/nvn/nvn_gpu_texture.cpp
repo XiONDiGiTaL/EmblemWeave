@@ -2700,7 +2700,7 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     // Check the actual alias format, rather than only the image's original format. view_for
     // can restrict inherited usages, but a descriptor must still have sampled-image usage.
     // Cache per image/device; this is also called for every pool descriptor refresh.
-    static const bool lean = nxrt::config_get_bool("nvn", "lean_draws", true);   // the last format's answer without the map (a property of the format)
+    static const bool lean = nxrt::config_get_bool("nvn", "lean_draws", !nxrt::gfx::gpu_quirks().igpu_compat);   // the last format's answer without the map (a property of the format)
     if (!lean || g->last_sampled_fmt != fmt) {
         auto [feature, inserted] = g->sampled_formats.try_emplace(fmt, false);
         if (inserted) {

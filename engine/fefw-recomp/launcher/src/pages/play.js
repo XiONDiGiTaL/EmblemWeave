@@ -65,6 +65,7 @@ export async function render(el, ctx) {
           ${statusChip(status)}
         </div>
         ${reportHtml(status)}
+        ${steam.available && steam.stale ? `<div class="banner warn">${icon('triangle-alert')}<div style="flex:1">${esc(t('play.steamStale'))}</div><button class="btn" id="update-steam" ${ov.exe_exists && !addingSteam ? '' : 'disabled'}>${icon('gamepad-2')}${esc(t('play.updateSteam'))}</button></div>` : ''}
 
         <div class="card">
           <h2>${icon('hard-drive')}${esc(t('play.install'))}</h2>
@@ -95,7 +96,7 @@ export async function render(el, ctx) {
     el.querySelector('#to-setup')?.addEventListener('click', () => ctx.go('setup'));
     el.querySelector('#open-dir')?.addEventListener('click', () => api('open_game_dir').catch((e) => toast(errText(e), 'error')));
     el.querySelector('#open-mods')?.addEventListener('click', () => api('open_mods_dir').catch((e) => toast(errText(e), 'error')));
-    el.querySelector('#add-steam')?.addEventListener('click', async () => {
+    const addSteam = async () => {
       addingSteam = true;
       draw();
       try {
@@ -106,7 +107,9 @@ export async function render(el, ctx) {
       steam = await api('steam_status').catch(() => steam);
       addingSteam = false;
       draw();
-    });
+    };
+    el.querySelector('#add-steam')?.addEventListener('click', addSteam);
+    el.querySelector('#update-steam')?.addEventListener('click', addSteam);
     el.querySelectorAll('[data-open]').forEach((b) =>
       b.addEventListener('click', () => api('open_game_file', { name: b.dataset.open }).catch((e) => toast(errText(e), 'error'))),
     );

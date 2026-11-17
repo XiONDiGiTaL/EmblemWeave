@@ -89,7 +89,7 @@ fn vdf_values(text: &str, key: &str) -> Vec<String> {
 }
 
 /// (Steam root, its library folders) from libraryfolders.vdf. None without Steam.
-fn steam_libraries() -> Option<(PathBuf, Vec<PathBuf>)> {
+pub(crate) fn steam_libraries() -> Option<(PathBuf, Vec<PathBuf>)> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     for r in [".local/share/Steam", ".steam/steam", ".steam/root", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
         let Ok(root) = std::fs::canonicalize(home.join(r)) else { continue };
@@ -222,7 +222,7 @@ fn on_path(name: &str) -> bool {
 }
 
 /// `launcher_dir`: the folder the package's upscalers/ is in (the AppImage's folder, not its mount).
-pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, launcher_dir: &Path, minimize: bool, runner_setting: &str) -> Result<(), String> {
+pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, launcher_dir: &Path, minimize: bool, runner_setting: &str, extra_env: Vec<(String, String)>) -> Result<(), String> {
     if app.state::<PlayState>().0.lock().unwrap().state == "running" {
         return Err("The game is already running.".into());
     }
@@ -249,10 +249,14 @@ pub fn start(app: &AppHandle, exe: &Path, game_dir: &Path, launcher_dir: &Path, 
         };
         crate::setup::host_env(&mut cmd);
         cmd.envs(assign.iter().filter_map(|w| w.split_once('=')));
+        cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
         // Steam's Proton (and umu-run) run in a container that does not see a dump outside the home folder, /mnt and /media (#142)
         if !cfg!(windows) && std::env::var_os("STEAM_COMPAT_MOUNTS").is_none() && !assign.iter().any(|w| w.starts_with("STEAM_COMPAT_MOUNTS=")) {
             let home = std::env::var_os("HOME").map(PathBuf::from);
-            if let Some(m) = container_mounts(&ini_dirs(&dir), home.as_deref()) {
+            // and the folder of a file a Vulkan layer is pointed at (LSFG-VK's lsfg-vk.dll, in a Steam library that may be on another drive)
+            let mut dirs = ini_dirs(&dir);
+            dirs.extend(extra_env.iter().filter(|(k, _)| k == "LSFGVK_DLL_PATH").filter_map(|(_, v)| Path::new(v).parent().map(Path::to_path_buf)));
+            if let Some(m) = container_mounts(&dirs, home.as_deref()) {
                 cmd.env("STEAM_COMPAT_MOUNTS", m);
             }
         }

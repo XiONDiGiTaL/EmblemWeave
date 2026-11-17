@@ -97,3 +97,20 @@ body {
   #nav .label, #nav .brand .name { display: none; }
   .field { grid-template-columns: 1fr; gap: var(--space-2); }
 }
+
+/* settings: the tab bar stays at the top of the view while the page scrolls under it (as .savebar does at the bottom) */
+.tabbar {
+  position: sticky;
+  top: calc(var(--space-6) * -1);
+  z-index: 2;
+  margin: calc(var(--space-2) * -1) 0;
+  padding: var(--space-2) 0;
+}
+.tabs { display: flex; gap: var(--space-1); overflow-x: auto; scrollbar-width: none; }
+.tab { position: relative; flex: 1 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); }
+.tabpanel { display: flex; flex-direction: column; gap: var(--space-5); }
+.tabpanel[hidden] { display: none; }
+
+@media (max-width: 900px) {
+  .tab span:not(.dot) { display: none; }
+}

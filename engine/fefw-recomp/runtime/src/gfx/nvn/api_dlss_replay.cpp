@@ -644,13 +644,13 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
             return;
         }
         static bool told = false;
-        if (!told) {
+        if (!told && !(why && why[0])) {   // a per-frame failure is logged by the backend, with its retry
             told = true;
             NXLOG_W(kTag, "%s is not available (its DLLs, or Streamline not started): the built-in temporal upscaler is used", upscaler_name(u));
         }
         {
-            // The SDK's own wording when it got as far as evaluating ("slEvaluateFeature failed (39): DLSS off" is a VRAM budget, not a missing
-            // DLL); the generic sentence only when the backend or its images could not be had at all.
+            // The SDK's own wording when it got as far as evaluating ("slEvaluateFeature failed (39): retrying in 2 s", seen with video memory
+            // over the OS budget, issue 21), not a missing DLL; the generic sentence only when the backend or its images could not be had at all.
             char msg[128];
             if (why && why[0]) std::snprintf(msg, sizeof(msg), "%s", why);
             else std::snprintf(msg, sizeof(msg), "%s could not run (its DLLs, or Streamline not started)", upscaler_name(u));

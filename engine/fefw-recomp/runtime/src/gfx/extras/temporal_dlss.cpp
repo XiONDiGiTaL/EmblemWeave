@@ -9,8 +9,10 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -222,6 +224,9 @@ public:
     bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
         Sl& s = sl_state();
         if (failed_) return false;
+        // After a per-frame failure (slEvaluateFeature 39 under VRAM pressure, issue 21) the caller runs the built-in upscaler until the
+        // retry time; the next try starts from no history (the caller's sdk_valid is cleared by the frames the built-in upscaler ran).
+        if (retry_pending_ && std::chrono::steady_clock::now() < retry_at_) return false;
         // DLSS-G consumes viewport 0 at present; keep SR tags/constants separate.
         const sl::ViewportHandle vp(framegen_dlss() ? 1u : 0u);
         sl::FrameToken* frame = static_cast<sl::FrameToken*>(sl_frame_token());
@@ -291,7 +296,7 @@ public:
         c.motionVectors3D = sl::Boolean::eFalse;
         c.reset = f.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         c.motionVectorsJittered = sl::Boolean::eFalse;
-        if (s.constants(c, *frame, vp) != sl::Result::eOk) return fail("slSetConstants");
+        if (s.constants(c, *frame, vp) != sl::Result::eOk) return fail_frame("slSetConstants");
         sl::Resource col = resource(f.color), dep = resource(f.depth), mv = resource(f.motion), out = resource(f.output);
         const sl::Extent in_ext{0, 0, f.render.width, f.render.height}, out_ext{0, 0, f.out.width, f.out.height};
         sl::ResourceTag tags[4] = {sl::ResourceTag(&col, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
@@ -299,10 +304,16 @@ public:
                                    sl::ResourceTag(&mv, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
                                    sl::ResourceTag(&out, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, &out_ext)};
         auto* slcb = reinterpret_cast<sl::CommandBuffer*>(cb);
-        if (s.tag(*frame, vp, tags, 4, slcb) != sl::Result::eOk) return fail("slSetTagForFrame");
+        if (s.tag(*frame, vp, tags, 4, slcb) != sl::Result::eOk) return fail_frame("slSetTagForFrame");
         const sl::BaseStructure* inputs[] = {&vp};
         const sl::Result er = s.evaluate(sl::kFeatureDLSS, *frame, inputs, 1, slcb);
-        if (er != sl::Result::eOk) return fail("slEvaluateFeature", static_cast<int>(er));
+        if (er != sl::Result::eOk) return fail_frame("slEvaluateFeature", static_cast<int>(er));
+        if (retry_pending_) {
+            NXLOG_I(kTag, "%s is back after %u failed attempts", name(), fail_streak_);
+            retry_pending_ = false;
+            fail_streak_ = 0;
+            failure_[0] = '\0';
+        }
         return true;
     }
 
@@ -372,9 +383,27 @@ private:
         failed_ = true;
         return false;
     }
+    // A failure of one frame's work (constants, tags, the evaluation itself): Streamline and the DLSS feature are still there, and the
+    // usual cause passes (video memory over the OS budget during a level load, which Streamline warns about beside the error). DLSS is
+    // tried again after a delay that doubles with each failure in a row, from 2 s up to 30 s, so a lasting failure costs one call a
+    // half minute rather than one a frame, and a passing one gives DLSS back instead of the built-in upscaler for the rest of the session.
+    bool fail_frame(const char* what, int code = -1) {
+        ++fail_streak_;
+        const unsigned shift = fail_streak_ > 5 ? 4u : fail_streak_ - 1u;
+        const int delay_s = std::min(2 << shift, 30);
+        retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(delay_s);
+        retry_pending_ = true;
+        if (fail_streak_ == 1) NXLOG_E(kTag, "%s failed (%d): the built-in upscaler until DLSS is tried again in %d s", what, code, delay_s);
+        else NXLOG_W(kTag, "%s failed (%d) again (%u in a row): next try in %d s", what, code, fail_streak_, delay_s);
+        if (code >= 0) std::snprintf(failure_, sizeof(failure_), "%s failed (%d): retrying in %d s", what, code, delay_s);
+        else std::snprintf(failure_, sizeof(failure_), "%s failed: retrying in %d s", what, delay_s);
+        return false;
+    }
     const char* last_failure() const override { return failure_; }
     gfx::Device* dev_;
-    bool dlaa_ = false, failed_ = false;
+    bool dlaa_ = false, failed_ = false, retry_pending_ = false;
+    unsigned fail_streak_ = 0;
+    std::chrono::steady_clock::time_point retry_at_{};
     char failure_[96] = {};
     sl::DLSSMode last_mode_ = sl::DLSSMode::eCount;
     VkExtent2D last_out_ = {};

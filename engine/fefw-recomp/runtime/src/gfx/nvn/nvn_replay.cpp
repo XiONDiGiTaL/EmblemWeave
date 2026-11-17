@@ -223,7 +223,7 @@ bool ubo_only_rebind_on() {
 // measurement with [nvn] replay_stats in one run.
 bool g_lean = true;
 bool lean_setting() {
-    static const bool on = nxrt::config_get_bool("nvn", "lean_draws", true);
+    static const bool on = nxrt::config_get_bool("nvn", "lean_draws", !nxrt::gfx::gpu_quirks().igpu_compat);   // [gfx] igpu_compat: off
     return on;
 }
 inline bool lean_on() { return g_lean; }
