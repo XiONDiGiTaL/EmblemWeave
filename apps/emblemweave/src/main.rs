@@ -25,11 +25,14 @@ mod ingame;
 mod crash;
 mod deps;
 mod mods;
+mod onboarding;
 mod pad;
 mod patches;
 mod perf;
+mod portraits;
 mod report;
 mod snapshots;
+mod shell;
 mod updater;
 mod saves;
 mod sites;
@@ -152,6 +155,14 @@ pub struct App {
     /// `--tour`: walk through the features by itself, for recordings.
     tour: Option<Instant>,
     tour_step: usize,
+    /// The expandable background-task panel in the status strip.
+    pub show_activity: bool,
+    /// Keep the hover preview open while the pointer crosses the gap between
+    /// the status-bar hub and the panel. This is transient UI state, never
+    /// written to config.
+    pub activity_hover_until: Option<Instant>,
+    /// Seen page, so opening a page from elsewhere reopens its navigation group.
+    nav_last: Option<Page>,
 }
 
 fn clock() -> String {
@@ -163,7 +174,16 @@ fn clock() -> String {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
         theme::configure_fonts(&cc.egui_ctx);
-        let (config, warning) = Config::load();
+        let (mut config, warning) = Config::load();
+        if !config.onboarding.introduced {
+            config.onboarding.introduced = true;
+            // A configuration with game paths belongs to someone who used the
+            // launcher before this guide existed. Do not greet them with
+            // first-run setup; Overview can reopen it when they want it.
+            if !config.paths.game_root.trim().is_empty() || !config.paths.exefs.trim().is_empty() {
+                config.onboarding.completed = true;
+            }
+        }
         theme::apply(&cc.egui_ctx, config.theme);
         let saved = serde_json::to_string(&config).unwrap_or_default();
         let last_boot = Config::dir()
@@ -216,6 +236,9 @@ impl App {
             log_ui: Default::default(),
             tour: None,
             tour_step: 0,
+            show_activity: false,
+            activity_hover_until: None,
+            nav_last: None,
         };
         // Command line: `--page <name>` opens a page, `--boot-test` runs the
         // boot test as soon as the game data is detected.
@@ -523,92 +546,8 @@ impl App {
         }
     }
 
-    /// The brand strip above every page: the project, the page it is on, and
-    /// the launcher's own frame rate.
-    fn top_bar(&mut self, ctx: &egui::Context) {
-        let p = self.config.theme.palette();
-        let s = self.frames.stats();
-        let fps = self.frames.fps().unwrap_or(0.0);
-        egui::TopBottomPanel::top("topbar")
-            .exact_height(theme::TOPBAR_HEIGHT)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 14, right: 14, top: 5, bottom: 3 }))
-            .show(ctx, |ui| {
-                let strip = ui.available_rect_before_wrap();
-                widgets::glass_panel(ui, strip, &p, egui::CornerRadius::same(14));
-                // The bar is the window's title bar now. Empty parts of it drag
-                // the window; the controls on the right are outside the drag
-                // region, so a double-click there can only act on the button.
-                let drag_rect = egui::Rect::from_min_max(
-                    strip.min,
-                    egui::pos2(strip.right() - SHELL_CONTROL_ZONE, strip.bottom()),
-                );
-                let drag = ui.interact(drag_rect, ui.id().with("shell-drag"), egui::Sense::click_and_drag());
-                if drag.drag_started() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-                if drag.double_clicked() {
-                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                }
-                if drag.hovered() {
-                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
-                }
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(14.0);
-                    // The brand mark: a lit diamond, as on the reference bar.
-                    let (mark, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    let c = mark.center();
-                    let diamond = vec![
-                        c + egui::vec2(0.0, -5.5),
-                        c + egui::vec2(5.5, 0.0),
-                        c + egui::vec2(0.0, 5.5),
-                        c + egui::vec2(-5.5, 0.0),
-                    ];
-                    ui.painter().add(egui::Shape::convex_polygon(diamond, p.accent, egui::Stroke::new(1.0_f32, theme::alpha(egui::Color32::WHITE, 170))));
-                    ui.add_space(6.0);
-                    widgets::tracked(ui, "EMBLEMWEAVE", 10.5, p.ink, 3.0);
-                    ui.add_space(12.0);
-                    let (div, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
-                    ui.painter().vline(div.center().x, div.y_range(), egui::Stroke::new(1.0_f32, theme::alpha(p.accent, 70)));
-                    ui.add_space(11.0);
-                    widgets::tracked(ui, &self.page.label().to_uppercase(), 9.5, p.accent_hi, theme::TRACK_MID);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Right to left: close is the rightmost button, then
-                        // maximize, minimize, and the quiet version/frame text.
-                        // The cluster is inset from the strip's rounded corner,
-                        // and its own spacing is exact rather than the layout's.
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.add_space(SHELL_CONTROL_INSET);
-                        if shell_control(ui, &p, ShellControl::Close, "Close").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        ui.add_space(SHELL_BUTTON_GAP);
-                        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                        if shell_control(ui, &p, ShellControl::Maximize { restore: maximized }, if maximized { "Restore" } else { "Maximize" }).clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                        }
-                        ui.add_space(SHELL_BUTTON_GAP);
-                        if shell_control(ui, &p, ShellControl::Minimize, "Minimize").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                        }
-                        ui.add_space(12.0);
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if self.config.hud.fps {
-                            if ui.small_button("✕").on_hover_text("Hide the frame rate").clicked() {
-                                self.config.hud.fps = false;
-                            }
-                            ui.label(RichText::new(format!("{fps:.0} fps · {:.1} ms", s.avg_ms)).font(theme::mono(12.0)).color(p.accent_hi));
-                        } else {
-                            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(11.0)).color(p.muted));
-                        }
-                        ui.add_space(8.0);
-                    });
-                });
-            });
-    }
-
     fn autosave(&mut self) {
-        if self.tour.is_some() {
+        if self.tour.is_some() || self.screenshot.is_some() {
             return;
         }
         if self.last_save_check.elapsed() < Duration::from_millis(400) {
@@ -651,179 +590,6 @@ impl App {
                 }
             }
         });
-    }
-
-    /// The rail: the lockup, then the pages in named groups.
-    fn nav(&mut self, ctx: &egui::Context) {
-        const GROUPS: [(&str, &[Page]); 4] = [
-            ("Play", &[Page::Overview, Page::Setup]),
-            ("Library", &[Page::Saves, Page::Mods, Page::Cheats]),
-            ("Runtime", &[Page::Recompile, Page::Graphics, Page::Audio, Page::Controls]),
-            ("System", &[Page::Appearance, Page::Diagnostics, Page::Troubleshoot, Page::Requirements, Page::Log, Page::About]),
-        ];
-        let p = self.config.theme.palette();
-        egui::SidePanel::left("nav")
-            .exact_width(theme::NAV_WIDTH)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 8, right: 4, top: 6, bottom: 8 }))
-            .show(ctx, |ui| {
-                let full = ui.available_rect_before_wrap();
-                widgets::glass_panel(ui, full, &p, egui::CornerRadius::same(18));
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.add_space(12.0);
-                ui.vertical_centered(|ui| {
-                    logo::show_lockup(ui, &p, theme::NAV_WIDTH - 96.0);
-                    ui.add_space(1.0);
-                    widgets::tracked(ui, "NATIVE PC RECOMPILATION", 8.0, p.muted, theme::TRACK_TIGHT);
-                });
-                ui.add_space(1.0);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                for (name, pages) in GROUPS {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(18.0);
-                        widgets::eyebrow(ui, &p, name);
-                    });
-                    for page in pages {
-                        let i = Page::ALL.iter().position(|q| q == page).unwrap_or(0);
-                        let r = widgets::nav_item(ui, &p, page.icon(), page.label(), self.page == *page)
-                            .on_hover_text(format!("{}  (Ctrl+{})", page.label(), i + 1));
-                        if r.clicked() {
-                            self.page = *page;
-                        }
-                    }
-                }
-                });
-            });
-    }
-
-    /// The status column beside the Overview page: where the game, the
-    /// recompiler and the runtime stand, and what the launcher just did.
-    fn side_panel(&mut self, ctx: &egui::Context) {
-        // The column steps aside on a narrow window: the page keeps its room
-        // instead of both being squeezed into scroll boxes.
-        if self.page != Page::Overview || ctx.screen_rect().width() < theme::SIDE_MIN_WINDOW {
-            return;
-        }
-        let p = self.config.theme.palette();
-        egui::SidePanel::right("status-column")
-            .exact_width(theme::SIDE_WIDTH)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 0, right: 14, top: 12, bottom: 2 }))
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let (ready, r_tone) = pages::overview::readiness(self);
-                    widgets::section(ui, &p, "Status", |ui| {
-                        ui.horizontal(|ui| {
-                            widgets::status_dot(ui, &p, r_tone);
-                            ui.label(RichText::new(ready).font(theme::semibold(14.0)).color(r_tone.colour(&p)));
-                        });
-                        ui.add_space(theme::SPACE_S);
-                        let severities = [
-                            (
-                                "Game data",
-                                match self.game.worst() {
-                                    crate::gamedata::Severity::Ok | crate::gamedata::Severity::Info => ("Ready", Tone::Ok),
-                                    crate::gamedata::Severity::Warn => ("Needs attention", Tone::Warn),
-                                    crate::gamedata::Severity::Error => ("Incomplete", Tone::Bad),
-                                },
-                            ),
-                            (
-                                "Recompilation",
-                                match &self.last_pipeline {
-                                    Some(s) => match s.verified {
-                                        Some((ok, n)) if ok == n => ("Verified", Tone::Ok),
-                                        Some(_) => ("Differs", Tone::Warn),
-                                        None => ("Lifted", Tone::Accent),
-                                    },
-                                    None => ("Not run", Tone::Neutral),
-                                },
-                            ),
-                            (
-                                "Runtime",
-                                match &self.last_boot {
-                                    Some(_) => ("Booted", Tone::Accent),
-                                    None => ("Not run", Tone::Neutral),
-                                },
-                            ),
-                        ];
-                        for (label, (value, tone)) in severities {
-                            let row = ui
-                                .horizontal(|ui| {
-                                    widgets::status_dot(ui, &p, tone);
-                                    ui.label(RichText::new(label).size(12.5).color(p.body));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(RichText::new(value).font(theme::semibold(12.0)).color(tone.colour(&p)));
-                                    });
-                                })
-                                .response;
-                            // "Needs attention" without the reason is a riddle:
-                            // the row names every check that is open when hovered.
-                            if label == "Game data" {
-                                if let Some(text) = self.game.attention_text() {
-                                    row.on_hover_text(text);
-                                }
-                            }
-                            ui.add_space(3.0);
-                        }
-                    });
-                    widgets::section(ui, &p, "Recent activity", |ui| {
-                        if self.activity.is_empty() {
-                            ui.label(RichText::new("Nothing yet").size(12.5).color(p.muted));
-                        }
-                        for a in self.activity.iter().rev().take(8) {
-                            ui.horizontal_top(|ui| {
-                                ui.label(RichText::new(&a.at).font(theme::mono(10.5)).color(p.muted));
-                                ui.add(egui::Label::new(RichText::new(&a.text).size(12.0).color(a.tone.colour(&p))).wrap());
-                            });
-                            ui.add_space(3.0);
-                        }
-                    });
-                });
-            });
-    }
-
-    fn status_bar(&mut self, ctx: &egui::Context) {
-        let p = self.config.theme.palette();
-        egui::TopBottomPanel::bottom("status")
-            .exact_height(theme::STATUSBAR_HEIGHT)
-            .frame(egui::Frame::new().fill(p.bg_deep).inner_margin(egui::Margin { left: 16, right: 16, top: 4, bottom: 4 }))
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let active = self.jobs.iter().find(|j| !j.finished() && j.kind != JobKind::Detect);
-                    match active {
-                        Some(job) => {
-                            let kind = job.kind;
-                            let message = job.snapshot(|pr| pr.message.clone());
-                            let steps = job.steps.load(std::sync::atomic::Ordering::Relaxed);
-                            ui.spinner();
-                            ui.label(RichText::new(kind.title().to_uppercase()).font(theme::semibold(10.0)).color(p.accent));
-                            ui.label(RichText::new(message).font(theme::mono(11.0)).color(p.body));
-                            if kind == JobKind::Boot && steps > 0 {
-                                ui.label(RichText::new(format!("{} instr", fmt_count(steps))).font(theme::mono(10.5)).color(p.muted));
-                            }
-                            ui.label(RichText::new(format!("{:.1}s", job.started.elapsed().as_secs_f32())).font(theme::mono(10.5)).color(p.muted));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("Cancel").on_hover_text("Stop at the next safe point").clicked() {
-                                    self.confirm = Some(Confirm::CancelJob(kind));
-                                }
-                            });
-                            ctx.request_repaint_after(Duration::from_millis(100));
-                        }
-                        None => {
-                            let (text, tone) = pages::overview::readiness(self);
-                            widgets::status_dot(ui, &p, tone);
-                            ui.label(RichText::new(text.to_uppercase()).font(theme::semibold(9.5)).color(tone.colour(&p)));
-                            ui.label(RichText::new(clock()).font(theme::mono(10.5)).color(p.muted));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " ", env!("EW_GIT_REV"))).font(theme::mono(10.5)).color(p.muted));
-                                ui.label(RichText::new("by XiØN").font(theme::mono(10.5)).color(p.muted));
-                                ui.label(RichText::new("EMBLEMWEAVE").font(theme::semibold(9.5)).color(p.accent));
-                            });
-                        }
-                    }
-                });
-            });
     }
 
     fn overlays(&mut self, ctx: &egui::Context) {
@@ -883,24 +649,23 @@ impl App {
                 ),
                 Confirm::CancelJob(k) => ("Stop this task?", k.title(), "Stop"),
             };
-            let mut decision = None;
-            egui::Window::new(title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
+            let decision = std::cell::Cell::new(None::<bool>);
+            let shown = widgets::modal(ctx, &p, "confirm-action", title, "This action is applied to the current configuration.", 480.0, |ui| {
                     ui.label(RichText::new(body).color(p.body));
-                    ui.add_space(theme::SPACE_M);
+                }, |ui| {
                     ui.horizontal(|ui| {
                         if widgets::button(ui, &p, action, true).clicked() {
-                            decision = Some(true);
+                            decision.set(Some(true));
                         }
-                        if widgets::button(ui, &p, "Keep", true).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            decision = Some(false);
+                        if widgets::button(ui, &p, "Keep", true).clicked() {
+                            decision.set(Some(false));
                         }
                     });
                 });
-            if let Some(yes) = decision {
+            if shown.close {
+                decision.set(Some(false));
+            }
+            if let Some(yes) = decision.get() {
                 if yes {
                     match self.confirm.take() {
                         Some(Confirm::ResetBindings) => {
@@ -930,6 +695,7 @@ impl App {
                 self.confirm = None;
             }
         }
+        crate::onboarding::show(self, ctx);
     }
 }
 
@@ -1000,6 +766,11 @@ impl eframe::App for App {
             theme::apply(ctx, self.config.theme);
         }
         self.poll_jobs();
+        // The dependency report is warmed off the render thread. Keep the
+        // status chips and setup guide live until its result arrives.
+        if crate::deps::cached().is_none() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         // A launch that drew nothing says so here, while the window is still
         // on screen and the player can act on it.
         while let Some((said, good)) = crate::engine::take_play_alert() {
@@ -1036,13 +807,17 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.shortcuts(ctx);
-        self.top_bar(ctx);
-        self.status_bar(ctx);
-        self.nav(ctx);
-        self.side_panel(ctx);
+        shell::top_bar(self, ctx);
+        shell::status_bar(self, ctx);
+        shell::nav(self, ctx);
         let p = self.config.theme.palette();
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin { left: 28, right: 28, top: 0, bottom: 0 }))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin {
+                left: if ctx.screen_rect().width() < 1240.0 { 16 } else { 24 },
+                right: if ctx.screen_rect().width() < 1240.0 { 16 } else { 24 },
+                top: 0,
+                bottom: 0,
+            }))
             .show(ctx, |ui| {
                 crate::widgets::backdrop(ui.painter(), ui.max_rect().expand2(egui::vec2(28.0, 0.0)), &p);
                 let fresh_page = self.page_seen != Some(self.page);
@@ -1070,6 +845,7 @@ impl eframe::App for App {
                     });
                 });
             });
+        shell::activity_window(self, ctx);
         self.overlays(ctx);
         self.tour_frame(ctx);
         ingame::frame(self, ctx);
@@ -1134,7 +910,6 @@ const SHELL_BUTTON_W: f32 = 34.0;
 const SHELL_BUTTON_H: f32 = 30.0;
 const SHELL_BUTTON_GAP: f32 = 4.0;
 const SHELL_CONTROL_INSET: f32 = 6.0;
-const SHELL_CONTROL_ZONE: f32 = SHELL_BUTTON_W * 3.0 + SHELL_BUTTON_GAP * 2.0 + SHELL_CONTROL_INSET;
 
 #[derive(Clone, Copy)]
 enum ShellControl {
@@ -1450,10 +1225,20 @@ fn main() -> eframe::Result<()> {
         let path = args.get(i + 1).map(|s| s.as_str());
         std::process::exit(verify_log_cli(path));
     }
+    // Screenshot and layout checks need a repeatable window size; it changes
+    // this run only and never touches the saved preferences.
+    let window_size = args
+        .iter()
+        .position(|a| a == "--size")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.split_once('x'))
+        .and_then(|(w, h)| Some([w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?]))
+        .map(|[w, h]| [w.max(1120.0), h.max(720.0)])
+        .unwrap_or([1440.0, 900.0]);
     // The launcher draws its own top bar and window buttons. Keeping the
     // native title bar would put a stock Windows strip above that design.
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1440.0, 900.0])
+        .with_inner_size(window_size)
         .with_min_inner_size([1120.0, 720.0])
         .with_decorations(false)
         .with_resizable(true)

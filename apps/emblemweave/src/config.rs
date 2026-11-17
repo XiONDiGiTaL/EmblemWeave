@@ -8,6 +8,7 @@
 
 use crate::theme::Scheme;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Where the user's own game data lives. Every path is optional: the setup
@@ -216,6 +217,24 @@ impl Default for Hud {
     }
 }
 
+/// Navigation presentation the player has chosen. Groups remember whether
+/// they are open and the rail can stay compact, so the same layout comes back
+/// at the next launch instead of resetting itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NavState {
+    /// Icon-only rail instead of the labelled sidebar.
+    pub rail: bool,
+    /// Group keys that are folded away.
+    pub collapsed: Vec<String>,
+}
+
+impl Default for NavState {
+    fn default() -> Self {
+        NavState { rail: false, collapsed: vec!["system".into(), "settings".into()] }
+    }
+}
+
 /// A named set of mods to switch on together.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -240,6 +259,28 @@ pub struct GraphicsPreset {
     pub applied: Option<Graphics>,
 }
 
+/// The guided setup's durable position. `step` is the guide's own page, not a
+/// claim about the machine: every screen re-checks the real game data, tools
+/// and build before it offers to continue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Onboarding {
+    pub completed: bool,
+    /// Closed without finishing. It stays quiet until Overview's setup card or
+    /// Game Setup asks for it again.
+    pub dismissed: bool,
+    pub step: u8,
+    /// Set on the first launch after this field exists, so an older config with
+    /// an already chosen game folder is not greeted with first-run setup.
+    pub introduced: bool,
+}
+
+impl Default for Onboarding {
+    fn default() -> Self {
+        Onboarding { completed: false, dismissed: false, step: 0, introduced: false }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -253,9 +294,20 @@ pub struct Config {
     pub updates: Updates,
     pub graphics_preset: GraphicsPreset,
     pub hud: Hud,
+    pub nav: NavState,
     pub profiles: Vec<ModProfile>,
     /// The profile last applied, for the Mods page.
     pub profile: String,
+    /// User-chosen labels for save slots, keyed by profile and then by the
+    /// slot path inside that profile. These are display names only: the game
+    /// file name and contents are never changed.
+    pub slot_names: BTreeMap<String, BTreeMap<String, String>>,
+    /// The protagonist portrait chosen for a save profile. `cai`, `dietrich`,
+    /// `eshmel`, `leda` or `theodora`; absent means Automatic, which reads the
+    /// newest readable slot. Display-only, like the slot labels above.
+    pub profile_portraits: BTreeMap<String, String>,
+    /// First-run guided setup progress.
+    pub onboarding: Onboarding,
 }
 
 impl Config {

@@ -14,6 +14,7 @@
 //! import writes the `.meta` the engine expects.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Fire Emblem: Fortune's Weave's program id: the save folder's name in an
 /// emulator's NAND. Used when the dump does not state it.
@@ -208,7 +209,15 @@ pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Res
             let meta = target.with_extension("meta");
             if !meta.is_file() {
                 if let Some(text) = meta_text(title_id, &user) {
-                    std::fs::write(&meta, text).map_err(|e| format!("writing {}: {e}", meta.display()))?;
+                    if let Err(e) = std::fs::write(&meta, text) {
+                        // The copied tree is not a usable installed save without
+                        // its journal metadata. Put the previous save back.
+                        let _ = std::fs::remove_dir_all(&target);
+                        if let Some(b) = &backup {
+                            let _ = std::fs::rename(b, &target);
+                        }
+                        return Err(format!("writing {}: {e}", meta.display()));
+                    }
                 }
             }
             Ok(Imported { files, backup })
@@ -245,6 +254,303 @@ pub struct Profile {
     pub path: PathBuf,
     pub files: usize,
     pub modified: Option<std::time::SystemTime>,
+}
+
+/// A marker in a profile that has no save yet. It is not a game file: the game
+/// never sees it, and the slot scanner ignores it.
+pub const EMPTY_PROFILE_MARKER: &str = ".emblemweave-empty";
+
+/// The kind of save file a profile or the current save holds. The game's
+/// filenames are the only stable identifiers available without guessing at
+/// the payload, so the display type is derived from those names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotKind {
+    Auto,
+    Manual,
+    Other,
+}
+
+impl SlotKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SlotKind::Auto => "Autosave",
+            SlotKind::Manual => "Manual save",
+            SlotKind::Other => "Other save data",
+        }
+    }
+}
+
+/// What one save file contributes to a profile summary. Parsing failures are
+/// data, not errors: the file is kept and shown as unreadable rather than
+/// hidden or deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotInfo {
+    pub path: PathBuf,
+    pub relative: String,
+    pub name: String,
+    pub kind: SlotKind,
+    pub modified: Option<SystemTime>,
+    pub size: u64,
+    pub gold: Option<u32>,
+    pub renown: Option<u32>,
+    pub units: usize,
+    /// The first main character this slot names, when it has one. Display-only:
+    /// the carousel uses it to choose a portrait when no explicit one is set.
+    pub leader: Option<String>,
+    pub valid: bool,
+    pub problems: Vec<String>,
+}
+
+/// The cached metadata for a profile. Values that this build cannot read from
+/// the save format stay `None`; they are never filled with guesses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileMeta {
+    pub slots: Vec<SlotInfo>,
+    pub gold: Option<u32>,
+    pub renown: Option<u32>,
+    pub units: usize,
+    pub leader: Option<String>,
+    pub valid_slots: usize,
+}
+
+/// A user-facing profile name that is also a safe directory name. Unlike the
+/// older silent clean-up, this reports why a name cannot be used.
+pub fn checked_profile_name(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("a profile needs a name".into());
+    }
+    let clean = crate::mods::clean_name(trimmed);
+    if clean != trimmed || clean.is_empty() {
+        return Err("use a name without path separators, control characters or a trailing dot".into());
+    }
+    Ok(clean)
+}
+
+pub fn is_metadata_file(name: &str) -> bool {
+    name == EMPTY_PROFILE_MARKER || name.ends_with(".meta")
+}
+
+fn is_slot_candidate(path: &Path) -> bool {
+    path.extension().is_none() && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| !is_metadata_file(n))
+}
+
+fn kind_of(name: &str) -> SlotKind {
+    let n = name.to_ascii_lowercase();
+    if n.starts_with("auto") {
+        SlotKind::Auto
+    } else if n.starts_with("chapter") || n.starts_with("manual") || n.starts_with("save") {
+        SlotKind::Manual
+    } else {
+        SlotKind::Other
+    }
+}
+
+fn file_paths(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.is_file() {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The save files in a profile, with the metadata this build can parse. The
+/// list is sorted by modified time, newest first, and includes unknown files so
+/// the manager can show them instead of silently treating them as disposable.
+pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
+    let mut out = Vec::new();
+    for path in file_paths(&p.path) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        if is_metadata_file(&name)
+            || name.ends_with(".tmp")
+            || name.ends_with(".orig")
+            || name.ends_with(".before-restore")
+        {
+            continue;
+        }
+        let rel = path.strip_prefix(&p.path).unwrap_or(&path).display().to_string();
+        let metadata = std::fs::metadata(&path).ok();
+        let modified = metadata.as_ref().and_then(|m| m.modified().ok());
+        let size = metadata.as_ref().map_or(0, |m| m.len());
+        let (gold, renown, units, leader, valid, problems) = match crate::savefile::Slot::open(&path) {
+            Ok(slot) => {
+                let player = slot.player();
+                let roster = slot.units(ids);
+                let leader = roster.iter().find_map(|u| crate::portraits::key_for_name(&u.name)).map(str::to_string);
+                let problems = slot.verify();
+                (player.map(|p| p.gold), player.map(|p| p.renown), roster.len(), leader, problems.is_empty(), problems)
+            }
+            Err(e) => (None, None, 0, None, false, vec![e]),
+        };
+        out.push(SlotInfo { path, relative: rel, name: name.clone(), kind: kind_of(&name), modified, size, gold, renown, units, leader, valid, problems });
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.relative.cmp(&b.relative)));
+    out
+}
+
+/// A summary of a profile for the carousel. The newest readable slot supplies
+/// gold, renown and the number of units; missing values remain missing.
+pub fn profile_meta(p: &Profile, ids: &crate::savefile::Ids) -> ProfileMeta {
+    let slots = profile_slots(p, ids);
+    let newest = slots.iter().find(|s| s.valid).or_else(|| slots.first());
+    ProfileMeta {
+        gold: newest.and_then(|s| s.gold),
+        renown: newest.and_then(|s| s.renown),
+        units: newest.map_or(0, |s| s.units),
+        leader: newest.and_then(|s| s.leader.clone()),
+        valid_slots: slots.iter().filter(|s| s.valid).count(),
+        slots,
+    }
+}
+
+pub fn is_empty_profile(p: &Profile) -> bool {
+    p.path.join(EMPTY_PROFILE_MARKER).is_file()
+        && file_paths(&p.path).iter().all(|f| f.file_name().and_then(|n| n.to_str()) == Some(EMPTY_PROFILE_MARKER))
+}
+
+/// Whether every file in `profile` is byte-for-byte present in the current
+/// account save. The `.meta` beside the account folder is not part of a profile
+/// and is ignored.
+fn profile_is_installed(p: &Profile, save_dir: &Path) -> bool {
+    let target = account_dir(save_dir);
+    let files = file_paths(&p.path);
+    let mut compared = 0;
+    for from in files {
+        let Some(name) = from.file_name().and_then(|n| n.to_str()) else { continue };
+        if is_metadata_file(name) {
+            continue;
+        }
+        let Ok(rel) = from.strip_prefix(&p.path) else { continue };
+        let to = target.join(rel);
+        let (Ok(a), Ok(b)) = (std::fs::read(&from), std::fs::read(&to)) else { return false };
+        if a != b {
+            return false;
+        }
+        compared += 1;
+    }
+    compared > 0
+}
+
+/// The profile installed in the game's current save, found by comparing the
+/// actual files. This is what makes the active badge correct after a restart,
+/// not only in the session that loaded the profile.
+pub fn installed_profile(save_dir: &Path, profiles: &[Profile]) -> Option<String> {
+    profiles.iter().find(|p| profile_is_installed(p, save_dir)).map(|p| p.name.clone())
+}
+
+pub fn create_empty_profile(save_dir: &Path, name: &str) -> Result<Profile, String> {
+    let name = checked_profile_name(name)?;
+    let path = save_dir.join("profiles").join(&name);
+    if path.exists() {
+        return Err(format!("there is already a profile called {name}"));
+    }
+    std::fs::create_dir_all(&path).map_err(|e| format!("creating {}: {e}", path.display()))?;
+    if let Err(e) = std::fs::write(path.join(EMPTY_PROFILE_MARKER), "EmblemWeave empty profile\n") {
+        let _ = std::fs::remove_dir_all(&path);
+        return Err(format!("writing the profile marker: {e}"));
+    }
+    let (files, modified) = summary(&path);
+    Ok(Profile { name, path, files, modified })
+}
+
+/// Copy an external folder into a new profile and refuse to keep it unless its
+/// slot files can be read. The source is never modified.
+pub fn import_profile(save_dir: &Path, name: &str, source: &Path) -> Result<Profile, String> {
+    let name = checked_profile_name(name)?;
+    if !source.is_dir() {
+        return Err(format!("{} is not a folder", source.display()));
+    }
+    let path = save_dir.join("profiles").join(&name);
+    if path.exists() {
+        return Err(format!("there is already a profile called {name}"));
+    }
+    if source == path || source.starts_with(&path) {
+        return Err("the import source overlaps the profile folder".into());
+    }
+    copy_tree(source, &path)?;
+    let (files, modified) = summary(&path);
+    let p = Profile { name: name.clone(), path, files, modified };
+    let check = check_profile(&p);
+    if !check.ok() {
+        let _ = std::fs::remove_dir_all(&p.path);
+        return Err(check.problems.first().cloned().unwrap_or_else(|| "the backup has no readable save slots".into()));
+    }
+    Ok(p)
+}
+
+/// Export a profile in the same title-id layout `export` uses for the current
+/// save, without touching the current account.
+pub fn export_profile(p: &Profile, dest: &Path, title_id: u64) -> Result<(PathBuf, usize), String> {
+    let to = dest.join(format!("{title_id:016X}"));
+    if to.exists() {
+        return Err(format!("{} already exists; choose an empty folder", to.display()));
+    }
+    copy_tree(&p.path, &to).map(|n| (to, n))
+}
+
+/// Load a profile and verify the installed tree before reporting success. If
+/// the copy differs, put the previous save back and return an error.
+pub fn load_profile_verified(save_dir: &Path, p: &Profile, title_id: u64, stamp: &str) -> Result<Imported, String> {
+    if is_empty_profile(p) {
+        return load_empty_profile(save_dir, p, title_id, stamp);
+    }
+    let check = check_profile(p);
+    if !check.ok() {
+        return Err(check.problems.first().cloned().unwrap_or_else(|| "the profile has no readable save slots".into()));
+    }
+    let imported = load_profile(save_dir, p, title_id, stamp)?;
+    if profile_is_installed(p, save_dir) {
+        return Ok(imported);
+    }
+    let target = account_dir(save_dir);
+    let _ = std::fs::remove_dir_all(&target);
+    if let Some(backup) = &imported.backup {
+        let _ = std::fs::rename(backup, &target);
+    }
+    Err("the restored save did not match the profile; the previous save was put back".into())
+}
+
+/// Install a fresh, empty account save. The previous save is kept in backups,
+/// so starting a new playthrough never destroys the old one.
+pub fn load_empty_profile(save_dir: &Path, p: &Profile, title_id: u64, stamp: &str) -> Result<Imported, String> {
+    if !is_empty_profile(p) {
+        return Err("this profile is not empty".into());
+    }
+    let target = account_dir(save_dir);
+    let backup = if target.is_dir() && summary(&target).0 > 0 {
+        let to = save_dir.join("backups").join(stamp);
+        std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
+        std::fs::rename(&target, &to).map_err(|e| format!("moving the current save to {}: {e}", to.display()))?;
+        Some(to)
+    } else {
+        None
+    };
+    let result = (|| {
+        std::fs::create_dir_all(&target).map_err(|e| format!("creating {}: {e}", target.display()))?;
+        let user = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let meta = target.with_extension("meta");
+        if let Some(text) = meta_text(title_id, &user) {
+            std::fs::write(&meta, text).map_err(|e| format!("writing {}: {e}", meta.display()))?;
+        }
+        Ok(Imported { files: 0, backup: backup.clone() })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&target);
+        if let Some(b) = &backup {
+            let _ = std::fs::rename(b, &target);
+        }
+    }
+    result
 }
 
 pub fn profiles(save_dir: &Path) -> Vec<Profile> {
@@ -315,7 +621,7 @@ pub fn check_profile(p: &Profile) -> ProfileCheck {
                 stack.push(path);
                 continue;
             }
-            if path.extension().is_some() {
+            if !is_slot_candidate(&path) {
                 continue;
             }
             slots += 1;
@@ -364,6 +670,53 @@ pub fn backups(save_dir: &Path) -> Vec<Backup> {
 /// moved to the backups first, so a restore can be undone.
 pub fn restore_backup(save_dir: &Path, b: &Backup, title_id: u64, stamp: &str) -> Result<Imported, String> {
     import(&b.path, save_dir, title_id, stamp)
+}
+
+/// Restore a whole backup and verify the installed tree. If the copy differs,
+/// the save that was replaced is put back before the error is returned.
+pub fn restore_backup_verified(save_dir: &Path, b: &Backup, title_id: u64, stamp: &str) -> Result<Imported, String> {
+    let imported = restore_backup(save_dir, b, title_id, stamp)?;
+    let p = Profile { name: b.name.clone(), path: b.path.clone(), files: b.files, modified: b.modified };
+    if profile_is_installed(&p, save_dir) {
+        return Ok(imported);
+    }
+    let target = account_dir(save_dir);
+    let _ = std::fs::remove_dir_all(&target);
+    if let Some(previous) = &imported.backup {
+        let _ = std::fs::rename(previous, &target);
+    }
+    Err("the restored backup did not match its files; the previous save was put back".into())
+}
+
+/// Keep a copy of one slot beside the other whole-save backups. The slot stays
+/// where it is, so this is safe for a profile that is currently selected.
+pub fn backup_slot(save_dir: &Path, profile: &Profile, slot: &Path, stamp: &str) -> Result<PathBuf, String> {
+    let name = slot.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "slot".into());
+    let to = save_dir.join("backups").join(format!("{stamp}-{}-{name}", profile.name));
+    std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
+    std::fs::copy(slot, &to).map_err(|e| format!("copying {} to {}: {e}", slot.display(), to.display()))?;
+    Ok(to)
+}
+
+/// The untouched original kept by the slot editor, when there is one.
+pub fn original_slot_path(slot: &Path) -> PathBuf {
+    let mut o = slot.as_os_str().to_owned();
+    o.push(".orig");
+    PathBuf::from(o)
+}
+
+/// Put a slot's `.orig` back, first keeping the current file as `.before-restore`.
+pub fn restore_original_slot(slot: &Path) -> Result<PathBuf, String> {
+    let original = original_slot_path(slot);
+    if !original.is_file() {
+        return Err("no original backup exists for this slot".into());
+    }
+    let current = slot.with_extension("before-restore");
+    if slot.is_file() {
+        std::fs::copy(slot, &current).map_err(|e| format!("keeping the current slot: {e}"))?;
+    }
+    std::fs::copy(&original, slot).map_err(|e| format!("restoring {}: {e}", original.display()))?;
+    Ok(current)
 }
 
 /// Move a profile to the backups folder.
@@ -463,6 +816,7 @@ pub fn nacp_save_owner(nacp: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::savefile::{fnv1_32, fnv1a32, raw_zstd_frame};
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ew-saves-{name}-{}", std::process::id()));
@@ -474,6 +828,11 @@ mod tests {
     fn write(p: &Path, text: &str) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
+    }
+
+    fn write_bytes(p: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, bytes).unwrap();
     }
 
     #[test]
@@ -642,6 +1001,145 @@ mod tests {
         assert!(to.ends_with("04007EF01F8AE000"));
         assert!(to.join("000/Auto").is_file());
         assert!(export(&save, &root.join("out"), FALLBACK_TITLE_ID).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A minimal valid container for metadata tests. It has no GameUserData,
+    /// so gold and renown are correctly absent rather than invented.
+    fn valid_slot(payload: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0u8; 0x124];
+        raw[0..4].copy_from_slice(&0xCDEF_BCDDu32.to_le_bytes());
+        raw[4..8].copy_from_slice(&0xE0u32.to_le_bytes());
+        raw[0x104..0x108].copy_from_slice(&0xCDEF_BCDDu32.to_le_bytes());
+        let frame = raw_zstd_frame(payload);
+        raw[0x108..0x10C].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+        raw[0x10C..0x110].copy_from_slice(&fnv1_32(payload).to_le_bytes());
+        raw[0x110..0x114].copy_from_slice(&3u32.to_le_bytes());
+        raw.extend(frame);
+        let header = fnv1a32(&raw[0x1F..0x1F + 0xE0]);
+        raw[8..12].copy_from_slice(&header.to_le_bytes());
+        raw
+    }
+
+    #[test]
+    fn empty_profile_load_backs_up_the_current_save() {
+        let root = temp("empty-profile");
+        let save = root.join("save");
+        let p = create_empty_profile(&save, "Fresh Run").unwrap();
+        assert!(is_empty_profile(&p));
+        assert!(profile_slots(&p, &crate::savefile::Ids::default()).is_empty());
+        let old = account_dir(&save).join("000/Auto");
+        write(&old, "old save");
+        let loaded = load_empty_profile(&save, &p, FALLBACK_TITLE_ID, "9").unwrap();
+        assert_eq!(loaded.files, 0);
+        let backup = loaded.backup.expect("the previous save is kept");
+        assert_eq!(std::fs::read_to_string(backup.join("000/Auto")).unwrap(), "old save");
+        assert!(account_dir(&save).is_dir());
+        assert!(!account_dir(&save).join("000/Auto").exists());
+        assert!(save.join("account").join(format!("{DEFAULT_USER}.meta")).is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn slot_metadata_keeps_corrupt_files_and_does_not_invent_values() {
+        let root = temp("profile-meta");
+        let save = root.join("save");
+        let p = create_empty_profile(&save, "Run A").unwrap();
+        std::fs::write(p.path.join("Auto"), valid_slot(b"payload")).unwrap();
+        std::fs::write(p.path.join("Chapter_1"), b"not a save").unwrap();
+        let slots = profile_slots(&p, &crate::savefile::Ids::default());
+        assert_eq!(slots.len(), 2, "both files stay visible");
+        assert!(slots.iter().any(|s| s.name == "Auto" && s.valid));
+        assert!(slots.iter().any(|s| s.name == "Chapter_1" && !s.valid));
+        let meta = profile_meta(&p, &crate::savefile::Ids::default());
+        assert_eq!(meta.valid_slots, 1);
+        assert_eq!((meta.gold, meta.renown), (None, None));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn active_profile_is_detected_from_the_installed_files() {
+        let root = temp("active-profile");
+        let save = root.join("save");
+        let account = account_dir(&save);
+        write_bytes(&account.join("000/Auto"), &valid_slot(b"same"));
+        store_profile(&save, "Run A", "1").unwrap();
+        let p = profiles(&save).into_iter().next().unwrap();
+        assert_eq!(installed_profile(&save, &profiles(&save)).as_deref(), Some("Run A"));
+        write_bytes(&account.join("000/Auto"), &valid_slot(b"changed"));
+        assert_eq!(installed_profile(&save, &profiles(&save)), None);
+        let loaded = load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "2").unwrap();
+        assert_eq!(std::fs::read(account.join("000/Auto")).unwrap(), valid_slot(b"same"));
+        assert!(loaded.backup.is_some());
+        assert_eq!(installed_profile(&save, &profiles(&save)).as_deref(), Some("Run A"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_and_duplicate_are_independent() {
+        let root = temp("profile-import");
+        let save = root.join("save");
+        let source = root.join("backup");
+        write_bytes(&source.join("000/Auto"), &valid_slot(b"source"));
+        let imported = import_profile(&save, "Imported", &source).unwrap();
+        let duplicate = duplicate_profile(&save, &imported, "Copy").unwrap();
+        std::fs::write(duplicate.path.join("000/Auto"), valid_slot(b"copy")).unwrap();
+        assert_eq!(std::fs::read(imported.path.join("000/Auto")).unwrap(), valid_slot(b"source"));
+        assert_ne!(std::fs::read(imported.path.join("000/Auto")).unwrap(), std::fs::read(duplicate.path.join("000/Auto")).unwrap());
+        let (to, n) = export_profile(&imported, &root.join("out"), FALLBACK_TITLE_ID).unwrap();
+        assert_eq!(n, 1);
+        assert!(to.join("000/Auto").is_file());
+        assert!(to.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_invalid_import_leaves_no_profile_behind() {
+        let root = temp("profile-bad-import");
+        let save = root.join("save");
+        let source = root.join("bad");
+        write(&source.join("Auto"), "not a slot");
+        assert!(import_profile(&save, "Bad", &source).is_err());
+        assert!(profiles(&save).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_names_and_collisions_are_refused() {
+        let root = temp("profile-names");
+        let save = root.join("save");
+        assert!(create_empty_profile(&save, "../outside").is_err());
+        assert!(create_empty_profile(&save, "  ").is_err());
+        let p = create_empty_profile(&save, "Run A").unwrap();
+        assert!(p.path.is_dir());
+        assert!(create_empty_profile(&save, "Run A").is_err());
+        assert_eq!(profiles(&save).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_profile_load_leaves_the_current_save_alone() {
+        let root = temp("profile-bad-load");
+        let save = root.join("save");
+        let current = account_dir(&save).join("000/Auto");
+        write(&current, "keep me");
+        let p = create_empty_profile(&save, "Corrupt").unwrap();
+        write(&p.path.join("Auto"), "not a save");
+        assert!(load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "4").is_err());
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "keep me");
+        assert!(installed_profile(&save, &profiles(&save)).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_slot_original_restore_keeps_the_replaced_copy() {
+        let root = temp("slot-original");
+        let slot = root.join("Auto");
+        write(&slot, "new");
+        write(&original_slot_path(&slot), "old");
+        let replaced = restore_original_slot(&slot).unwrap();
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(replaced).unwrap(), "new");
         let _ = std::fs::remove_dir_all(root);
     }
 }

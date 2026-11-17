@@ -45,14 +45,23 @@ fn texture(ctx: &egui::Context, png: &'static [u8]) -> Option<egui::TextureHandl
 
 /// Draw the logo into `rect`, fitted and centred, with a soft accent glow.
 pub fn lockup(painter: &egui::Painter, rect: Rect, palette: &Palette) {
+    lockup_tinted(painter, rect, palette, Color32::WHITE);
+}
+
+/// The same lockup with a caller-supplied tint, for quiet watermarks. A fully
+/// transparent tint draws nothing; a translucent one lets the artwork sit
+/// behind content without competing with it.
+pub fn lockup_tinted(painter: &egui::Painter, rect: Rect, palette: &Palette, tint: Color32) {
     let Some(tex) = texture(painter.ctx(), palette.logo) else { return };
     let [w, h] = tex.size();
     let scale = (rect.width() / w as f32).min(rect.height() / h as f32);
     let size = Vec2::new(w as f32, h as f32) * scale;
     let at = Rect::from_center_size(rect.center(), size);
-    glow(painter, at.center(), Vec2::new(size.x * 0.52, size.y * 0.62), palette.electric);
+    if tint.a() > 100 {
+        glow(painter, at.center(), Vec2::new(size.x * 0.52, size.y * 0.62), palette.electric);
+    }
     let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    painter.image(tex.id(), at, uv, Color32::WHITE);
+    painter.image(tex.id(), at, uv, tint);
 }
 
 /// An elliptical glow from the accent to clear, as one mesh.

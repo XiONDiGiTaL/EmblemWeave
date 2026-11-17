@@ -1,4 +1,5 @@
-//! The launcher's pages. Each module draws one page from the shared widgets.
+//! The launcher's pages, their navigation groups and their compact line-art
+//! icons. Each page draws from the shared widgets and design system.
 
 pub mod about;
 pub mod appearance;
@@ -16,7 +17,7 @@ pub mod setup;
 pub mod troubleshoot;
 
 use crate::App;
-use eframe::egui;
+use eframe::egui::{self, Color32, Pos2, Rect, Stroke, StrokeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -38,6 +39,8 @@ pub enum Page {
 }
 
 impl Page {
+    /// Shortcut order. Kept stable so Ctrl+1..9 keep opening the same pages
+    /// even though the sidebar now groups them differently.
     pub const ALL: [Page; 15] = [
         Page::Overview,
         Page::Setup,
@@ -76,24 +79,153 @@ impl Page {
         }
     }
 
-    /// Glyphs from egui's bundled icon font, so they render on every system.
-    pub fn icon(self) -> &'static str {
+    /// Where this page belongs in the sidebar.
+    pub fn group(self) -> NavGroup {
+        NavGroup::ALL
+            .into_iter()
+            .find(|g| g.pages().contains(&self))
+            .unwrap_or(NavGroup::Home)
+    }
+
+    /// A 16-pixel line icon. The shapes share one stroke weight and optical box,
+    /// so the rail reads as one set rather than a row of borrowed emoji.
+    pub fn paint_icon(self, painter: &egui::Painter, rect: Rect, colour: Color32) {
+        let c = rect.center();
+        let s = Stroke::new(1.35_f32, colour);
+        let p = |x: f32, y: f32| Pos2::new(c.x + x, c.y + y);
         match self {
-            Page::Overview => "🏠",
-            Page::Setup => "📁",
-            Page::Saves => "💾",
-            Page::Mods => "📦",
-            Page::Cheats => "⚡",
-            Page::Recompile => "⚙",
-            Page::Graphics => "🖥",
-            Page::Audio => "🔊",
-            Page::Controls => "🎮",
-            Page::Appearance => "🎨",
-            Page::Diagnostics => "🔍",
-            Page::Troubleshoot => "🛠",
-            Page::Log => "📄",
-            Page::About => "ℹ",
-            Page::Requirements => "🧩",
+            Page::Overview => {
+                painter.rect_stroke(Rect::from_center_size(c, egui::vec2(12.0, 10.0)), egui::CornerRadius::same(2), s, StrokeKind::Middle);
+                painter.line_segment([p(-4.0, 1.0), p(-1.0, -2.0)], s);
+                painter.line_segment([p(-1.0, -2.0), p(4.0, 3.0)], s);
+            }
+            Page::Setup => {
+                painter.line_segment([p(-6.0, -3.5), p(-2.0, -3.5)], s);
+                painter.line_segment([p(-2.0, -3.5), p(-0.5, -5.0)], s);
+                painter.line_segment([p(-0.5, -5.0), p(2.0, -5.0)], s);
+                painter.rect_stroke(Rect::from_min_max(p(-6.0, -3.5), p(6.0, 5.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+            }
+            Page::Saves => {
+                painter.rect_stroke(Rect::from_min_max(p(-5.0, -6.0), p(5.0, 6.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+                painter.line_segment([p(-2.0, -6.0), p(-2.0, -0.5)], s);
+                painter.line_segment([p(-2.0, -0.5), p(0.0, 1.0)], s);
+                painter.line_segment([p(0.0, 1.0), p(2.0, -0.5)], s);
+                painter.line_segment([p(2.0, -0.5), p(2.0, -6.0)], s);
+            }
+            Page::Mods => {
+                painter.rect_stroke(Rect::from_min_max(p(-5.0, -5.0), p(1.5, 1.5)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+                painter.rect_stroke(Rect::from_min_max(p(-1.5, -1.5), p(5.0, 5.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+            }
+            Page::Cheats => {
+                painter.add(egui::Shape::line(vec![p(-1.0, -6.0), p(-5.0, 0.0), p(-0.5, 0.0), p(1.0, 6.0), p(5.0, -0.5), p(0.5, -0.5), p(-1.0, -6.0)], s));
+            }
+            Page::Recompile => {
+                painter.circle_stroke(c, 5.5, s);
+                painter.circle_filled(c, 1.4, colour);
+                for i in 0..6 {
+                    let a = i as f32 * std::f32::consts::TAU / 6.0;
+                    painter.line_segment([c + egui::vec2(a.cos() * 5.5, a.sin() * 5.5), c + egui::vec2(a.cos() * 7.0, a.sin() * 7.0)], s);
+                }
+            }
+            Page::Graphics => {
+                painter.rect_stroke(Rect::from_min_max(p(-6.0, -5.0), p(6.0, 3.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+                painter.line_segment([p(0.0, 3.0), p(0.0, 5.5)], s);
+                painter.line_segment([p(-3.5, 5.5), p(3.5, 5.5)], s);
+            }
+            Page::Audio => {
+                painter.add(egui::Shape::line(vec![p(-5.5, -2.0), p(-2.5, -2.0), p(1.5, -5.0), p(1.5, 5.0), p(-2.5, 2.0), p(-5.5, 2.0), p(-5.5, -2.0)], s));
+                painter.circle_stroke(p(2.5, 0.0), 4.2, Stroke::new(1.2_f32, colour));
+                painter.circle_stroke(p(2.5, 0.0), 7.1, Stroke::new(1.0_f32, crate::theme::alpha(colour, 120)));
+            }
+            Page::Controls => {
+                painter.rect_stroke(Rect::from_center_size(c, egui::vec2(14.0, 8.0)), egui::CornerRadius::same(4), s, StrokeKind::Middle);
+                painter.line_segment([p(-4.5, 0.0), p(-1.5, 0.0)], s);
+                painter.line_segment([p(-3.0, -1.5), p(-3.0, 1.5)], s);
+                painter.circle_filled(p(3.0, -1.2), 1.0, colour);
+                painter.circle_filled(p(4.4, 0.6), 1.0, colour);
+            }
+            Page::Appearance => {
+                painter.circle_stroke(p(0.0, 0.0), 6.0, s);
+                painter.circle_filled(p(-2.4, -2.0), 1.2, colour);
+                painter.circle_filled(p(2.2, -2.8), 1.2, colour);
+                painter.circle_filled(p(3.0, 2.2), 1.2, colour);
+            }
+            Page::Diagnostics => {
+                painter.add(egui::Shape::line(vec![p(-6.0, 1.0), p(-3.5, 1.0), p(-2.0, -4.0), p(0.0, 5.0), p(2.3, -2.0), p(3.8, 1.0), p(6.0, 1.0)], s));
+            }
+            Page::Troubleshoot => {
+                painter.circle_stroke(p(-2.5, -2.5), 3.5, s);
+                painter.line_segment([p(0.0, 0.0), p(5.5, 5.5)], Stroke::new(2.0_f32, colour));
+                painter.circle_stroke(p(3.0, 3.0), 2.0, s);
+            }
+            Page::Log => {
+                painter.rect_stroke(Rect::from_min_max(p(-4.5, -6.0), p(4.5, 6.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+                for y in [-3.0, 0.0, 3.0] {
+                    painter.line_segment([p(-2.0, y), p(2.0, y)], Stroke::new(1.2_f32, colour));
+                }
+            }
+            Page::About => {
+                painter.circle_stroke(c, 6.0, s);
+                painter.circle_filled(p(0.0, -3.2), 1.0, colour);
+                painter.line_segment([p(0.0, -0.8), p(0.0, 3.6)], s);
+            }
+            Page::Requirements => {
+                painter.rect_stroke(Rect::from_min_max(p(-5.5, -6.0), p(5.5, 6.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
+                for y in [-2.5, 1.5, 4.0] {
+                    painter.line_segment([p(-2.8, y), p(-1.4, y + 1.2)], Stroke::new(1.2_f32, colour));
+                    painter.line_segment([p(-1.4, y + 1.2), p(0.4, y - 1.2)], Stroke::new(1.2_f32, colour));
+                    painter.line_segment([p(2.0, y), p(3.6, y)], Stroke::new(1.0_f32, colour));
+                }
+            }
+        }
+    }
+}
+
+/// The sidebar's parent sections. They are presentation groups over existing
+/// pages: no functionality is duplicated or removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavGroup {
+    Home,
+    Game,
+    Library,
+    Runtime,
+    System,
+    Settings,
+}
+
+impl NavGroup {
+    pub const ALL: [NavGroup; 6] = [NavGroup::Home, NavGroup::Game, NavGroup::Library, NavGroup::Runtime, NavGroup::System, NavGroup::Settings];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NavGroup::Home => "Home",
+            NavGroup::Game => "Game",
+            NavGroup::Library => "Library",
+            NavGroup::Runtime => "Runtime",
+            NavGroup::System => "System",
+            NavGroup::Settings => "Settings",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            NavGroup::Home => "home",
+            NavGroup::Game => "game",
+            NavGroup::Library => "library",
+            NavGroup::Runtime => "runtime",
+            NavGroup::System => "system",
+            NavGroup::Settings => "settings",
+        }
+    }
+
+    pub fn pages(self) -> &'static [Page] {
+        match self {
+            NavGroup::Home => &[Page::Overview],
+            NavGroup::Game => &[Page::Setup, Page::Requirements],
+            NavGroup::Library => &[Page::Saves, Page::Mods, Page::Cheats],
+            NavGroup::Runtime => &[Page::Recompile, Page::Graphics, Page::Audio, Page::Controls],
+            NavGroup::System => &[Page::Diagnostics, Page::Troubleshoot, Page::Log],
+            NavGroup::Settings => &[Page::Appearance, Page::About],
         }
     }
 }
@@ -115,5 +247,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::Log => log::show(app, ui),
         Page::About => about::show(app, ui),
         Page::Requirements => requirements::show(app, ui),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nav_groups_cover_every_page_once() {
+        let mut seen = Vec::new();
+        for group in NavGroup::ALL {
+            seen.extend_from_slice(group.pages());
+        }
+        assert_eq!(seen.len(), Page::ALL.len(), "a page belongs to more or fewer than one navigation group");
+        for page in Page::ALL {
+            assert_eq!(seen.iter().filter(|q| **q == page).count(), 1, "{} must appear exactly once", page.label());
+            assert_eq!(page.group().pages().contains(&page), true, "{} is in the wrong group", page.label());
+        }
+    }
+
+    #[test]
+    fn navigation_labels_are_unique() {
+        for (i, page) in Page::ALL.iter().enumerate() {
+            assert!(!Page::ALL[i + 1..].iter().any(|q| q.label() == page.label()), "duplicate page label {}", page.label());
+        }
     }
 }

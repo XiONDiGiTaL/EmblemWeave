@@ -1,8 +1,6 @@
-//! Requirements: every dependency this release needs, what was found on this PC,
-//! and the one line that installs what is missing. Everything here comes from
-//! `crate::deps`, the same registry the build checks and the docs table is
-//! generated from, so the page cannot claim a different requirement than the
-//! build enforces.
+//! Requirements: what this release needs, what this PC has, and what to install.
+//! The default view is a plain-language readiness summary. The full dependency
+//! matrix and install commands live in one collapsed technical drawer.
 
 use crate::deps::{self, Row, Stage, Status};
 use crate::theme;
@@ -26,121 +24,179 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui,
         &p,
         "Requirements",
-        "What this release needs, what this PC has, and what to install. Checks use the same toolchain detection the build does.",
+        "What EmblemWeave needs to build and run your game, what this PC already has, and what to install next.",
     );
-    ui.add_space(theme::SPACE_M);
 
-    // The report is computed on a background thread at start-up, so a frame
-    // never waits for vswhere, dotnet and a vcvars run.
     let Some(rows) = deps::cached() else {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(RichText::new("Checking the toolchain…").color(p.body));
+        widgets::section(ui, &p, "Checking this PC", |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(15.0).color(p.accent));
+                ui.label(RichText::new("Preparing the build-tool report…").font(theme::semibold(13.0)).color(p.ink));
+            });
+            ui.add_space(7.0);
+            widgets::progress_bar(ui, &p, None);
+            ui.add_space(7.0);
+            ui.label(
+                RichText::new(
+                    "This runs in the background: Visual Studio, Windows SDK, LLVM, CMake, Ninja, Python and the packaged shader tools are checked independently. It usually takes a few seconds on the first launch.",
+                )
+                .size(12.0)
+                .color(p.body),
+            );
+            for (name, detail) in [
+                ("Build tools", "The compiler, linker and build generator used for the native game."),
+                ("Python environment", "The bridge that decodes the game's compressed main module."),
+                ("Packaged helpers", "The shader translator shipped with this release, where present."),
+            ] {
+                ui.add_space(4.0);
+                widgets::status_line(ui, &p, Tone::Neutral, name, detail);
+            }
+            if widgets::button(ui, &p, "Check now", true).clicked() {
+                let rows = deps::refresh();
+                app.notify(deps::summary(&rows), if deps::blocking(&rows).is_empty() { Tone::Ok } else { Tone::Warn });
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
         });
-        ui.add_space(theme::SPACE_S);
-        if widgets::button(ui, &p, "Check now", true).clicked() {
-            let rows = deps::refresh();
-            app.notify(deps::summary(&rows), if deps::blocking(&rows).is_empty() { Tone::Ok } else { Tone::Warn });
-        }
-        ui.ctx().request_repaint_after(Duration::from_millis(250));
         return;
     };
 
     let blocking = deps::blocking(&rows);
     let missing_lines = deps::install_lines(&rows);
     let manual = deps::manual_fixes(&rows);
+    let all_ready = blocking.is_empty();
 
-    ui.horizontal(|ui| {
-        if widgets::button(ui, &p, "↻  Check again", true)
-            .on_hover_text("Runs every check again. Nothing needs a restart: the checks look where a fresh install lands.")
-            .clicked()
-        {
-            let rows = deps::refresh();
-            let text = deps::summary(&rows);
-            app.notify(text, if deps::blocking(&rows).is_empty() { Tone::Ok } else { Tone::Warn });
-        }
-        let can_install = !missing_lines.is_empty() && crate::engine::have_winget();
-        if widgets::primary_button(ui, &p, "Install what is missing", can_install)
-            .on_hover_text(if crate::engine::have_winget() {
-                format!("Runs these in a new window, one after another:\n{}", missing_lines.join("\n"))
-            } else {
-                "winget is not available on this PC. Install App Installer from the Microsoft Store, then check again.".to_string()
-            })
-            .clicked()
-        {
-            match crate::engine::start_install_lines(&missing_lines) {
-                Ok(_) => app.notify("Installing in a new window. Accept the Windows prompt, then press Check again.", Tone::Ok),
-                Err(e) => app.notify(e, Tone::Bad),
-            }
-        }
-    });
-    ui.add_space(theme::SPACE_S);
-    let (text, colour) = if blocking.is_empty() {
-        (deps::summary(&rows), p.ok)
-    } else {
-        (deps::summary(&rows), p.bad)
-    };
-    ui.label(RichText::new(text).size(13.0).color(colour));
-    if !manual.is_empty() {
-        for line in &manual {
-            ui.label(RichText::new(format!("• {line}")).size(12.5).color(p.body));
-        }
-    }
-    // The distinction people trip over: a release that bundles the translator
-    // does not need the .NET SDK, only the runtime the translator ships with.
-    for key in ["dotnet-sdk", "sdk"] {
-        if let Some(r) = deps::row(&rows, key) {
-            if matches!(r.status, Status::NotNeeded { .. }) {
-                let _ = widgets::pending_note(ui, &p, &format!("{}: {}", r.dep.name, r.status.detail()));
-            }
-        }
-    }
-    ui.add_space(theme::SPACE_M);
-
-    // One section per stage: the page reads like the build runs.
-    for stage in [Stage::Decode, Stage::Recompile, Stage::Build, Stage::Translate] {
-        let stage_rows: Vec<&Row> = rows.iter().filter(|r| r.dep.stages.contains(&stage)).collect();
-        if stage_rows.is_empty() {
-            continue;
-        }
-        widgets::section(ui, &p, stage.label(), |ui| {
-            for row in stage_rows {
-                row_view(app, ui, &p, row);
-            }
-        });
-    }
-}
-
-fn row_view(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, row: &Row) {
-    let status = &row.status;
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(row.dep.name).font(theme::semibold(13.5)).color(p.ink));
-        widgets::pill(ui, p, status.label(), tone(status));
-        if let Some(min) = row.dep.min {
-            ui.label(RichText::new(format!("needs {min}")).size(12.0).color(p.muted));
-        }
-        if row.required {
-            ui.label(RichText::new("required").size(11.5).color(p.muted));
-        } else {
-            ui.label(RichText::new("optional here").size(11.5).color(p.muted));
-        }
-    });
-    ui.label(RichText::new(status.detail()).size(12.5).color(p.body));
-    if !status.ok() {
-        ui.label(RichText::new(row.dep.note).size(12.0).color(p.muted));
-        if let Some(install) = row.dep.install {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(install.line()).monospace().size(12.0).color(p.accent_hi));
-                if install.runnable() && widgets::button(ui, p, "Install", true).clicked() {
-                    match crate::engine::start_install_lines(&[install.line().to_string()]) {
+    // Readiness, in one sentence and with the next action beside it.
+    widgets::section(ui, &p, "Readiness", |ui| {
+        ui.horizontal_top(|ui| {
+            widgets::status_dot(ui, &p, if all_ready { Tone::Ok } else { Tone::Bad });
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(if all_ready { "This PC can build the game" } else { "A few things are needed first" })
+                        .font(theme::display(19.0))
+                        .color(if all_ready { p.ok } else { p.warn }),
+                );
+                ui.label(RichText::new(deps::summary(&rows)).size(12.5).color(p.body));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_install = !missing_lines.is_empty() && crate::engine::have_winget();
+                if !all_ready
+                    && widgets::primary_button(ui, &p, "Install what is missing", can_install)
+                        .on_hover_text(if crate::engine::have_winget() {
+                            format!("Runs these in a new window, one after another:\n{}", missing_lines.join("\n"))
+                        } else {
+                            "winget is not available on this PC. Install App Installer from the Microsoft Store, then check again.".to_string()
+                        })
+                        .clicked()
+                {
+                    match crate::engine::start_install_lines(&missing_lines) {
                         Ok(_) => app.notify("Installing in a new window. Accept the Windows prompt, then press Check again.", Tone::Ok),
                         Err(e) => app.notify(e, Tone::Bad),
                     }
                 }
             });
+        });
+        ui.add_space(7.0);
+        ui.horizontal(|ui| {
+            if widgets::button(ui, &p, "Check again", true)
+                .on_hover_text("Runs every check again. Nothing needs a restart: the checks look where a fresh install lands.")
+                .clicked()
+            {
+                let rows = deps::refresh();
+                let text = deps::summary(&rows);
+                app.notify(text, if deps::blocking(&rows).is_empty() { Tone::Ok } else { Tone::Warn });
+            }
+            ui.label(RichText::new("Checks happen in the background; this page updates itself.").size(10.5).color(p.muted));
+        });
+        for line in &manual {
+            ui.add_space(3.0);
+            ui.label(RichText::new(format!("• {line}")).size(11.5).color(p.body));
         }
-    } else {
-        ui.label(RichText::new(row.dep.note).size(12.0).color(p.muted));
+    });
+
+    if !blocking.is_empty() {
+        widgets::section(ui, &p, "Needs attention", |ui| {
+            for row in &blocking {
+                row_view(app, ui, &p, row);
+            }
+        });
     }
-    ui.add_space(theme::SPACE_XS);
+
+    // Everything technical is still here, one deliberate step away.
+    widgets::section_drawer(
+        ui,
+        &p,
+        "dependencies",
+        "All dependencies",
+        if all_ready { "everything found" } else { "detailed matrix" },
+        false,
+        |ui| {
+            // The distinction people trip over: a release that bundles the
+            // translator does not need the .NET SDK, only the runtime it ships.
+            for key in ["dotnet-sdk", "sdk"] {
+                if let Some(r) = deps::row(&rows, key) {
+                    if matches!(r.status, Status::NotNeeded { .. }) {
+                        let _ = widgets::pending_note(ui, &p, &format!("{}: {}", r.dep.name, r.status.detail()));
+                    }
+                }
+            }
+            for stage in [Stage::Decode, Stage::Recompile, Stage::Build, Stage::Translate] {
+                let stage_rows: Vec<&Row> = rows.iter().filter(|r| r.dep.stages.contains(&stage)).collect();
+                if stage_rows.is_empty() {
+                    continue;
+                }
+                ui.add_space(4.0);
+                widgets::eyebrow(ui, &p, stage.label());
+                ui.add_space(3.0);
+                for row in stage_rows {
+                    row_view(app, ui, &p, row);
+                }
+            }
+            ui.add_space(5.0);
+            ui.label(RichText::new("Detection details and executable paths are included in the hover text and in Diagnostics → Export report.").size(10.5).color(p.muted));
+        },
+    );
+}
+
+fn row_view(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, row: &Row) {
+    let status = &row.status;
+    let tone = tone(status);
+    ui.horizontal_wrapped(|ui| {
+        widgets::status_dot(ui, p, tone);
+        ui.label(RichText::new(row.dep.name).font(theme::semibold(12.5)).color(p.ink));
+        widgets::pill(ui, p, status.label(), tone);
+        if let Some(min) = row.dep.min {
+            ui.label(RichText::new(format!("needs {min}")).size(11.0).color(p.muted));
+        }
+        ui.label(RichText::new(if row.required { "required" } else { "optional here" }).size(10.5).color(p.muted));
+    });
+    ui.horizontal_top(|ui| {
+        ui.add_space(14.0);
+        ui.vertical(|ui| {
+            ui.add(egui::Label::new(RichText::new(status.detail()).size(11.5).color(p.body)).wrap());
+            ui.add(egui::Label::new(RichText::new(row.dep.note).size(11.0).color(p.muted)).wrap());
+        });
+        if !status.ok() {
+            if let Some(install) = row.dep.install {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if install.runnable() {
+                        if widgets::button(ui, p, "Install", true)
+                            .on_hover_text(format!("Runs in a new window:\n{}", install.line()))
+                            .clicked()
+                        {
+                            match crate::engine::start_install_lines(&[install.line().to_string()]) {
+                                Ok(_) => app.notify("Installing in a new window. Accept the Windows prompt, then press Check again.", Tone::Ok),
+                                Err(e) => app.notify(e, Tone::Bad),
+                            }
+                        }
+                    } else {
+                        ui.label(RichText::new("Manual step").size(10.0).color(p.warn)).on_hover_text(install.line());
+                    }
+                });
+            }
+        }
+    });
+    ui.add_space(7.0);
+    let line = ui.available_rect_before_wrap();
+    ui.painter().hline(line.x_range(), line.top(), egui::Stroke::new(1.0_f32, theme::alpha(p.line, 100)));
+    ui.add_space(6.0);
 }

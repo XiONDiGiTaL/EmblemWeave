@@ -31,17 +31,15 @@ pub const SPACE_XL: f32 = 30.0;
 pub const RADIUS_S: u8 = 10;
 pub const RADIUS_M: u8 = 16;
 /// Width of the navigation rail.
-pub const NAV_WIDTH: f32 = 228.0;
+pub const NAV_WIDTH: f32 = 218.0;
+/// The rail's compact, icon-only width.
+pub const NAV_RAIL_WIDTH: f32 = 58.0;
 /// The brand and status strips above and below the pages.
-pub const TOPBAR_HEIGHT: f32 = 50.0;
-pub const STATUSBAR_HEIGHT: f32 = 28.0;
-/// The column of status panels beside the Overview page, and the window width
-/// below which it steps aside so the page keeps its room.
-pub const SIDE_WIDTH: f32 = 300.0;
-pub const SIDE_MIN_WINDOW: f32 = 1240.0;
+pub const TOPBAR_HEIGHT: f32 = 44.0;
+pub const STATUSBAR_HEIGHT: f32 = 24.0;
 /// The widest the page column grows; wider windows centre it instead of
 /// stretching the text across the screen.
-pub const CONTENT_MAX: f32 = 1180.0;
+pub const CONTENT_MAX: f32 = 1120.0;
 /// The radius of buttons and navigation rows. Chips keep their own 255 in
 /// `widgets::pill`; controls are softly rounded rectangles now, not pills.
 pub const RADIUS_PILL: u8 = 10;
@@ -50,7 +48,6 @@ pub const CARD: egui::CornerRadius = egui::CornerRadius::same(RADIUS_M);
 /// Letter spacing for the small-caps labels, as the reference launcher sets it.
 pub const TRACK_WIDE: f32 = 2.4;
 pub const TRACK_MID: f32 = 1.6;
-pub const TRACK_TIGHT: f32 = 0.9;
 
 /// Every colour a screen may use.
 #[derive(Debug, Clone, Copy)]
@@ -444,7 +441,7 @@ pub fn apply(ctx: &egui::Context, scheme: Scheme) {
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.spacing.slider_width = 220.0;
-    style.text_styles.insert(TextStyle::Heading, display(26.0));
+    style.text_styles.insert(TextStyle::Heading, display(19.0));
     style.text_styles.insert(TextStyle::Body, FontId::new(14.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Button, FontId::new(14.0, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));

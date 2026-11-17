@@ -80,22 +80,20 @@ pub fn glass_panel(ui: &egui::Ui, rect: Rect, p: &Palette, radius: CornerRadius)
 /// Page title in the semibold display sans with a one-line description, over
 /// a quiet eyebrow that names the section of the app.
 pub fn page_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
-    ui.add_space(theme::SPACE_L);
-    eyebrow(ui, p, title);
+    ui.add_space(theme::SPACE_M);
+    ui.label(RichText::new(title).font(theme::display(24.0)).color(p.ink));
     ui.add_space(2.0);
-    ui.label(RichText::new(title).font(theme::display(29.0)).color(p.ink));
-    ui.add_space(3.0);
-    ui.label(RichText::new(subtitle).size(13.0).color(p.body));
-    ui.add_space(theme::SPACE_M - 2.0);
+    ui.label(RichText::new(subtitle).size(12.5).color(p.body));
+    ui.add_space(theme::SPACE_S);
     let r = ui.available_rect_before_wrap();
     ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0_f32, p.line));
-    ui.add_space(theme::SPACE_M);
+    ui.add_space(theme::SPACE_M - 2.0);
 }
 
 /// An elevated section with a small caps title.
 pub fn section<R>(ui: &mut egui::Ui, p: &Palette, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let face = ui.painter().add(egui::Shape::Noop);
-    let r = card_frame(p, Margin::symmetric(20, 16))
+    let r = card_frame(p, Margin::symmetric(18, 14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             if !title.is_empty() {
@@ -126,11 +124,11 @@ pub fn section_drawer(
     let state = egui::Id::new(("section-drawer", id));
     let mut open = ui.ctx().data(|d| d.get_temp::<bool>(state).unwrap_or(default_open));
     let face = ui.painter().add(egui::Shape::Noop);
-    let r = card_frame(p, Margin::symmetric(20, 16)).show(ui, |ui| {
+    let r = card_frame(p, Margin::symmetric(18, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         // 34 px is a full-height header, not just the text: the whole row opens
         // the drawer, which matters on a handheld where a thumb is the pointer.
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked() {
             open = !open;
@@ -156,7 +154,7 @@ pub fn section_drawer(
                 painter.line_segment([Pos2::new(c.x - 2.0, c.y - 4.0), Pos2::new(c.x + 2.0, c.y)], stroke);
                 painter.line_segment([Pos2::new(c.x + 2.0, c.y), Pos2::new(c.x - 2.0, c.y + 4.0)], stroke);
             }
-            painter.text(Pos2::new(rect.left() + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, title, theme::semibold(14.5), p.ink);
+            painter.text(Pos2::new(rect.left() + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, title, theme::semibold(13.5), p.ink);
             if !summary.is_empty() {
                 let font = theme::mono(11.5);
                 let galley = painter.layout_no_wrap(summary.to_owned(), font, p.muted);
@@ -174,6 +172,144 @@ pub fn section_drawer(
     ui.ctx().data_mut(|d| d.insert_temp(state, open));
     ui.painter().set(face, card_face(r.response.rect, p));
     ui.add_space(theme::SPACE_M);
+}
+
+/// A compact status capsule for the application header. Three of these answer
+/// "is my game ready?" without opening a page, and each one is a shortcut to
+/// the page that can fix it.
+pub fn header_chip(ui: &mut egui::Ui, p: &Palette, label: &str, value: &str, tone: Tone) -> egui::Response {
+    let lf = theme::semibold(8.5);
+    let vf = theme::semibold(10.5);
+    let lw = ui.painter().layout_no_wrap(label.to_uppercase(), lf.clone(), p.muted).size().x;
+    let vw = ui.painter().layout_no_wrap(value.to_owned(), vf.clone(), p.ink).size().x;
+    let w = (lw + vw + 40.0).ceil();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool(response.id.with("h"), response.hovered());
+        let c = tone.colour(p);
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(13), lerp(p.panel_hi, p.surface, 0.35));
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(13),
+            Stroke::new(1.0_f32, lerp(p.line, alpha(p.accent_hi, 100), hover)),
+            StrokeKind::Inside,
+        );
+        painter.circle_filled(Pos2::new(rect.left() + 11.0, rect.center().y), 2.8, c);
+        painter.circle_filled(Pos2::new(rect.left() + 11.0, rect.center().y), 5.0, alpha(c, 24));
+        painter.text(Pos2::new(rect.left() + 19.0, rect.center().y), egui::Align2::LEFT_CENTER, label.to_uppercase(), lf, p.muted);
+        painter.text(Pos2::new(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, value, vf, p.ink);
+        if response.has_focus() {
+            painter.rect_stroke(rect.expand(1.0), CornerRadius::same(14), Stroke::new(1.0_f32, p.electric), StrokeKind::Outside);
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The primary game action: a wide, softly rounded key that reads from across
+/// the room without a halo or a sheen loop. The sub-label always says what the
+/// press will do.
+pub fn large_action(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str, enabled: bool) -> egui::Response {
+    let size = Vec2::new(216.0, 58.0);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool(response.id.with("h"), enabled && response.hovered());
+        let pressed = enabled && response.is_pointer_button_down_on();
+        let painter = ui.painter();
+        let base = if !enabled {
+            p.panel_hi
+        } else if pressed {
+            p.accent_deep
+        } else {
+            lerp(p.accent, p.accent_hover, hover)
+        };
+        let lift = if enabled { 1.5 * hover } else { 0.0 };
+        let face = rect.translate(Vec2::new(0.0, -lift));
+        painter.rect_filled(face, CornerRadius::same(16), base);
+        if enabled {
+            gradient_fill(painter, Rect::from_min_max(face.min, Pos2::new(face.max.x, face.center().y)), 16.0, alpha(Color32::WHITE, 34), Color32::TRANSPARENT);
+            painter.rect_stroke(face, CornerRadius::same(16), Stroke::new(1.0_f32, alpha(Color32::WHITE, 48)), StrokeKind::Inside);
+        } else {
+            painter.rect_stroke(face, CornerRadius::same(16), Stroke::new(1.0_f32, p.line_strong), StrokeKind::Inside);
+        }
+        let ink = if enabled { p.on_accent } else { p.muted };
+        painter.text(Pos2::new(face.center().x, face.center().y - 8.0), egui::Align2::CENTER_CENTER, title, theme::display(20.0), ink);
+        painter.text(Pos2::new(face.center().x, face.center().y + 14.0), egui::Align2::CENTER_CENTER, subtitle, theme::semibold(8.5), alpha(ink, 210));
+        if response.has_focus() {
+            painter.rect_stroke(face.expand(2.0), CornerRadius::same(18), Stroke::new(1.5_f32, p.accent_hi), StrokeKind::Outside);
+        }
+    }
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// A quick-access tile. The same component is used for every shortcut, so the
+/// Overview's grid stays one visual rhythm instead of a row of mini pages.
+pub fn quick_tile(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, detail: &str, tone: Tone) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 68.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool(response.id.with("h"), response.hovered());
+        let painter = ui.painter();
+        let face = rect.shrink2(Vec2::new(0.0, 1.0));
+        painter.rect_filled(face, CornerRadius::same(12), lerp(p.surface, p.panel_hi, hover * 0.75));
+        painter.rect_stroke(face, CornerRadius::same(12), Stroke::new(1.0_f32, lerp(p.line, alpha(p.accent_hi, 110), hover)), StrokeKind::Inside);
+        let icon = Rect::from_min_size(Pos2::new(face.left() + 13.0, face.center().y - 11.0), Vec2::splat(22.0));
+        painter.rect_filled(icon, CornerRadius::same(6), alpha(p.accent, 20));
+        page.paint_icon(painter, icon.shrink(3.0), lerp(p.accent_hi, Color32::WHITE, hover * 0.4));
+        painter.text(Pos2::new(face.left() + 44.0, face.center().y - 9.0), egui::Align2::LEFT_CENTER, page.label(), theme::semibold(12.5), p.ink);
+        painter.text(Pos2::new(face.left() + 44.0, face.center().y + 10.0), egui::Align2::LEFT_CENTER, detail, theme::semibold(9.5), tone.colour(p));
+        let arrow = Pos2::new(face.right() - 14.0, face.center().y);
+        let ink = lerp(p.muted, p.accent_hi, hover);
+        painter.line_segment([arrow + Vec2::new(-3.0, -3.0), arrow + Vec2::new(0.0, 0.0)], Stroke::new(1.2_f32, ink));
+        painter.line_segment([arrow + Vec2::new(0.0, 0.0), arrow + Vec2::new(-3.0, 3.0)], Stroke::new(1.2_f32, ink));
+        if response.has_focus() {
+            painter.rect_stroke(face.expand(1.0), CornerRadius::same(13), Stroke::new(1.0_f32, p.electric), StrokeKind::Outside);
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Open {}", page.label()))
+
+}
+
+/// A clickable parent section in the navigation rail.
+pub fn nav_group_header(ui: &mut egui::Ui, p: &Palette, label: &str, open: bool, compact: bool, active: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), if compact { 14.0 } else { 28.0 }), Sense::click());
+    if compact {
+        if ui.is_rect_visible(rect) {
+            ui.painter().hline((rect.left() + 8.0)..=(rect.right() - 8.0), rect.center().y, Stroke::new(1.0_f32, alpha(p.line, 180)));
+        }
+        return response;
+    }
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool(response.id.with("h"), response.hovered());
+        let painter = ui.painter();
+        if active {
+            let mark = egui::Rect::from_center_size(Pos2::new(rect.left() + 8.0, rect.center().y), Vec2::new(2.0, 13.0));
+            painter.rect_filled(mark, CornerRadius::same(1), p.accent_hi);
+        }
+        if hover > 0.0 {
+            painter.rect_filled(rect.shrink2(Vec2::new(6.0, 1.0)), CornerRadius::same(6), alpha(Color32::WHITE, (4.0 * hover) as u8));
+        }
+        painter.text(Pos2::new(rect.left() + 14.0, rect.center().y), egui::Align2::LEFT_CENTER, label.to_uppercase(), theme::semibold(9.0), if active { p.accent_hi } else { lerp(p.muted, p.ink, hover) });
+        let c = Pos2::new(rect.right() - 14.0, rect.center().y);
+        let ink = lerp(p.muted, p.accent_hi, hover);
+        let stroke = Stroke::new(1.2_f32, ink);
+        if open {
+            painter.line_segment([c + Vec2::new(-3.0, -1.5), c + Vec2::new(0.0, 1.5)], stroke);
+            painter.line_segment([c + Vec2::new(0.0, 1.5), c + Vec2::new(3.0, -1.5)], stroke);
+        } else {
+            painter.line_segment([c + Vec2::new(-1.5, -3.0), c + Vec2::new(1.5, 0.0)], stroke);
+            painter.line_segment([c + Vec2::new(1.5, 0.0), c + Vec2::new(-1.5, 3.0)], stroke);
+        }
+        if response.has_focus() {
+            painter.rect_stroke(rect.shrink2(Vec2::new(4.0, 1.0)), CornerRadius::same(6), Stroke::new(1.0_f32, p.electric), StrokeKind::Inside);
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The frame of a raised card: a quiet surface, one hairline, and a shadow
@@ -339,6 +475,141 @@ pub fn primary_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool)
 
 pub fn button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> egui::Response {
     button_core(ui, p, text, enabled, false)
+}
+
+/// A modal result. `close` is true for the veil, Escape, or the header's close
+/// control; the body decides whether its own primary action also closes.
+pub struct Modal {
+    pub close: bool,
+}
+
+/// One dialog frame for every floating panel in the launcher. It draws a
+/// dimmed veil, a fixed readable width, a consistent header with a real close
+/// target, and a scrollable body that never leaves the window. Content owns its
+/// footer, so destructive actions can keep their own confirmation wording.
+pub fn modal(
+    ctx: &egui::Context,
+    p: &Palette,
+    id: &str,
+    title: &str,
+    subtitle: &str,
+    width: f32,
+    add: impl FnOnce(&mut egui::Ui),
+    footer: impl FnOnce(&mut egui::Ui),
+) -> Modal {
+    let screen = ctx.screen_rect();
+    let width = width.clamp(300.0, (screen.width() - 40.0).max(300.0));
+    let mut close = false;
+    // The veil is its own layer, created first so the dialog is above it. It
+    // catches a click anywhere outside the panel, including on the page behind.
+    egui::Area::new(egui::Id::new(("modal-veil", id)))
+        .fixed_pos(screen.min)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter().rect_filled(rect, 0, Color32::from_black_alpha(150));
+            if response.clicked() {
+                close = true;
+            }
+        });
+    let frame = egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0_f32, p.line_strong))
+        .corner_radius(theme::CARD)
+        .shadow(egui::epaint::Shadow { offset: [0, 14], blur: 34, spread: 0, color: Color32::from_black_alpha(185) })
+        .inner_margin(Margin::symmetric(20, 16));
+    // A Window, rather than a bare Area, gives the content the whole screen as
+    // its available height. An anchored Area only offered the half below the
+    // anchor, which pushed footers into a scroll viewport.
+    egui::Window::new(title)
+        .id(egui::Id::new(("modal-panel", id)))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .order(egui::Order::Foreground)
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(width - 40.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    eyebrow(ui, p, "EmblemWeave");
+                    ui.add_space(1.0);
+                    ui.label(RichText::new(title).font(theme::display(20.0)).color(p.ink));
+                    if !subtitle.is_empty() {
+                        ui.label(RichText::new(subtitle).size(11.5).color(p.body));
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if modal_close(ui, p) {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(9.0);
+            let line = ui.available_rect_before_wrap();
+            ui.painter().hline(line.x_range(), line.top(), Stroke::new(1.0_f32, p.line));
+            ui.add_space(9.0);
+            egui::ScrollArea::vertical()
+                .id_salt(("modal-body", id))
+                .max_height((screen.height() - 300.0).max(150.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    add(ui);
+                });
+            ui.add_space(10.0);
+            let line = ui.available_rect_before_wrap();
+            ui.painter().hline(line.x_range(), line.top(), Stroke::new(1.0_f32, p.line));
+            ui.add_space(8.0);
+            footer(ui);
+        });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        close = true;
+    }
+    Modal { close }
+}
+
+fn modal_close(ui: &mut egui::Ui, p: &Palette) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool(response.id.with("close"), response.hovered());
+        if hover > 0.0 {
+            ui.painter().rect_filled(rect, CornerRadius::same(7), alpha(Color32::WHITE, (8.0 * hover) as u8));
+        }
+        let c = rect.center();
+        let ink = lerp(p.muted, p.ink, hover);
+        ui.painter().line_segment([c + Vec2::new(-4.0, -4.0), c + Vec2::new(4.0, 4.0)], Stroke::new(1.35_f32, ink));
+        ui.painter().line_segment([c + Vec2::new(4.0, -4.0), c + Vec2::new(-4.0, 4.0)], Stroke::new(1.35_f32, ink));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Close").clicked()
+}
+
+/// A consistent inline error for fields and failed dialog actions.
+pub fn error_note(ui: &mut egui::Ui, p: &Palette, text: &str) {
+    egui::Frame::new()
+        .fill(alpha(p.bad, 16))
+        .stroke(Stroke::new(1.0_f32, alpha(p.bad, 80)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(9, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(text).size(11.5).color(p.bad));
+        });
+}
+
+/// A consistent empty state, used when a list has nothing to show yet.
+pub fn empty_note(ui: &mut egui::Ui, p: &Palette, title: &str, body: &str) {
+    egui::Frame::new()
+        .fill(alpha(p.bg_deep, 90))
+        .stroke(Stroke::new(1.0_f32, p.line))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title).font(theme::semibold(12.5)).color(p.ink));
+            ui.label(RichText::new(body).size(11.5).color(p.muted));
+        });
 }
 
 /// A slider in the launcher's own material: a glass track carrying a glowing
@@ -616,37 +887,36 @@ pub fn stage_list(ui: &mut egui::Ui, p: &Palette, stages: &[Stage]) {
     }
 }
 
-/// A navigation entry: a softly rounded row that fills with the accent when it
-/// is the current page, with a quiet icon and a semibold label.
-pub fn nav_item(ui: &mut egui::Ui, p: &Palette, icon: &str, label: &str, selected: bool) -> egui::Response {
-    let size = Vec2::new(ui.available_width(), 34.0);
+/// A navigation row with one of the launcher's own line icons. In compact mode
+/// the row becomes a 38-pixel square in the icon rail; the label is preserved as
+/// the tooltip, so nothing becomes undiscoverable.
+pub fn nav_item_page(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, selected: bool, compact: bool) -> egui::Response {
+    let size = Vec2::new(ui.available_width(), if compact { 38.0 } else { 32.0 });
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let hover = ui.ctx().animate_bool(response.id.with("h"), response.hovered());
         let sel = ui.ctx().animate_bool(response.id.with("s"), selected);
-        let bg = rect.shrink2(Vec2::new(8.0, 2.0));
+        let bg = if compact { rect.shrink(5.0) } else { rect.shrink2(Vec2::new(6.0, 1.0)) };
         let painter = ui.painter();
         if sel > 0.0 {
-            painter.rect_filled(bg, CornerRadius::same(theme::RADIUS_PILL), alpha(p.accent, (210.0 * sel) as u8));
-            painter.rect_stroke(bg, CornerRadius::same(theme::RADIUS_PILL), Stroke::new(1.0_f32, alpha(p.accent_hi, (80.0 * sel) as u8)), StrokeKind::Inside);
+            painter.rect_filled(bg, CornerRadius::same(8), alpha(p.accent, (190.0 * sel) as u8));
+            painter.rect_stroke(bg, CornerRadius::same(8), Stroke::new(1.0_f32, alpha(p.accent_hi, (75.0 * sel) as u8)), StrokeKind::Inside);
         } else if hover > 0.0 {
-            painter.rect_filled(bg, CornerRadius::same(theme::RADIUS_PILL), alpha(Color32::WHITE, (7.0 * hover) as u8));
+            painter.rect_filled(bg, CornerRadius::same(8), alpha(Color32::WHITE, (7.0 * hover) as u8));
         }
         if response.has_focus() {
-            painter.rect_stroke(bg, CornerRadius::same(theme::RADIUS_PILL), Stroke::new(1.0_f32, p.electric), StrokeKind::Inside);
+            painter.rect_stroke(bg, CornerRadius::same(8), Stroke::new(1.0_f32, p.electric), StrokeKind::Inside);
         }
         let ink = if selected { Color32::WHITE } else { lerp(p.body, p.ink, hover) };
         let icon_colour = if selected { Color32::WHITE } else { lerp(p.muted, p.accent_hi, hover) };
-        painter.text(Pos2::new(bg.left() + 15.0, bg.center().y), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(13.0), icon_colour);
-        let font = theme::semibold(12.0);
-        let mut x = bg.left() + 31.0;
-        for c in label.chars() {
-            let w = ui.fonts(|f| f.layout_no_wrap(c.to_string(), font.clone(), ink).size().x);
-            ui.painter().text(Pos2::new(x, bg.center().y), egui::Align2::LEFT_CENTER, c, font.clone(), ink);
-            x += w + 0.4;
+        let icon = Rect::from_center_size(Pos2::new(bg.left() + 16.0, bg.center().y), Vec2::splat(16.0));
+        page.paint_icon(painter, icon, icon_colour);
+        if !compact {
+            let font = theme::semibold(11.5);
+            painter.text(Pos2::new(bg.left() + 32.0, bg.center().y), egui::Align2::LEFT_CENTER, page.label(), font, ink);
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if compact { page.label().to_string() } else { format!("{}  ·  {}", page.label(), page.group().label()) })
 }
 
 /// A thin progress bar, slanted as the reference launcher's resource bars are.

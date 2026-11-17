@@ -554,17 +554,7 @@ fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
     });
 
     if guide_open {
-        let mut open = guide_open;
-        egui::Window::new("Upscaler setup guide")
-            .id(egui::Id::new("upscaler-setup-guide"))
-            .collapsible(false)
-            .resizable(true)
-            .default_width(660.0)
-            .max_width(760.0)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .open(&mut open)
-            .show(ui.ctx(), |ui| {
-                egui::ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
+        let shown = widgets::modal(ui.ctx(), &p, "upscaler-setup-guide", "Upscaler setup guide", "Vendor DLLs stay external because their licences do not allow shipping them.", 700.0, |ui| {
                     ui.label(
                         RichText::new("Vendor DLLs are not shipped with EmblemWeave because their licences do not allow it. Copy the files into the folders below, then press Look for the files. The engine reads them at the next start.")
                             .size(12.5)
@@ -615,9 +605,10 @@ fn upscaler_files(app: &mut App, ui: &mut egui::Ui) {
                             reveal_upscalers(d);
                         }
                     }
-                });
-            });
-        guide_open = open;
+            }, |_| {});
+        if shown.close {
+            guide_open = false;
+        }
     }
     ui.ctx().data_mut(|d| d.insert_temp(guide_id, guide_open));
 }
