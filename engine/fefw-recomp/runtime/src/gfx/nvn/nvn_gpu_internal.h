@@ -331,6 +331,7 @@ VkImageView tex_present_view(Texture* t);
 VkImageView dummy_view(VkImageViewType type, bool depth_compare);
 VkImageView dummy_view(VkImageViewType type, bool depth_compare, int component);
 VkSampler dummy_sampler();
+VkSampler reserved_sampler();   // linear: sampler id 0 of a texel-fetch handle, sampled with filtering (nvn_replay.cpp)
 // Sampler for the NVN sampler state (cached forever). Never null.
 VkSampler sampler_for(const SamplerInfo& s);
 // Buffer <-> image copies with the NVN conventions (used by the replay for CopyBufferToTexture etc.).
