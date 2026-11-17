@@ -150,6 +150,39 @@ bool parse_corner(const std::string& name, Corner* out) {
     return false;
 }
 
+// ---- the pad combination that flips the frame rate counter -------------------------------------------------------------------
+
+namespace {
+constexpr const char* kFpsComboNames[] = {"none", "l3_r3", "minus_plus", "shoulders"};
+constexpr int kFpsComboCount = static_cast<int>(sizeof kFpsComboNames / sizeof kFpsComboNames[0]);
+}  // namespace
+
+const char* fps_combo_name(FpsCombo c) { return kFpsComboNames[static_cast<int>(c)]; }
+
+bool parse_fps_combo(const std::string& name, FpsCombo* out) {
+    const std::string key = name_key(name);
+    for (int i = 0; i < kFpsComboCount; ++i) {
+        if (key == kFpsComboNames[i]) {
+            if (out) *out = static_cast<FpsCombo>(i);
+            return true;
+        }
+    }
+    // Spellings a person actually types.
+    if (key == "sticks" || key == "l3+r3" || key == "click_sticks") {
+        if (out) *out = FpsCombo::L3R3;
+        return true;
+    }
+    if (key == "minus+plus" || key == "select_start" || key == "back_start") {
+        if (out) *out = FpsCombo::MinusPlus;
+        return true;
+    }
+    if (key == "lb_rb" || key == "bumpers" || key == "l1_r1") {
+        if (out) *out = FpsCombo::Shoulders;
+        return true;
+    }
+    return false;
+}
+
 // ---- actions -----------------------------------------------------------------------------------------------------------------
 
 // One row per Act, in enum order (checked by the static_assert below and by the unit tests). The generic names and outputs: the game's

@@ -530,6 +530,44 @@ void toggle_fullscreen() {
 
 void toggle_fps_counter();       // defined after the settings page host
 
+// The pad half of the frame rate counter's hotkey. A handheld has no F2, so the counter can also be flipped by holding one of a
+// pair of buttons and pressing the other. The pair follows `[fps] combo`; the SDL_GamepadButton numbers are the ones the platform
+// reports (7/8 the stick clicks, 4/6 Back/Start = Minus/Plus, 9/10 the shoulders). The press never reaches the game.
+namespace {
+struct FpsComboState {
+    bool a = false;
+    bool b = false;
+    bool fired = false;   // one toggle per time both are held
+};
+FpsComboState g_fps_combo;
+
+bool fps_combo_buttons(FpsCombo c, uint8_t* a, uint8_t* b) {
+    switch (c) {
+        case FpsCombo::L3R3: *a = 7; *b = 8; return true;
+        case FpsCombo::MinusPlus: *a = 4; *b = 6; return true;
+        case FpsCombo::Shoulders: *a = 9; *b = 10; return true;
+        case FpsCombo::None: break;
+    }
+    return false;
+}
+
+bool fps_combo_event(const FpsSettings& f, const input::Event& e) {
+    uint8_t a = 0, b = 0;
+    if (!fps_combo_buttons(f.combo, &a, &b)) return false;
+    const bool down = e.type == input::EventType::GamepadButtonDown;
+    const uint8_t btn = e.u.gpbutton.button;
+    if (btn == a) g_fps_combo.a = down;
+    else if (btn == b) g_fps_combo.b = down;
+    else return false;
+    if (down && g_fps_combo.a && g_fps_combo.b && !g_fps_combo.fired) {
+        g_fps_combo.fired = true;
+        toggle_fps_counter();
+    }
+    if (!g_fps_combo.a && !g_fps_combo.b) g_fps_combo.fired = false;
+    return true;
+}
+}  // namespace
+
 // Tells the overlay how the frame rate counter should look (the overlay draws it; nothing happens while it is off).
 void apply_fps_counter(const FpsSettings& f) {
     G& st = g();
@@ -591,6 +629,8 @@ void handle_event(const input::Event& e, uint64_t now) {
         if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle_fps_counter();
         return;
     }
+    // The same switch from a pad, for a handheld or a pad with no keyboard: hold one button of the pair, press the other.
+    if (st.overlay && (e.type == EventType::GamepadButtonDown || e.type == EventType::GamepadButtonUp) && fps_combo_event(st.settings.fps, e)) return;
     if (st.overlay && st.overlay->handle_event(e)) return;
     const bool menu_blocked = st.overlay && st.overlay->blocks_game();
     if ((e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) || e.type == EventType::MouseButtonDown || e.type == EventType::MouseWheel)

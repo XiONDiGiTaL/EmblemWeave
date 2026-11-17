@@ -548,6 +548,19 @@ void fps_group(UiHost& host, Page& p) {
         p.fps_capture = true;
         host.begin_capture();
     }
+    ImGui::Text("Controller combo");
+    ImGui::SameLine();
+    {
+        static const char* kComboNames[] = {"None", "L3 + R3 (click both sticks)", "Minus + Plus (handheld)", "LB + RB (bumpers)"};
+        int sel = static_cast<int>(fps.combo);
+        if (ImGui::Combo("##fps_combo", &sel, kComboNames, 4)) {
+            FpsSettings f = fps;
+            f.combo = static_cast<FpsCombo>(sel);
+            set_fps_live(host, f);
+        }
+    }
+    ImGui::TextDisabled("Hold one, press the other: a handheld needs no keyboard.");
+
     if (p.fps_capture) {
         ImGui::SameLine();
         ImGui::TextDisabled("press a keyboard key...");

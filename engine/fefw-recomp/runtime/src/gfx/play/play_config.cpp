@@ -389,6 +389,15 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                 }
                 return true;
             }
+            if (k == "combo") {
+                FpsCombo c;
+                if (!parse_fps_combo(v, &c)) {
+                    *msg = "combo must be none, l3_r3, minus_plus or shoulders, got '" + v + "'";
+                    return false;
+                }
+                s->fps.combo = c;
+                return true;
+            }
             if (k == "detail") return set_int(0, 2, &s->fps.detail);
             if (k == "in_screenshots") return set_bool(&s->fps.in_screenshots);
             break;
@@ -994,6 +1003,7 @@ std::string format_settings(const Settings& s) {
     kv("corner", corner_name(s.fps.corner));
     kv("detail", std::to_string(s.fps.detail));
     kv("in_screenshots", flag(s.fps.in_screenshots));
+    kv("combo", fps_combo_name(s.fps.combo));
 
     o += "\n[switch]\n";
     for (int a = 1; a < kActCount; ++a) {   // every action except none

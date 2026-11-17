@@ -226,12 +226,25 @@ enum class Corner : uint8_t { TopLeft = 0, TopRight, BottomLeft, BottomRight };
 const char* corner_name(Corner c);                       // "top_left" "top_right" "bottom_left" "bottom_right"
 bool parse_corner(const std::string& s, Corner* out);    // case-insensitive, '-' and ' ' equal '_'
 constexpr int32_t kScancodeF2 = 59;                      // SDL_SCANCODE_F2
+
+// The pad combination that flips the counter, for a handheld or a pad with no keyboard within reach: press either of the two
+// buttons while the other is held. Nothing reaches the game, exactly like the keyboard hotkey.
+enum class FpsCombo : uint8_t {
+    None = 0,
+    L3R3,        // click both sticks (SDL 7 + 8), the usual pad shortcut
+    MinusPlus,   // Switch's Minus and Plus (SDL Back 4 + Start 6): what a handheld leaves free
+    Shoulders,   // LB + RB (SDL 9 + 10), for pads whose sticks are stiff
+};
+const char* fps_combo_name(FpsCombo c);                    // "none" "l3_r3" "minus_plus" "shoulders"
+bool parse_fps_combo(const std::string& s, FpsCombo* out);  // case-insensitive, '-' and ' ' equal '_'
+
 struct FpsSettings {
     bool show = false;                                   // [fps] show
     InputId key = {InKind::Key, kScancodeF2};            // [fps] key: the hotkey that flips `show` (a keyboard key; never reaches the game)
     Corner corner = Corner::TopLeft;                     // [fps] corner
     int detail = 1;                                      // [fps] detail: 0 frame rate only, 1 frame rate and frame time, 2 also the 1% low and the worst frame
     bool in_screenshots = false;                         // [fps] in_screenshots: the counter is drawn into screenshots too (test tooling asks for this)
+    FpsCombo combo = FpsCombo::L3R3;                     // [fps] combo: the pad combination that flips `show` (handhelds have no F2)
 };
 
 // ---- lock-on and camera feel (S32) --------------------------------------------------------------------------------------------
