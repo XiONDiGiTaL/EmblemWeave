@@ -263,7 +263,8 @@ NXTEST(prepare_six_programs) {
     CHECK_EQ(r.programs, 6ull);
     CHECK_EQ(r.prepared + r.missing_shaders + r.failed, 6ull);
     CHECK(r.prepared >= 1);
-    CHECK_EQ(r.failed, 0ull);  // a state file is written only for a run without failures, so this is also what case 3 needs
+    CHECK_EQ(r.missing_shaders, 0ull);   // a complete stamp is only written when every shader of the list was there
+    CHECK_EQ(r.failed, 0ull);
     CHECK(!r.cancelled);
     CHECK_EQ(last_done.load(), 6ull);
     CHECK_EQ(last_total.load(), 6ull);
@@ -325,6 +326,11 @@ NXTEST(only_if_needed_and_force) {
     nxrt::nvn::ShaderPrepareResult first;
     REQUIRE(nxrt::nvn::prepare_shaders(o, &first));
     REQUIRE(first.prepared >= 1);
+    if (first.missing_shaders != 0) {
+        app.shutdown();
+        nxtest::skip("the local program list names shaders that are not in the shader cache");
+        return;
+    }
 
     nxrt::nvn::ShaderPrepareOptions again = o;
     again.only_if_needed = true;
@@ -341,6 +347,88 @@ NXTEST(only_if_needed_and_force) {
     CHECK(r3.parts > 0);
     std::printf("    second call: already_ready %d, parts %llu; forced call: parts %llu\n", r2.already_ready ? 1 : 0,
                 static_cast<unsigned long long>(r2.parts), static_cast<unsigned long long>(r3.parts));
+    app.shutdown();
+}
+
+// The state key covers the program list content, not only its count: changing a shader in a six-program list must make an only_if_needed
+// run do work again instead of trusting the old stamp.
+NXTEST(program_list_change_invalidates_state) {
+    if (!real_data_available()) { nxtest::skip("work/shader_cache not found"); return; }
+    std::vector<Prog> progs;
+    REQUIRE(real_programs(&progs));
+    TempDir td;
+    PrepareConfig cfg(td.path);
+    const fs::path file = td.path / "programs.bin";
+    REQUIRE(write_programs(file, progs));
+    App app;
+    REQUIRE(start(app));
+    if (!gpu::gpl_active()) {
+        app.shutdown();
+        nxtest::skip("pipeline libraries not supported on this GPU");
+        return;
+    }
+    nxrt::nvn::ShaderPrepareOptions o;
+    o.programs_file = file.string();
+    o.threads = 2;
+    nxrt::nvn::ShaderPrepareResult first;
+    REQUIRE(nxrt::nvn::prepare_shaders(o, &first));
+    if (first.missing_shaders != 0) {
+        app.shutdown();
+        nxtest::skip("the local program list names shaders that are not in the shader cache");
+        return;
+    }
+
+    // Same number of programs, one different record. The new geometry hash need not exist: the key is computed before any shader is read,
+    // and the progress callback cancels before the fake record can be built.
+    progs[0].gs = progs[0].gs == 0x1111111111111111ull ? 0x2222222222222222ull : 0x1111111111111111ull;
+    REQUIRE(write_programs(file, progs));
+
+    nxrt::nvn::ShaderPrepareOptions again = o;
+    again.only_if_needed = true;
+    again.progress = [](uint64_t, uint64_t) { return false; };
+    nxrt::nvn::ShaderPrepareResult r2;
+    CHECK(nxrt::nvn::prepare_shaders(again, &r2));
+    CHECK(!r2.already_ready);
+    std::printf("    changed program list: already_ready %d, missing %llu\n", r2.already_ready ? 1 : 0,
+                static_cast<unsigned long long>(r2.missing_shaders));
+    app.shutdown();
+}
+
+// A shader the program list names but the cache does not hold cannot be prepared by another run: the completed stamp stays, and a later
+// only_if_needed run does not repeat the work.
+NXTEST(missing_shader_does_not_block_complete) {
+    if (!real_data_available()) { nxtest::skip("work/shader_cache not found"); return; }
+    std::vector<Prog> progs;
+    REQUIRE(real_programs(&progs));
+    progs[0].vs = 0xdeadbeefdeadbeefull;   // no such shader
+    TempDir td;
+    PrepareConfig cfg(td.path);
+    const fs::path file = td.path / "programs.bin";
+    REQUIRE(write_programs(file, progs));
+    App app;
+    REQUIRE(start(app));
+    if (!gpu::gpl_active()) {
+        app.shutdown();
+        nxtest::skip("pipeline libraries not supported on this GPU");
+        return;
+    }
+    nxrt::nvn::ShaderPrepareOptions o;
+    o.programs_file = file.string();
+    o.threads = 2;
+    nxrt::nvn::ShaderPrepareResult first;
+    CHECK(nxrt::nvn::prepare_shaders(o, &first));
+    CHECK(first.missing_shaders > 0);
+    const std::string state = read_text(td.path / "prepare.state");
+    CHECK(state.find("complete: 1") != std::string::npos);
+
+    nxrt::nvn::ShaderPrepareOptions again = o;
+    again.only_if_needed = true;
+    nxrt::nvn::ShaderPrepareResult r2;
+    CHECK(nxrt::nvn::prepare_shaders(again, &r2));
+    CHECK(r2.already_ready);
+    CHECK_EQ(r2.parts, 0ull);
+    std::printf("    missing shader: first missing %llu, only_if_needed already_ready %d\n",
+                static_cast<unsigned long long>(first.missing_shaders), r2.already_ready ? 1 : 0);
     app.shutdown();
 }
 
