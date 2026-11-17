@@ -49,6 +49,9 @@ carries that engine forward as the launcher around it, and
 > Visual Studio 2022 Build Tools with the C++ workload and no .NET SDK: the shader translator ships in the zip with its
 > own runtime. What changed in each release is in the [changelog](docs/changelog/README.md).
 >
+> The 0.1.38 download includes the FSR 3.1 upscaler. The frame-generation preset and the ReShade launcher card are in the
+> current source tree for the next build; the screenshot and feature notes below describe this tree.
+>
 > **The engine is fefw-recomp, integrated.** `engine/fefw-recomp` is the permanent primary engine and is built from source
 > in this repository: its recompiler lifts the game's AArch64 code into C++, its CMake build compiles and links
 > `fefw.exe`, and its runtime provides the system services, graphics and audio. EmblemWeave is the application around it:
