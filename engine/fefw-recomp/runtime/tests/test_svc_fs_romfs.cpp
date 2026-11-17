@@ -25,6 +25,8 @@
 #include <zstd.h>
 
 #include "../src/services/fs_romfs.h"
+#include "nxrt/config.h"
+#include "nxrt/services.h"
 #include "test_framework.h"
 
 NXTEST_GROUP(svc_fs_romfs)
@@ -788,24 +790,33 @@ NXTEST(romfs_from_nup_package) {
 }
 
 // #39: the launcher writes the originals of zstd-packed .nup files into its package overlay, below installed mods. A mod that
-// replaces one of those files must be served from the mod after both overlays have been merged, not from the package.
+// replaces one of those files must be served from the mod after both overlays have been merged, not from the package. Build the
+// image through the same config-driven path the game uses, so the package-overlay/mod order is part of what this covers.
 NXTEST(romfs_nup_overlay_replaces_packed_file) {
-    TempTree t, package_overlay, mod;
+    TempTree t, package_overlay, mods;
     const auto path = t.root / "game.nup";
     const std::vector<uint8_t> a = pattern(5000, 1), b = pattern(70000, 2);
+    const std::vector<uint8_t> package_a = pattern(11, 3), package_b = pattern(11, 4), mod_a = pattern(99, 9);
     const std::vector<uint8_t> bytes = tiny_nup(a, b, 1);
     { std::ofstream(path, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
-    write_host(package_overlay.root, {{"/a.bin", false, pattern(11, 3)}});
-    write_host(mod.root, {{"/a.bin", false, pattern(99, 9)}});
-    RomfsImage img;
-    std::string err;
-    REQUIRE(img.build(utf8(path), &err, {utf8(package_overlay.root), utf8(mod.root)}));
-    uint64_t off = 0, size = 0;
-    REQUIRE(img.file_extent("/a.bin", &off, &size));
-    CHECK_EQ(size, uint64_t{99});
-    std::vector<uint8_t> got(size);
-    REQUIRE(img.read(off, got.data(), size));
-    CHECK(got == pattern(99, 9));
+    write_host(package_overlay.root, {{"/a.bin", false, package_a}, {"/d/b.bin", false, package_b}});
+    write_host(mods.root / "Weapon Durability" / "romfs", {{"/a.bin", false, mod_a}});
+
+    const std::string image = utf8(path), overlay = utf8(package_overlay.root), mod_root = utf8(mods.root);
+    nxrt::config_clear();
+    nxrt::config_set("fs", "romfs", image.c_str());
+    nxrt::config_set("fs", "romfs_overlay", overlay.c_str());
+    nxrt::config_set("fs", "mods", mod_root.c_str());
+    nxrt::services::reset_all();
+
+    std::vector<uint8_t> got;
+    REQUIRE(nxrt::services::read_romfs_file("/a.bin", got));
+    CHECK(got == mod_a);
+    REQUIRE(nxrt::services::read_romfs_file("/d/b.bin", got));
+    CHECK(got == package_b);
+
+    nxrt::services::reset_all();
+    nxrt::config_clear();
 }
 
 // RomFS mods: overlays laid over the game's tree. A file at the same path (ignoring ASCII case) takes the overlay's data and keeps the
