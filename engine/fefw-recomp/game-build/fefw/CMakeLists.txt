@@ -115,7 +115,11 @@ target_include_directories(fefw PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_fefw nxrt_gfx nxrt nxrt_zstd)
 # As pkp.exe: a linker map next to the exe (host frames get names), a big main stack (lifted code nests deeply), low host allocations so
 # the guest ranges at 0x71_0000_0000 and up stay free. res/fefw.rc carries the manifest (UTF-8 code page).
-target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)
+# /OPT:REF discards code nothing reaches and /OPT:ICF folds identical functions and
+# constants; /DEBUG leaves both off by default, so say them. The recompiled code repeats
+# the same small helpers in every translation unit, and folding them makes the executable
+# smaller and its instruction cache footprint lower.
+target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO /OPT:REF /OPT:ICF)
 
 # The shared-font fallback (runtime src/services/pl.cpp looks in fonts\ next to the exe) and the ASTC decoder DLLs when the transcoder is in.
 # These two files are copied when the build is configured, not in a POST_BUILD step: CMake wraps that step in cmd.exe's

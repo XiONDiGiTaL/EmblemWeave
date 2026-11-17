@@ -57,6 +57,39 @@ can be repeated.
 7. **The launcher's file dialogs and shell integration** (`explorer`, `notepad`, `taskkill`, `tasklist`) have
    direct equivalents (`xdg-open`, `$EDITOR`, `/proc`), and `platform.rs` is where they go.
 
+## The Windows calls, counted
+
+`python tools/port/win32_audit.py` reads `runtime/src` and `runtime/include`, counts what each subsystem calls, and
+prints this table. It is generated rather than estimated, so a phase that lands can be re-measured with one command.
+Counts are from the tree at this commit.
+
+| Subsystem | Files | Calls | Replace with | Most used |
+|---|---:|---:|---|---|
+| Threads | 31 | 130 | pthreads | `GetCurrentThreadId`, `GetCurrentThread`, `SetThreadPriority`, `YieldProcessor` |
+| Memory | 16 | 78 | mmap/mprotect | `VirtualFree`, `VirtualProtect`, `VirtualAlloc`, `VirtualQuery` |
+| Sync | 11 | 147 | pthreads/futex | `ReleaseSRWLockExclusive`, `AcquireSRWLockExclusive`, `ReleaseSRWLockShared`, `WaitForSingleObject` |
+| Time | 21 | 82 | clock_gettime/timerfd | `Sleep`, `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetTickCount64` |
+| Files | 28 | 122 | POSIX file API | `CloseHandle`, `GetProcAddress`, `GetFileAttributesW`, `CreateFileW` |
+| Registry | 1 | 3 | config files instead | `RegOpenKeyExW`, `RegEnumValueW`, `RegCloseKey` |
+| Window | 1 | 2 | SDL3 window | `MonitorFromWindow`, `GetMonitorInfoW` |
+| Input | 0 | 0 | SDL3 gamepad | — |
+| Audio | 4 | 16 | PipeWire/ALSA | `CoInitializeEx`, `CoUninitialize`, `CoCreateInstance` |
+| Media | 1 | 3 | FFmpeg/libvpx | `MFCreateMediaType`, `MFStartup`, `MFCreateSourceReaderFromURL` |
+| Console/diag | 43 | 150 | POSIX equivalent | `GetCurrentProcess`, `GetLastError`, `WideCharToMultiByte`, `TerminateProcess` |
+| **Total** | **68** | **733** | | |
+
+The shape of the port is in that table. **Threads, sync, memory, time and files are 559 of the 733 calls**, and they
+are the five things the lifted code touches on almost every call it makes, so they are the interface phase 2 has to
+get right. The window is not a project: it is already SDL3, and two monitor queries are the whole of it. Input does
+not appear because SDL's gamepad API already does that job. Audio is four files and thirteen COM calls (XAudio2),
+media is three Media Foundation calls, and one file reads three values from the registry. The 150 calls under
+*Console/diag* are process ids, last-error text and UTF-16 conversion — a header and an `#if` each, not a subsystem.
+
+The files that carry the most of it are the ones to open first: `src/diag/crash.cpp` (six subsystems),
+`src/mem/write_watch.cpp`, `src/testtools/tt_core.cpp`, `src/services/audio_xaudio2.cpp` (five each),
+`src/kernel/thread.cpp`, `src/kernel/host_place.cpp`, `src/kernel/starvation_guard.cpp`, `src/mem/memory.cpp` and
+`src/gfx/nvn/nvn_gpu.cpp` (four each).
+
 ## What a Linux build needs
 
 Verified on the machine this page was written on, where marked:

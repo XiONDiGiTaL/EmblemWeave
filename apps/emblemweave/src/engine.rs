@@ -120,7 +120,10 @@ pub fn reshade_layer_dir() -> PathBuf {
 /// "not installed", not an error: ReShade is optional.
 pub fn reshade_status() -> ReshadeStatus {
     let common = reshade_layer_dir();
-    let installed = common.join("ReShade64").join("ReShade64.dll").is_file()
+    // 6.8's setup writes the layer straight into `%ProgramData%\ReShade`; the
+    // older layout kept the DLL one folder down. Both are a working install.
+    let installed = (common.join("ReShade64.dll").is_file()
+        || common.join("ReShade64").join("ReShade64.dll").is_file())
         && common.join("ReShade64.json").is_file();
     let game = root().map(|r| game_exe(&r));
     let enabled = installed
@@ -140,6 +143,9 @@ pub fn reshade_status() -> ReshadeStatus {
 /// case and with either slash; the setup tool writes them absolute.
 fn reshade_apps_contains(path: &Path, game: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else { return false };
+    // The setup writes this file as UTF-8 with a byte order mark, so the first
+    // key arrives as `\u{feff}Apps` and would never match.
+    let text = text.trim_start_matches('\u{feff}');
     let wanted = game.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
     for line in text.lines() {
         let line = line.trim();
@@ -200,8 +206,52 @@ pub fn launch_reshade_setup(setup: &Path) -> Result<(), String> {
         .arg(&exe)
         .args(["--api", "vulkan"])
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("starting {}: {e}", setup.display()))
+        .map_err(|e| format!("starting {}: {e}", setup.display()))?;
+    // The setup writes ReShade.ini when it finishes, with the overlay key set to
+    // Home and `ForceShortcutModifiers=1` beside it, which makes that key do
+    // nothing. Catch the file as it appears and put the modifier rule back, so the
+    // first launch already answers Home.
+    if let Some(dir) = exe.parent() {
+        let ini = dir.join("ReShade.ini");
+        std::thread::spawn(move || {
+            for _ in 0..240 {
+                if ini.is_file() && allow_plain_shortcuts(&ini) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+    }
+    Ok(())
+}
+
+/// ReShade 6.8 starts a new `ReShade.ini` with `ForceShortcutModifiers=1`, which
+/// requires a modifier for every shortcut: the Home key it also writes as the
+/// overlay key then opens nothing, and the overlay looks broken. Setting the key
+/// back to 0 makes the key the Graphics page names work. Returns whether the file
+/// had to change; a missing file or another setting is left alone.
+fn allow_plain_shortcuts(ini: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(ini) else { return false };
+    let mut out = String::with_capacity(text.len() + 2);
+    let mut input_section = false;
+    let mut changed = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            input_section = trimmed.eq_ignore_ascii_case("[INPUT]");
+        }
+        if input_section && trimmed.eq_ignore_ascii_case("ForceShortcutModifiers=1") {
+            out.push_str("ForceShortcutModifiers=0");
+            changed = true;
+        } else {
+            out.push_str(line);
+        }
+        out.push_str("\r\n");
+    }
+    if changed {
+        let _ = std::fs::write(ini, out);
+    }
+    changed
 }
 
 /// Whether the game has been built and configured, ready to play.
@@ -1796,6 +1846,13 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         }
     }
     build_with_repairs(&builds, fefw, |m| ctx.log(m))?;
+    // lld keeps its scratch files when a link is interrupted (a cancelled build, a
+    // crash). They are never read again and one build folder had eight of them at
+    // 1.2 GB. A successful link means they are dead weight, so take them with it.
+    let swept = tidy_link_temps(&builds);
+    if swept > 0 {
+        ctx.log(format!("removed {swept} leftover linker temp file(s) from the build folder"));
+    }
     // The haptics backend is a vendored DLL the runtime loads from beside `fefw.exe` (gfx/haptic.cpp looks
     // nowhere else), so it is copied in after the build rather than linked. Without it the game still vibrates,
     // on the standard two-motor rumble.
@@ -3064,6 +3121,26 @@ fn last_error(log: &Path) -> Option<String> {
         .map(|l| l.trim().to_string())
 }
 
+/// Delete the `RCX*.tmp` scratch files lld leaves in a release folder after an
+/// interrupted link. Only that name is touched: the rest of the folder is the
+/// build. Returns how many files went.
+fn tidy_link_temps(builds: &Path) -> usize {
+    let mut gone = 0;
+    let Ok(dirs) = std::fs::read_dir(builds) else { return 0 };
+    for dir in dirs.flatten() {
+        let release = dir.path().join("release");
+        let Ok(files) = std::fs::read_dir(&release) else { continue };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().to_string();
+            let temp = name.starts_with("RCX") && name.ends_with(".tmp");
+            if temp && std::fs::remove_file(file.path()).is_ok() {
+                gone += 1;
+            }
+        }
+    }
+    gone
+}
+
 /// Watch a launch until it draws or gives up. The engine logs "fps N, …" only
 /// when a frame is presented, so a window that stays black while the sound
 /// plays is exactly a run with no such line: it is named here instead of
@@ -3193,6 +3270,10 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
         // not uninstall it or change any other game.
         cmd.env("DISABLE_VK_LAYER_reshade_1", "1")
             .env("DISABLE_VK_LAYER_reshade", "1");
+    } else if let Some(dir) = exe.parent() {
+        // A ReShade.ini from before 6.8, or one the setup wrote before the launcher
+        // could catch it, still blocks the bare Home key. Every launch checks once.
+        let _ = allow_plain_shortcuts(&dir.join("ReShade.ini"));
     }
     let child = cmd.spawn().map_err(|e| format!("starting {}: {e}", exe.display()))?;
     watch_first_frame(child, log, from);
@@ -3213,6 +3294,34 @@ mod tests {
         assert!(reshade_apps_contains(&apps, Path::new(r"c:\games\FEFW.exe")));
         assert!(reshade_apps_contains(&apps, Path::new(r"d:\other\GAME.exe")));
         assert!(!reshade_apps_contains(&apps, Path::new(r"c:\games\other.exe")));
+
+        // The setup tool writes a byte order mark before `Apps` and CRLF line ends.
+        std::fs::write(&apps, "\u{feff}Apps=C:\\Games\\fefw.exe\r\n\r\n").unwrap();
+        assert!(reshade_apps_contains(&apps, Path::new(r"c:\games\fefw.exe")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_overlay_key_is_freed_from_forced_modifiers_in_the_input_section_only() {
+        let dir = std::env::temp_dir().join(format!("ew-reshade-ini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("ReShade.ini");
+        // 6.8's own default, with the same key name in another section left alone.
+        std::fs::write(
+            &ini,
+            "[GENERAL]\r\nForceShortcutModifiers=1\r\n[INPUT]\r\nKeyOverlay=36,0,0,0\r\nForceShortcutModifiers=1\r\n[OVERLAY]\r\nShowFPS=2\r\n",
+        )
+        .unwrap();
+
+        assert!(allow_plain_shortcuts(&ini));
+        let text = std::fs::read_to_string(&ini).unwrap();
+        assert!(text.contains("[GENERAL]\r\nForceShortcutModifiers=1\r\n"), "the other section is not touched: {text}");
+        assert!(text.contains("[INPUT]\r\nKeyOverlay=36,0,0,0\r\nForceShortcutModifiers=0\r\n"), "{text}");
+        assert_eq!(text.matches("ForceShortcutModifiers=0").count(), 1, "{text}");
+        // Already right: nothing is rewritten, so the overlay keeps its state file.
+        assert!(!allow_plain_shortcuts(&ini));
+        assert!(!allow_plain_shortcuts(&dir.join("absent.ini")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

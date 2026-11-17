@@ -82,6 +82,7 @@ carries that engine forward as the launcher around it, and
 - [Installation and game data](docs/INSTALL.md)
 - [Launcher guide](docs/USAGE.md)
 - [Building and testing](docs/BUILDING.md)
+- [Performance](docs/PERFORMANCE.md) and [Linux](docs/LINUX.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Legal](#legal)
 - [Terms](docs/TERMS.md) and [privacy](docs/PRIVACY.md)
@@ -188,9 +189,11 @@ Requirements are listed under [System requirements](#system-requirements); failu
 - Upscaling: built-in TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with its own availability
   check. **FSR 3 frame generation works**: with the FidelityFX SDK 1.1.4 DLLs, the engine turns 60 rendered fps into 120
   presented fps on an RX 7900 XT. The Graphics page has a one-press AMD preset for FSR 3.1 + frame generation.
-- Optional **ReShade**: the launcher detects the 64-bit Vulkan layer, checks this build in `ReShadeApps.ini`, opens the
-  official setup for `fefw.exe` with Vulkan preselected, and can switch the layer off for this game only. ReShade stays a
-  separate user install; the add-on build supports `.addon64` files and user presets.
+- Optional **ReShade**, verified end to end with the Add-on build of 6.8.0: the layer loads into the game, the overlay
+  opens with `Home`, and the launcher's switch keeps it out of the game process. The launcher detects the 64-bit Vulkan
+  layer, checks this build in `ReShadeApps.ini`, opens the official setup for `fefw.exe` with Vulkan preselected, and
+  clears the modifier rule 6.8 adds to the overlay key. ReShade stays a separate user install; the add-on build supports
+  `.addon64` files and user presets.
   Expand **ReShade (optional)** on Graphics, press **Set up ReShade…**, select the Add-on build if you use add-ons, and
   install the effect packs you want. Put presets, shader packs and `.addon64` files beside `fefw.exe`; press `Home` in
   game for the overlay. The **Load ReShade** switch disables the layer for this game without uninstalling it.
@@ -234,8 +237,8 @@ and are not on the shipping path.
 - FSR 4 is not integrated. The FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader.
 - FSR 3 frame generation is validated on the RX 7900 XT; other AMD GPUs and drivers still need a run. DLSS Frame Generation
   is implemented but has not been tested on RTX 40 hardware in this project.
-- ReShade is installed through its official setup and configured by the user. The launcher detects it, but does not test
-  every preset; depth-based effects depend on the depth buffer the engine exposes.
+- ReShade's layer, allowlist, overlay key and disable switch are verified with 6.8.0 Add-on on Vulkan. Individual shader
+  packs are the user's to choose, and depth-based effects depend on the depth buffer the engine exposes.
 - Code mods are tested with the loader and site checks; a mod hooking a site that exists in the build, `make_function`,
   `make_writable` and `edit_file` have not been exercised end to end.
 - The compatibility matrix is small: a Ryzen 7 5700X3D with an RTX 5060 (development PC) and the 0.1.17 test PC. Other

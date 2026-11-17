@@ -519,9 +519,9 @@ fn reshade_settings(app: &mut App, ui: &mut egui::Ui) {
         } else if !re_shade {
             (Tone::Neutral, "ReShade is installed and allowed for this executable, but EmblemWeave disables it for the next start.".to_string())
         } else if status.logged {
-            (Tone::Ok, "ReShade has loaded for this game before. Press Home in game to open its overlay and choose a preset.".to_string())
+            (Tone::Ok, "ReShade has loaded for this game before. Press Home in game to open its overlay; effect packs come from the setup's download step, and a preset is what those effects are saved as.".to_string())
         } else {
-            (Tone::Ok, "ReShade is installed and allowed for this executable. Press Home in game to open its overlay.".to_string())
+            (Tone::Ok, "ReShade is installed and allowed for this executable. Press Home in game to open its overlay; EmblemWeave also clears the modifier rule 6.8 adds to that key.".to_string())
         };
         ui.label(RichText::new(detail).size(12.5).color(tone.colour(&p)));
         ui.add_space(theme::SPACE_S);

@@ -61,19 +61,41 @@ them, and reports what is missing; a mode whose files or hardware are absent fal
 
 ## ReShade (optional)
 
+Verified end to end with the Add-on build of ReShade 6.8.0 and this build of the engine: the layer loads, the overlay
+opens, and the launcher's switch keeps it out of the game process.
+
 1. On **Graphics**, expand **ReShade (optional)** and press **Set up ReShade…**. Choose the official setup executable if the
    launcher does not find it in your Downloads or Desktop folder.
 2. The setup opens with this build's `fefw.exe` and the Vulkan API already selected. Use the **Add-on** build when you
    want `.addon64` add-ons; choose the effect packs you want. Windows asks for administrator approval when the setup
-   registers the Vulkan layer and writes `ReShadeApps.ini`.
+   registers the Vulkan layer and writes `ReShadeApps.ini`. The same install from a console, with no window, is
+   `ReShade_Setup_6.8.0_Addon.exe "<engine>\game-build\fefw\build\release\fefw.exe" --api vulkan --headless`.
 3. Keep presets, `reshade-shaders`, and `.addon64` files beside `fefw.exe`. In game, press **Home** to open ReShade's
-   overlay and select a preset.
+   overlay and select a preset. Effect packs come from the setup's download step; without them the overlay opens but
+   has nothing to apply.
 4. The **Load ReShade** switch on the same card only changes the game process: it sets the Vulkan loader's disable
    variables for this launch. It does not uninstall ReShade or affect other games. Use the setup tool to uninstall.
 
-The launcher checks `%ProgramData%\ReShade\ReShade64\ReShade64.dll`, `ReShade64.json`, and this build's entry in
-`ReShadeApps.ini`. A missing entry means ReShade is installed but will not load for this executable; run the setup again
-for it. Depth-based effects depend on the depth buffer the engine exposes and are not guaranteed; colour, sharpening and
+What the 6.8 setup writes, and what the launcher reads:
+
+| Path | What it is |
+| --- | --- |
+| `%ProgramData%\ReShade\ReShade64.dll` and `ReShade64.json` | The layer and its manifest. The manifest is registered under `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers` and names `DISABLE_VK_LAYER_reshade_1` as its own disable switch. |
+| `%ProgramData%\ReShade\ReShadeApps.ini` | The allowlist. Its `Apps=` value must contain this build's `fefw.exe`, or the layer is installed and never loaded. |
+| `<build folder>\ReShade.ini`, `ReShade.log`, `ReShadePreset.ini` | This game's settings, its log, and its preset, written beside the executable the setup was pointed at. |
+
+Two things in 6.8's own files would otherwise read as "broken" here, and both are handled:
+
+* It writes a UTF-8 byte order mark before `Apps=`, so a parser that does not strip it sees `\u{feff}Apps` and reports
+  *not enabled for this build* while the entry is right there.
+* It writes `ForceShortcutModifiers=1` beside `KeyOverlay=36` (Home), which makes a bare Home key open nothing. The
+  launcher sets that back to 0 when it starts the game and when the setup creates the file.
+
+The proof it loaded is in `ReShade.log`: `Initializing crosire's ReShade version '6.8.0...' (64-bit) loaded from
+'C:\ProgramData\ReShade\ReShade64.dll' into '...fefw.exe'`, then `Redirecting vkCreateSwapchainKHR` and `Recreated
+runtime environment`. With **Load ReShade** off, the game starts normally and `ReShade.log` is not touched at all.
+
+Depth-based effects depend on the depth buffer the engine exposes and are not guaranteed; colour, sharpening and
 anti-aliasing effects do not need it.
 
 ## How to check a claim on your own PC
@@ -87,7 +109,7 @@ anti-aliasing effects do not need it.
 ## Known gaps
 
 - FSR 3 frame generation is validated only on the RX 7900 XT (Adrenalin 26.10.1, FidelityFX SDK 1.1.4). Other AMD GPUs and drivers still need a run; DLSS Frame Generation is untested on RTX 40 hardware.
-- ReShade is installed and configured by the user through the official setup; the launcher does not test every preset, and depth-based effects may not see the buffers they expect.
+- ReShade's layer, allowlist, overlay and disable switch are verified (6.8.0 Add-on, Vulkan, this build). Individual shader packs and depth-based effects are not: they are the user's to choose, and depth-based ones may not see the buffers they expect.
 - FSR 4, DLSS 4 and XeSS 3 features are not integrated.
 - vkBasalt is not integrated.
 - Performance numbers for each upscaler on this project's hardware are not yet recorded in a complete benchmark table; the
