@@ -32,6 +32,13 @@ save/
 node_modules/
 target/
 bin/
+# the portable toolchain (apps/emblemweave/src/portable.rs): archives, unpacked folders and the executables linked from them
+tools/download/
+tools/unpack/
+tools/lib/
+tools/share/
+tools/include/
+tools/fetch.log
 obj/
 .vs/
 .venv/

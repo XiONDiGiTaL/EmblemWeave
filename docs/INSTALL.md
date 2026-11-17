@@ -43,10 +43,24 @@ player to install what the zip can carry:
 | NASM, PowerShell 7, `uv`, Git, .NET SDK | 0 to 300 MB | already optional or replaced by the bundled translator | nothing to remove |
 | Visual Studio C++ tools and the Windows SDK | 2 to 6 GB | the headers and import libraries are Microsoft's, and redistributing them is not ours to do | stays, but the launcher's one-button `winget` install already runs it unattended |
 
-The launcher is ready for that layout today: `toolchain::tool_path` puts `engine/fefw-recomp/tools\bin` first on the
-PATH every probe and every build step uses, so a zip that carries the four portable pieces there is found and used with
-no other change. The remaining work is packaging (put the extracted tools in the zip and check their hashes, as
-`tools/package_release.ps1` already does for everything else), not code in the build.
+The launcher now does that itself (`apps/emblemweave/src/portable.rs`). `toolchain::tool_path` puts
+`engine/fefw-recomp/tools\bin` first on the PATH every probe and every build step uses, so a piece that lands there is
+found before anything installed on the PC, and the Requirements page reports it as **Carried** rather than installed.
+On first run a copy without that folder fetches the four pieces in the background (`tools\fetch.log` records the
+progress); `EmblemWeave.exe --fetch-tools` does the same in the foreground, which is what a build machine should run.
+
+| Piece | Archive | Pinned SHA-256 |
+| --- | --- | --- |
+| LLVM `clang-cl` + `lld-link` 23.1.5 | `clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.xz` (901 MB) | `62fdada7…11c6d4` |
+| CMake 3.31.6 | `cmake-3.31.6-windows-x86_64.zip` (46 MB) | `d163cd3a…e4f836` |
+| Ninja 1.13.1 | `ninja-win.zip` (0.3 MB) | `26a40fa8…74ae25bf` |
+| Python 3.12.8 (embeddable) | `python-3.12.8-embed-amd64.zip` (11 MB) | `8d3f33be…e3ced2fb` |
+
+Each archive is checked against the hash pinned in the table before it is unpacked, so a truncated or substituted
+download stops with a message instead of filling `tools\bin` with something that half works. Anything that fails the
+check is deleted and fetched again on the next run. The executables are linked into `tools\bin` (a hard link, which is
+instant and costs no extra space) with LLVM's `lib` and CMake's `share` beside it, because both look for their files next
+to their own `bin`.
 
 Removing Visual Studio as well is the bigger prize and the bigger job: it means building the runtime and every static
 dependency with clang against MinGW-w64 or libc++, which is the same ABI change a Linux build needs ([LINUX.md](LINUX.md)

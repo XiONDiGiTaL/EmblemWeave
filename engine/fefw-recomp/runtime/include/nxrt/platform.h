@@ -4,6 +4,7 @@
 // returned: pump_events() turns them into nxrt::input events (input.h).
 // Configuration (config.h): [gfx] hidden / NXRT_GFX_HIDDEN=1 creates the window hidden (automated tests).
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 namespace nxrt::platform {
@@ -87,5 +88,64 @@ uint64_t ticks_ns();                          // SDL_GetTicksNS
 const char* const* vulkan_instance_extensions(uint32_t* count);
 bool create_vulkan_surface(void* vk_instance, uint64_t* surface_out);
 void destroy_vulkan_surface(void* vk_instance, uint64_t surface);
+
+// --- host services ----------------------------------------------------------------------------------------------------
+// What the runtime above the window layer needs from the operating system, behind one interface (docs/LINUX.md, phase 2):
+// memory, threads, synchronisation, time and files. src/platform/win32 answers these with the calls the runtime used
+// before (VirtualAlloc, _beginthreadex, SRW locks, QueryPerformanceCounter, a high-resolution waitable timer, CreateFileW)
+// and src/platform/posix with mmap, pthreads, clock_gettime, nanosleep and file descriptors. Nothing here includes SDL or
+// windows.h, so the kernel can use it without pulling the graphics shell in.
+
+// Reserve address space without committing it, then commit pages as the guest asks for them. `release` frees the whole
+// range; `decommit` hands the pages back to the system but keeps the reservation.
+void* reserve(std::size_t bytes);
+bool commit(void* p, std::size_t bytes);
+bool decommit(void* p, std::size_t bytes);
+void release(void* p, std::size_t bytes);
+bool protect(void* p, std::size_t bytes, bool writable);
+std::size_t page_size();
+
+using ThreadFn = void (*)(void*);
+
+struct Thread;
+// Starts a thread that runs `fn(arg)` and exits. The handle is freed by `thread_join` or `thread_detach`.
+Thread* thread_start(const char* name, ThreadFn fn, void* arg);
+void thread_join(Thread* t);
+void thread_detach(Thread* t);
+uint32_t thread_id();     // the host's id for the calling thread, for log tags
+void yield_cpu();         // offers the processor to another ready thread
+
+// A lock the runtime holds for a few instructions at a time, never across a guest wait.
+struct Mutex;
+struct Cond;
+Mutex* mutex_create();
+void mutex_destroy(Mutex* m);
+void mutex_lock(Mutex* m);
+void mutex_unlock(Mutex* m);
+Cond* cond_create();
+void cond_destroy(Cond* c);
+void cond_wait(Cond* c, Mutex* m);   // releases `m` while waiting and takes it again before returning
+void cond_signal(Cond* c);
+void cond_broadcast(Cond* c);
+
+// A monotonic counter and its frequency. Windows keeps QueryPerformanceCounter and its frequency, so the console tick
+// derived here is the number the runtime produced before the split.
+uint64_t clock_ticks();
+uint64_t clock_hz();
+int64_t now_ns();         // clock_ticks() in nanoseconds, without dropping the sub-tick remainder
+// Waits at least `ns`; zero or negative returns at once. This primitive never spins: kernel::sleep_ns decides whether a
+// short span is better spent yielding.
+void sleep_ns(int64_t ns);
+
+struct File;
+// Opens a UTF-8 path. `write` creates or truncates the file; a read opens it only if it exists.
+File* file_open(const char* path_utf8, bool write);
+void file_close(File* f);
+std::size_t file_read(File* f, void* buf, std::size_t bytes);
+std::size_t file_write(File* f, const void* buf, std::size_t bytes);
+bool file_seek(File* f, int64_t offset);   // absolute, from the start
+int64_t file_size(File* f);                // -1 when it cannot be asked
+bool file_exists(const char* path_utf8);
+bool file_mkdirs(const char* path_utf8);   // every missing component, like mkdir -p
 
 }  // namespace nxrt::platform

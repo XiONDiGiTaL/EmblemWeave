@@ -14,8 +14,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 
+# The host services behind nxrt/platform.h (memory, threads, sync, time, files). Windows builds the whole runtime;
+# the POSIX side builds and tests on its own, so phase 2 of docs/LINUX.md can be compiled and run on Linux while the
+# rest of nxrt (the graphics shell, the game module, the launcher) is still Windows-only.
+set(NXRT_PLATFORM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32")
 if(NOT WIN32)
-    message(FATAL_ERROR "nxrt targets native Windows x64 only")
+    set(NXRT_PLATFORM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/posix")
+endif()
+option(NXRT_PLATFORM_ONLY "Build only nxrt's platform layer and its self-test" OFF)
+if(NOT WIN32)
+    set(NXRT_PLATFORM_ONLY ON)
+endif()
+if(NXRT_PLATFORM_ONLY)
+    file(GLOB NXRT_PLATFORM_SOURCES CONFIGURE_DEPENDS "${NXRT_PLATFORM_DIR}/*.cpp")
+    add_library(nxrt_platform STATIC ${NXRT_PLATFORM_SOURCES})
+    target_include_directories(nxrt_platform PUBLIC include)
+    enable_testing()
+    add_executable(nxrt_platform_tests tests/platform_selftest.cpp)
+    target_link_libraries(nxrt_platform_tests PRIVATE nxrt_platform)
+    add_test(NAME platform COMMAND nxrt_platform_tests)
+    message(STATUS "nxrt: platform layer only (${NXRT_PLATFORM_DIR}); the full runtime is Windows-only, see docs/LINUX.md")
+    return()
 endif()
 
 option(NXRT_BUILD_TESTS "Build the nxrt_tests executable and register its CTest entries" ON)
@@ -46,6 +65,9 @@ endif()
 
 file(GLOB_RECURSE NXRT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER NXRT_SOURCES EXCLUDE REGEX "/src/gfx/")   # the graphics shell is its own library (cmake/gfx.cmake)
+list(FILTER NXRT_SOURCES EXCLUDE REGEX "/src/platform/")   # both backends live there; only this host's is compiled
+file(GLOB NXRT_PLATFORM_SOURCES CONFIGURE_DEPENDS "${NXRT_PLATFORM_DIR}/*.cpp")
+list(APPEND NXRT_SOURCES ${NXRT_PLATFORM_SOURCES})
 include(cmake/zstd_deps.cmake)   # zstd for the shader pack and the .nx RomFS reader
 
 add_library(nxrt STATIC ${NXRT_SOURCES})
@@ -59,11 +81,16 @@ include(cmake/media_deps.cmake)   # libvpx for the Switch 2 video decoders (opti
 if(NXRT_BUILD_TESTS)
     enable_testing()
     file(GLOB NXRT_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+    list(FILTER NXRT_TEST_SOURCES EXCLUDE REGEX "platform_selftest\\.cpp$")   # its own executable, below
     # The tests of the test game's own runtime-side code (games/<id>/tests/core) run in the same executable.
     if(NXRT_TEST_GAME)
         file(GLOB NXRT_GAME_CORE_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_TEST_GAME}/tests/core/*.cpp")
         list(APPEND NXRT_TEST_SOURCES ${NXRT_GAME_CORE_TEST_SOURCES})
     endif()
+    # The platform layer answers the runtime directly, so its self-test is its own executable rather than a group of nxrt_tests.
+    add_executable(nxrt_platform_selftest "${CMAKE_CURRENT_SOURCE_DIR}/tests/platform_selftest.cpp")
+    target_link_libraries(nxrt_platform_selftest PRIVATE nxrt)
+    add_test(NAME platform_selftest COMMAND nxrt_platform_selftest)
     add_executable(nxrt_tests ${NXRT_TEST_SOURCES})
     target_include_directories(nxrt_tests PRIVATE tests)
     # nxrt calls into the graphics shell (switch2.cpp: HDR metadata, tt_core.cpp: screenshot writes), so the tests link it when it is built

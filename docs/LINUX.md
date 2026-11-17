@@ -98,9 +98,9 @@ Verified on the machine this page was written on, where marked:
 | --- | --- | --- |
 | Rust | 1.98.1, target `x86_64-unknown-linux-gnu` | yes: launcher `cargo check` passes |
 | .NET SDK | 10.0.404 (only to build the translator; the release ships it published) | yes: `-r linux-x64` publish produces a running ELF |
-| C/C++ compiler | clang 18 or newer with `lld` | not yet: a stock Ubuntu 26.04 image has neither |
-| CMake | 3.25 or newer | not yet (not installed in the image used) |
-| Ninja | any recent | not yet |
+| C/C++ compiler | clang 18 or newer with `lld` (`clang`, `lld`) | not yet: a stock Ubuntu 26.04 image has neither |
+| CMake | 3.25 or newer (`cmake`) | not yet (not installed in the image used) |
+| Ninja | any recent (`ninja-build`) | not yet |
 | Vulkan loader | `libvulkan.so.1` (`libvulkan1` / `vulkan-loader`) | present in the image (9 `ldconfig` entries) |
 | Vulkan driver | Mesa RADV or `nvidia` | present in the image; not exercised by the engine |
 | SDL3 | fetched by the engine's CMake (`cmake/gfx_deps.cmake`) | not yet |
@@ -108,6 +108,30 @@ Verified on the machine this page was written on, where marked:
 
 The engine's CMake asks for the Windows SDK and MSVC-specific flags today; the port's first commit has to teach
 `cmake/` a second toolchain file rather than patching the flags at each target.
+
+What to install in a WSL Ubuntu (or any Ubuntu 26.04) to build and test the platform layer here:
+
+```bash
+sudo apt update
+sudo apt install -y clang lld cmake ninja-build pkg-config \
+                    libvulkan-dev libzstd-dev zlib1g-dev \
+                    python3 python3-venv python3-pip
+# only if the distribution has no SDL3 package yet; the engine's cmake/gfx_deps.cmake can also fetch it
+sudo apt install -y libsdl3-dev || true
+```
+
+Then, from the repository root:
+
+```bash
+cmake -S engine/fefw-recomp/runtime -B build-linux -G Ninja \
+      -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-linux
+ctest --test-dir build-linux --output-on-failure     # one entry: platform
+```
+
+`runtime/CMakeLists.txt` builds only the platform layer there (`NXRT_PLATFORM_ONLY` is forced on when the host is not
+Windows), because the rest of nxrt — the graphics shell, the game module, the lifted code — still asks for Windows
+headers. Nothing else in the tree is needed for that build, and nothing in it writes to the Windows side of the tree.
 
 ## SteamOS and the Steam Deck
 
@@ -134,9 +158,17 @@ Each phase ends with something that was built and run, not something that was de
 1. **Launcher on Linux.** A window opens, Game Setup reads a folder, Requirements explains that the build is
    Windows-only, Play is refused with the same sentence. Done when `cargo build --target
    x86_64-unknown-linux-gnu` links and the window runs on this machine. Most of it exists: the check passes.
-2. **Engine platform layer.** `runtime/src/platform` gains a Linux implementation for memory, threads, files,
-   the clock and exception handling; the 69 `<windows.h>` files include the interface instead. Done when
-   `nxrt_tests` and `nxrt_gfx_tests` build and pass on Linux (they are the existing, game-independent tests).
+2. **Engine platform layer.** *Started.* `runtime/include/nxrt/platform.h` now carries the host interface — memory,
+   threads, synchronisation, time and files — with `src/platform/win32` (VirtualAlloc, `_beginthreadex`, SRW locks,
+   QueryPerformanceCounter, the high-resolution waitable timer, CreateFileW) and `src/platform/posix` (mmap, pthreads,
+   clock_gettime, nanosleep, file descriptors) behind it. The time subsystem (`kernel/time.cpp`) is the first call site
+   moved: it no longer includes `<windows.h>`, and on Windows the tick and the sleep are the same calls as before.
+   `tests/platform_selftest.cpp` exercises all five groups and builds and passes on Windows today; on Linux it builds
+   from the same CMake file with `NXRT_PLATFORM_ONLY`.
+
+   What is left for the phase: the other 20-odd files with host calls (threads and sync in `kernel/`, files in `svc/`),
+   the exception and unwind path, `dlopen`-shaped loading, and `nxrt_gfx_tests`. Done when `nxrt_tests` and
+   `nxrt_gfx_tests` build and pass on Linux (they are the existing, game-independent tests).
 3. **Lifted code for Linux.** The recompiler emits C++ that clang links for ELF; `fefw_*.lib` becomes
    `libfefw_*.a`. Done when `fefw` boots to its first frame with the test dump.
 4. **Play on Linux.** Input, audio, saves, mods, screenshots, the F1 menu. Done when a full play session happens

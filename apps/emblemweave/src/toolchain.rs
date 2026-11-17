@@ -419,6 +419,11 @@ pub fn clang_candidates() -> Vec<PathBuf> {
     if let Ok(tc) = std::env::var("NX_TOOLCHAIN") {
         dirs.push(PathBuf::from(tc).join("llvm").join("bin"));
     }
+    // The release's own copy first: a zip that carries clang-cl must use it, not whichever LLVM happens to be installed. It is
+    // the same version the lifted code was built with, and `tool_path` already puts its folder first on the build's PATH.
+    if let Some(root) = crate::engine::root() {
+        dirs.push(root.join("tools").join("bin"));
+    }
     dirs.push(PathBuf::from(r"C:\Program Files\LLVM\bin"));
     if let Ok(path) = std::env::var("PATH") {
         dirs.extend(path.split(';').filter(|d| !d.trim().is_empty()).map(PathBuf::from));

@@ -34,6 +34,7 @@ mod portraits;
 mod report;
 mod snapshots;
 mod shell;
+mod portable;
 mod updater;
 mod saves;
 mod sites;
@@ -1162,6 +1163,30 @@ fn main() -> eframe::Result<()> {
     // Before anything reads the settings: a fresh copy keeps its data beside the program, so the first run writes its config there.
     platform::adopt_portable_on_first_run();
     let args: Vec<String> = std::env::args().collect();
+    // A copy without `tools\bin` carries the toolchain into it on first run, in the background; the Requirements page
+    // reports the pieces as Carried once they land. `--fetch-tools` does the same in the foreground.
+    portable::auto_start();
+    // Carry the toolchain the release ships: the same four downloads the launcher would do on first run, runnable from a
+    // console so a build machine can prepare `tools\bin` without opening the window.
+    if args.iter().any(|a| a == "--fetch-tools") {
+        let last = std::cell::RefCell::new(String::new());
+        let r = portable::install_all(&|f, line| {
+            if *last.borrow() != line {
+                println!("{:>3.0}% {line}", f * 100.0);
+                *last.borrow_mut() = line;
+            }
+        });
+        match r {
+            Ok(()) => {
+                println!("every piece is carried in {}", portable::bin_dir().map(|d| d.display().to_string()).unwrap_or_default());
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("fetching the toolchain: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.iter().any(|a| a == "--check-toolchain") {
         std::process::exit(check_toolchain_cli());
     }

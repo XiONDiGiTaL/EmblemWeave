@@ -292,12 +292,20 @@ pub enum Status {
     NotNeeded { why: &'static str },
 }
 
+/// Whether a detected path is one of the release's own copies, in `engine/fefw-recomp/tools\bin`.
+fn carried(path: &Path) -> bool {
+    crate::portable::bin_dir().is_some_and(|bin| path.starts_with(&bin))
+}
+
 impl Status {
     pub fn ok(&self) -> bool {
         matches!(self, Status::Ready { .. } | Status::NotNeeded { .. })
     }
     pub fn label(&self) -> &'static str {
         match self {
+            // A tool the release carries itself is not "installed": it travels with the zip, its version is pinned by the
+            // release, and it is found before anything on the PC (`toolchain::tool_path` puts `tools\bin` first).
+            Status::Ready { path: Some(p), .. } if carried(p) => "Carried",
             Status::Ready { .. } => "Installed",
             Status::TooOld { .. } => "Too old",
             Status::Missing => "Missing",
@@ -308,6 +316,7 @@ impl Status {
     pub fn detail(&self) -> String {
         match self {
             Status::Ready { version, path } => match path {
+                Some(p) if carried(p) => format!("{version} carried in tools\\bin ({})", p.display()),
                 Some(p) => format!("{version} at {}", p.display()),
                 None => version.clone(),
             },
@@ -465,6 +474,7 @@ pub fn parse_dotnet_runtimes(text: &str) -> Option<String> {
 /// `python`, then `py -3`, then `python3`. `python` and `py` commonly resolve to
 /// different installs, and only one of them may have `zbic`, so every candidate
 /// is asked rather than the first name that answers.
+#[derive(Clone)]
 pub struct Py {
     pub program: PathBuf,
     pub leading: Vec<&'static str>,
@@ -475,6 +485,11 @@ pub fn pythons() -> Vec<Py> {
     let mut out: Vec<Py> = Vec::new();
     let mut candidates: Vec<(PathBuf, Vec<&'static str>)> = Vec::new();
     if let Some(root) = crate::engine::root() {
+        // The interpreter the release carries, before any the PC has: it is the one the translator runs.
+        let carried = root.join("tools").join("bin").join("python.exe");
+        if carried.is_file() {
+            candidates.push((carried, Vec::new()));
+        }
         let venv = root.join("tools").join(".venv").join("Scripts").join("python.exe");
         if venv.is_file() {
             candidates.push((venv, Vec::new()));
@@ -594,8 +609,13 @@ fn detect(dep: &'static Dep, bundled: Option<&Path>) -> Status {
             },
         },
         Detect::Python => {
-            let best = pythons().into_iter().max_by(|a, b| {
-                crate::toolchain::version_parts(&a.version).cmp(&crate::toolchain::version_parts(&b.version))
+            let all = pythons();
+            // The interpreter the release carries wins over a newer one installed on the PC: the translator's packages were
+            // pinned against it, and a 3.14 from the Store is not what the build was tested with.
+            let best = all.iter().find(|p| carried(&p.program)).cloned().or_else(|| {
+                all.into_iter().max_by(|a, b| {
+                    crate::toolchain::version_parts(&a.version).cmp(&crate::toolchain::version_parts(&b.version))
+                })
             });
             match best {
                 Some(p) => {
