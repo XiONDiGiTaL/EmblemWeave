@@ -1313,12 +1313,16 @@ fn manage_dialog(app: &mut App, ctx: &egui::Context, save_dir: &Path, ids: &Ids,
             } else {
                 for slot in &slots {
                         let display = m.names.get(&slot.relative).cloned().unwrap_or_else(|| slot.relative.clone());
-                        let meta = format!(
-                            "{}{}{}",
-                            if slot.gold.is_some() { format!("Gold {}  ", count(slot.gold.unwrap_or(0) as usize)) } else { String::new() },
-                            if slot.renown.is_some() { format!("Renown {}  ", count(slot.renown.unwrap_or(0) as usize)) } else { String::new() },
-                            if slot.units > 0 { format!("{} units  ", slot.units) } else { String::new() }
-                        );
+                        // The read-only summary: what the slot itself says, with a gap wherever a field could not be read.
+                        let s = &slot.summary;
+                        let mut parts: Vec<String> = Vec::new();
+                        if let Some(g) = slot.gold { parts.push(format!("Gold {}", count(g as usize))) }
+                        if let Some(r) = slot.renown { parts.push(format!("Renown {}", count(r as usize))) }
+                        if slot.units > 0 { parts.push(format!("{} units", slot.units)) }
+                        if let Some(d) = s.difficulty { parts.push(format!("Difficulty {d}")) }
+                        if let Some(t) = s.playthrough { parts.push(format!("Playthrough {t}")) }
+                        if let Some(n) = s.flags { parts.push(format!("{} flags", count(n))) }
+                        let meta = parts.join("  ");
                         ui.horizontal_wrapped(|ui| {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {

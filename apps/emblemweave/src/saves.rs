@@ -299,6 +299,8 @@ pub struct SlotInfo {
     pub leader: Option<String>,
     pub valid: bool,
     pub problems: Vec<String>,
+    /// The read-only summary: difficulty, playthrough, mode and how many flags the slot stores.
+    pub summary: crate::savefile::Summary,
 }
 
 /// The cached metadata for a profile. Values that this build cannot read from
@@ -396,17 +398,18 @@ pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
         let metadata = std::fs::metadata(&path).ok();
         let modified = metadata.as_ref().and_then(|m| m.modified().ok());
         let size = metadata.as_ref().map_or(0, |m| m.len());
-        let (gold, renown, units, leader, valid, problems) = match crate::savefile::Slot::open(&path) {
+        let (gold, renown, units, leader, valid, problems, summary) = match crate::savefile::Slot::open(&path) {
             Ok(slot) => {
                 let player = slot.player();
                 let roster = slot.units(ids);
                 let leader = roster.iter().find_map(|u| crate::portraits::key_for_name(&u.name)).map(str::to_string);
                 let problems = slot.verify();
-                (player.map(|p| p.gold), player.map(|p| p.renown), roster.len(), leader, problems.is_empty(), problems)
+                let summary = slot.summary();
+                (player.map(|p| p.gold), player.map(|p| p.renown), roster.len(), leader, problems.is_empty(), problems, summary)
             }
-            Err(e) => (None, None, 0, None, false, vec![e]),
+            Err(e) => (None, None, 0, None, false, vec![e], crate::savefile::Summary::default()),
         };
-        out.push(SlotInfo { path, relative: rel, name: name.clone(), kind: kind_of(&name), modified, size, gold, renown, units, leader, valid, problems });
+        out.push(SlotInfo { path, relative: rel, name: name.clone(), kind: kind_of(&name), modified, size, gold, renown, units, leader, valid, problems, summary });
     }
     out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.relative.cmp(&b.relative)));
     out

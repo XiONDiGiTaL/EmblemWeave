@@ -186,6 +186,31 @@ impl Slot {
         Some(Player { gold: u32_at(&self.payload, at + 6)?, renown: u32_at(&self.payload, at + 10)? })
     }
 
+    /// What the Saves page shows about a slot without changing it: gold and renown from the player record, the playthrough,
+    /// mode and difficulty from the payload header, and how many named flags the GameUserData block stores.
+    ///
+    /// The layout is the one the community save editor documents: byte 12 is 15 when the load screen carries the settings,
+    /// then 13 is the playthrough, 14 the mode and 15 the difficulty; the player record starts at GameUserData + 4, with gold
+    /// at +6 and renown at +10; a flag list is a `[u32 next][u8 0][u16 count]` head followed by `[u32 name][value]` entries,
+    /// the value one byte or, behind a 0xFF marker, an i32. Anything that cannot be read stays `None`.
+    pub fn summary(&self) -> Summary {
+        let p = &self.payload;
+        let mut s = Summary::default();
+        if let Some(player) = self.player() {
+            s.gold = Some(player.gold);
+            s.renown = Some(player.renown);
+        }
+        if p.len() > 16 && p[12] == 15 {
+            s.playthrough = Some(p[13]);
+            s.mode = Some(p[14]);
+            s.difficulty = Some(p[15]);
+        }
+        if let Some(b) = self.block("GameUserData") {
+            s.flags = count_flags(p, b.start, b.end);
+        }
+        s
+    }
+
     pub fn set_player(&mut self, p: &Player) -> bool {
         let Some(at) = self.user_data() else { return false };
         self.payload[at + 6..at + 10].copy_from_slice(&p.gold.to_le_bytes());
@@ -270,6 +295,55 @@ pub fn raw_zstd_frame(data: &[u8]) -> Vec<u8> {
         out.extend(c);
     }
     out
+}
+
+/// The read-only facts the Saves page reports for a slot. Every field is optional because a slot that does not carry that
+/// part has to read as unknown; the page shows a gap rather than a zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub gold: Option<u32>,
+    pub renown: Option<u32>,
+    pub playthrough: Option<u8>,
+    pub mode: Option<u8>,
+    pub difficulty: Option<u8>,
+    pub flags: Option<usize>,
+}
+
+/// How many named flags the lists between `start` and `end` hold. A list is a header whose fifth byte is 0 and whose `u16` at
+/// +5 is its count; entries are a u32 name plus either one byte of value or a 0xFF marker and an i32. A walk that runs past
+/// the list's own end is abandoned, which is how a false hit on the header pattern is skipped.
+fn count_flags(p: &[u8], start: usize, end: usize) -> Option<usize> {
+    let end = end.min(p.len());
+    let mut total = 0usize;
+    let mut i = start;
+    while i + 7 <= end {
+        if p[i + 4] != 0 {
+            i += 1;
+            continue;
+        }
+        let count = u16::from_le_bytes([p[i + 5], p[i + 6]]);
+        let next = u32_at(p, i).map(ptr).unwrap_or(0);
+        if count == 0 || next <= i || next > end {
+            i += 1;
+            continue;
+        }
+        let mut at = i + 7;
+        let mut ok = true;
+        for _ in 0..count {
+            if at + 5 > next {
+                ok = false;
+                break;
+            }
+            at += if p[at + 4] == 0xFF { 9 } else { 5 };
+        }
+        if ok && at <= next && next - at <= 4 {
+            total += count as usize;
+            i = at;
+        } else {
+            i += 1;
+        }
+    }
+    (total > 0).then_some(total)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -493,6 +567,36 @@ impl Ids {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_summary_counts_the_flags_a_list_holds() {
+        // One list at 32: a head of [next pointer][0][u16 count], then two entries of five bytes. A stored pointer is the
+        // offset plus 32, the encoding the payload uses everywhere.
+        let mut p = vec![0u8; 128];
+        let start = 32usize;
+        let next = start + 7 + 10;
+        p[start..start + 4].copy_from_slice(&((next as u32 + 32) & 0x00FF_FFFF).to_le_bytes());
+        p[start + 4] = 0;
+        p[start + 5..start + 7].copy_from_slice(&2u16.to_le_bytes());
+        for (i, at) in [start + 7, start + 12].into_iter().enumerate() {
+            p[at..at + 4].copy_from_slice(&(0x10 + i as u32).to_le_bytes());
+            p[at + 4] = 1;   // one byte of value
+        }
+        assert_eq!(super::count_flags(&p, start, next), Some(2));
+
+        // A wide entry (0xFF marker and an i32) is nine bytes, not five.
+        let wide_start = next;
+        let wide_next = wide_start + 7 + 9;
+        p[wide_start..wide_start + 4].copy_from_slice(&((wide_next as u32 + 32) & 0x00FF_FFFF).to_le_bytes());
+        p[wide_start + 4] = 0;
+        p[wide_start + 5..wide_start + 7].copy_from_slice(&1u16.to_le_bytes());
+        p[wide_start + 11] = 0xFF;
+        assert_eq!(super::count_flags(&p, wide_start, wide_next), Some(1));
+
+        // A head that claims more entries than fit is not a list: the walk is abandoned and nothing is counted.
+        p[wide_start + 5..wide_start + 7].copy_from_slice(&40u16.to_le_bytes());
+        assert_eq!(super::count_flags(&p, wide_start, wide_next), None);
+    }
 
     #[test]
     fn raw_frames_decode() {
