@@ -144,7 +144,15 @@ pub struct ShipPreset {
     pub name: String,
 }
 
-/// The presets that travel with the engine, by name, from the folder they are kept in.
+/// The order the presets are offered and cycled in: the general-purpose looks first, the strong stylisations last, so F3/F4
+/// walk from a subtle tweak towards a full restyle instead of jumping alphabetically. Names not in this list follow, sorted.
+const PRESET_ORDER: [&str; 4] = ["Vivid", "Bright", "RetroCRT", "GameBoy"];
+
+fn preset_rank(name: &str) -> usize {
+    PRESET_ORDER.iter().position(|n| n.eq_ignore_ascii_case(name)).unwrap_or(PRESET_ORDER.len())
+}
+
+/// The presets that travel with the engine, in [`PRESET_ORDER`], from the folder they are kept in.
 pub fn ship_presets() -> Vec<ShipPreset> {
     let Some(root) = root() else { return Vec::new() };
     let dir = root.join("reshade").join("Presets");
@@ -160,7 +168,7 @@ pub fn ship_presets() -> Vec<ShipPreset> {
                 .map(|name| ShipPreset { name })
         })
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort_by(|a, b| preset_rank(&a.name).cmp(&preset_rank(&b.name)).then_with(|| a.name.cmp(&b.name)));
     out
 }
 
