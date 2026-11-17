@@ -87,6 +87,7 @@ public:
         int corner = 0;                  // 0 top left, 1 top right, 2 bottom left, 3 bottom right
         int detail = 1;                  // 0 frame rate; 1 also the frame time; 2 also the 1 % low and the worst frame
         bool in_screenshots = false;     // leave it in screenshots too (by default it is not drawn into them)
+        int key_scancode = 0;            // the key that hides it again, drawn under the counter as "F2 hides this"; 0 draws nothing
     };
     void set_counter(const CounterConfig& c);
 

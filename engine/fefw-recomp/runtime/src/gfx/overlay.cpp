@@ -229,6 +229,7 @@ struct Overlay::Impl {
     std::atomic<int> counter_corner{0};
     std::atomic<int> counter_detail{1};
     std::atomic<bool> counter_in_shots{false};
+    std::atomic<int> counter_key{0};   // scancode of the hotkey, shown under the counter
     bool counter_was_on = false;
     bool counter_have_prev = false;
     std::chrono::steady_clock::time_point counter_prev{};
@@ -588,6 +589,7 @@ void Overlay::set_counter(const CounterConfig& c) {
     s.counter_corner.store(std::clamp(c.corner, 0, 3), std::memory_order_relaxed);
     s.counter_detail.store(std::clamp(c.detail, 0, 2), std::memory_order_relaxed);
     s.counter_in_shots.store(c.in_screenshots, std::memory_order_relaxed);
+    s.counter_key.store(c.key_scancode, std::memory_order_relaxed);
     s.counter_show.store(c.show, std::memory_order_relaxed);   // last: the other settings are in place when it turns on
 }
 
@@ -1066,8 +1068,10 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
 void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
     refresh_counter_text(now_s);
     ImFont* font = ImGui::GetFont();
-    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 45.f), 14.f, 40.f);
-    const float pad = size * 0.4f;
+    // A readout, not a headline: a third of the frame height it used to take, so it stays out of the
+    // way at 1440p and up while still being legible at 720p.
+    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 70.f), 11.f, 24.f);
+    const float pad = size * 0.45f;
     const float gap = size * 0.15f;
     const float margin = size * 0.8f;
     const int n = counter_n;
@@ -1079,8 +1083,25 @@ void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
         line_h = std::max(line_h, sz.y);
         text_w = std::max(text_w, sz.x);
     }
-    const float box_w = text_w + 2.f * pad;
-    const float box_h = static_cast<float>(n) * line_h + static_cast<float>(n - 1) * gap + 2.f * pad;
+    // The key that hides it, from the binding the player chose. The counter is the only thing on screen
+    // that can say how to get rid of it, and the menu may not be open when it is in the way.
+    char hint[64] = {};
+    const int hint_sc = counter_key.load(std::memory_order_relaxed);
+    if (hint_sc > 0) {
+        const char* name = SDL_GetScancodeName(static_cast<SDL_Scancode>(hint_sc));
+        if (name && *name) std::snprintf(hint, sizeof hint, "%s hides this", name);
+    }
+    const float hint_size = std::max(9.f, size * 0.62f);
+    float hint_w = 0, hint_h = 0;
+    if (hint[0]) {
+        const ImVec2 sz = font->CalcTextSizeA(hint_size, FLT_MAX, 0.0f, hint);
+        hint_w = sz.x;
+        hint_h = sz.y;
+    }
+    const float lines_h = static_cast<float>(n) * line_h + static_cast<float>(n - 1) * gap;
+    const float hint_gap = hint[0] ? gap * 0.9f : 0.f;
+    const float box_w = std::max(text_w, hint_w) + 2.f * pad;
+    const float box_h = lines_h + hint_gap + hint_h + 2.f * pad;
     const int corner = counter_corner.load(std::memory_order_relaxed);
     const bool right = corner == 1 || corner == 3;
     const bool bottom = corner >= 2;
@@ -1094,6 +1115,10 @@ void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
         const float x = right ? x0 + box_w - pad - lines_w[i] : x0 + pad;
         const float y = y0 + pad + static_cast<float>(i) * (line_h + gap);
         dl->AddText(font, size, ImVec2(x, y), IM_COL32(255, 255, 255, 255), counter_lines[i].c_str());
+    }
+    if (hint[0]) {
+        const float x = right ? x0 + box_w - pad - hint_w : x0 + pad;
+        dl->AddText(font, hint_size, ImVec2(x, y0 + pad + lines_h + hint_gap), IM_COL32(255, 255, 255, 155), hint);
     }
 }
 

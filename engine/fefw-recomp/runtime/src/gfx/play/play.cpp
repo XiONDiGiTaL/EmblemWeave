@@ -539,6 +539,8 @@ void apply_fps_counter(const FpsSettings& f) {
     c.corner = static_cast<int>(f.corner);
     c.detail = f.detail;
     c.in_screenshots = f.in_screenshots;
+    // The counter draws its own hotkey under itself, so the key the player bound in the menu is the key it names.
+    c.key_scancode = f.key.kind == InKind::Key ? f.key.code : 0;
     st.overlay->set_counter(c);
 }
 
