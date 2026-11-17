@@ -13,6 +13,7 @@
 #include <system_error>
 #include <vector>
 
+#include "spirv_val.h"
 #include "test_framework.h"
 #include "project_root.h"
 
@@ -28,7 +29,6 @@ namespace hdr = nxrt::extras;
 
 const fs::path kSpvDir = nxtest::project_path("work/shader_cache/spirv");
 const fs::path kTonemapPath = kSpvDir / "e728113b14f3564a.spv";
-const char* kSpirvVal = "C:\\VulkanSDK\\1.4.363.0\\Bin\\spirv-val.exe";
 
 constexpr uint32_t kOpExtInst = 12, kOpFMul = 133, kOpStore = 62, kOpImageSampleImplicitLod = 87;
 constexpr uint32_t kOpExtInstImport = 11, kOpEntryPoint = 15, kOpTypeInt = 21, kOpTypeFloat = 22, kOpTypePointer = 32;
@@ -230,9 +230,9 @@ NXTEST(spirv_val_accepts_patched_output) {
         nxtest::skip("shader cache not present");
         return;
     }
-    std::error_code ec;
-    if (!fs::is_regular_file(kSpirvVal, ec)) {
-        nxtest::skip("spirv-val not present");
+    const std::string spirv_val = nxtest::find_spirv_val();
+    if (spirv_val.empty()) {
+        nxtest::skip(nxtest::spirv_val_missing());
         return;
     }
     std::vector<uint32_t> in, out;
@@ -242,11 +242,19 @@ NXTEST(spirv_val_accepts_patched_output) {
         CHECK(false);
         return;
     }
-    const char* temp = std::getenv("TEMP");
-    const fs::path tmp = std::string(temp ? temp : ".") + "\\nxrt_hdr_tm.spv";
+    std::error_code ec;
+    fs::path tmp = fs::temp_directory_path(ec);
+    if (ec) tmp = ".";
+    tmp /= "nxrt_hdr_tm.spv";
     CHECK(write_words(tmp, out));
+    const std::string exe = nxtest::quote(spirv_val);
+    const std::string args = " --target-env vulkan1.3 " + nxtest::quote(tmp.string());
+#ifdef _WIN32
     // cmd.exe strips the outermost pair of quotes when the line starts with one, so the whole line is wrapped in an extra pair.
-    const std::string cmd = std::string("\"\"") + kSpirvVal + "\" --target-env vulkan1.3 \"" + tmp.string() + "\"\"";
+    const std::string cmd = "\"" + exe + args + "\"";
+#else
+    const std::string cmd = exe + args;
+#endif
     const int rc = std::system(cmd.c_str());
     printf("hdr_tonemap_patch: spirv-val exit code %d\n", rc);
     CHECK_EQ(rc, 0);

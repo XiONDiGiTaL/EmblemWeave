@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPIR-V rewrites of the back end (src/gfx/nvn/nvn_spirv_patch.{h,cpp}) on the translated shaders of the shader cache. Each
 // rewritten module must still pass spirv-val (vulkan1.3) and reflect to the declarations the rewrite promises. Cases skip
-// when the cache or the Vulkan SDK's spirv-val is absent.
+// when the cache or spirv-val is absent (SPIRV_VAL or NXRT_SPIRV_VAL names it, VULKAN_SDK points at its SDK, or it is on PATH).
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +15,7 @@
 
 #include "nvn_shaders.h"
 #include "nvn_spirv_patch.h"
+#include "spirv_val.h"
 #include "test_framework.h"
 #include "project_root.h"
 NXTEST_GROUP(gfx_nvn_spirv_patch)
@@ -27,7 +28,7 @@ namespace {
 
 const std::string kSpvDirStr = nxtest::project_path("work/shader_cache/spirv");
 const char* kSpvDir = kSpvDirStr.c_str();
-const char* kSpirvVal = "C:\\VulkanSDK\\1.4.363.0\\Bin\\spirv-val.exe";
+std::string spirv_val() { return nxtest::find_spirv_val(); }
 const char* kVertexHash = "a656883b0cdb8ebc";      // position only, no varyings
 const char* kConstFragHash = "062cfa5657f5388d";   // constant colour fragment shader, no Location 1 output
 
@@ -40,7 +41,7 @@ const char* absent_input() {
     std::error_code ec;
     if (!fs::exists(fs::path(kSpvDir) / (std::string(kVertexHash) + ".spv"), ec))
         return "shader cache absent (a656883b0cdb8ebc.spv not under work/shader_cache/spirv)";
-    if (!fs::exists(kSpirvVal, ec)) return "spirv-val not found at C:\\VulkanSDK\\1.4.363.0\\Bin";
+    if (spirv_val().empty()) return nxtest::spirv_val_missing();
     return nullptr;
 }
 
@@ -68,7 +69,12 @@ bool write_words(const std::string& path, const std::vector<uint32_t>& w) {
 int run_spirv_val(const std::vector<uint32_t>& w, const std::string& tag, std::string& log) {
     const std::string spv = tag + ".spv", txt = tag + ".log";
     if (!write_words(spv, w)) return -1;
-    const std::string cmd = std::string(kSpirvVal) + " --target-env vulkan1.3 " + spv + " > " + txt + " 2>&1";
+    const std::string exe = nxtest::quote(spirv_val());
+#ifdef _WIN32
+    const std::string cmd = "\"" + exe + " --target-env vulkan1.3 \"" + spv + "\" > \"" + txt + "\" 2>&1\"";
+#else
+    const std::string cmd = exe + " --target-env vulkan1.3 \"" + spv + "\" > \"" + txt + "\" 2>&1";
+#endif
     const int rc = std::system(cmd.c_str());
     std::ifstream f(txt);
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());

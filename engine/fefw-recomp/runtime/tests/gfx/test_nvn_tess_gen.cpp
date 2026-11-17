@@ -2,7 +2,7 @@
 // The generated pass-through tessellation control shader (src/gfx/nvn/nvn_tess_gen.h) must pass spirv-val (vulkan1.3) for the
 // interface shapes the replay feeds it: the translator's vec4 varyings, per-patch inputs, evaluation inputs the vertex shader does not
 // write, type and component-count conversions, packed components, every patch size, gl_ClipDistance / gl_CullDistance copies. Skips when spirv-val is absent
-// (NXRT_SPIRV_VAL names it; default the MSYS2 clang64 one).
+// (SPIRV_VAL or NXRT_SPIRV_VAL names it, VULKAN_SDK points at its SDK, or it is on PATH).
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "nvn_tess_gen.h"
+#include "spirv_val.h"
 #include "test_framework.h"
 NXTEST_GROUP(gfx_nvn_tess_gen)
 
@@ -20,11 +21,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string spirv_val() {
-    if (const char* e = std::getenv("NXRT_SPIRV_VAL"); e && *e) return e;
-    return "spirv-val";   // from PATH (Vulkan SDK)
-}
-
 int run_val(const std::vector<uint32_t>& w, const std::string& tag, std::string& log) {
     const std::string spv = tag + ".spv", txt = tag + ".log";
     {
@@ -32,7 +28,12 @@ int run_val(const std::vector<uint32_t>& w, const std::string& tag, std::string&
         f.write(reinterpret_cast<const char*>(w.data()), std::streamsize(w.size() * 4));
         if (!f) return -1;
     }
-    const std::string cmd = "\"\"" + spirv_val() + "\" --target-env vulkan1.3 " + spv + " > " + txt + " 2>&1\"";
+    const std::string exe = nxtest::quote(nxtest::find_spirv_val());
+#ifdef _WIN32
+    const std::string cmd = "\"" + exe + " --target-env vulkan1.3 \"" + spv + "\" > \"" + txt + "\" 2>&1\"";
+#else
+    const std::string cmd = exe + " --target-env vulkan1.3 \"" + spv + "\" > \"" + txt + "\" 2>&1";
+#endif
     const int rc = std::system(cmd.c_str());
     std::ifstream f(txt);
     log.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
@@ -55,8 +56,7 @@ tessgen::Io io(uint32_t loc, uint32_t comps = 4, tessgen::Kind k = tessgen::Kind
 }  // namespace
 
 NXTEST(validates) {
-    std::error_code ec;
-    if (!fs::exists(spirv_val(), ec)) { nxtest::skip("spirv-val not found (NXRT_SPIRV_VAL)"); return; }
+    if (nxtest::find_spirv_val().empty()) { nxtest::skip(nxtest::spirv_val_missing()); return; }
     using tessgen::Kind;
     struct Case {
         const char* tag;
