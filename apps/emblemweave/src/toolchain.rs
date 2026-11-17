@@ -156,8 +156,8 @@ impl Toolchain {
 }
 
 /// The environment variable names whose inherited values can silently send the
-/// build to a different toolkit than the one that was validated.
-pub const STALE: [&str; 16] = [
+/// build to a different toolkit or Python environment than the validated one.
+pub const STALE: [&str; 18] = [
     "CC",
     "CXX",
     "CL",
@@ -174,6 +174,11 @@ pub const STALE: [&str; 16] = [
     "NX_TOOLCHAIN",
     "NX_LLVM",
     "NX_VCVARS",
+    // A Python path from another install puts its extension modules (a 3.11
+    // `_socket.pyd`) ahead of the engine's own and makes the build's Python
+    // load `python311.dll` beside 3.13/3.14 (issue 43).
+    "PYTHONHOME",
+    "PYTHONPATH",
 ];
 
 /// Which of those this process inherited, and their values, so the log can say
@@ -1024,5 +1029,18 @@ SOME_MISSING:STRING=value-NOTFOUND
         assert_eq!(names, ["14.9.1", "14.10.0", "14.44.35207"]);
         assert_eq!(version_parts("14.44.35207"), Some(vec![14, 44, 35207]));
         assert_eq!(version_parts("nope"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_child_command_cannot_inherit_another_pythons_path() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "echo %PYTHONPATH% %PYTHONHOME%"]);
+        cmd.env("PYTHONPATH", r"C:\Python311\DLLs");
+        cmd.env("PYTHONHOME", r"C:\Python311");
+        scrub(&mut cmd);
+        let out = cmd.output().expect("cmd runs");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(said.trim(), "%PYTHONPATH% %PYTHONHOME%", "the child saw a Python environment (issue 43)");
     }
 }

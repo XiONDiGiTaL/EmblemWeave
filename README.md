@@ -41,7 +41,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.37, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
+> **Current status: 0.1.38, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
 > AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes; it covered the title screen, the
 > save loaded through **Continue**, the hub, the in-game menu and the F1 settings overlay. Later releases are checked by
 > building and by headless runs of the real game, listed under [Development status](#development-status). The build needs

@@ -354,7 +354,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             Action::Load => {
                 if let Some(item) = selected_item(&items, app.saves_ui.selected_profile.as_deref()) {
+                    let before = app.saves_ui.active_profile.clone();
                     message = Some(load_profile(app, &save_dir, &item.profile, title, active.as_deref(), running));
+                    // The carousel above was drawn with the old active profile.
+                    // Use the one the load actually installed for the rest of
+                    // this frame, and draw the next frame with the new badge
+                    // instead of waiting for the mouse to move.
+                    if app.saves_ui.active_profile != before {
+                        active = app.saves_ui.active_profile.clone();
+                        ui.ctx().request_repaint();
+                    }
                 }
             }
             Action::Duplicate => {

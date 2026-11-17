@@ -304,9 +304,11 @@ impl PythonEnv {
 /// Python computes `identity` itself so Windows path normalisation (case,
 /// short names, junctions) is the platform's own rather than a string compare
 /// here. `sys.prefix != sys.base_prefix` rejects a global interpreter that was
-/// copied into `tools/.venv`; `sys.executable` names what actually ran.
+/// copied into `tools/.venv`; `sys.executable` names what actually ran. `socket`
+/// is the extension that exposed a Python 3.11 `_socket.pyd` from PYTHONPATH
+/// only when the build ran (issue 43); importing it here checks the venv itself.
 const PYTHON_PROBE: &str = r#"import json, os, sys
-modules = ("capstone", "lz4", "zstandard", "zbic", "elftools", "unicorn")
+modules = ("capstone", "lz4", "zstandard", "zbic", "elftools", "unicorn", "socket")
 errors = []
 for name in modules:
     try:
@@ -371,7 +373,7 @@ fn parse_python_probe(stdout: &str, stderr: &str) -> PythonEnv {
         .unwrap_or_default();
     if !imports.is_empty() {
         return PythonEnv::Unusable {
-            why: format!("required lifter module(s) do not import: {}", imports.join("; ")),
+            why: format!("required Python module(s) do not import: {}", imports.join("; ")),
         };
     }
     PythonEnv::Healthy { version, executable }
@@ -583,8 +585,11 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
         .stderr(Stdio::piped());
     // The environment the toolchain was validated with, not the one the
     // launcher inherited: `CC`, `CXX`, `INCLUDE`, `LIB` and `VCINSTALLDIR` from
-    // an older shell would point the build at headers nobody checked.
+    // an older shell would point the build at headers nobody checked. The
+    // Python flags keep user-site packages out of the build's interpreter too;
+    // the probe runs isolated, so this makes the build match it.
     crate::toolchain::scrub(&mut cmd);
+    cmd.env("PYTHONNOUSERSITE", "1");
     match crate::toolchain::init() {
         Ok(resolved) => {
             for (k, v) in &resolved.env {
@@ -1417,7 +1422,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     ctx.log(format!("toolchain: {}", resolved.toolchain.summary()));
     ctx.log(format!("toolchain fingerprint: {}", resolved.toolchain.fingerprint()));
     for (name, value) in crate::toolchain::stale_env() {
-        ctx.log(format!("ignoring the inherited {name}={value}: it would point the build at a toolchain that was not checked"));
+        ctx.log(format!("ignoring the inherited {name}={value}: it would point the build at a toolchain or Python environment that was not checked"));
     }
     // Two builds at once write the same object files and fetch the same sources.
     let _build_lock = lock_build(&root)?;

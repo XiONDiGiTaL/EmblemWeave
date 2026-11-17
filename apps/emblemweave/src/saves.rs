@@ -806,7 +806,7 @@ pub fn slots(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().is_none() {
+            } else if is_slot_candidate(&p) {
                 out.push((p, e.metadata().ok().and_then(|m| m.modified().ok())));
             }
         }
@@ -1074,9 +1074,9 @@ mod tests {
         write_bytes(&p.path.join("000/Auto"), &valid_slot(b"payload"));
         write_bytes(&p.path.join("000/Global"), b"global data");
 
-        let slots = profile_slots(&p, &crate::savefile::Ids::default());
-        assert_eq!(slots.len(), 1);
-        assert_eq!(slots[0].name, "Auto");
+        let listed = profile_slots(&p, &crate::savefile::Ids::default());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Auto");
         let check = check_profile(&p);
         assert_eq!((check.slots, check.readable), (1, 1));
         assert!(check.ok());
@@ -1086,6 +1086,9 @@ mod tests {
         assert_eq!(std::fs::read(account_dir(&save).join("000/Auto")).unwrap(), valid_slot(b"payload"));
         assert_eq!(std::fs::read(account_dir(&save).join("000/Global")).unwrap(), b"global data");
         assert!(loaded.backup.is_some());
+        let current = slots(&save);
+        assert_eq!(current.len(), 1, "the marker and Global are data, not slots in the current save either");
+        assert_eq!(current[0].0.file_name().and_then(|n| n.to_str()), Some("Auto"));
         let _ = std::fs::remove_dir_all(root);
     }
 
