@@ -252,6 +252,9 @@ impl App {
         };
         // Command line: `--page <name>` opens a page, `--boot-test` runs the
         // boot test as soon as the game data is detected.
+        // A `fefw.exe` rebuilt outside the launcher leaves the old `built_by` stamp behind, which reads as a stale folder and
+        // puts the different-version notice back on the Overview. Refresh it before any page reads it.
+        crate::engine::refresh_build_stamp();
         let args: Vec<String> = std::env::args().collect();
         for (i, a) in args.iter().enumerate() {
             match a.as_str() {

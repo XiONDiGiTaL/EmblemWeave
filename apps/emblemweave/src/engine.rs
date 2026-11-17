@@ -1525,6 +1525,37 @@ pub fn built_by() -> Option<String> {
     ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned()
 }
 
+/// Refresh the `[engine] built_by` stamp when the engine binary is newer than the ini that names it. A `fefw.exe` rebuilt
+/// outside the launcher (CMake straight from the engine folder, or a script) left the old stamp behind, and the Overview then
+/// called a current folder stale and told the player to rebuild — the different-version notice that reappeared in the
+/// screenshots after every rebuild. Only that one line is rewritten, and the rewrite also moves the ini's timestamp forward so
+/// the comparison settles; every other key is left exactly as it was.
+///
+/// Returns the old and new stamp when it changed the file.
+pub fn refresh_build_stamp() -> Option<(String, String)> {
+    let ini = run_dir()?.join("fefw.ini");
+    let exe = root()?.join("game-build").join("fefw").join("build").join("release").join("fefw.exe");
+    let ini_at = std::fs::metadata(&ini).ok()?.modified().ok()?;
+    let exe_at = std::fs::metadata(&exe).ok()?.modified().ok()?;
+    if exe_at <= ini_at {
+        return None;
+    }
+    let old = built_by()?;
+    let now = env!("CARGO_PKG_VERSION");
+    let text = std::fs::read_to_string(&ini).ok()?;
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("built_by") {
+            out.push_str(&format!("built_by = {now}"));
+        } else {
+            out.push_str(line);
+        }
+        out.push_str("\r\n");
+    }
+    std::fs::write(&ini, out).ok()?;
+    Some((old, now.to_string()))
+}
+
 /// A game folder the launcher can play but that was built by another release.
 /// The Overview offers one press that rebuilds it and writes the packed-file
 /// overlay in the same run, so an update does not leave a mixed folder behind
