@@ -138,6 +138,14 @@ namespace gpu {
 namespace {
 
 constexpr const char* kTag = "nvn.tex";
+// [gfx] float16_scene = auto | on | off: R11G11B10F render targets kept as RGBA16F (texture creation). auto: while the HDR scene is on.
+bool float16_scene_on() {
+    static const int mode = [] {
+        const std::string v = nxrt::config_get_str("gfx", "float16_scene", "auto");
+        return (v == "on" || v == "true" || v == "1") ? 1 : (v == "off" || v == "false" || v == "0") ? 0 : 2;
+    }();
+    return mode == 1 || (mode == 2 && extras::hdr_scene_active());
+}
 std::atomic<uint64_t> g_live_images{0};
 nxrt::GaugeCounter g_gauge_textures_live("nvn.textures_live");               // TexGpu objects alive (g_live_set)
 nxrt::GaugeCounter g_gauge_texture_snapshots("nvn.texture_snapshots");       // debug snapshots kept (g_snaps; the list never shrinks)
@@ -800,6 +808,22 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
             chosen = hf;
             g->promoted = true;
         }
+    }
+
+    // [gfx] float16_scene (auto: with the HDR scene): an R11G11B10F render target (the GPU's B10G11R11: 6-bit mantissas for red and green,
+    // 5 for blue) is kept as RGBA16F (10-bit mantissas). Fortune's Weave renders its whole scene, DLSS input and output, and the tone map's
+    // output in R11G11B10F; the console's 8-bit SDR output hides the steps, the HDR output's wider range shows them as banding in the sky
+    // (blue first). Render targets only (compressible or display flags, as the HDR promotion): their bytes in memory are never the image's
+    // (the promotion's rule: they start cleared), and a view of the NVN format reads the image's own (promoted_view_format, the fallback rule).
+    if (g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && (t->b.flags & 0x9) && float16_scene_on() &&
+        device().image_supported(make_desc(s, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                            base_flags(s, VK_FORMAT_R16G16B16A16_SFLOAT)))) {
+        static std::atomic<int> said{0};
+        if (said.fetch_add(1) < 12)
+            NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x, %u levels) kept as float16 ([gfx] float16_scene)", t->id, s.base.width,
+                    s.base.height, static_cast<unsigned>(t->b.flags), s.levels);
+        chosen = VK_FORMAT_R16G16B16A16_SFLOAT;
+        g->promoted = true;
     }
 
     g->format = chosen;
@@ -2584,9 +2608,9 @@ VkFormat tex_vk_format(Texture* t) {
     return g ? g->format : VK_FORMAT_UNDEFINED;
 }
 
-bool tex_hdr_promoted(Texture* t) {
+bool tex_hdr_promoted(Texture* t) {   // the 8-bit window-kind targets only, not [gfx] float16_scene's R11G11B10F ones
     TexGpu* g = tex_or_null(t);
-    return g && g->promoted;
+    return g && g->promoted && g->fmt && g->fmt->srgb;
 }
 
 VkImageAspectFlags tex_aspect(Texture* t) {
