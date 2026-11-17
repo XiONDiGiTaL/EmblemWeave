@@ -33,6 +33,56 @@ enum Action {
     InstallTools,
 }
 
+/// A built engine this copy found in an older EmblemWeave folder, offered before the checklist asks for a build. The build is
+/// the expensive part of an install and a new release zip does not carry it, so reusing an older folder's is the difference
+/// between updating and recompiling the game from scratch.
+fn reuse_offer(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
+    let Some(found) = app.reuse.clone() else { return };
+    let built = crate::pages::saves::ago(found.built);
+    let when = if built.is_empty() { String::new() } else { format!(", built {built}") };
+    let mut use_it = false;
+    let mut dismiss = false;
+    widgets::section(ui, p, "A build is already on this PC", |ui| {
+        ui.label(
+            RichText::new(format!(
+                "{} already has the game built{when}. Use it instead of compiling the engine again here? Your saves, settings \
+                 and game data are not moved.",
+                found.install.display()
+            ))
+            .size(13.0)
+            .color(p.ink),
+        );
+        ui.add_space(theme::SPACE_XS);
+        ui.horizontal(|ui| {
+            if widgets::primary_button(ui, p, "Use this build", true).clicked() {
+                use_it = true;
+            }
+            if widgets::button(ui, p, "Not now", true)
+                .on_hover_text("Game Setup > Engine folder can still point at it later")
+                .clicked()
+            {
+                dismiss = true;
+            }
+        });
+    });
+    ui.add_space(theme::SPACE_M);
+    if use_it {
+        match crate::engine::remember_root(&found.root) {
+            Ok(root) => {
+                app.reuse = None;
+                app.notify(format!("Using the build in {}", root.display()), Tone::Ok);
+            }
+            Err(e) => app.notify(e, Tone::Bad),
+        }
+    } else if dismiss {
+        app.reuse = None;
+        let root = found.root.display().to_string();
+        if !app.config.reuse_dismissed.contains(&root) {
+            app.config.reuse_dismissed.push(root);
+        }
+    }
+}
+
 struct SetupStage {
     name: &'static str,
     detail: String,
@@ -45,6 +95,7 @@ struct SetupStage {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     ui.add_space(theme::SPACE_M - 2.0);
+    reuse_offer(app, ui, &p);
 
     let stages = setup_stages(app);
     let total = stages.iter().filter(|s| s.counts).count();

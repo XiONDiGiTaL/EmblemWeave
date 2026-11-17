@@ -137,7 +137,7 @@ fn megabytes(bytes: u64) -> String {
     }
 }
 
-fn ago(t: Option<std::time::SystemTime>) -> String {
+pub(crate) fn ago(t: Option<std::time::SystemTime>) -> String {
     let Some(secs) = t.and_then(|t| std::time::SystemTime::now().duration_since(t).ok()).map(|d| d.as_secs()) else {
         return String::new();
     };

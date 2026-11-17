@@ -329,6 +329,9 @@ pub struct Config {
     pub profile_portraits: BTreeMap<String, String>,
     /// First-run guided setup progress.
     pub onboarding: Onboarding,
+    /// Built engine checkouts (as `engine.txt` records them) whose reuse offer was declined. The offer for one folder does not
+    /// hide an offer for another, and a declined one stays declined across restarts.
+    pub reuse_dismissed: Vec<String>,
 }
 
 impl Config {

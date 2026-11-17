@@ -155,6 +155,8 @@ pub struct App {
     pub discord: discord::Presence,
     pub ingame: ingame::Ingame,
     pub log_ui: pages::log::Ui,
+    /// A built engine found in an older copy of this launcher, offered on Overview until it is used or declined.
+    pub reuse: Option<crate::engine::Existing>,
     /// `--tour`: walk through the features by itself, for recordings.
     tour: Option<Instant>,
     tour_step: usize,
@@ -210,6 +212,10 @@ impl App {
         std::thread::spawn(|| {
             let _ = crate::updater::clean_cache();
         });
+        // A fresh copy has no build of its own. Find one already on the PC — an older copy beside this one, or a checkout an
+        // earlier copy's `engine.txt` names — and offer it before the player is asked to compile the engine again.
+        let reuse = crate::engine::existing_build()
+            .filter(|e| !config.reuse_dismissed.contains(&e.root.display().to_string()));
         let mut app = App {
             applied: config.theme,
             config,
@@ -244,6 +250,7 @@ impl App {
             discord: Default::default(),
             ingame: Default::default(),
             log_ui: Default::default(),
+            reuse,
             tour: None,
             tour_step: 0,
             show_activity: false,

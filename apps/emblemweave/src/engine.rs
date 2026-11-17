@@ -91,6 +91,95 @@ pub fn remember_root(picked: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// A built engine found elsewhere on this PC, offered when this copy has none of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Existing {
+    /// The checkout, `…/engine/fefw-recomp`.
+    pub root: PathBuf,
+    /// The EmblemWeave folder it belongs to, for the offer's text.
+    pub install: PathBuf,
+    /// When the built game was written, for the offer's text.
+    pub built: Option<std::time::SystemTime>,
+}
+
+/// The built engine this copy could reuse instead of compiling one.
+///
+/// A new release is mostly a new launcher, so a copy that has no build of its own looks for one before asking for a rebuild:
+/// `engine.txt` in this copy's settings, in the profile settings folder, and in the `data` folder of every older copy beside
+/// it (a portable install writes it there), plus an `engine/fefw-recomp` under any sibling EmblemWeave folder. Nothing is
+/// changed until the player accepts the offer on the Overview page.
+pub fn existing_build() -> Option<Existing> {
+    let here = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let mut settings: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = Config::dir() {
+        settings.push(dir);
+    }
+    if let Some(dir) = crate::platform::data_root_from(&|k| std::env::var(k).ok()) {
+        settings.push(dir);
+    }
+    // A sibling's remembered engine is in its own data folder, which is where a portable copy keeps it.
+    if let Some(parent) = here.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() && p != here {
+                    settings.push(p.join("data"));
+                }
+            }
+        }
+    }
+    find_existing(&here, &settings, root().as_deref())
+}
+
+/// The detection behind [`existing_build`], with the folders passed in so it can be tested without touching a real install.
+/// `current` is the checkout this copy would use; when it already holds a built game there is nothing to offer.
+pub(crate) fn find_existing(here: &Path, settings: &[PathBuf], current: Option<&Path>) -> Option<Existing> {
+    if current.is_some_and(|c| game_exe(c).is_file()) {
+        return None;
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in settings {
+        let remembered = std::fs::read_to_string(dir.join("engine.txt")).unwrap_or_default();
+        let remembered = remembered.trim();
+        if !remembered.is_empty() {
+            roots.push(PathBuf::from(remembered));
+        }
+    }
+    if let Some(parent) = here.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() && p != here {
+                    roots.push(p.join("engine").join("fefw-recomp"));
+                }
+            }
+        }
+    }
+    let mut best: Option<Existing> = None;
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if current.is_some_and(|c| c == root) {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(game_exe(&root)) else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        if seen.contains(&canonical) {
+            continue;
+        }
+        seen.push(canonical);
+        let built = meta.modified().ok();
+        let newer = best.as_ref().is_none_or(|b| b.built.is_none_or(|t| built.is_some_and(|at| at > t)));
+        if newer {
+            let install = root.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| root.clone());
+            best = Some(Existing { root, install, built });
+        }
+    }
+    best
+}
+
 /// The built game, if it exists.
 pub fn game_exe(root: &Path) -> PathBuf {
     root.join("game-build").join("fefw").join("build").join("release").join("fefw.exe")
@@ -3466,6 +3555,63 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_copy_beside_this_one_is_offered_when_nothing_is_built_here() {
+        let dir = std::env::temp_dir().join(format!("ew-reuse-{}", std::process::id()));
+        let here = dir.join("EmblemWeave-v0.1.40");
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(dir.join("unrelated")).unwrap();
+        let old = dir.join("EmblemWeave-v0.1.39");
+        let exe = game_exe(&old.join("engine").join("fefw-recomp"));
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "built").unwrap();
+
+        let found = find_existing(&here, &[], None).expect("the sibling build is offered");
+        assert_eq!(found.root, old.join("engine").join("fefw-recomp"));
+        assert_eq!(found.install, old);
+
+        // A copy that already has its own build is not offered another one.
+        let mine = here.join("engine").join("fefw-recomp");
+        let mine_exe = game_exe(&mine);
+        std::fs::create_dir_all(mine_exe.parent().unwrap()).unwrap();
+        std::fs::write(&mine_exe, "mine").unwrap();
+        assert!(find_existing(&here, &[], Some(&mine)).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_remembered_engine_in_another_settings_folder_is_offered() {
+        let dir = std::env::temp_dir().join(format!("ew-reuse-memo-{}", std::process::id()));
+        let here = dir.join("fresh");
+        std::fs::create_dir_all(&here).unwrap();
+        // The old copy lives on another drive: only its engine.txt names the checkout.
+        let elsewhere = dir.join("drive");
+        let root = elsewhere.join("engine").join("fefw-recomp");
+        let exe = game_exe(&root);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "built").unwrap();
+        let settings = dir.join("old-data");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::write(settings.join("engine.txt"), root.display().to_string()).unwrap();
+
+        let found = find_existing(&here, &[settings], None).expect("the remembered build is offered");
+        assert_eq!(found.root, root);
+
+        // An engine.txt pointing at this copy's own unbuilt checkout is not an offer. A copy with no siblings is used here, so
+        // the built engine above cannot be found instead.
+        let lone = dir.join("lone").join("fresh");
+        std::fs::create_dir_all(&lone).unwrap();
+        let own = lone.join("engine").join("fefw-recomp");
+        std::fs::create_dir_all(own.join("game-build")).unwrap();
+        let own_settings = dir.join("lone").join("data");
+        std::fs::create_dir_all(&own_settings).unwrap();
+        std::fs::write(own_settings.join("engine.txt"), own.display().to_string()).unwrap();
+        assert!(find_existing(&lone, &[own_settings], Some(&own)).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reshade_apps_matches_the_build_path_without_case_or_slashes() {

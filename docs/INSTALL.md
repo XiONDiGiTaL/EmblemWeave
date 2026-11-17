@@ -33,6 +33,10 @@ really just a new launcher. So there is no need to delete the old folder and sta
   folder**: press **Use another engine folder…** and choose the old copy's `engine\fefw-recomp` (or the old copy itself). The
   launcher remembers it and plays the existing build. This is the one to use when the old build lives on another drive, or when
   the old folder is kept as a backup.
+- **On first run it looks for you.** A copy with no build of its own checks `engine.txt` in its settings, in the profile
+  settings folder and in the `data` folder of any EmblemWeave copy beside it, and looks for a built engine in those siblings.
+  When it finds one, the Overview page opens with **A build is already on this PC** and a **Use this build** button; **Not now**
+  declines that one until you say otherwise, and nothing is compiled before you answer.
 
 Saves are not touched by any of this: in a portable install they are in `data\save`, and in a profile install in
 `%APPDATA%\EmblemWeave\save` (Windows) or `$XDG_CONFIG_HOME/EmblemWeave/save` (Linux). **About > Storage** says which one
