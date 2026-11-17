@@ -212,38 +212,56 @@ pub fn resolve_source(source: &Path, title_id: u64) -> PathBuf {
     if source.join("000").is_dir() {
         return source.to_path_buf();
     }
-    // The title folder, at the top of a picked user folder or inside a NAND save tree.
-    if let Some(dir) = newest_dir_named(source, &title, 6) {
+    // The title folder, at the documented levels only: directly in a picked user folder, one level below it, or under a NAND
+    // save tree (`nand/user/save/<id>/[<profile>/]<title>`). A picked folder can be a whole drive; walking it depth-first for
+    // the name took as long as the drive had folders, so the search looks at these levels and nowhere else.
+    if let Some(dir) = child_named(source, &title).or_else(|| nested_named(source, &title)).or_else(|| nand_named(source, &title)) {
         return dir;
     }
     source.to_path_buf()
 }
 
-/// The newest folder called `name` below `root`, up to `depth` levels down. A console keeps the title's save under a user id
-/// and a NAND root adds `nand/user/save/<id>/`, so the title folder can be several levels below whatever was picked.
-fn newest_dir_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, d)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let named = p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name));
-            if named && summary(&p).0 > 0 {
-                let (_, at) = summary(&p);
-                let at = at.unwrap_or(std::time::UNIX_EPOCH);
-                if best.as_ref().is_none_or(|(t, _)| at > *t) {
-                    best = Some((at, p.clone()));
-                }
-            } else if d + 1 < depth {
-                stack.push((p, d + 1));
+fn has_name(p: &Path, name: &str) -> bool {
+    p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
+}
+
+/// A child folder of `dir` called `name` that holds files.
+fn child_named(dir: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir() && has_name(p, name) && summary(p).0 > 0)
+}
+
+/// A folder called `name` one level below `root`, which is where a console keeps the title folder under a profile id.
+fn nested_named(root: &Path, name: &str) -> Option<PathBuf> {
+    for e in std::fs::read_dir(root).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(found) = child_named(&p, name) {
+                return Some(found);
             }
         }
     }
-    best.map(|(_, p)| p)
+    None
+}
+
+/// The title folder in a NAND save tree, `nand/user/save/<save id>/[<profile>/]<title>`, from a picked emulator root, the
+/// `save` folder, or the `nand` folder.
+fn nand_named(root: &Path, name: &str) -> Option<PathBuf> {
+    for save in [root.join("nand").join("user").join("save"), root.to_path_buf()] {
+        let Ok(ids) = std::fs::read_dir(&save) else { continue };
+        for id in ids.flatten() {
+            let p = id.path();
+            if p.is_dir() {
+                if let Some(found) = child_named(&p, name).or_else(|| nested_named(&p, name)) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Copy `source` into the game's account save, moving any existing save to
@@ -1061,6 +1079,16 @@ mod tests {
         let r = import(&nand, &save, FALLBACK_TITLE_ID, "3").unwrap();
         assert!(r.readable, "the NAND tree was walked to the title folder");
         assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "c");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_title_search_stops_at_the_documented_levels() {
+        // The title folder four levels down is not where a console or a NAND tree puts it, and a picked drive must not be walked
+        // to find it: the walk is over, the folder is used as picked.
+        let root = temp("levels");
+        write(&root.join("a/b/c/04007EF01F8AE000/000/Auto"), "x");
+        assert_eq!(resolve_source(&root, FALLBACK_TITLE_ID), root);
         let _ = std::fs::remove_dir_all(root);
     }
 

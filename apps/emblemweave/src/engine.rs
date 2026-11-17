@@ -78,12 +78,18 @@ pub fn root() -> Option<PathBuf> {
 /// The build is the expensive part of an install and the one thing a new release zip cannot carry, so keeping one engine folder
 /// anywhere on disk and pointing a fresh launcher at it is what spares a full rebuild when updating (issue #56).
 pub fn remember_root(picked: &Path) -> Result<PathBuf, String> {
+    let file = remembered().ok_or("the settings folder is unavailable")?;
+    remember_in(&file, picked)
+}
+
+/// The write behind [`remember_root`], with the file named so it can be tested: creates its folder, writes the checkout and
+/// returns it. A folder that holds no engine is refused before anything is written.
+pub(crate) fn remember_in(file: &Path, picked: &Path) -> Result<PathBuf, String> {
     let candidates = [picked.to_path_buf(), picked.join("engine").join("fefw-recomp")];
     let root = candidates
         .into_iter()
         .find(|c| c.join("game-build").is_dir())
         .ok_or_else(|| format!("{} does not hold an engine (expected engine\\fefw-recomp with game-build)", picked.display()))?;
-    let file = remembered().ok_or("the settings folder is unavailable")?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
@@ -3555,6 +3561,28 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choosing_an_engine_folder_is_remembered_where_lookups_read_it() {
+        let dir = std::env::temp_dir().join(format!("ew-engine-pick-{}", std::process::id()));
+        let install = dir.join("EmblemWeave-old");
+        let checkout = install.join("engine").join("fefw-recomp");
+        std::fs::create_dir_all(checkout.join("game-build")).unwrap();
+        let file = dir.join("data").join("engine.txt");
+
+        // The whole older copy is accepted and the checkout inside it is what gets remembered.
+        assert_eq!(remember_in(&file, &install).unwrap(), checkout);
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), checkout.display().to_string());
+        // The checkout itself works too, as the picker's own help text says.
+        assert_eq!(remember_in(&file, &checkout).unwrap(), checkout);
+
+        // A folder without an engine is refused and leaves the remembered one in place.
+        std::fs::create_dir_all(dir.join("unrelated")).unwrap();
+        assert!(remember_in(&file, &dir.join("unrelated")).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), checkout.display().to_string());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_older_copy_beside_this_one_is_offered_when_nothing_is_built_here() {

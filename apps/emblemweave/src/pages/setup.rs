@@ -401,3 +401,24 @@ pub(crate) fn import_message(r: Result<crate::saves::Imported, String>) -> (Stri
         Err(e) => (format!("Import failed: {e}"), Tone::Bad),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nested_import_warns_instead_of_reporting_success() {
+        // Files at the top of the picked folder land outside `<account>/000`, the only folder the game opens. The message has
+        // to say that: "Imported 1 save files" with an empty game is what sent the reporter looking for a bug.
+        let root = std::env::temp_dir().join(format!("ew-import-msg-{}", std::process::id()));
+        let (picked, save) = (root.join("picked"), root.join("save"));
+        std::fs::create_dir_all(&picked).unwrap();
+        std::fs::write(picked.join("Auto"), "x").unwrap();
+        let result = crate::saves::import(&picked, &save, crate::saves::FALLBACK_TITLE_ID, "1");
+        let (text, tone) = import_message(result);
+        println!("import message: {text}");
+        assert_eq!(tone, Tone::Bad, "{text}");
+        assert!(text.contains("the game reads only <save>/000"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

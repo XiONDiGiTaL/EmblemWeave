@@ -1038,16 +1038,21 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
+    // The same message the page shows: a console import that lands where the game will not read it has to say so rather than
+    // print a success line.
     match saves::import(std::path::Path::new(source), &save_dir, saves::FALLBACK_TITLE_ID, &stamp) {
         Ok(i) => {
-            println!("imported {} files into {}", i.files, saves::account_dir(&save_dir).display());
-            if let Some(b) = i.backup {
-                println!("the previous save is in {}", b.display());
+            let (text, tone) = crate::pages::setup::import_message(Ok(i));
+            println!("{text}");
+            if tone == crate::widgets::Tone::Bad {
+                std::process::ExitCode::FAILURE
+            } else {
+                std::process::ExitCode::SUCCESS
             }
-            std::process::ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("import failed: {e}");
+            let (text, _) = crate::pages::setup::import_message(Err(e));
+            eprintln!("{text}");
             std::process::ExitCode::FAILURE
         }
     }
