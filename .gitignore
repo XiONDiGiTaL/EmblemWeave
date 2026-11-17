@@ -22,5 +22,10 @@
 # Launch videos made with /brag (they contain game footage: keep them local)
 brag-output*/
 
-# Local captures and the scripts that take them: they hold the desktop and game footage, so they stay on the machine.
-shots/
+# Local captures: they hold the desktop and game footage, so they stay on the machine. The scripts that take them
+# (shots/*.ps1) are tracked, so the docs screenshots can be regenerated.
+shots/*.png
+shots/*.jpg
+shots/**/*.png
+shots/**/*.jpg
+shots/*.b64
