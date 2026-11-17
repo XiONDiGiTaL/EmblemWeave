@@ -712,25 +712,89 @@ pub fn backup_slot(save_dir: &Path, profile: &Profile, slot: &Path, stamp: &str)
     Ok(to)
 }
 
-/// The untouched original kept by the slot editor, when there is one.
+/// The untouched original kept by the slot editor, when there is one. Older folders keep it as `<slot>.orig`; the numbered
+/// scheme below writes `<slot>.bak` instead and still reads the old name.
 pub fn original_slot_path(slot: &Path) -> PathBuf {
     let mut o = slot.as_os_str().to_owned();
     o.push(".orig");
     PathBuf::from(o)
 }
 
-/// Put a slot's `.orig` back, first keeping the current file as `.before-restore`.
-pub fn restore_original_slot(slot: &Path) -> Result<PathBuf, String> {
-    let original = original_slot_path(slot);
-    if !original.is_file() {
-        return Err("no original backup exists for this slot".into());
+/// The names a slot's backups use: `<slot>.bak` for the untouched original, then `<slot>.bak1`, `.bak2`, … for the copies
+/// each save replaced, the highest number the newest.
+fn slot_backup_names(slot: &Path) -> Option<(std::path::PathBuf, String)> {
+    let name = slot.file_name()?.to_string_lossy().into_owned();
+    let dir = slot.parent().unwrap_or(Path::new(".")).to_path_buf();
+    Some((dir, name))
+}
+
+/// Every backup beside a slot, oldest first: the original, then the numbered copies by ascending number. A folder that
+/// still has the older `<slot>.orig` is read as having that original. Nothing is renamed or removed to build the list.
+pub fn slot_backups(slot: &Path) -> Vec<PathBuf> {
+    let Some((dir, name)) = slot_backup_names(slot) else { return Vec::new() };
+    let mut original: Option<PathBuf> = None;
+    let mut numbered: Vec<(u32, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some(tail) = file.strip_prefix(&format!("{name}.bak")) else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if tail.is_empty() {
+            original = Some(path);
+        } else if let Ok(n) = tail.parse::<u32>() {
+            if n > 0 {
+                numbered.push((n, path));
+            }
+        }
     }
-    let current = slot.with_extension("before-restore");
-    if slot.is_file() {
-        std::fs::copy(slot, &current).map_err(|e| format!("keeping the current slot: {e}"))?;
+    if original.is_none() {
+        let legacy = dir.join(format!("{name}.orig"));
+        if legacy.is_file() {
+            original = Some(legacy);
+        }
     }
-    std::fs::copy(&original, slot).map_err(|e| format!("restoring {}: {e}", original.display()))?;
-    Ok(current)
+    numbered.sort_by_key(|(n, _)| *n);
+    let mut out: Vec<PathBuf> = original.into_iter().collect();
+    out.extend(numbered.into_iter().map(|(_, p)| p));
+    out
+}
+
+/// Keep the file a save is about to replace: the first save takes `<slot>.bak`, so the untouched original survives, and
+/// every save after that takes the next number. Nothing already on disk is renamed, overwritten or deleted.
+pub fn keep_slot_backup(slot: &Path) -> Result<PathBuf, String> {
+    let Some((dir, name)) = slot_backup_names(slot) else { return Err("that slot has no file name".into()) };
+    if !slot.is_file() {
+        return Err(format!("{} is not there to back up", slot.display()));
+    }
+    let original = dir.join(format!("{name}.bak"));
+    let legacy = dir.join(format!("{name}.orig"));
+    let to = if !original.exists() && !legacy.exists() {
+        original
+    } else {
+        let mut n = 1u32;
+        loop {
+            let candidate = dir.join(format!("{name}.bak{n}"));
+            if !candidate.exists() {
+                break candidate;
+            }
+            n += 1;
+        }
+    };
+    std::fs::copy(slot, &to).map_err(|e| format!("copying {} to {}: {e}", slot.display(), to.display()))?;
+    Ok(to)
+}
+
+/// Put the newest backup back. The file it replaces is kept as the next backup first, and the answer names both, so the
+/// page can say which file it restored from instead of just claiming success.
+pub fn restore_slot_backup(slot: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let Some(newest) = slot_backups(slot).pop() else {
+        return Err("this slot has no backup to restore".into());
+    };
+    let kept = keep_slot_backup(slot)?;
+    std::fs::copy(&newest, slot).map_err(|e| format!("restoring {}: {e}", newest.display()))?;
+    Ok((newest, kept))
 }
 
 /// Move a profile to the backups folder.
@@ -1198,9 +1262,40 @@ mod tests {
         let slot = root.join("Auto");
         write(&slot, "new");
         write(&original_slot_path(&slot), "old");
-        let replaced = restore_original_slot(&slot).unwrap();
+        let (from, replaced) = restore_slot_backup(&slot).unwrap();
+        assert!(from.to_string_lossy().ends_with("Auto.orig"), "an old folder restores its .orig: {from:?}");
         assert_eq!(std::fs::read_to_string(&slot).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(replaced).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // The scheme the save editor ships: the untouched original is `<slot>.bak`, each replaced copy `<slot>.bak1`, `.bak2`
+    // …, the highest number newest, and no save ever renames or deletes the ones before it.
+    #[test]
+    fn slot_backups_number_upwards_and_never_reuse_a_name() {
+        let root = temp("slot-numbered");
+        let slot = root.join("Chapter_0");
+        write(&slot, "original");
+        let first = keep_slot_backup(&slot).unwrap();
+        assert!(first.to_string_lossy().ends_with("Chapter_0.bak"), "first keep is the bare .bak: {first:?}");
+        write(&slot, "second");
+        let second = keep_slot_backup(&slot).unwrap();
+        assert!(second.to_string_lossy().ends_with("Chapter_0.bak1"), "then .bak1: {second:?}");
+        write(&slot, "third");
+        let third = keep_slot_backup(&slot).unwrap();
+        assert!(third.to_string_lossy().ends_with("Chapter_0.bak2"), "then .bak2: {third:?}");
+        let listed = slot_backups(&slot);
+        let names: Vec<String> = listed.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["Chapter_0.bak", "Chapter_0.bak1", "Chapter_0.bak2"]);
+        assert_eq!(std::fs::read_to_string(&listed[0]).unwrap(), "original", "the original is never overwritten");
+
+        // Restoring takes the newest, keeps the file it replaces as the next number, and says where it read from.
+        let (from, kept) = restore_slot_backup(&slot).unwrap();
+        assert!(from.to_string_lossy().ends_with("Chapter_0.bak2"), "newest first: {from:?}");
+        assert!(kept.to_string_lossy().ends_with("Chapter_0.bak3"), "the replaced copy takes the next number: {kept:?}");
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), "third");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "third");
+        assert_eq!(slot_backups(&slot).len(), 4, "nothing was dropped");
         let _ = std::fs::remove_dir_all(root);
     }
 }

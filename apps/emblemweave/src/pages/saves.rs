@@ -1347,7 +1347,7 @@ fn manage_dialog(app: &mut App, ctx: &egui::Context, save_dir: &Path, ids: &Ids,
                                 if widgets::button(ui, p, "Export", true).clicked() {
                                     export_slot = Some(slot.path.clone());
                                 }
-                                if saves::original_slot_path(&slot.path).is_file() && widgets::button(ui, p, "Restore", true).clicked() {
+                                if !saves::slot_backups(&slot.path).is_empty() && widgets::button(ui, p, "Restore", true).clicked() {
                                     restore_slot = Some(slot.path.clone());
                                 }
                                 if widgets::button(ui, p, "Backup", true).clicked() {
@@ -1424,10 +1424,11 @@ fn manage_dialog(app: &mut App, ctx: &egui::Context, save_dir: &Path, ids: &Ids,
         }
     }
     if let Some(path) = restore_slot {
-        match saves::restore_original_slot(&path) {
-            Ok(previous) => {
+        match saves::restore_slot_backup(&path) {
+            Ok((from, kept)) => {
                 m.slots = None;
-                m.notice = Some((format!("Restored the original; the replaced slot is {}", previous.display()), Tone::Ok));
+                let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+                m.notice = Some((format!("Restored {}; the copy it replaced is {}", name(&from), name(&kept)), Tone::Ok));
             }
             Err(e) => m.notice = Some((e, Tone::Bad)),
         }
