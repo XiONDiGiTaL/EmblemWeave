@@ -207,6 +207,17 @@ Clear them permanently for your user account (open a new terminal afterwards):
 
 Since 0.1.38 every build step the launcher starts removes both variables and sets `PYTHONNOUSERSITE=1` itself, so an up-to-date launcher does not need this. A manual `build_fefw.ps1` run, an older release, or another build wrapper can still inherit them. Do not uninstall the other Python; clearing the variables is enough.
 
+## Torch and brazier light breaks up in a dungeon (#29)
+
+The report is a lighting shader that glitches as the camera moves nearer or farther from a torch, not a crash. A still screenshot usually cannot show it, and the two logs attached to #29 now return 404, so the pass involved is not confirmed. Before changing settings, record a five-second clip that includes the distance where it starts, plus **Troubleshooter > Create report bundle**. Then isolate it in this order; none of these steps touches saves, profiles or the built game:
+
+1. **Rule out a stale shader or pipeline cache.** Close the game, delete `engine\fefw-recomp\work\shaders\spirv` and the engine's `pipeline_cache` file, and start it again. The caches are rebuilt; the first frames are slower.
+2. **Use the console shadow settings.** In `fefw.ini`, set `[fefw] shadow_size = 2048` and `quality = console`. A larger `shadow_size` is sharper but changes the depth precision, so test 2048 before 4096.
+3. **A/B the two lighting paths.** In `fefw.ini`, set `[nvn] int_fetch_retype = false` for one run (it defaults to `true`; with `false` some local lights can disappear entirely, which is itself useful to report). Then set `[nvn] robust_ubo = false` for one run (it defaults to `true`; the game's lighting compute shaders read past their uniform blocks). Change one key at a time, and put it back after the run.
+4. **Check whether HDR or an upscaler is involved.** Repeat with `[gfx] float16_scene = off`, and with the upscaler off. If the glitch only appears with one of them, say which.
+
+If the light is stable with the caches cleared and the console shadow settings, keep those settings; there is nothing else to download. If it still follows the camera at the same distance, attach the clip and the bundle to #29: that points at the clustered light grid or the shadow pass, and the log will show which shaders were built.
+
 ## Console windows during the recompilation pipeline
 
 The pipeline compiles the C it emits, one shard per process, using zig's clang (`python -m ziglang cc`), `zig`, or LLVM's
