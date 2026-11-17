@@ -331,8 +331,16 @@ pub fn is_metadata_file(name: &str) -> bool {
     name == EMPTY_PROFILE_MARKER || name.ends_with(".meta")
 }
 
+/// `Global` is the game's global data beside the slots, not a slot file: it has
+/// a different header, so validating it as a slot would reject every profile
+/// that contains one. It is still copied with the profile.
+fn is_global_save_file(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Global")
+}
+
 fn is_slot_candidate(path: &Path) -> bool {
-    path.extension().is_none() && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| !is_metadata_file(n))
+    path.extension().is_none()
+        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| !is_metadata_file(n) && !is_global_save_file(n))
 }
 
 fn kind_of(name: &str) -> SlotKind {
@@ -372,6 +380,7 @@ pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
     for path in file_paths(&p.path) {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         if is_metadata_file(&name)
+            || is_global_save_file(&name)
             || name.ends_with(".tmp")
             || name.ends_with(".orig")
             || name.ends_with(".before-restore")
@@ -1054,6 +1063,29 @@ mod tests {
         let meta = profile_meta(&p, &crate::savefile::Ids::default());
         assert_eq!(meta.valid_slots, 1);
         assert_eq!((meta.gold, meta.renown), (None, None));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn global_data_beside_the_slots_is_not_a_broken_slot() {
+        let root = temp("profile-global");
+        let save = root.join("save");
+        let p = create_empty_profile(&save, "Run A").unwrap();
+        write_bytes(&p.path.join("000/Auto"), &valid_slot(b"payload"));
+        write_bytes(&p.path.join("000/Global"), b"global data");
+
+        let slots = profile_slots(&p, &crate::savefile::Ids::default());
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].name, "Auto");
+        let check = check_profile(&p);
+        assert_eq!((check.slots, check.readable), (1, 1));
+        assert!(check.ok());
+
+        write(&account_dir(&save).join("000/Auto"), "old save");
+        let loaded = load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "7").unwrap();
+        assert_eq!(std::fs::read(account_dir(&save).join("000/Auto")).unwrap(), valid_slot(b"payload"));
+        assert_eq!(std::fs::read(account_dir(&save).join("000/Global")).unwrap(), b"global data");
+        assert!(loaded.backup.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
