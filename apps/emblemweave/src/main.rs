@@ -1042,16 +1042,16 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
     // print a success line.
     match saves::import(std::path::Path::new(source), &save_dir, saves::FALLBACK_TITLE_ID, &stamp) {
         Ok(i) => {
-            let (text, tone) = crate::pages::setup::import_message(Ok(i));
+            let (text, ok) = saves::import_message(Ok(i));
             println!("{text}");
-            if tone == crate::widgets::Tone::Bad {
-                std::process::ExitCode::FAILURE
-            } else {
+            if ok {
                 std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
             }
         }
         Err(e) => {
-            let (text, _) = crate::pages::setup::import_message(Err(e));
+            let (text, _) = saves::import_message(Err(e));
             eprintln!("{text}");
             std::process::ExitCode::FAILURE
         }

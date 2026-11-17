@@ -322,6 +322,32 @@ pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Res
     }
 }
 
+/// What to say about an import result, and whether it is good news.
+///
+/// The wording lives here rather than on a page so `--import-save` prints the same sentence the window shows without reaching
+/// into a UI module. `false` means the import needs the player's attention: the files landed, but somewhere the game does not
+/// read.
+pub fn import_message(r: Result<Imported, String>) -> (String, bool) {
+    match r {
+        Ok(i) => {
+            let from = i.from.as_ref().map(|p| format!(" from {}", p.display())).unwrap_or_default();
+            let mut text = format!("Imported {} save files{from}", i.files);
+            if let Some(b) = &i.backup {
+                text.push_str(&format!("; the previous save is in {}", b.display()));
+            }
+            if !i.readable {
+                // The old message said success either way, and the player found an empty game afterwards.
+                return (
+                    format!("{text} — but the game reads only <save>/000, which holds none of them; import the folder that contains 000"),
+                    false,
+                );
+            }
+            (text, true)
+        }
+        Err(e) => (format!("Import failed: {e}"), false),
+    }
+}
+
 /// Copy the game's account save into `dest/<title id>`, the layout an
 /// emulator's user folder expects. Returns the folder written.
 pub fn export(save_dir: &Path, dest: &Path, title_id: u64) -> Result<(PathBuf, usize), String> {
@@ -1438,6 +1464,22 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&slot).unwrap(), "third");
         assert_eq!(std::fs::read_to_string(&kept).unwrap(), "third");
         assert_eq!(slot_backups(&slot).len(), 4, "nothing was dropped");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_nested_import_warns_instead_of_reporting_success() {
+        // Files at the top of the picked folder land outside `<account>/000`, the only folder the game opens. The message has
+        // to say that: "Imported 1 save files" with an empty game is what sent the reporter looking for a bug.
+        let root = std::env::temp_dir().join(format!("ew-import-msg-{}", std::process::id()));
+        let (picked, save) = (root.join("picked"), root.join("save"));
+        std::fs::create_dir_all(&picked).unwrap();
+        std::fs::write(picked.join("Auto"), "x").unwrap();
+        let result = import(&picked, &save, FALLBACK_TITLE_ID, "1");
+        let (text, ok) = import_message(result);
+        println!("import message: {text}");
+        assert!(!ok, "{text}");
+        assert!(text.contains("the game reads only <save>/000"), "{text}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

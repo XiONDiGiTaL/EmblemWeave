@@ -319,7 +319,7 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
                 app.saves_ui.sources_at = now;
             }
             if !found.is_empty() && widgets::primary_button(ui, p, "Import newest", true).on_hover_text("Imports the most recently written emulator save above").clicked() {
-                message = Some(import_message(crate::saves::import(&found[0].path, &save_dir, title, &stamp())));
+                message = Some(import_notice(crate::saves::import(&found[0].path, &save_dir, title, &stamp())));
             }
         });
         if found.is_empty() {
@@ -350,7 +350,7 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
                     .unwrap_or_default();
                 ui.label(format!("{}: {} files, {}", label, f.files, when)).on_hover_text(f.path.display().to_string());
                 if widgets::button(ui, p, "Import", true).clicked() {
-                    message = Some(import_message(crate::saves::import(&f.path, &save_dir, title, &stamp())));
+                    message = Some(import_notice(crate::saves::import(&f.path, &save_dir, title, &stamp())));
                 }
             });
         }
@@ -358,7 +358,7 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
         ui.horizontal(|ui| {
             if widgets::button(ui, p, "Import from folder…", true).clicked() {
                 if let Some(dir) = rfd::FileDialog::new().set_title("Choose the game's save folder (the one named by its title id)").pick_folder() {
-                    message = Some(import_message(crate::saves::import(&dir, &save_dir, title, &stamp())));
+                    message = Some(import_notice(crate::saves::import(&dir, &save_dir, title, &stamp())));
                 }
             }
             if widgets::button(ui, p, "Export…", files > 0).clicked() {
@@ -381,44 +381,9 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
     }
 }
 
-pub(crate) fn import_message(r: Result<crate::saves::Imported, String>) -> (String, Tone) {
-    match r {
-        Ok(i) => {
-            let from = i.from.as_ref().map(|p| format!(" from {}", p.display())).unwrap_or_default();
-            let mut text = format!("Imported {} save files{from}", i.files);
-            if let Some(b) = &i.backup {
-                text.push_str(&format!("; the previous save is in {}", b.display()));
-            }
-            if !i.readable {
-                // The old message said success either way, and the player found an empty game afterwards.
-                return (
-                    format!("{text} — but the game reads only <save>/000, which holds none of them; import the folder that contains 000"),
-                    Tone::Bad,
-                );
-            }
-            (text, Tone::Ok)
-        }
-        Err(e) => (format!("Import failed: {e}"), Tone::Bad),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_nested_import_warns_instead_of_reporting_success() {
-        // Files at the top of the picked folder land outside `<account>/000`, the only folder the game opens. The message has
-        // to say that: "Imported 1 save files" with an empty game is what sent the reporter looking for a bug.
-        let root = std::env::temp_dir().join(format!("ew-import-msg-{}", std::process::id()));
-        let (picked, save) = (root.join("picked"), root.join("save"));
-        std::fs::create_dir_all(&picked).unwrap();
-        std::fs::write(picked.join("Auto"), "x").unwrap();
-        let result = crate::saves::import(&picked, &save, crate::saves::FALLBACK_TITLE_ID, "1");
-        let (text, tone) = import_message(result);
-        println!("import message: {text}");
-        assert_eq!(tone, Tone::Bad, "{text}");
-        assert!(text.contains("the game reads only <save>/000"), "{text}");
-        let _ = std::fs::remove_dir_all(root);
-    }
+/// The page's tone for an import result. The wording itself lives in [`crate::saves::import_message`], so the command line and
+/// the window say the same thing without the CLI importing a page module.
+fn import_notice(r: Result<crate::saves::Imported, String>) -> (String, Tone) {
+    let (text, ok) = crate::saves::import_message(r);
+    (text, if ok { Tone::Ok } else { Tone::Bad })
 }
