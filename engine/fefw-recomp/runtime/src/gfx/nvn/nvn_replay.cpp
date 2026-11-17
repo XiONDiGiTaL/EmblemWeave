@@ -406,8 +406,11 @@ struct RStats {
     uint64_t draws = 0, draws_desc = 0, draws_ubo = 0, draws_pipe = 0, sets = 0, set_hits = 0, set_writes = 0, res_tex = 0, res_img = 0, res_memo = 0;
     uint64_t binds = 0, binds_same = 0, layouts = 0, keys = 0, dispatches = 0;
     uint64_t miss_first = 0, miss_uboofs = 0, miss_ubo = 0, miss_tex = 0, miss_other = 0;   // set cache misses by what differs from the last set of that layout
+    uint64_t out_fast = 0, out_full_all = 0, out_full_gen = 0, out_full_unmemo = 0, out_prog = 0, out_prog_marked = 0;   // out_draw_bindings passes
 };
 RStats g_rs;
+int g_out_prog = -1;   // [nvn] out_prog_dirty, read once; [nvn] out_prog_ab flips it every stats window
+extern bool g_out_all;
 uint64_t g_rs_t = 0;   // TSC at the last phase mark
 // [nvn] rt_check = 1 (debug, default 0): every memo answer of the rt changes (resolve_memo, out_memo; pool_cache in nvn_objects.cpp, the
 // view and sampler caches in nvn_gpu_texture.cpp) is compared with the answer computed without it. A mismatch is logged (nvn.rtcheck,
@@ -478,6 +481,14 @@ void rs_report() {
             static_cast<double>(g_lean_push_full) * pf, static_cast<double>(g_lean_push_delta) * pf, static_cast<double>(g_lean_push_none) * pf,
             static_cast<double>(g_lean_push_writes) * pf);
     g_lean_push_full = g_lean_push_delta = g_lean_push_none = g_lean_push_writes = 0;
+    NXLOG_I("nvn.rstats", "out_prog_dirty %d: out passes/frame: fast %.0f, full %.0f (program bind or reset %.0f, generation %.0f, unmemoised %.0f) | program binds/frame %.0f, "
+            "slots marked by them %.0f",
+            g_out_prog, s.out_fast * pf, (s.out_full_all + s.out_full_gen + s.out_full_unmemo) * pf, s.out_full_all * pf, s.out_full_gen * pf,
+            s.out_full_unmemo * pf, s.out_prog * pf, s.out_prog_marked * pf);
+    {   // [nvn] out_prog_ab: the next window runs out_prog_dirty the other way; a full pass makes the switch safe
+        static const bool ab = nxrt::config_get_int("nvn", "out_prog_ab", 0) > 0;
+        if (ab && g_out_prog >= 0) { g_out_prog = !g_out_prog; g_out_all = true; }
+    }
     {   // [nvn] lean_ab: the next window runs the other way (replay_begin_submit keeps the setting otherwise)
         static const bool ab = nxrt::config_get_int("nvn", "lean_ab", 0) > 0;
         if (ab) g_lean = !g_lean;
@@ -1766,6 +1777,22 @@ bool out_memo_dirty_on() {
     static const bool on = nxrt::config_get_bool("nvn", "out_memo_dirty", true);
     return on;
 }
+// [nvn] out_memo_held (default on): the slots that ended unmemoised (their range shares a page with a held result) are listed, and the next
+// draw at the same generation checks those and the changed slots instead of every bound slot. A memoised slot was clear at this generation
+// and stays clear until it moves, which is what the dirty-only path already relies on. In the busy plaza (~3,000 draws) every draw took the
+// full walk: ~1,800 a frame after a program bind, the rest because a bound buffer overlapped a held result. Each fix alone moves the walks to
+// the other cause; with out_prog_dirty (below) 99.8 % take the short path, 0.3-0.4 ms of ~9.9 ms replay a frame (rt_check: 0 mismatches).
+bool out_prog_dirty_on();
+bool out_memo_held_on() {   // with out_prog_dirty: [nvn] out_prog_ab switches both
+    static const bool on = nxrt::config_get_bool("nvn", "out_memo_held", true);
+    return on && out_prog_dirty_on();
+}
+uint16_t g_out_held_list[kOutSlots];   // the unmemoised slots after the last check (valid while g_out_held_ok)
+int g_out_held_n = 0;
+bool g_out_held_ok = false;            // the list is complete: every unmemoised bound slot of the last check is in it
+inline void out_held_note(int idx, const OutSlot& m, uint64_t addr) {
+    if (addr && m.gen == ~0ull && g_out_held_n < kOutSlots) g_out_held_list[g_out_held_n++] = static_cast<uint16_t>(idx);
+}
 void out_slot_changed(int idx) {
     if (idx < 0 || idx >= kOutSlots || g_out_dirty[idx]) return;
     g_out_dirty[idx] = 1;
@@ -1822,7 +1849,10 @@ void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua) {
     }
     OutSlot& m = g_out_slot[idx];
     out_draw_read_slot(m, *b, copy_ok, why, gen);
-    if (b->addr && m.gen == ~0ull) g_out_unmemo = true;
+    if (b->addr && m.gen == ~0ull) {
+        g_out_unmemo = true;
+        out_held_note(idx, m, b->addr);
+    }
 }
 
 // The reads of a draw's bound buffers (out_before_op).
@@ -1830,11 +1860,27 @@ void out_draw_bindings() {
     if (out_memo_on()) {
         const uint64_t gen = out_gen();
         const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
-        if (out_memo_dirty_on() && !g_out_all && !g_out_unmemo && gen == g_out_last_gen) {
+        const bool held_path = out_memo_held_on() && g_out_held_ok;
+        if (rs_on()) {
+            if (out_memo_dirty_on() && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen) ++g_rs.out_fast;
+            else if (g_out_all) ++g_rs.out_full_all;
+            else if (gen != g_out_last_gen) ++g_rs.out_full_gen;
+            else ++g_rs.out_full_unmemo;
+        }
+        if (out_memo_dirty_on() && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen) {
+            // the slots unmemoised at the last check are checked again with the changed ones (out_memo_held); the list is rebuilt
+            uint16_t prev[kOutSlots];
+            const int pn = g_out_unmemo ? g_out_held_n : 0;
+            if (pn) std::memcpy(prev, g_out_held_list, static_cast<size_t>(pn) * sizeof prev[0]);
+            g_out_held_n = 0;
+            g_out_unmemo = false;
             for (int i = 0; i < g_out_dirty_n; ++i) out_check_slot(g_out_dirty_list[i], gen, ua);
+            for (int i = 0; i < pn; ++i) if (!g_out_dirty[prev[i]]) out_check_slot(prev[i], gen, ua);
             if (rt_check()) {     // [nvn] rt_check: a slot the fast path skipped must have nothing held in its range
+                uint8_t was_held[kOutSlots] = {};
+                for (int i = 0; i < pn; ++i) was_held[prev[i]] = 1;
                 for (int idx = 0; idx < kOutSlots; ++idx) {
-                    if (g_out_dirty[idx]) continue;
+                    if (g_out_dirty[idx] || was_held[idx]) continue;
                     const GState::Bind* b = idx < 16 ? &S.vtx[idx] : idx >= 16 + kCompute * 32 ? &S.xfb[idx - 16 - kCompute * 32]
                                           : !S.stage[(idx - 16) / 32] ? nullptr : (idx - 16) % 32 < 16 ? &S.ubo[(idx - 16) / 32][(idx - 16) % 32]
                                                                                                         : &S.ssbo[(idx - 16) / 32][(idx - 16) % 32 - 16];
@@ -1843,9 +1889,12 @@ void out_draw_bindings() {
             }
             out_dirty_clear();
             if (out_gen() != gen) g_out_all = true;     // a flush in it moved the generation
+            g_out_held_ok = true;
             return;
         }
         g_out_unmemo = false;
+        g_out_held_n = 0;
+        g_out_held_ok = false;
         if (out_masks_on()) {
             // [nvn] out_masks (default on): only the bound slots (S.*_mask), in the same order; an unbound slot is a no-op in the walk below.
             // The walk over every slot was ~11 % of the render thread at 2600 draws (most of ~84 slots a draw are unbound).
@@ -1856,6 +1905,7 @@ void out_draw_bindings() {
                 OutSlot& m = m0[k];
                 out_draw_read_slot(m, S.vtx[k], true, kOutDrawBuffer, gen);
                 g_out_unmemo |= m.gen == ~0ull;
+                out_held_note(static_cast<int>(k), m, S.vtx[k].addr);
             }
             for (int st = 0; st < kCompute; ++st) {
                 if (!S.stage[st]) continue;
@@ -1865,11 +1915,13 @@ void out_draw_bindings() {
                     const GState::Bind& b = S.ubo[st][k];
                     out_draw_read_slot(ms[k], b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen);
                     g_out_unmemo |= ms[k].gen == ~0ull;
+                    out_held_note(16 + st * 32 + static_cast<int>(k), ms[k], b.addr);
                 }
                 for (uint32_t mk = S.ssbo_mask[st]; mk; mk &= mk - 1) {
                     const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
                     out_draw_read_slot(ms[16 + k], S.ssbo[st][k], true, kOutStorageXfb, gen);
                     g_out_unmemo |= ms[16 + k].gen == ~0ull;
+                    out_held_note(16 + st * 32 + 16 + static_cast<int>(k), ms[16 + k], S.ssbo[st][k].addr);
                 }
             }
             OutSlot* mx = m0 + 16 + kCompute * 32;
@@ -1877,7 +1929,9 @@ void out_draw_bindings() {
                 const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
                 out_draw_read_slot(mx[k], S.xfb[k], false, kOutStorageXfb, gen);
                 g_out_unmemo |= mx[k].gen == ~0ull;
+                out_held_note(16 + kCompute * 32 + static_cast<int>(k), mx[k], S.xfb[k].addr);
             }
+            g_out_held_ok = true;            // the walk saw every bound slot
         } else {
             OutSlot* m = g_out_slot;
             for (const GState::Bind& b : S.vtx) { out_draw_read_slot(*m, b, true, kOutDrawBuffer, gen); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
@@ -4728,8 +4782,26 @@ void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size, bool ba
 }
 
 // ---- the interpreter ----------------------------------------------------------------------------------------------------------
+// [nvn] out_prog_dirty (default on): a program bind does not make the next draw check every slot. out_draw_bindings' answer for a slot
+// depends on its binding and out_gen() only, never on the program, so only the bound slots of a graphics stage that was inactive and
+// becomes active are marked (the fast path skipped them while it was inactive). A compute-only bind changes nothing for draws.
+bool out_prog_dirty_on() {
+    if (g_out_prog < 0) g_out_prog = nxrt::config_get_bool("nvn", "out_prog_dirty", true) ? 1 : 0;
+    return g_out_prog != 0;
+}
 void apply_bind_program(const P_BindProgram& p) {
-    g_out_all = true;     // out_draw_bindings: the active stages may change
+    if (rs_on()) ++g_rs.out_prog;
+    if (out_prog_dirty_on() && out_memo_dirty_on()) {
+        for (int st = 0; st < kCompute; ++st) {
+            if (!(p.stages & (1u << st)) || S.stage[st] || !p.program || !p.program->stage[st]) continue;
+            const int base = 16 + st * 32;
+            for (uint32_t mk = S.ubo_mask[st]; mk; mk &= mk - 1) out_slot_changed(base + std::countr_zero(mk));
+            for (uint32_t mk = S.ssbo_mask[st]; mk; mk &= mk - 1) out_slot_changed(base + 16 + std::countr_zero(mk));
+            if (rs_on()) g_rs.out_prog_marked += std::popcount(S.ubo_mask[st]) + std::popcount(S.ssbo_mask[st]);
+        }
+    } else {
+        g_out_all = true;     // out_draw_bindings: the active stages may change
+    }
     for (int st = 0; st < 6; ++st)
         if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
     if (g_trace && (p.stages & (1u << kCompute))) {
