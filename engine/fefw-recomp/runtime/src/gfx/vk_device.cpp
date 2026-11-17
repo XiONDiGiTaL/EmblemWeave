@@ -1024,16 +1024,18 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         q.intel_integrated = q.intel && props_.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
         q.budget_detail = quirk_key("budget_detail", q.intel);
         q.pressure_detail = quirk_key("pressure_detail", q.intel) && x_membudget;   // needs the OS's figures, not VMA's estimate
+        q.igpu_compat = quirk_key("igpu_compat", q.intel_integrated);                 // #5, #18
         g_quirks = q;
         VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
         vmaGetHeapBudgets(vma_, b);
         const double budget_gib = static_cast<double>(b[device_local_heap(vma_)].budget) / (1024.0 * 1024.0 * 1024.0);
-        if (q.intel || q.budget_detail || q.pressure_detail)
+        if (q.intel || q.budget_detail || q.pressure_detail || q.igpu_compat)
             NXLOG_I(kTag, "GPU quirks: %s%s; video memory budget %.2f GiB; budget_detail %d (texture_detail = auto goes by the budget), "
-                          "pressure_detail %d (textures made over 90%% of the budget leave out their largest level) ([gfx] budget_detail, "
-                          "pressure_detail = auto|1|0)",
+                          "pressure_detail %d (textures made over 90%% of the budget leave out their largest level), igpu_compat %d ([nvn] lean_draws "
+                          "and [gfx] residency default to off) "
+                          "([gfx] budget_detail, pressure_detail, igpu_compat = auto|1|0)",
                     q.intel ? "Intel " : "", q.intel ? (q.intel_integrated ? "integrated GPU" : "discrete GPU") : "not an Intel GPU (forced on)", budget_gib,
-                    q.budget_detail, q.pressure_detail);
+                    q.budget_detail, q.pressure_detail, q.igpu_compat);
     }
 
     VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};

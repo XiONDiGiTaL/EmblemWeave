@@ -737,7 +737,7 @@ void poll_pads(uint64_t now) {
             }
         }
         // The haptic backends drive the pad themselves; only the plain two-motor path goes through SDL here.
-        if ((rumble_changed || rumble_refresh) && haptic::legacy_rumble()) platform::gamepad_rumble(infos[i].id, lo, hi, 250);
+        if ((rumble_changed || rumble_refresh) && haptic::legacy_rumble(infos[i].id)) platform::gamepad_rumble(infos[i].id, lo, hi, 250);
     }
     if (rumble_changed || rumble_refresh) {
         st.rumble_lo = lo;

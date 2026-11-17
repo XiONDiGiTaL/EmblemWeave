@@ -84,14 +84,21 @@ Attributions & Third-Party Credits
     Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
     https://github.com/samaBR85/renhdrum-eden
 
-13. Frizti, zortos293, Dark (Fritchii v5.3 / Lichii / Dynamic FPS)
-    Authors of Fritchii v5.3 (commit 1a7a3c03c5), Lichii, and Dynamic FPS, providing
+13. Frizti, zortos293, Dark (Fritchii v5.5 / Lichii / Dynamic FPS)
+    Authors of Fritchii v5.5 (commit 4012e5271e), Lichii, and Dynamic FPS, providing
     the baseline Switch 2 emulator platform used for Brontide-oot.
     Licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later).
 
 14. NotRexed & Hookshot Contributors (Hookshot)
-    Authors of Hookshot (OoT Switch 2 Recompiler, commit fa43939, tag v2.0.6),
+    Authors of Hookshot (OoT Switch 2 Recompiler, tag v2.1.0, synced to commit fa734ed),
     providing the reference static recompilation testbed for integrations/recomp-c/
     (see integrations/recomp-c/reference/).
     Licensed under the GNU General Public License, version 3 (GPL-3.0).
     https://github.com/NotRexed/Hookshot
+
+15. iafx, LiveHaptics, and hckrman101 (Hookshot PR #1213)
+    Steam Controller (2026) grip HID report 0x86 / 0x88 protocol and hardware
+    measurements by iafx (RenHDrum#5, iafx/Lichii); PCM stream format discovery
+    by LiveHaptics (MIT); Bluetooth newest-sample fallback pacing idea from
+    Hookshot PR #1213 by hckrman101 (GPL-3.0).
+    Referenced only; no code copied.

@@ -61,7 +61,7 @@ Build (20 compile processes, ninja, clang-cl 23.1.4, `/O1`):
 | lift of all four modules (inside the build) | 31 s (main, 24 lifter processes) | | under 3 GB |
 | link check (`mpr_link_check.exe`, 130 MB) | 6.6 s | 4 s | 0.3 GB |
 
-A 5.5 MB / 88k-instruction unit compiles in 20 s with 0.46 GB, so the unit size (45k instructions) was chosen for balance, not for memory; the fixed cost of a unit (cxx.h plus the `funcs.h` of the module) is 2 s. No unit comes near the 180 s limit of `cmake/nx_cc_launcher.py`; the launcher is not enabled. `/O1` is as in S1's `NX_OPT`; nothing was tuned.
+A 5.5 MB / 88k-instruction unit compiles in 20 s with 0.46 GB, so the unit size (45k instructions) was chosen for balance, not for memory; the fixed cost of a unit (cxx.h plus the `funcs.h` of the module) is 2 s. No unit comes near the 180 s limit of `cmake/nx_cc_launcher.py`; the launcher is not enabled. `/O1` is as in S1's `NX_OPT`; nothing was tuned. (`NX_OPT` is `/O2` since PR #24; these measurements are from the `/O1` build. The player build, `fefw_build.py` with the bundled Zig, was already clang -O2.)
 
 ## Lifter changes the game forced (debug notes)
 

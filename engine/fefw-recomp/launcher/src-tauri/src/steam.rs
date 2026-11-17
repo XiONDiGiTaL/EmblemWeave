@@ -146,29 +146,61 @@ fn is_ours(e: &[(Vec<u8>, Node)], exe: &Path) -> bool {
     str_of(e, "Exe").trim().trim_matches('"') == exe.to_string_lossy()
 }
 
-const DIR_VAR: &str = "NXRT_LAUNCHER_DIR=\"";
+/// The variables the launcher puts in front of %command% in a shortcut's launch options: NXRT_LAUNCHER_DIR, and LSFG-VK's (lsfg.rs)
+/// with the game's own frame generation turned off while it is on. Any of them the shortcut has is replaced; the rest is the player's.
+const OUR_VARS: [&str; 7] = [
+    "NXRT_LAUNCHER_DIR",
+    "LSFGVK_ENV",
+    "LSFGVK_DLL_PATH",
+    "LSFGVK_MULTIPLIER",
+    "LSFGVK_FLOW_SCALE",
+    "LSFGVK_PERFORMANCE_MODE",
+    "NXRT_DLSS_FRAME_GEN",
+];
 
-/// A shortcut's launch options with this launcher's NXRT_LAUNCHER_DIR="..." (`dir`, or none) in place of the one it had; whatever
-/// else the player put there is kept.
-pub fn launch_options(existing: &str, dir: Option<&str>) -> String {
+/// `existing` without any `NAME=value` / `NAME="va lue"` word of OUR_VARS.
+fn strip_ours(existing: &str) -> String {
     let mut rest = existing.to_string();
-    if let Some(i) = rest.find(DIR_VAR) {
-        let end = rest[i + DIR_VAR.len()..].find('"').map_or(rest.len(), |j| i + DIR_VAR.len() + j + 1);
-        rest.replace_range(i..end, "");
+    for name in OUR_VARS {
+        let pat = format!("{name}=");
+        let mut from = 0;
+        while let Some(off) = rest[from..].find(&pat) {
+            let i = from + off;
+            // only at the start of a word (not the tail of another variable's name)
+            if i > 0 && !rest[..i].ends_with(char::is_whitespace) {
+                from = i + pat.len();
+                continue;
+            }
+            let v = i + pat.len();
+            let end = if rest[v..].starts_with('"') {
+                rest[v + 1..].find('"').map_or(rest.len(), |j| v + 1 + j + 1)
+            } else {
+                rest[v..].find(char::is_whitespace).map_or(rest.len(), |j| v + j)
+            };
+            rest.replace_range(i..end, "");
+            from = i;
+        }
     }
-    let rest = rest.split_whitespace().collect::<Vec<_>>().join(" ");
-    match dir {
-        None if rest == "%command%" => String::new(),
-        None => rest,
-        Some(d) if rest.is_empty() => format!("{DIR_VAR}{d}\" %command%"),
-        Some(d) if rest.contains("%command%") => format!("{DIR_VAR}{d}\" {rest}"),
-        Some(d) => format!("{DIR_VAR}{d}\" %command% {rest}"),
+    rest.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A shortcut's launch options with `vars` (each written NAME="value") in place of the launcher's variables it had; whatever else
+/// the player put there is kept.
+pub fn launch_options(existing: &str, vars: &[(String, String)]) -> String {
+    let rest = strip_ours(existing);
+    let ours = vars.iter().map(|(k, v)| format!("{k}=\"{v}\"")).collect::<Vec<_>>().join(" ");
+    match (ours.is_empty(), rest.as_str()) {
+        (true, "%command%") => String::new(),
+        (true, _) => rest,
+        (false, "") => format!("{ours} %command%"),
+        (false, r) if r.contains("%command%") => format!("{ours} {r}"),
+        (false, r) => format!("{ours} %command% {r}"),
     }
 }
 
-/// Adds or updates the fefw.exe shortcut in a parsed shortcuts.vdf. Returns whether it was there already. `launcher_dir`: the
-/// NXRT_LAUNCHER_DIR the game needs (None when it finds the upscalers next to itself).
-pub fn upsert(top: &mut Vec<(Vec<u8>, Node)>, exe: &Path, start_dir: &Path, launcher_dir: Option<&str>) -> Result<bool, String> {
+/// Adds or updates the fefw.exe shortcut in a parsed shortcuts.vdf. Returns whether it was there already. `vars`: the launcher's
+/// variables for the launch options (OUR_VARS: NXRT_LAUNCHER_DIR when the game does not find the upscalers next to itself, LSFG-VK's).
+pub fn upsert(top: &mut Vec<(Vec<u8>, Node)>, exe: &Path, start_dir: &Path, vars: &[(String, String)]) -> Result<bool, String> {
     if top.is_empty() {
         top.push((b"shortcuts".to_vec(), Node::Map(vec![])));
     }
@@ -180,7 +212,7 @@ pub fn upsert(top: &mut Vec<(Vec<u8>, Node)>, exe: &Path, start_dir: &Path, laun
         // keep the player's name, artwork id and options; only make sure it still starts in the run folder
         set(e, "Exe", Node::Str(exe_q.into_bytes()));
         set(e, "StartDir", Node::Str(quoted(start_dir).into_bytes()));
-        let opts = launch_options(&str_of(e, "LaunchOptions"), launcher_dir);
+        let opts = launch_options(&str_of(e, "LaunchOptions"), vars);
         set(e, "LaunchOptions", Node::Str(opts.into_bytes()));
         return Ok(true);
     }
@@ -193,7 +225,7 @@ pub fn upsert(top: &mut Vec<(Vec<u8>, Node)>, exe: &Path, start_dir: &Path, laun
         (b"StartDir".to_vec(), s(&quoted(start_dir))),
         (b"icon".to_vec(), s("")),
         (b"ShortcutPath".to_vec(), s("")),
-        (b"LaunchOptions".to_vec(), s(&launch_options("", launcher_dir))),
+        (b"LaunchOptions".to_vec(), s(&launch_options("", vars))),
         (b"IsHidden".to_vec(), Node::Int(0)),
         (b"AllowDesktopConfig".to_vec(), Node::Int(1)),
         (b"AllowOverlay".to_vec(), Node::Int(1)),
@@ -290,28 +322,39 @@ fn steam_command(flatpak: bool) -> Command {
     c
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 pub struct State {
     /// Steam is installed for this user (Linux only)
     pub available: bool,
     pub running: bool,
     /// a shortcut to this fefw.exe exists already (as saved on disk)
     pub added: bool,
+    /// it exists but its launch options are not what Add to Steam would write now (the settings changed since): press it again
+    pub stale: bool,
 }
 
-pub fn state(exe: &Path) -> State {
+pub fn state(exe: &Path, vars: &[(String, String)]) -> State {
     let Some(inst) = find_install().filter(|_| cfg!(target_os = "linux")) else {
-        return State { available: false, running: false, added: false };
+        return State::default();
     };
-    let added = accounts(&inst.root).iter().any(|a| {
-        fs::read(a.join("config").join("shortcuts.vdf")).ok().and_then(|d| parse(&d).ok()).is_some_and(|top| {
-            matches!(get(&top, "shortcuts"), Some(Node::Map(l)) if l.iter().any(|(_, v)| matches!(v, Node::Map(e) if is_ours(e, exe))))
-        })
-    });
-    State { available: true, running: running().is_some(), added }
+    let (mut added, mut stale) = (false, false);
+    for a in accounts(&inst.root) {
+        let Some(top) = fs::read(a.join("config").join("shortcuts.vdf")).ok().and_then(|d| parse(&d).ok()) else { continue };
+        let Some(Node::Map(l)) = get(&top, "shortcuts") else { continue };
+        for (_, v) in l {
+            if let Node::Map(e) = v {
+                if is_ours(e, exe) {
+                    added = true;
+                    let opts = str_of(e, "LaunchOptions");
+                    stale |= launch_options(&opts, vars) != opts;
+                }
+            }
+        }
+    }
+    State { available: true, running: running().is_some(), added, stale }
 }
 
-fn update_file(path: &Path, exe: &Path, start_dir: &Path, launcher_dir: Option<&str>) -> Result<bool, String> {
+fn update_file(path: &Path, exe: &Path, start_dir: &Path, vars: &[(String, String)]) -> Result<bool, String> {
     let old = fs::read(path).ok();
     let mut top = match &old {
         Some(d) => {
@@ -323,7 +366,7 @@ fn update_file(path: &Path, exe: &Path, start_dir: &Path, launcher_dir: Option<&
         }
         None => vec![],
     };
-    let existed = upsert(&mut top, exe, start_dir, launcher_dir)?;
+    let existed = upsert(&mut top, exe, start_dir, vars)?;
     // the file as it was before the launcher first changed it: a later Add to Steam does not replace it
     let backup = path.with_extension("vdf.fefw-backup");
     if let (Some(d), false) = (&old, backup.exists()) {
@@ -338,12 +381,12 @@ fn update_file(path: &Path, exe: &Path, start_dir: &Path, launcher_dir: Option<&
 
 /// Adds fefw.exe to every Steam account on this PC. `close_steam`: a running Steam may be shut down (and is started again).
 /// `reads`: the folders the game reads (the run folder, the dump, the package), named for Flatpak Steam's sandbox.
-pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, reads: &[PathBuf], close_steam: bool) -> Result<String, String> {
+pub fn add(exe: &Path, start_dir: &Path, vars: &[(String, String)], reads: &[PathBuf], close_steam: bool) -> Result<String, String> {
     if !cfg!(target_os = "linux") {
         return Err("Add to Steam is for Linux, where Steam runs fefw.exe with Proton.".into());
     }
     // Steam keeps these quoted ("...") in the file and in the launch options, with no escaping
-    if [exe.to_string_lossy(), start_dir.to_string_lossy()].iter().chain(launcher_dir.map(Into::into).iter()).any(|p| p.contains('"')) {
+    if [exe.to_string_lossy(), start_dir.to_string_lossy()].iter().any(|p| p.contains('"')) || vars.iter().any(|(_, v)| v.contains('"')) {
         return Err("The game's folder has a \" in its path, which a Steam shortcut cannot hold. Move it to a folder without one.".into());
     }
     let inst = find_install().ok_or("Steam was not found (no ~/.steam/steam or ~/.local/share/Steam).")?;
@@ -370,7 +413,7 @@ pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, reads: &[Pa
     // every account, also after one fails, so one odd file does not keep the game from the others
     let (mut updated, mut added, mut failed) = (0, 0, vec![]);
     for a in &accts {
-        match update_file(&a.join("config").join("shortcuts.vdf"), exe, start_dir, launcher_dir) {
+        match update_file(&a.join("config").join("shortcuts.vdf"), exe, start_dir, vars) {
             Ok(true) => updated += 1,
             Ok(false) => added += 1,
             Err(e) => failed.push(e),
@@ -403,7 +446,7 @@ pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, reads: &[Pa
         return Err(format!("{head}: {}", failed.join(" ")));
     }
     let mut msg = if added == 0 {
-        "fefw.exe was already in Steam; its shortcut now starts in the run folder.".to_string()
+        "fefw.exe was already in Steam; its shortcut now starts in the run folder with the current settings.".to_string()
     } else {
         format!("Added to Steam as \"{APP_NAME}\". Steam runs it with Proton.")
     };
@@ -431,6 +474,14 @@ pub fn add(exe: &Path, start_dir: &Path, launcher_dir: Option<&str>, reads: &[Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn none() -> Vec<(String, String)> {
+        vec![]
+    }
+
+    fn dir(d: &str) -> Vec<(String, String)> {
+        vec![("NXRT_LAUNCHER_DIR".into(), d.into())]
+    }
 
     /// FEFW_TEST_SHORTCUTS=<a real shortcuts.vdf> cargo test -- --ignored: parses it and writes the same bytes back (read-only)
     #[test]
@@ -466,12 +517,28 @@ mod tests {
 
     #[test]
     fn launch_options_keep_the_players_own() {
-        assert_eq!(launch_options("", None), "");
-        assert_eq!(launch_options("", Some("Z:/a")), "NXRT_LAUNCHER_DIR=\"Z:/a\" %command%");
-        assert_eq!(launch_options("NXRT_LAUNCHER_DIR=\"Z:/old\" %command%", Some("Z:/new")), "NXRT_LAUNCHER_DIR=\"Z:/new\" %command%");
-        assert_eq!(launch_options("PROTON_LOG=1 NXRT_LAUNCHER_DIR=\"Z:/old\" %command%", None), "PROTON_LOG=1 %command%");
-        assert_eq!(launch_options("NXRT_LAUNCHER_DIR=\"Z:/old\" %command%", None), "");
-        assert_eq!(launch_options("-fullscreen", Some("Z:/a")), "NXRT_LAUNCHER_DIR=\"Z:/a\" %command% -fullscreen");
+        assert_eq!(launch_options("", &none()), "");
+        assert_eq!(launch_options("", &dir("Z:/a")), "NXRT_LAUNCHER_DIR=\"Z:/a\" %command%");
+        assert_eq!(launch_options("NXRT_LAUNCHER_DIR=\"Z:/old\" %command%", &dir("Z:/new")), "NXRT_LAUNCHER_DIR=\"Z:/new\" %command%");
+        assert_eq!(launch_options("PROTON_LOG=1 NXRT_LAUNCHER_DIR=\"Z:/old\" %command%", &none()), "PROTON_LOG=1 %command%");
+        assert_eq!(launch_options("NXRT_LAUNCHER_DIR=\"Z:/old\" %command%", &none()), "");
+        assert_eq!(launch_options("-fullscreen", &dir("Z:/a")), "NXRT_LAUNCHER_DIR=\"Z:/a\" %command% -fullscreen");
+    }
+
+    #[test]
+    fn lsfg_variables_are_added_replaced_and_removed() {
+        let lsfg = |m: &str| -> Vec<(String, String)> {
+            vec![("LSFGVK_ENV".into(), "1".into()), ("LSFGVK_DLL_PATH".into(), "/s/Lossless Scaling/lsfg-vk.dll".into()), ("LSFGVK_MULTIPLIER".into(), m.into())]
+        };
+        let on = launch_options("PROTON_LOG=1 %command% -x", &lsfg("2"));
+        assert_eq!(on, "LSFGVK_ENV=\"1\" LSFGVK_DLL_PATH=\"/s/Lossless Scaling/lsfg-vk.dll\" LSFGVK_MULTIPLIER=\"2\" PROTON_LOG=1 %command% -x");
+        // a changed multiplier replaces the old one (so the shortcut counts as out of date until it is written again)
+        assert_eq!(launch_options(&on, &lsfg("3")), on.replace("MULTIPLIER=\"2\"", "MULTIPLIER=\"3\""));
+        assert_ne!(launch_options(&on, &lsfg("3")), on);
+        // turned off: only the player's own words are left
+        assert_eq!(launch_options(&on, &none()), "PROTON_LOG=1 %command% -x");
+        // an unquoted value, and a name that only ends like one of ours, are handled
+        assert_eq!(launch_options("LSFGVK_MULTIPLIER=4 MY_LSFGVK_ENV=1 %command%", &none()), "MY_LSFGVK_ENV=1 %command%");
     }
 
     #[test]
@@ -483,13 +550,13 @@ mod tests {
     fn add_then_find_and_round_trip() {
         let exe = Path::new("/home/deck/Games/fefw/fefw.exe");
         let mut top = vec![];
-        assert!(!upsert(&mut top, exe, Path::new("/home/deck/Games/fefw"), None).unwrap());
+        assert!(!upsert(&mut top, exe, Path::new("/home/deck/Games/fefw"), &none()).unwrap());
         let bytes = write(&top);
         assert_eq!(&bytes[..14], b"\x00shortcuts\x00\x000\x00");
         let mut back = parse(&bytes).unwrap();
         assert_eq!(write(&back), bytes);
         // a second add updates the same entry, no duplicate
-        assert!(upsert(&mut back, exe, Path::new("/elsewhere"), Some("Z:/l")).unwrap());
+        assert!(upsert(&mut back, exe, Path::new("/elsewhere"), &dir("Z:/l")).unwrap());
         let Some(Node::Map(l)) = get(&back, "shortcuts") else { panic!() };
         assert_eq!(l.len(), 1);
         let Node::Map(e) = &l[0].1 else { panic!() };
@@ -503,7 +570,7 @@ mod tests {
         let exe = Path::new("/g/fefw.exe");
         let mine = vec![(b"appid".to_vec(), Node::Int(123)), (b"appname".to_vec(), Node::Str(b"FE".to_vec())), (b"Exe".to_vec(), Node::Str(b"\"/g/fefw.exe\"".to_vec()))];
         let mut top = vec![(b"shortcuts".to_vec(), Node::Map(vec![(b"0".to_vec(), Node::Map(mine))]))];
-        assert!(upsert(&mut top, exe, Path::new("/g"), None).unwrap());
+        assert!(upsert(&mut top, exe, Path::new("/g"), &none()).unwrap());
         let Some(Node::Map(l)) = get(&top, "shortcuts") else { panic!() };
         let Node::Map(e) = &l[0].1 else { panic!() };
         assert_eq!(str_of(e, "appname"), "FE");

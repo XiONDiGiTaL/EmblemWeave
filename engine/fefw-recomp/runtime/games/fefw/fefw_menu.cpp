@@ -1176,7 +1176,7 @@ void mouse_section(UiHost& host, Menu& m) {
 
 // ---- Haptics ----------------------------------------------------------------------------------------------------------------------------
 // How the game's HD Rumble value reaches the pad. The backends live in gfx/haptic.cpp: the standard two-motor rumble always
-// works, the DualSense gets real haptics on a cable, a Switch Pro Controller gets HD Rumble packets. The state line reports
+// works, the DualSense gets real haptics, a Switch Pro Controller gets HD Rumble packets, an Xbox pad its four motors. The state line reports
 // what is actually driving the pad, not what was asked for.
 constexpr const char* kHapticNames[] = {"Automatic", "Off", "Standard rumble", "DualSense haptics"};
 constexpr int kHapticCount = 4;
@@ -1187,8 +1187,9 @@ void haptic_group(UiHost& host, Menu& m) {
     section("Haptics");
     if (begin_rows("haptic")) {
         row(m, "Vibration", When::Live,
-            "Automatic: DualSense haptics on a cable, HD Rumble for a Switch Pro Controller, the standard rumble for "
-            "anything else. A mode change applies at once; if a backend cannot start, the standard rumble takes over.");
+            "Automatic: DualSense haptics (cable or Bluetooth), HD Rumble for a Switch Pro Controller, all four motors of "
+            "an Xbox pad, the standard rumble for anything else. A mode change applies at once; if a backend cannot start, "
+            "the standard rumble takes over.");
         int mode = std::clamp(p.haptic, 0, kHapticCount - 1);
         if (combo(m, "##hap", &mode, kHapticNames, kHapticCount)) {
             p.haptic = mode;
