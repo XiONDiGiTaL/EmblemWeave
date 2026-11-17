@@ -144,6 +144,11 @@ pub struct Imported {
     pub files: usize,
     /// Where the previous save was moved, if there was one.
     pub backup: Option<PathBuf>,
+    /// The folder the files were read from, after resolving what the player picked.
+    pub from: Option<PathBuf>,
+    /// Whether the game's own data folder (`<account save>/000`) received files. The game reads that folder, so an import
+    /// whose files all landed beside it is one that reports success and shows nothing in game.
+    pub readable: bool,
 }
 
 /// The engine's built-in local user id (`[account] uid` unset), as its save
@@ -180,6 +185,67 @@ fn meta_text(title_id: u64, user_hex: &str) -> Option<String> {
     Some(format!("size={SAVE_SIZE}\njournal={SAVE_SIZE}\nowner={title_id:x}\nattr={hex}\n"))
 }
 
+/// Where an import should read from, when the picked folder may sit above the save's own files.
+///
+/// The game opens `<account>/<user>/000`, so the files have to end up exactly there. Four folder shapes are common and only the
+/// first is already at the right level: the save's data folder, an EmblemWeave save folder (`account/<user>` beside
+/// `<user>.meta`), a console user folder holding `<title id>/000`, and a whole NAND save tree. Copying any of the other three
+/// wholesale nested everything one level deeper, under a folder the game never opens: the import reported success and the game
+/// still showed no save (issue #43).
+pub fn resolve_source(source: &Path, title_id: u64) -> PathBuf {
+    let title = format!("{title_id:016X}");
+    // An EmblemWeave save folder: use its account save rather than copying `account/` inside one.
+    let account = source.join("account");
+    if account.is_dir() {
+        let preferred = account.join(DEFAULT_USER);
+        if summary(&preferred).0 > 0 {
+            return preferred;
+        }
+        let found = std::fs::read_dir(&account)
+            .ok()
+            .and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.is_dir() && summary(p).0 > 0));
+        if let Some(dir) = found {
+            return dir;
+        }
+    }
+    // Already the title's own save folder.
+    if source.join("000").is_dir() {
+        return source.to_path_buf();
+    }
+    // The title folder, at the top of a picked user folder or inside a NAND save tree.
+    if let Some(dir) = newest_dir_named(source, &title, 6) {
+        return dir;
+    }
+    source.to_path_buf()
+}
+
+/// The newest folder called `name` below `root`, up to `depth` levels down. A console keeps the title's save under a user id
+/// and a NAND root adds `nand/user/save/<id>/`, so the title folder can be several levels below whatever was picked.
+fn newest_dir_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, d)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let named = p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name));
+            if named && summary(&p).0 > 0 {
+                let (_, at) = summary(&p);
+                let at = at.unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(t, _)| at > *t) {
+                    best = Some((at, p.clone()));
+                }
+            } else if d + 1 < depth {
+                stack.push((p, d + 1));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// Copy `source` into the game's account save, moving any existing save to
 /// `<save folder>/backups/<stamp>/` first.
 pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Result<Imported, String> {
@@ -189,6 +255,10 @@ pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Res
     if summary(source).0 == 0 {
         return Err(format!("{} holds no save files", source.display()));
     }
+    // The picked folder can be a whole save folder or a NAND root; read the title's files out of it instead of copying the
+    // nesting into the account save.
+    let resolved = resolve_source(source, title_id);
+    let source = resolved.as_path();
     let target = account_dir(save_dir);
     // A profile under the save folder is fine; the current save, or a folder
     // holding the save folder, is not.
@@ -220,7 +290,8 @@ pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Res
                     }
                 }
             }
-            Ok(Imported { files, backup })
+            let readable = summary(&target.join("000")).0 > 0;
+            Ok(Imported { files, backup, from: Some(source.to_path_buf()), readable })
         }
         Err(e) => {
             // Put the previous save back rather than leave a partial copy.
@@ -559,7 +630,7 @@ pub fn load_empty_profile(save_dir: &Path, p: &Profile, title_id: u64, stamp: &s
         if let Some(text) = meta_text(title_id, &user) {
             std::fs::write(&meta, text).map_err(|e| format!("writing {}: {e}", meta.display()))?;
         }
-        Ok(Imported { files: 0, backup: backup.clone() })
+        Ok(Imported { files: 0, backup: backup.clone(), from: None, readable: true })
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&target);
@@ -962,6 +1033,46 @@ mod tests {
         let backup = r.backup.unwrap();
         assert_eq!(std::fs::read_to_string(backup.join("000/Auto")).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(src.join("000/Auto")).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_reads_the_save_out_of_the_folder_that_was_picked() {
+        let root = temp("unwrap");
+        let (src, save) = (root.join("src"), root.join("save"));
+        // A whole EmblemWeave save folder: the account save belongs inside `account/`, not `account/account/`.
+        write(&src.join("account").join(DEFAULT_USER).join("000/Auto"), "a");
+        let r = import(&src, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        assert_eq!(r.from.as_deref(), Some(src.join("account").join(DEFAULT_USER).as_path()));
+        assert!(r.readable, "the files landed in the folder the game reads");
+        let user = save.join("account").join(DEFAULT_USER);
+        assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "a");
+
+        // A console user folder: `<title id>/000` is the save, not a folder to nest inside the account save.
+        let picked = root.join("user");
+        write(&picked.join("04007EF01F8AE000/000/Auto"), "b");
+        let r = import(&picked, &save, FALLBACK_TITLE_ID, "2").unwrap();
+        assert!(r.readable, "the title folder was unwrapped");
+        assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "b");
+
+        // A whole NAND save tree: the title folder is below nand/user/save/<id>/<profile>/.
+        let nand = root.join("nand-root");
+        write(&nand.join("nand/user/save/0000000000000000/5A3C/04007EF01F8AE000/000/Auto"), "c");
+        let r = import(&nand, &save, FALLBACK_TITLE_ID, "3").unwrap();
+        assert!(r.readable, "the NAND tree was walked to the title folder");
+        assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "c");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_import_the_game_would_not_read_says_so() {
+        let root = temp("unreadable");
+        let (src, save) = (root.join("src"), root.join("save"));
+        // Files at the top of the picked folder are outside `<account>/000`, which is all the game opens.
+        write(&src.join("save.dat"), "x");
+        let r = import(&src, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        assert_eq!(r.files, 1);
+        assert!(!r.readable);
         let _ = std::fs::remove_dir_all(root);
     }
 

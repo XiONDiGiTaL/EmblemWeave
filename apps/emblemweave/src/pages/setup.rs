@@ -236,6 +236,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     });
 
+    widgets::section(ui, &p, "Engine folder", |ui| {
+        let current = crate::engine::root();
+        widgets::kv(ui, &p, "Engine", &current.as_ref().map(|r| r.display().to_string()).unwrap_or_else(|| "not found".into()));
+        ui.label(RichText::new("The engine folder holds the built game and its build cache. Keeping one anywhere on disk is what spares a full rebuild when a new launcher version arrives: point the new copy here instead of unzipping a whole engine beside it.").size(12.5).color(p.muted));
+        ui.horizontal(|ui| {
+            if widgets::button(ui, &p, "Use another engine folder…", true)
+                .on_hover_text("Choose the checkout (…\\engine\\fefw-recomp) or a folder that holds it, such as an older EmblemWeave copy")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new().set_title("Choose an engine folder (engine\\fefw-recomp)").pick_folder() {
+                    match crate::engine::remember_root(&dir) {
+                        Ok(root) => app.notify(format!("Using the engine in {}", root.display()), Tone::Ok),
+                        Err(e) => app.notify(e, Tone::Bad),
+                    }
+                }
+            }
+            if let Some(root) = &current {
+                if widgets::button(ui, &p, "Open folder", true).clicked() {
+                    let _ = std::process::Command::new("explorer").arg(root).spawn();
+                }
+            }
+        });
+    });
+
     widgets::section(ui, &p, "Save data", |ui| {
         ui.label("Importing, save profiles and the save editor are on the Saves page.");
     });
@@ -359,10 +383,21 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
 
 pub(crate) fn import_message(r: Result<crate::saves::Imported, String>) -> (String, Tone) {
     match r {
-        Ok(i) => match i.backup {
-            Some(b) => (format!("Imported {} save files; the previous save is in {}", i.files, b.display()), Tone::Ok),
-            None => (format!("Imported {} save files", i.files), Tone::Ok),
-        },
+        Ok(i) => {
+            let from = i.from.as_ref().map(|p| format!(" from {}", p.display())).unwrap_or_default();
+            let mut text = format!("Imported {} save files{from}", i.files);
+            if let Some(b) = &i.backup {
+                text.push_str(&format!("; the previous save is in {}", b.display()));
+            }
+            if !i.readable {
+                // The old message said success either way, and the player found an empty game afterwards.
+                return (
+                    format!("{text} — but the game reads only <save>/000, which holds none of them; import the folder that contains 000"),
+                    Tone::Bad,
+                );
+            }
+            (text, Tone::Ok)
+        }
         Err(e) => (format!("Import failed: {e}"), Tone::Bad),
     }
 }
