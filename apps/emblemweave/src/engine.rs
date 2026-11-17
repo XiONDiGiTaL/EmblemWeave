@@ -849,6 +849,31 @@ fn needs_cache_reset(error: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+/// Characters cmd.exe splits a command line at, quotes or no quotes. A project folder that contains one truncates the
+/// `cmd /C "cd . && llvm-lib … object …"` rule CMake generates, and ninja then reports a path cut at the character
+/// (`CMakeFiles\G_\Games\PC_Ports_`) instead of naming the folder.
+const CMD_BREAKERS: [char; 8] = ['&', '|', '<', '>', '^', '(', ')', '%'];
+
+/// The first character in `path` that cmd.exe cannot carry through a build, if any.
+pub fn cmd_breaker(path: &Path) -> Option<char> {
+    path.to_string_lossy().chars().find(|c| CMD_BREAKERS.contains(c))
+}
+
+/// The folder the game is built from, refused when its path holds a character cmd.exe splits a command line at. Every later
+/// error in that case is about a truncated path (`CMakeFiles\G_\Games\PC_Ports_`), which reads like a missing build file and
+/// sends people looking in the wrong place, so the build stops here with the reason and the fix.
+fn build_root(root: &Path) -> Result<PathBuf, String> {
+    let Some(bad) = cmd_breaker(root) else { return Ok(root.to_path_buf()) };
+    Err(format!(
+        "the project is in a folder whose path contains '{bad}':\n\n{}\\n\ncmd.exe splits its command line at & | < > ^ ( ) %, even inside quotes, so the linker step CMake generates for the \
+         lifted code is cut in half at that character and ninja reports a path that does not exist (\"CMakeFiles\\G_\\Games\\
+         PC_Ports_\") instead of saying what happened.\n\nMove EmblemWeave to a folder whose path has none of & | < > ^ ( ) %, \
+         for example C:\\EmblemWeave, then press Build the game again. An existing game folder can be moved as it is; only \
+         paths outside it are written into its ini.",
+        root.display()
+    ))
+}
+
 fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -1863,9 +1888,12 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         let from: std::collections::BTreeSet<&str> = mod_sites.iter().map(|s| s.from.split(':').next().unwrap_or("")).collect();
         ctx.log(format!("hook sites: main.sites plus {} from mods ({})", mod_sites.len(), from.into_iter().collect::<Vec<_>>().join(", ")));
     }
+    // cmd.exe splits its command line at & | < > ^ ( ) % even when the line is quoted, which is how `G:\Games\PC Ports &
+    // Recomps` became a command called `CMakeFiles\G_\Games\PC_Ports_`. Stop with that explanation instead of building.
+    let root_here = build_root(&root)?;
     let site_list = site_list.display().to_string();
     envs.push(("FEFW_SITES", &site_list));
-    let built = run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs);
+    let built = run_env(ctx, &root_here, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs);
     if let Err(e) = built {
         // The same old-toolset case, when it slips past the version check: the C++ library of an older Visual Studio has no
         // `<bit>`, and nothing in the message says that is what it means.
@@ -1886,7 +1914,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         ctx.log("the build folder holds a cache CMake cannot reuse; clearing it and configuring again");
         let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
         let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
-        run_env(ctx, &root, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs)?;
+        run_env(ctx, &root_here, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs)?;
     }
     // A step that reports success without writing its libraries leaves the
     // next one failing over a missing `fefw_main.lib`, which says nothing
@@ -3719,6 +3747,21 @@ mod tests {
             "tools\\textures\\scripts\\fetch_third_party.ps1"
         );
         assert_eq!(super::step_name("cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"]), "/C");
+    }
+
+    #[test]
+    fn a_project_path_cmd_would_split_is_refused_with_the_reason() {
+        use std::path::Path;
+        assert_eq!(super::cmd_breaker(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")), Some('&'));
+        assert_eq!(super::cmd_breaker(Path::new(r"C:\Users\me\EmblemWeave")), None);
+        assert_eq!(super::cmd_breaker(Path::new(r"C:\Games (2)\EmblemWeave")), Some('('));
+        assert_eq!(super::cmd_breaker(Path::new(r"C:\Games\100%\EmblemWeave")), Some('%'));
+
+        assert!(super::build_root(Path::new(r"C:\Users\me\EmblemWeave")).is_ok());
+        let said = super::build_root(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")).unwrap_err();
+        assert!(said.contains("contains '&'"), "names the character: {said}");
+        assert!(said.contains("Move EmblemWeave to a folder"), "says what to do: {said}");
+        assert!(said.contains("PC Ports & Recomps"), "names the folder: {said}");
     }
 
     #[test]
