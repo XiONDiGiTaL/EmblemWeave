@@ -260,6 +260,37 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     });
 
+    widgets::section_drawer(
+        ui,
+        &p,
+        "updating",
+        "Updating EmblemWeave",
+        "what to keep, and why nothing is rebuilt",
+        false,
+        |ui| {
+            // Issue #56 asked for the steps in one place: which folders to keep, and why a new launcher does not need a new build.
+            let steps = [
+                "1. Unzip the new release over this folder. It replaces the launcher; data\\ and engine\\ stay as they are, so \
+                 the game is not rebuilt.",
+                "2. Unpacking into a new folder instead? Copy data\\ and engine\\ across, or keep the old folder and press \
+                 Use another engine folder… above. Nothing is moved or deleted.",
+                "3. A copy with no build finds one already on this PC by itself: Overview opens with A build is already on \
+                 this PC and a Use this build button. Not now declines it until you say otherwise.",
+            ];
+            for step in steps {
+                ui.label(RichText::new(step).size(12.5).color(p.body));
+                ui.add_space(3.0);
+            }
+            ui.add_space(theme::SPACE_XS);
+            if let Some(dir) = crate::config::Config::dir() {
+                widgets::kv(ui, &p, "This copy keeps settings and saves in", &dir.display().to_string());
+            }
+            if let Some(root) = crate::engine::root() {
+                widgets::kv(ui, &p, "The engine and its build", &root.display().to_string());
+            }
+        },
+    );
+
     widgets::section(ui, &p, "Save data", |ui| {
         ui.label("Importing, save profiles and the save editor are on the Saves page.");
     });

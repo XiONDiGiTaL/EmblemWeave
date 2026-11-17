@@ -136,7 +136,10 @@ extracted and the file is only ever read.
 the manifest the engine was tested with, taken from the preserved fefw-recomp
 0.2.0 package: update 131072, `main` build `db93b0125f48…`. If all seven hashes
 agree the check says so; a different build is reported as such, and still
-recompiles, since the pipeline works from your own modules.
+recompiles, since the pipeline works from your own modules. The label on the
+folder does not decide this: a tree labelled 1.1.1 that carries these same
+seven modules is the supported build, while a folder renamed to look newer but
+holding different bytes is reported as the different build it is.
 
 An **`.nsp` package** works too, when it is a plaintext repack: NSP Box writes
 those without keys, as unsigned program, control and meta NCAs. Pick it with
