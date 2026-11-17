@@ -2950,15 +2950,22 @@ void temporal_for_draw(const ProgLayout& pl) {
     }
 }
 
+// extras::hdr_is_tonemap, kept on the shader: it is asked for every draw with a colour target while an upscaler runs, and its own cache (a
+// mutex and a map keyed by the hash string) was ~2 % of the render thread in a busy Fortune's Weave scene. The answer never changes.
+bool is_tonemap_shader(const ShaderInfo* fs) {
+    if (fs->tonemap_match < 0) fs->tonemap_match = extras::hdr_is_tonemap(fs->spirv, fs->hash) ? 1 : 0;
+    return fs->tonemap_match != 0;
+}
+
 void scene_upscale_for_draw(const ProgLayout& pl) {
     g_su_tex = nullptr;
     g_su_view = VK_NULL_HANDLE;
     const ShaderInfo* fs = S.stage[kFragment];
-    if (fs && extras::temporal_wanted() && S.ncolor > 0 && S.color_tex[0] && extras::hdr_is_tonemap(fs->spirv, fs->hash)) {
+    if (fs && extras::temporal_wanted() && S.ncolor > 0 && S.color_tex[0] && is_tonemap_shader(fs)) {
         temporal_for_draw(pl);
         return;
     }
-    if (!fs || !extras::scene_upscale_wanted() || S.ncolor == 0 || !S.color_tex[0] || !extras::hdr_is_tonemap(fs->spirv, fs->hash)) return;
+    if (!fs || !extras::scene_upscale_wanted() || S.ncolor == 0 || !S.color_tex[0] || !is_tonemap_shader(fs)) return;
     Texture* target = S.color_tex[0].get();
     if (!tex_gpu(target)) return;
     const VkExtent3D te = tex_extent(target, 0);
