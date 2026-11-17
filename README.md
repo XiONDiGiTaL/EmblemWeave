@@ -188,6 +188,9 @@ Requirements are listed under [System requirements](#system-requirements); failu
 - Optional **ReShade**: the launcher detects the 64-bit Vulkan layer, checks this build in `ReShadeApps.ini`, opens the
   official setup for `fefw.exe` with Vulkan preselected, and can switch the layer off for this game only. ReShade stays a
   separate user install; the add-on build supports `.addon64` files and user presets.
+  Expand **ReShade (optional)** on Graphics, press **Set up ReShade…**, select the Add-on build if you use add-ons, and
+  install the effect packs you want. Put presets, shader packs and `.addon64` files beside `fefw.exe`; press `Home` in
+  game for the overlay. The **Load ReShade** switch disables the layer for this game without uninstalling it.
 - The evaluation of further options (FSR 4, OptiScaler, vkBasalt) and their status are in
   [docs/GRAPHICS.md](docs/GRAPHICS.md).
 

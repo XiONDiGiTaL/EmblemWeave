@@ -59,6 +59,23 @@ them, and reports what is missing; a mode whose files or hardware are absent fal
 - ReShade: its own licence; it stays a separate download the user installs. EmblemWeave opens the official setup and never ships ReShade binaries or shader files.
 - vkBasalt: its own licence; not integrated.
 
+## ReShade (optional)
+
+1. On **Graphics**, expand **ReShade (optional)** and press **Set up ReShade…**. Choose the official setup executable if the
+   launcher does not find it in your Downloads or Desktop folder.
+2. The setup opens with this build's `fefw.exe` and the Vulkan API already selected. Use the **Add-on** build when you
+   want `.addon64` add-ons; choose the effect packs you want. Windows asks for administrator approval when the setup
+   registers the Vulkan layer and writes `ReShadeApps.ini`.
+3. Keep presets, `reshade-shaders`, and `.addon64` files beside `fefw.exe`. In game, press **Home** to open ReShade's
+   overlay and select a preset.
+4. The **Load ReShade** switch on the same card only changes the game process: it sets the Vulkan loader's disable
+   variables for this launch. It does not uninstall ReShade or affect other games. Use the setup tool to uninstall.
+
+The launcher checks `%ProgramData%\ReShade\ReShade64\ReShade64.dll`, `ReShade64.json`, and this build's entry in
+`ReShadeApps.ini`. A missing entry means ReShade is installed but will not load for this executable; run the setup again
+for it. Depth-based effects depend on the depth buffer the engine exposes and are not guaranteed; colour, sharpening and
+anti-aliasing effects do not need it.
+
 ## How to check a claim on your own PC
 
 1. Set the mode in **Graphics > Upscaling**, start the game, and read `%APPDATA%\EmblemWeave\logs\engine-*.log` for the
