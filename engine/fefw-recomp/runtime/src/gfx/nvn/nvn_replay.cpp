@@ -912,6 +912,7 @@ struct TexResolved {
     bool has_view = false;
     SamplerInfo smp;
     bool has_sampler = false;
+    bool sid0 = false;    // the handle's sampler id is 0: a texel-fetch handle (reserved_sampler)
 };
 
 // The scale nxrt/gfx_tuning.h asks for on uniform block `idx` of this binding's shader (1 = none): only the chosen fragment shader's block.
@@ -972,7 +973,7 @@ ResMemo* memo_for(const BindingDesc& d) {
 TexResolved resolve_texture_raw(const BindingDesc& d);
 TexResolved resolve_image_raw(const BindingDesc& d);
 bool same_resolved(const TexResolved& a, const TexResolved& b) {
-    if (a.tex != b.tex || a.has_view != b.has_view || a.has_sampler != b.has_sampler) return false;
+    if (a.tex != b.tex || a.has_view != b.has_view || a.has_sampler != b.has_sampler || a.sid0 != b.sid0) return false;
     if (a.has_sampler && !(a.smp == b.smp)) return false;
     if (!a.has_view) return true;
     const TextureViewInfo& x = a.view; const TextureViewInfo& y = b.view;
@@ -1024,6 +1025,11 @@ const TexResolved& resolve_image_ref(const BindingDesc& d, TexResolved& tmp) {
     return m->i;
 }
 
+bool reserved_sampler_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "reserved_sampler", true);
+    return on;
+}
+
 TexResolved resolve_texture_raw(const BindingDesc& d) {
     ++g_rs.res_tex;
     TexResolved r;
@@ -1039,6 +1045,7 @@ TexResolved resolve_texture_raw(const BindingDesc& d) {
         if (idx >= 0 && idx < 16) handle = S.img[d.nvn_stage][idx];
     }
     const uint32_t tid = handle_texture_id(handle), sid = handle_sampler_id(handle);
+    r.sid0 = sid == 0;
     if (S.tpool && static_cast<int>(tid) < S.tpool->count) {
         std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
         const TexturePool::Entry& e = S.tpool->entries[tid];
@@ -2404,6 +2411,11 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     // GENERAL: the op also writes it as a storage image (prepare_textures left it there)
                     ii.imageLayout = tex_layout(r.tex) == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : tex_sampled_layout(r.tex);
                     if (r.has_sampler) ii.sampler = sampler_for(int_comp ? unfiltered(r.smp) : r.smp);
+                    // [nvn] reserved_sampler (default on): a texel-fetch handle (sampler id 0, the driver's reserved range) sampled with filtering
+                    // gets the linear reserved sampler, as on the console; integer and depth textures keep the nearest dummy
+                    else if (r.sid0 && component == 1 && !(tex_aspect(r.tex) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+                             reserved_sampler_on())
+                        ii.sampler = reserved_sampler();
                     if (r.tex == g_su_tex && g_su_view) {            // the upscaled scene replaces the small one for this draw (S14)
                         ii.imageView = g_su_view;
                         ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
