@@ -17,6 +17,41 @@ removed, uses `%APPDATA%\EmblemWeave` (Windows) or `$XDG_CONFIG_HOME/EmblemWeave
 The zip and what it deliberately leaves out are listed in [PACKAGE.md](PACKAGE.md), and
 `tools/package_release.ps1` builds it reproducibly.
 
+## The build tools, and making them the release's job
+
+The one part of the install that is still the player's is the build toolchain. Today the launcher finds, versions and
+(where it can) `winget`-installs seven things: Visual Studio's C++ tools, the Windows 10/11 SDK, LLVM's `clang-cl` and
+`lld-link`, CMake, Ninja, Python with `zbic`, and optionally NASM, PowerShell 7, `uv` and the .NET SDK. That is more
+than the other recompilations ask for, and the difference is not the engine: it is what each project ships.
+
+`FireEmblemEngage-EngagePCRecomp` is the clearest comparison, because it is installed here and can be measured. Its
+`START-HERE.txt` lists four requirements — Windows 10/11 x64, an AVX2 CPU, a Vulkan 1.3 driver, 40 GiB free — and no
+build tools at all. Its folder carries `llvm/` (316 MB: clang and the MinGW-w64 target), `python/` (101 MB, a relocatable
+interpreter with its packages), `bin/ninja.exe` (0.6 MB), its extractor and its translator. The player runs the setup,
+points it at their dump, and waits. NX2navi does the same thing in the other direction: its launcher "downloads the build
+tools" into its own folder and the setup .exe is the only file the player handles.
+
+So the way to make EmblemWeave's setup one step is not to remove steps from the engine; it is to stop asking the
+player to install what the zip can carry:
+
+| Piece | Size | Can the release carry it? | Effect |
+| --- | ---: | --- | --- |
+| LLVM `clang-cl` + `lld-link` | about 250 MB unpacked | yes, LLVM's own licence allows redistribution | removes the LLVM install |
+| CMake | about 60 MB unpacked | yes, BSD-3-Clause | removes the CMake install |
+| Ninja | under 1 MB | yes, Apache-2.0 | removes the Ninja install |
+| Python + `zbic`, `capstone`, `lz4`, `zstandard` | about 120 MB | yes, PSF licence plus wheel licences | removes the Python install and the pip step |
+| NASM, PowerShell 7, `uv`, Git, .NET SDK | 0 to 300 MB | already optional or replaced by the bundled translator | nothing to remove |
+| Visual Studio C++ tools and the Windows SDK | 2 to 6 GB | the headers and import libraries are Microsoft's, and redistributing them is not ours to do | stays, but the launcher's one-button `winget` install already runs it unattended |
+
+The launcher is ready for that layout today: `toolchain::tool_path` puts `engine/fefw-recomp/tools\bin` first on the
+PATH every probe and every build step uses, so a zip that carries the four portable pieces there is found and used with
+no other change. The remaining work is packaging (put the extracted tools in the zip and check their hashes, as
+`tools/package_release.ps1` already does for everything else), not code in the build.
+
+Removing Visual Studio as well is the bigger prize and the bigger job: it means building the runtime and every static
+dependency with clang against MinGW-w64 or libc++, which is the same ABI change a Linux build needs ([LINUX.md](LINUX.md)
+phase 3). It should be done once, for both platforms, rather than twice.
+
 ## Portable mode
 
 Every current release is portable by default: `portable.txt` ships beside `EmblemWeave.exe`, so the launcher keeps

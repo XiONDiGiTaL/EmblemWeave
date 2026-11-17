@@ -219,6 +219,15 @@ pub fn tool_path() -> String {
 fn build_tool_path() -> String {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let mut dirs: Vec<String> = Vec::new();
+    // Tools the release carries itself, first. A zip that ships clang-cl, lld-link,
+    // CMake and Ninja in `tools\bin` needs none of them installed, and this is the
+    // only place that has to know: every probe and every build step reads this PATH.
+    if let Some(root) = crate::engine::root() {
+        let carried = root.join("tools").join("bin");
+        if carried.is_dir() {
+            dirs.push(carried.display().to_string());
+        }
+    }
     if let Some(clang) = find_clang() {
         if let Some(bin) = clang.exe.parent() {
             dirs.push(bin.display().to_string());
