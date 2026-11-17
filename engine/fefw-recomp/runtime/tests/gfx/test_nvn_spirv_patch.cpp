@@ -129,10 +129,7 @@ std::set<uint32_t> locations(const std::vector<ShaderIo>& v) {
     return s;
 }
 
-bool spirv_val_present() {
-    std::error_code ec;
-    return fs::exists(kSpirvVal, ec);
-}
+bool spirv_val_present() { return !spirv_val().empty(); }
 
 // A complete, valid Vulkan 1.3 fragment shader with one Location 0 output, written for this test. It stores white and returns once, which is
 // all spirv_scale_output0 needs: the patch wraps that return, scales the output's rgb and keeps its alpha.
@@ -626,7 +623,7 @@ NXTEST(scale_output0_synthetic_scales_location0_rgb) {
 
 NXTEST(scale_output0_synthetic_is_valid_spirv) {
     if (!spirv_val_present()) {
-        nxtest::skip("spirv-val not found at C:\\VulkanSDK\\1.4.363.0\\Bin");
+        nxtest::skip(nxtest::spirv_val_missing());
         return;
     }
     const std::vector<uint32_t> in = synthetic_fragment_shader();
