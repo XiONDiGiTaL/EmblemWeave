@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <set>
 #include <string>
@@ -120,6 +121,46 @@ std::set<uint32_t> locations(const std::vector<ShaderIo>& v) {
     std::set<uint32_t> s;
     for (const ShaderIo& io : v) s.insert(io.location);
     return s;
+}
+
+bool spirv_val_present() {
+    std::error_code ec;
+    return fs::exists(kSpirvVal, ec);
+}
+
+// A complete, valid Vulkan 1.3 fragment shader with one Location 0 output, written for this test. It stores white and returns once, which is
+// all spirv_scale_output0 needs: the patch wraps that return, scales the output's rgb and keeps its alpha.
+std::vector<uint32_t> synthetic_fragment_shader() {
+    enum : uint32_t {
+        OpCapability = 17, OpMemoryModel = 14, OpEntryPoint = 15, OpExecutionMode = 16, OpDecorate = 71,
+        OpTypeVoid = 19, OpTypeFloat = 22, OpTypeVector = 23, OpTypeFunction = 33, OpTypePointer = 32,
+        OpConstant = 43, OpConstantComposite = 44, OpVariable = 59, OpFunction = 54, OpLabel = 248, OpStore = 62,
+        OpReturn = 253, OpFunctionEnd = 56,
+    };
+    std::vector<uint32_t> w = {0x07230203u, 0x00010300u, 0u, 11u, 0u};
+    auto emit = [&](uint32_t op, std::initializer_list<uint32_t> body) {
+        w.push_back((static_cast<uint32_t>(body.size()) + 1) << 16 | op);
+        w.insert(w.end(), body.begin(), body.end());
+    };
+    emit(OpCapability, {1u});                                      // Shader
+    emit(OpMemoryModel, {0u, 1u});                                 // Logical GLSL450
+    emit(OpEntryPoint, {4u, 9u, 0x6e69616du, 0u, 8u});             // Fragment main "main", interface %out
+    emit(OpExecutionMode, {9u, 7u});                               // OriginUpperLeft
+    emit(OpDecorate, {8u, 30u, 0u});                               // Location 0 on %out
+    emit(OpTypeVoid, {1u});
+    emit(OpTypeFloat, {2u, 32u});
+    emit(OpTypeVector, {3u, 2u, 4u});                              // vec4
+    emit(OpTypePointer, {4u, 3u, 3u});                             // Output pointer to vec4
+    emit(OpTypeFunction, {5u, 1u});                                // void ()
+    emit(OpConstant, {2u, 6u, 0x3f800000u});                       // 1.0f
+    emit(OpConstantComposite, {3u, 7u, 6u, 6u, 6u, 6u});            // white
+    emit(OpVariable, {4u, 8u, 3u});                                // %out, Output
+    emit(OpFunction, {1u, 9u, 0u, 5u});                            // %main
+    emit(OpLabel, {10u});
+    emit(OpStore, {8u, 7u});
+    emit(OpReturn, {});
+    emit(OpFunctionEnd, {});
+    return w;
 }
 
 }  // namespace
@@ -541,6 +582,89 @@ NXTEST(predict_int_inputs_from_the_code) {
     CHECK(gpu::spirv_predict_int_inputs(std::vector<uint32_t>{1u, 2u}).empty());
 }
 
+
+NXTEST(scale_output0_synthetic_scales_location0_rgb) {
+    const std::vector<uint32_t> in = synthetic_fragment_shader();
+    const std::vector<uint32_t> before = in;
+    std::vector<uint32_t> out;
+    REQUIRE(gpu::spirv_scale_output0(in, out));
+    CHECK(in == before);
+    CHECK(out.size() > in.size());
+    CHECK(out[3] > in[3]);
+
+    ShaderReflection r;
+    std::string err;
+    CHECK_MSG(reflect(out, r, err), err);
+    CHECK(r.stage == ShaderStage::Fragment);
+    const ShaderIo* io = find_io(r.outputs, 0);
+    REQUIRE(io != nullptr);
+    CHECK(io->type == ScalarType::Float);
+    CHECK_EQ(io->components, 4u);
+
+    auto count_op = [](const std::vector<uint32_t>& words, uint32_t op) {
+        size_t n = 0;
+        for (size_t i = 5; i < words.size();) {
+            const uint32_t len = words[i] >> 16;
+            if (!len || i + len > words.size()) break;
+            n += (words[i] & 0xffffu) == op;
+            i += len;
+        }
+        return n;
+    };
+    // One rgb scale, one alpha extract + insert (alpha kept), and the original store plus the scaled store.
+    CHECK_EQ(count_op(out, 142u), 1u);       // OpVectorTimesScalar
+    CHECK_EQ(count_op(out, 81u), 1u);        // OpCompositeExtract
+    CHECK_EQ(count_op(out, 82u), 1u);        // OpCompositeInsert
+    CHECK_EQ(count_op(out, 62u), 2u);        // OpStore
+}
+
+NXTEST(scale_output0_synthetic_is_valid_spirv) {
+    if (!spirv_val_present()) {
+        nxtest::skip("spirv-val not found at C:\\VulkanSDK\\1.4.363.0\\Bin");
+        return;
+    }
+    const std::vector<uint32_t> in = synthetic_fragment_shader();
+    std::string log;
+    CHECK_MSG(run_spirv_val(in, "scale_output0_in", log) == 0, "input module: " + log);
+    std::vector<uint32_t> out;
+    REQUIRE(gpu::spirv_scale_output0(in, out));
+    CHECK_MSG(run_spirv_val(out, "scale_output0_out", log) == 0, "patched module: " + log);
+}
+
+NXTEST(scale_output0_refuses_other_stages_and_modules) {
+    const std::vector<uint32_t> keep = {0xdeadbeefu, 7u};
+    std::vector<uint32_t> out = keep;
+    CHECK(!gpu::spirv_scale_output0({}, out));
+    CHECK(out == keep);
+
+    std::vector<uint32_t> vertex = synthetic_fragment_shader();
+    for (size_t i = 5; i < vertex.size();) {
+        const uint32_t len = vertex[i] >> 16;
+        if (!len || i + len > vertex.size()) break;
+        if ((vertex[i] & 0xffffu) == 15u) {
+            vertex[i + 1] = 0u;             // Vertex instead of Fragment
+            break;
+        }
+        i += len;
+    }
+    out = keep;
+    CHECK(!gpu::spirv_scale_output0(vertex, out));
+    CHECK(out == keep);
+
+    std::vector<uint32_t> no_location0 = synthetic_fragment_shader();
+    for (size_t i = 5; i < no_location0.size();) {
+        const uint32_t len = no_location0[i] >> 16;
+        if (!len || i + len > no_location0.size()) break;
+        if ((no_location0[i] & 0xffffu) == 71u && len >= 4 && no_location0[i + 2] == 30u) {
+            no_location0[i + 3] = 1u;       // Location 1: no colour output 0
+            break;
+        }
+        i += len;
+    }
+    out = keep;
+    CHECK(!gpu::spirv_scale_output0(no_location0, out));
+    CHECK(out == keep);
+}
 
 // Issue #89: the deferred light pass reads the clustered light grid (an R32UI 3D image) with texelFetch and bitcasts the texel to int.
 // spirv_predict_int_fetches names that binding; the rewrite makes it a uint image that reflects as such (the binding then gets a UINT

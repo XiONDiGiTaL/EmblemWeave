@@ -335,6 +335,11 @@ void prewarm_init() {
     for (const Rec& r : parts) queue_parts(r, false);           // outside g_mu: the pipeline-library side takes its own lock
 }
 
+bool prewarm_key_recordable(const GraphicsKey& key) {
+    Rec r;
+    return rec_of(key, &r);
+}
+
 void prewarm_record(const GraphicsKey& key) {
     Rec r;
     if (!rec_of(key, &r)) return;                               // the record has no room for tessellation stages

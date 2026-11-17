@@ -148,6 +148,8 @@ void pipeline_cache_flush();
 struct PipeUpgrade;
 void prewarm_init();                                                      // loads the key file, queues its keys, starts the cache saver (idempotent)
 void prewarm_record(const GraphicsKey& key);                              // a draw used this key (built, linked or waiting for its parts)
+// True when prewarm_record can store this key: no tessellation and none of the alpha-test / scene-gain fields the record does not hold.
+bool prewarm_key_recordable(const GraphicsKey& key);
 size_t prewarm_program(const ShaderInfo* const stages[6]);                // a program got its shaders: its recorded pipelines go first in line (how many)
 // True with *out: the pipeline was built ahead. False: build it here, except that when a background build of it is under way and can_link()
 // says the draw can link it from parts now, *later gets the whole pipeline that will replace the linked one (link with no upgrade of its own).
