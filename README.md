@@ -41,7 +41,7 @@ reference build and its tested-dump manifest are still available. EmblemWeave
 carries that engine forward as the launcher around it, and
 [docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
 
-> **Current status: 0.1.36, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
+> **Current status: 0.1.37, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an
 > AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes; it covered the title screen, the
 > save loaded through **Continue**, the hub, the in-game menu and the F1 settings overlay. Later releases are checked by
 > building and by headless runs of the real game, listed under [Development status](#development-status). The build needs
@@ -239,8 +239,8 @@ and are not on the shipping path.
 
 1. **P0 — real-hardware release validation.** Build the current tree and run the
    same matrix on 16 GB and 24 GB handhelds, discrete NVIDIA and AMD systems, and
-   a clean Windows profile. The Low Memory and ExeFS patch changes are not in the
-   0.1.36 release yet.
+   a clean Windows profile. The Low Memory and ExeFS patch changes are in 0.1.37;
+   their hardware validation is still pending.
 2. **P1 — game 1.1.1 compatibility.** Map the 1.1.1 build ID, add it to the
    tested manifest if upstream supports it, and refuse it early if not. Issue #41
    is a 1.1.1 run and compatibility is still unverified.
@@ -277,9 +277,9 @@ criteria for each area, is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 The screenshots are the launcher's own rendering from the current source tree,
 saved with `EmblemWeave.exe --page <page> --screenshot <file.png>`. The **Low
-Memory** card on the Graphics screenshot is implemented in this tree but is
-**not** part of the released 0.1.36 build; the same applies to the ExeFS patch
-support described on the Mods page.
+Memory** card on the Graphics screenshot is part of the 0.1.37 build, as is the
+ExeFS patch support described on the Mods page. The screenshots were captured
+from this tree.
 
 ## Key capabilities
 
