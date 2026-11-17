@@ -25,7 +25,9 @@
 
 set(NXRECOMP_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." CACHE PATH "recomp/ folder")
 set(NX_PYTHON "${NXRECOMP_ROOT}/../tools/.venv/Scripts/python.exe" CACHE FILEPATH "Python with the nxrecomp requirements")
-set(NX_OPT "/O1" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
+# /O2 (was /O1, which optimises for size; untuned since S1): in Fortune's Weave the software occlusion culler threads
+# (MOCull_Worker1/2) went from 29-49 % to 3-4 % of a core each, the main thread from 4.5-5.8 to 4.1-4.2 ms per frame, same scene.
+set(NX_OPT "/O2" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
 set(NX_EXTRA_FLAGS "" CACHE STRING "more compile flags of the lifted code, space-separated (a profile-guided build: -fprofile-instr-generate, then -fprofile-instr-use=<file>)")
 option(NX_USE_LAUNCHER "wrap lifted-code compiles in cmake/nx_cc_launcher.py (time-limit fallback to optnone / -O0)" OFF)
 
