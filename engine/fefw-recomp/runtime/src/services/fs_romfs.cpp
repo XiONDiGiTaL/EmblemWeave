@@ -117,6 +117,7 @@ struct Node {
     nx::File nx_src;             // files: the archive record (path, size, block range)
     bool packed = false;         // files: a zstd entry of a .nup, decompressed on first read
     nup::File pkg;               // files: the package record, when packed
+    int overlay = -1;            // index in the build's overlays, or -1 for the base RomFS
     std::shared_ptr<const std::vector<uint8_t>> mem;   // files: the content after an edit (RomfsEdits), served instead of the host file
 };
 
@@ -315,21 +316,49 @@ bool repath(Node& n, const std::string& parent, std::string& msg) {
     return true;
 }
 
+struct ShadowInfo {
+    uint32_t files = 0;
+    std::string first;
+};
+
+void set_overlay(Node& n, size_t overlay) {
+    n.overlay = static_cast<int>(overlay);
+    for (Node& k : n.kids) set_overlay(k, overlay);
+}
+
+// Records the files a later layer replaces that came from an installed mod. The count is per earlier mod, and `first` names the
+// first path so one warning line is enough. A later mod layer also counts: when two mods touch the same file, the later one wins.
+void note_shadows(const Node& n, size_t layer, const std::vector<RomfsOverlay>& overlays, std::map<size_t, ShadowInfo>& shadows) {
+    if (!n.is_dir) {
+        if (n.overlay >= 0 && static_cast<size_t>(n.overlay) < overlays.size() &&
+            overlays[static_cast<size_t>(n.overlay)].installed_mod && static_cast<size_t>(n.overlay) != layer) {
+            ShadowInfo& s = shadows[static_cast<size_t>(n.overlay)];
+            s.files++;
+            if (s.first.empty()) s.first = n.path;
+        }
+        return;
+    }
+    for (const Node& k : n.kids) note_shadows(k, layer, overlays, shadows);
+}
+
 // Lays the overlay directory `add` over `base`. `taken` counts the files taken from the overlay.
-bool merge(Node& base, Node& add, uint32_t& taken, std::string& msg) {
+bool merge(Node& base, Node& add, size_t layer, const std::vector<RomfsOverlay>& overlays, std::map<size_t, ShadowInfo>& shadows,
+           uint32_t& taken, std::string& msg) {
     for (Node& k : add.kids) {
         auto it = std::find_if(base.kids.begin(), base.kids.end(), [&](const Node& b) { return b.name == k.name; });
         if (it == base.kids.end())
             it = std::find_if(base.kids.begin(), base.kids.end(), [&](const Node& b) { return same_name_nocase(b.name, k.name); });
         if (it == base.kids.end()) {
             if (!repath(k, base.path, msg)) return false;
+            set_overlay(k, layer);
             taken += count_files(k);
             base.kids.push_back(std::move(k));
         } else if (it->is_dir && k.is_dir) {
-            if (!merge(*it, k, taken, msg)) return false;
+            if (!merge(*it, k, layer, overlays, shadows, taken, msg)) return false;
         } else if (!it->is_dir && !k.is_dir) {
             // The overlay's file becomes a host file. Clear every source marker the base may have carried: an
             // archived (.nx) or packed (.nup) file would otherwise still be read from its archive/package.
+            note_shadows(*it, layer, overlays, shadows);
             it->host = k.host;
             it->size = k.size;
             it->src = 0;
@@ -337,14 +366,17 @@ bool merge(Node& base, Node& add, uint32_t& taken, std::string& msg) {
             it->nx_src = nx::File{};
             it->packed = false;
             it->pkg = nup::File{};
+            it->overlay = static_cast<int>(layer);
             it->mem.reset();
             taken++;
         } else {
             // a file where the game has a folder, or the other way round: the overlay's entry replaces the game's
+            note_shadows(*it, layer, overlays, shadows);
             const std::string name = it->name;
             *it = std::move(k);
             it->name = name;
             if (!repath(*it, base.path, msg)) return false;
+            set_overlay(*it, layer);
             taken += count_files(*it);
         }
     }
@@ -421,7 +453,7 @@ struct Layout {
 };
 
 // Lays out the host folder: entries sorted by full path in each table, file data in that order, 16-byte aligned.
-bool make_layout(const std::string& host_dir, const std::vector<std::string>& overlays, const RomfsEdits* edits, Layout& L,
+bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits, Layout& L,
                  std::string* err) {
     std::string msg;
     std::wstring wdir;
@@ -452,13 +484,14 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         L.archive = std::move(archive);
         NXLOG_I("fs", "nx: %s, %zu top-level RomFS entries", host_dir.c_str(), root.kids.size());
     }
-    uint32_t taken = 0;
-    for (const std::string& o : overlays) {
+    uint32_t taken = 0, installed_mod_files = 0, package_overlay_files = 0, shadowed_mod_files = 0;
+    for (size_t i = 0; i < overlays.size(); i++) {
+        const RomfsOverlay& o = overlays[i];
         std::wstring wo;
         std::error_code oec;
-        const std::filesystem::path oabs = to_wide(o, wo) ? std::filesystem::absolute(std::filesystem::path(wo), oec) : std::filesystem::path();
+        const std::filesystem::path oabs = to_wide(o.path, wo) ? std::filesystem::absolute(std::filesystem::path(wo), oec) : std::filesystem::path();
         if (oabs.empty() || oec || !std::filesystem::is_directory(oabs, oec)) {
-            NXLOG_W("fs", "romfs overlay '%s' is not a folder: left out", o.c_str());
+            NXLOG_W("fs", "romfs overlay '%s' is not a folder: left out", o.path.c_str());
             continue;
         }
         Node ov;
@@ -466,19 +499,39 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
         ov.host = long_path(oabs.wstring());
         std::string omsg;
         if (!scan(ov, omsg)) {
-            NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.c_str(), omsg.c_str());
+            NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.path.c_str(), omsg.c_str());
             continue;
         }
         // merge into a copy, so an overlay that fails halfway (a path too long) leaves the tree as it was
         Node merged = root;
         uint32_t n = 0;
-        if (!merge(merged, ov, n, omsg)) {
-            NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.c_str(), omsg.c_str());
+        std::map<size_t, ShadowInfo> shadows;
+        if (!merge(merged, ov, i, overlays, shadows, n, omsg)) {
+            NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.path.c_str(), omsg.c_str());
             continue;
         }
         root = std::move(merged);
         taken += n;
-        NXLOG_I("fs", "romfs overlay '%s': %u files", o.c_str(), n);
+        if (o.installed_mod)
+            installed_mod_files += n;
+        else
+            package_overlay_files += n;
+        if (o.installed_mod)
+            NXLOG_I("mods", "mod '%s': %u file(s) from RomFS", o.name.c_str(), n);
+        else
+            NXLOG_I("fs", "package overlay '%s': %u file(s)", o.path.c_str(), n);
+        for (const auto& [victim, shadow] : shadows) {
+            const RomfsOverlay& from = overlays[victim];
+            shadowed_mod_files += shadow.files;
+            if (o.installed_mod) {
+                NXLOG_W("mods", "mod '%s' shadows %u file(s) from installed mod '%s' (first: %s); the later mod wins", o.name.c_str(),
+                        shadow.files, from.name.c_str(), shadow.first.c_str());
+            } else {
+                NXLOG_W("mods", "package overlay '%s' shadows %u file(s) from installed mod '%s' (first: %s); package data must stay "
+                                 "below mods, so the mod's files are not used",
+                        o.path.c_str(), shadow.files, from.name.c_str(), shadow.first.c_str());
+            }
+        }
     }
     if (!overlays.empty()) sort_tree(root);
 
@@ -639,6 +692,9 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     L.stats.data_bytes = data_bytes;
     L.stats.data_offset = kPartitionOfs;
     L.stats.overlay_files = taken;
+    L.stats.installed_mod_files = installed_mod_files;
+    L.stats.package_overlay_files = package_overlay_files;
+    L.stats.shadowed_mod_files = shadowed_mod_files;
     L.stats.edited_files = edited;
     L.built = true;
     return true;
@@ -780,6 +836,13 @@ RomfsImage::RomfsImage() : p_(std::make_unique<Impl>()) {}
 RomfsImage::~RomfsImage() = default;
 
 bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays, const RomfsEdits* edits) {
+    std::vector<RomfsOverlay> layers;
+    layers.reserve(overlays.size());
+    for (const std::string& path : overlays) layers.emplace_back(path, std::string(), false);
+    return build(host_dir, err, layers, edits);
+}
+
+bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits) {
     Layout fresh;
     const bool ok = make_layout(host_dir, overlays, edits, fresh, err);
     std::lock_guard<std::mutex> lk(p_->mu);

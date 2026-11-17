@@ -447,7 +447,8 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     auto img = std::make_shared<fs::RomfsImage>();
     std::string err;
     const std::string dir = romfs_dir();
-    std::vector<std::string> overlays;
+    std::vector<fs::RomfsOverlay> overlays;
+    size_t package_overlays = 0, installed_romfs_mods = 0;
     // [fs] romfs_overlay: what the launcher writes for a package whose RomFS is packed with zstd, since those files cannot be served from the
     // package itself. Semi-colon separated, so more than one folder can be laid over it. This is base game data, so it goes *below* the
     // installed mods: a mod replacing a packed file must not be undone by the unpacked original (#39).
@@ -455,8 +456,9 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
         const size_t at = list.find(';');
         const std::string one = list.substr(0, at);
         if (!one.empty()) {
-            NXLOG_I("fs", "RomFS overlay for packed files: %s", one.c_str());
-            overlays.push_back(one);
+            NXLOG_I("fs", "package overlay (base game data, below mods): %s", one.c_str());
+            overlays.emplace_back(one, std::string(), false);
+            ++package_overlays;
         }
         if (at == std::string::npos) break;
         list.erase(0, at + 1);
@@ -465,8 +467,9 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     for (const RomfsMod& m : installed_mods()) {
         if (m.has_exefs && has_exefs_patches(m)) NXLOG_W("mods", "%s: exefs patches are left out (the game code is compiled ahead of time)", m.name.c_str());
         if (!m.romfs.empty()) {
-            NXLOG_I("mods", "%s: RomFS from %s", m.name.c_str(), m.romfs.c_str());
-            overlays.push_back(m.romfs);
+            NXLOG_I("mods", "mod '%s': RomFS from %s", m.name.c_str(), m.romfs.c_str());
+            overlays.emplace_back(m.romfs, m.name, true);
+            ++installed_romfs_mods;
         }
     }
     // code mods' file edits (nxrt/mod_api.h edit_file): applied to the tree with the RomFS mods laid over it
@@ -481,7 +484,8 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     const fs::RomfsImage::Stats s = img->stats();
     NXLOG_I("fs", "RomFS image from %s: %u files, %u directories, %llu bytes of data, image size %llu", dir.c_str(), s.files, s.dirs,
             static_cast<unsigned long long>(s.data_bytes), static_cast<unsigned long long>(img->size()));
-    if (!overlays.empty()) NXLOG_I("mods", "%zu RomFS mod(s), %u files from mods", overlays.size(), s.overlay_files);
+    if (installed_romfs_mods) NXLOG_I("mods", "%zu installed RomFS mod(s), %u file(s) from mods", installed_romfs_mods, s.installed_mod_files);
+    if (package_overlays) NXLOG_I("fs", "package overlay: %zu folder(s), %u file(s)", package_overlays, s.package_overlay_files);
     if (s.edited_files) NXLOG_I("mods", "%u file(s) edited by code mods", s.edited_files);
     // [fs] romfs_files: the file count of the complete RomFS of the supported version (the game sets it). A dump well short of it (the
     // base game's RomFS beside the update's code, a copy that stopped part way) boots and then crashes on a file that is not there (#64).

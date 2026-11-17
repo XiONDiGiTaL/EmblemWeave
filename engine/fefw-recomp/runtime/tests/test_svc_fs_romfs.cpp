@@ -26,6 +26,7 @@
 
 #include "../src/services/fs_romfs.h"
 #include "nxrt/config.h"
+#include "nxrt/log.h"
 #include "nxrt/services.h"
 #include "test_framework.h"
 
@@ -33,8 +34,9 @@ NXTEST_GROUP(svc_fs_romfs)
 
 namespace {
 
-using nxrt::services::fs::RomfsImage;
 using nxrt::services::fs::RomfsEdits;
+using nxrt::services::fs::RomfsImage;
+using nxrt::services::fs::RomfsOverlay;
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 
 // One entry of a host test tree. `path` is an image path ("/dir/name").
@@ -863,6 +865,71 @@ NXTEST(romfs_overlays_replace_and_add) {
                      {"/top.txt", false, pattern(11, 7)}});
     uint64_t off = 0, sz = 0;
     CHECK(!img.file_extent("/data/unit.bin", &off, &sz));   // the game's spelling is kept
+}
+
+namespace {
+
+struct LogCapture {
+    explicit LogCapture(std::vector<std::string>& lines) : lines(lines), level(nxrt::log_level()) {
+        nxrt::log_set_level(nxrt::LogLevel::Info);
+        nxrt::log_set_sink(&LogCapture::sink, this);
+    }
+    ~LogCapture() {
+        nxrt::log_set_sink(nullptr, nullptr);
+        nxrt::log_set_level(level);
+    }
+    static void sink(nxrt::LogLevel, const char* line, void* user) { static_cast<LogCapture*>(user)->lines.emplace_back(line); }
+    std::vector<std::string>& lines;
+    nxrt::LogLevel level;
+};
+
+bool has_line(const std::vector<std::string>& lines, const char* needle) {
+    for (const std::string& line : lines)
+        if (line.find(needle) != std::string::npos) return true;
+    return false;
+}
+
+}  // namespace
+
+// #39: the startup log must say which layer is the launcher's package overlay and which is an installed mod. If the package overlay
+// is applied after a mod, it shadows the mod's files; that warning is what makes the failure visible in fefw.log.
+NXTEST(romfs_overlay_diagnostics_separate_mods_from_package) {
+    TempTree base, package, mod;
+    write_host(base.root, {{"/GameData/Item.bin", false, pattern(20, 1)}});
+    write_host(package.root, {{"/GameData/Item.bin", false, pattern(20, 2)}, {"/GameData/PackageOnly.bin", false, pattern(20, 3)}});
+    write_host(mod.root, {{"/GameData/Item.bin", false, pattern(20, 4)}});
+
+    std::vector<std::string> fixed_log;
+    {
+        LogCapture capture(fixed_log);
+        RomfsImage img;
+        std::string err;
+        const std::vector<RomfsOverlay> overlays{{utf8(package.root), "", false}, {utf8(mod.root), "Weapon Durability", true}};
+        REQUIRE(img.build(utf8(base.root), &err, overlays));
+        CHECK_EQ(img.stats().package_overlay_files, 2u);
+        CHECK_EQ(img.stats().installed_mod_files, 1u);
+        CHECK_EQ(img.stats().shadowed_mod_files, 0u);
+        check_tree(img, {{"/GameData/Item.bin", false, pattern(20, 4)}, {"/GameData/PackageOnly.bin", false, pattern(20, 3)}});
+    }
+    CHECK(has_line(fixed_log, "package overlay"));
+    CHECK(has_line(fixed_log, "mod 'Weapon Durability'"));
+    CHECK(!has_line(fixed_log, "shadows"));
+
+    std::vector<std::string> reversed_log;
+    {
+        LogCapture capture(reversed_log);
+        RomfsImage img;
+        std::string err;
+        const std::vector<RomfsOverlay> overlays{{utf8(mod.root), "Weapon Durability", true}, {utf8(package.root), "", false}};
+        REQUIRE(img.build(utf8(base.root), &err, overlays));
+        CHECK_EQ(img.stats().package_overlay_files, 2u);
+        CHECK_EQ(img.stats().installed_mod_files, 1u);
+        CHECK_EQ(img.stats().shadowed_mod_files, 1u);
+        check_tree(img, {{"/GameData/Item.bin", false, pattern(20, 2)}, {"/GameData/PackageOnly.bin", false, pattern(20, 3)}});
+    }
+    CHECK(has_line(reversed_log, "package overlay"));
+    CHECK(has_line(reversed_log, "shadows 1 file(s) from installed mod 'Weapon Durability'"));
+    CHECK(has_line(reversed_log, "below mods, so the mod's files are not used"));
 }
 
 // Edits (code mods' edit_file): a wanted file is handed over as it stands after the overlays, the image serves the returned bytes with
