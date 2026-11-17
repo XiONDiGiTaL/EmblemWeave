@@ -279,6 +279,8 @@ void gpu_wrote(uint64_t addr, uint64_t size, int use) {
 const ProgLayout* g_pl = nullptr;
 const ProgLayout* g_last_draw_pl = nullptr;
 bool g_alpha_draw = false;       // this draw uses the alpha-test layout: build_key sets the key's alpha_func
+bool g_gain_draw = false;        // [hdr] ui_nits: the scene's draw into the window texture: alpha-test layout, the scene gain pushed (hdr_gain_shader)
+bool g_scene_drawn = false;      // [hdr] ui_nits: the tone-map draw ran and the scene has not reached a window texture yet
 VkPipeline g_pipe = VK_NULL_HANDLE;
 VkPrimitiveTopology g_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
 VkPrimitiveTopology g_pipe_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
@@ -2800,8 +2802,9 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
         for (uint32_t i = 0; i < 8; ++i) key.blend_enable[i] = 0;
     }
     // The game's alpha test (alpha_test_wanted, begin_draw chose the alpha-test layout): the fragment shader variant; the reference is a push constant.
-    key.alpha_layout = g_alpha_draw ? 1 : 0;   // the layout begin_draw chose, also when the variant is ruled out below
+    key.alpha_layout = (g_alpha_draw || g_gain_draw) ? 1 : 0;   // the layout begin_draw chose, also when the variant is ruled out below
     if (g_alpha_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.alpha_func = static_cast<uint8_t>(S.color.alpha_test);
+    if (g_gain_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.alpha_pad[0] = 1;   // [hdr] ui_nits
     return true;
 }
 
@@ -3167,9 +3170,28 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     const ProgLayout* pl = g_pl;
     if (!pl) return false;
     g_alpha_draw = false;
+    g_gain_draw = false;
     if (alpha_test_wanted()) {
         const ProgLayout* ap = alpha_layout(*pl);
         if (ap != pl) { pl = ap; g_alpha_draw = true; }
+    } else if (S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && extras::hdr_ui_split()) {
+        // [hdr] ui_nits: the scene keeps paper white. The gain goes on the frame's first draw after the tone-map draw into a target of the
+        // window's kind (an 8-bit sRGB target kept as float, or a window texture): the scene's last pass before the UI. Not on the tone map
+        // itself: the game's passes after it (grading, anti-aliasing) are not linear, and scaling their input changed the whole picture.
+        // Fortune's Weave: tone map -> R11G11B10F, then its post pass writes the HUD-less scene (the frame generation input), the gain's draw.
+        if (hdr_tonemap_shader(S.stage[kFragment])) {
+            g_scene_drawn = true;
+        } else if (g_scene_drawn && S.color_tex[0] && (S.color_tex[0]->is_display || tex_hdr_promoted(S.color_tex[0].get()))) {
+            g_scene_drawn = false;
+            if (hdr_gain_shader(S.stage[kFragment])) {
+                const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the scene gain
+                if (ap != pl) { pl = ap; g_gain_draw = true; }
+            }
+            static std::atomic<int> told{0};
+            if (told.fetch_add(1) < 3)
+                NXLOG_I("hdr", "UI brightness: the scene's last draw before the UI, into t%u (fs %s), %s, gain %.3f", S.color_tex[0]->id, S.stage[kFragment]->hash.c_str(),
+                        g_gain_draw ? "gets the scene gain" : "cannot take it (patch or layout): no scene gain", static_cast<double>(extras::hdr_scene_gain()));
+        }
     }
     if (pl != g_last_draw_pl) {   // another layout than the last draw's (the alpha test came or went): the sets and the pipeline are bound again
         g_last_draw_pl = pl;
@@ -3415,6 +3437,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     }
     rs_mark(kRsSets);
     if (g_alpha_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof S.alpha_ref, &S.alpha_ref);
+    if (g_gain_draw) {   // [hdr] ui_nits: the scene keeps paper white while the output pass maps 1.0 to the UI's white (read every draw: live)
+        const float gain = extras::hdr_scene_gain();
+        vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof gain, &gain);
+    }
     if (pl->push_bytes && g_gen_tcs) {
         // the pass-through control shader's tessellation levels (NVN's fixed SetInner/OuterTessellationLevels), every draw: cheap, and
         // the layout may have changed since the last push

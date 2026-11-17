@@ -273,6 +273,7 @@ void tex_mark_gpu_written(Texture* t);
 void tex_sparse_before_copy(Texture* t, uint32_t layer, uint32_t level);   // a sparse texture: bind the mapped tiles a copy writes
 VkImage tex_image(Texture* t);
 VkFormat tex_vk_format(Texture* t);
+bool tex_hdr_promoted(Texture* t);   // an 8-bit sRGB render target kept as RGBA16F for the HDR scene (hdr_promote_target)
 VkImageAspectFlags tex_aspect(Texture* t);
 VkExtent3D tex_extent(Texture* t, uint32_t level = 0);
 uint32_t tex_levels(Texture* t);

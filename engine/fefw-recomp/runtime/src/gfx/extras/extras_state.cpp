@@ -57,6 +57,8 @@ Settings settings_from_config() {
     s.hdr.paper_white_nits = std::clamp(config_get_double("hdr", "paper_white_nits", 0.0), 0.0, 500.0);
     if (s.hdr.paper_white_nits != 0 && s.hdr.paper_white_nits < 80) s.hdr.paper_white_nits = 80;
     s.hdr.highlight_boost = std::clamp(config_get_double("hdr", "highlight_boost", 1.0), 0.0, 2.0);
+    s.hdr.ui_nits = std::clamp(config_get_double("hdr", "ui_nits", 0.0), 0.0, 500.0);
+    if (s.hdr.ui_nits != 0 && s.hdr.ui_nits < 40) s.hdr.ui_nits = 40;
 
     const std::string um = lower(config_get_str("upscale", "mode", "off"));
     s.upscale.mode = um == "fsr1" || um == "spatial" ? UpscaleMode::Fsr1 : um == "fsr3" ? UpscaleMode::Fsr3 : um == "dlss" ? UpscaleMode::Dlss : um == "xess" ? UpscaleMode::Xess : um == "nis" ? UpscaleMode::Nis : um == "dlaa" ? UpscaleMode::Dlaa : UpscaleMode::Off;
@@ -214,7 +216,20 @@ void hdr_refresh_levels() {
         hs.peak_nits = std::max(hs.peak_nits, hs.paper_white_nits);
     }
     hs.peak_ratio = hs.output == OutputKind::Sdr8 ? 1.0f : peak_ratio(hs.peak_nits, hs.paper_white_nits, static_cast<float>(es.hdr.highlight_boost));
+    hs.ui_nits = static_cast<float>(es.hdr.ui_nits);
     hdr_set_state(hs);
+}
+
+float hdr_output_white_nits(const HdrState& hs) { return hs.scene_hdr && hs.ui_nits > 0 ? hs.ui_nits : hs.paper_white_nits; }
+
+float hdr_scene_gain() {
+    const HdrState hs = hdr_state();
+    return hs.scene_hdr && hs.ui_nits > 0 ? hs.paper_white_nits / hs.ui_nits : 1.0f;
+}
+
+bool hdr_ui_split() {
+    const HdrState hs = hdr_state();
+    return hs.scene_hdr && hs.ui_nits > 0;
 }
 
 bool hdr_mode_native() { return settings().hdr.mode == HdrMode::Native; }

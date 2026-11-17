@@ -814,6 +814,11 @@ void hdr_group(UiHost& host, Menu& m) {
         }
         row(m, "Highlight boost", When::Live, "0 keeps the SDR look, 1 lets highlights reach the peak, 2 pushes them further.");
         if (slider(m, "##hb", &h.highlight_boost, 0.0, 2.0, 0.1, "%.2f")) apply(host, m);
+        row(m, "UI brightness", When::Live, "Nits of white in menus, text and the HUD while the 3D scene keeps paper white; 0 = same as paper white.");
+        if (slider(m, "##ui", &h.ui_nits, 0, 500, 10, h.ui_nits <= 0 ? "same as paper white" : "%.0f nits")) {
+            if (h.ui_nits > 0 && h.ui_nits < 40) h.ui_nits = 40;
+            apply(host, m);
+        }
         end_rows();
     }
     const extras::HdrState hs = extras::hdr_state();

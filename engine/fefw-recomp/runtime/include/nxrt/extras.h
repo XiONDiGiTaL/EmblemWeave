@@ -30,6 +30,7 @@ struct HdrSettings {
     double peak_nits = 0;            // 0 = the display's reported peak (1000 when it reports none), else 200..10000
     double paper_white_nits = 0;     // 0 = Windows' SDR content brightness when HDR is on there (203 otherwise), else 80..500
     double highlight_boost = 1.0;    // 0 = the game's SDR look up to its own white, 1 = highlights reach the peak (0 .. 2)
+    double ui_nits = 0;              // 0 = the UI's white is paper white (as before), else 40..500: the UI's own white; the 3D scene keeps paper white
 };
 
 // Nis: NVIDIA Image Scaling v1.0.3 (spatial, any GPU). Fsr3, Dlss, Dlaa, Xess: temporal (Dlaa = DLSS at the input size).
@@ -121,7 +122,9 @@ struct HdrState {
     float paper_white_nits = 203;
     float peak_nits = 1000;
     float peak_ratio = 1;            // asymptote of the extended shoulder, in paper-white units (1 = the game's own SDR curve)
-    bool display_hdr = false;        // Windows reports HDR on for the monitor (informational)
+    float ui_nits = 0;               // [hdr] ui_nits: 0 = off (the UI's white is paper white); else the output pass maps 1.0 to this and the
+                                     // tone-map draw scales the scene by paper_white_nits / ui_nits (hdr_scene_gain)
+    bool display_hdr = false;       // Windows reports HDR on for the monitor (informational)
     float display_peak_nits = 0;
     float display_sdr_white_nits = 80;
     // What the game declares about its own output (0 / -1: not declared). Used by HdrMode::Native.
@@ -149,5 +152,10 @@ bool hdr_mode_native();
 
 // Resolves the numbers the settings leave at 0 ("auto") against what the display reports.
 void hdr_resolve_levels(const HdrSettings& s, bool display_hdr, float display_peak_nits, float display_sdr_white_nits, float* paper, float* peak);
+// UI brightness ([hdr] ui_nits): the nits the output pass maps 1.0 of the window texture to (the UI's white; paper white when it is off),
+// and the factor the tone-map draw puts on the 3D scene so the scene keeps paper white (paper_white_nits / ui_nits; 1 when it is off).
+float hdr_output_white_nits(const HdrState& hs);
+float hdr_scene_gain();
+bool hdr_ui_split();   // [hdr] ui_nits is set and the HDR scene runs
 
 }  // namespace nxrt::extras

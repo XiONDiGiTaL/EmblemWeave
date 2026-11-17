@@ -61,6 +61,10 @@ bool push_uniforms_on();
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);
 // The layout of `base` with the alpha-test push constant (cached per base; `base` itself when it has push constants of its own).
 const ProgLayout* alpha_layout(const ProgLayout& base);
+// [hdr] ui_nits: the gain variant of fs fits (colour output 0 scaled by the push constant at offset 0; GraphicsKey::alpha_pad[0] = 1
+// selects it). hdr_tonemap_shader: fs is the HDR tone-map shader (the scene's draw; the gain goes on the scene's next draw into a window texture).
+bool hdr_gain_shader(const ShaderInfo* fs);
+bool hdr_tonemap_shader(const ShaderInfo* fs);
 
 // Vertex input for the key.
 struct KeyAttr {

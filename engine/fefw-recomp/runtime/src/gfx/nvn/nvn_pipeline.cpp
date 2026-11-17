@@ -341,6 +341,51 @@ static VkShaderModule hdr_fragment_module(const ShaderInfo* fs) {
     return m;
 }
 
+// [hdr] ui_nits: the fragment shader (its HDR variant when it is the tone-map shader) with colour output 0's rgb scaled by the push
+// constant (the scene gain, hdr_scene_gain). Empty when the scale patch does not fit; hdr_gain_shader is the replay's test for it.
+static std::vector<uint32_t> hdr_gain_words(const ShaderInfo* fs) {
+    std::vector<uint32_t> hdr, scaled;
+    if (!extras::hdr_scene_active() || fs->spirv.size() > 65536) return {};
+    const bool tonemap = extras::hdr_tonemap_variant(fs->spirv, fs->hash, hdr);
+    if (!spirv_scale_output0(tonemap ? hdr : fs->spirv, scaled)) return {};
+    return scaled;
+}
+
+bool hdr_gain_shader(const ShaderInfo* fs) {
+    static std::mutex mu;
+    static std::unordered_map<const ShaderInfo*, bool> cache;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = cache.find(fs);
+    if (it != cache.end()) return it->second;
+    const bool ok = !hdr_gain_words(fs).empty();
+    if (ok) NXLOG_I(kTag, "%s: the scene's last pass before the UI gets the HDR scene gain ([hdr] ui_nits) from a push constant", fs->hash.c_str());
+    cache[fs] = ok;
+    return ok;
+}
+
+bool hdr_tonemap_shader(const ShaderInfo* fs) {
+    static std::mutex mu;
+    static std::unordered_map<const ShaderInfo*, bool> cache;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = cache.find(fs);
+    if (it != cache.end()) return it->second;
+    std::vector<uint32_t> hdr;
+    const bool ok = extras::hdr_scene_active() && fs->spirv.size() <= 65536 && extras::hdr_tonemap_variant(fs->spirv, fs->hash, hdr);
+    cache[fs] = ok;
+    return ok;
+}
+
+static VkShaderModule hdr_gain_module(const ShaderInfo* fs) {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static std::unordered_map<const ShaderInfo*, VkShaderModule> cache;
+    auto it = cache.find(fs);
+    if (it != cache.end()) return it->second;
+    const std::vector<uint32_t> w = hdr_gain_words(fs);
+    VkShaderModule m = w.empty() ? hdr_fragment_module(fs) : create_module(w, fs->hash.c_str());
+    cache[fs] = m;
+    return m;
+}
+
 // The fragment shader with the game's alpha test (func; the reference is a push constant) as a kill before each return: one module per shader and function.
 static VkShaderModule alpha_test_module(const ShaderInfo* fs, uint32_t func) {
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
@@ -638,6 +683,7 @@ bool resolve_stage_modules(const GraphicsKey& key, StageModules* out) {
                            : (i == 1 && key.no_out)      ? no_output_module(key.stage[i])
                            : (i == 1 && key.dual_src)    ? dual_source_module(key.stage[i])
                            : (i == 1 && key.alpha_func) ? alpha_test_module(key.stage[i], key.alpha_func)
+                           : (i == 1 && key.alpha_pad[0]) ? hdr_gain_module(key.stage[i])
                            : (i == 1)                    ? hdr_fragment_module(key.stage[i])
                                                          : shader_module(key.stage[i]);
         if (!m) return false;

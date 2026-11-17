@@ -645,6 +645,21 @@ void hdr_group(Page& p) {
     tip("The brightness of ordinary white in the game, in nits; auto follows Windows' SDR content brightness when HDR is on there, else 203.");
     if (slider("Highlight boost", &h.highlight_boost, 0.0, 2.0, "%.2f")) mark(p);
     tip("0 keeps the game's SDR look up to its own white, 1 lets highlights reach the display's peak, 2 pushes them further.");
+    {   // UI brightness: 0 ("same as paper white") keeps the UI at the scene's white, as before
+        int x = static_cast<int>(std::lround(h.ui_nits));
+        bool changed = ImGui::SliderInt("UI brightness##hdr_ui", &x, 0, 500, x <= 0 ? "same as paper white" : "%d nits");
+        if (ImGui::IsItemDeactivated()) {
+            const int c = x <= 0 ? 0 : std::clamp(x, 40, 500);
+            changed = changed || c != x;
+            x = c;
+        }
+        if (changed) {
+            h.ui_nits = x;
+            mark(p);
+        }
+    }
+    tip("The brightness of white in the menus, text and HUD, in nits, while the 3D scene keeps paper white. Applies live. "
+        "The first change from \"same as paper white\" builds the scene's tone-map pipelines again (a short pause).");
 
     const extras::HdrState hs = extras::hdr_state();
     ImGui::Text("HDR scene: %s, swapchain: %s, paper white %.0f nits, peak %.0f nits, peak ratio %.2f, display reports HDR: %s",

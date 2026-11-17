@@ -422,6 +422,7 @@ struct Renderer::Impl {
                 hs.peak_nits = std::max(hs.peak_nits, hs.paper_white_nits);
             }
             hs.peak_ratio = wanted == extras::OutputKind::Sdr8 ? 1.0f : extras::peak_ratio(hs.peak_nits, hs.paper_white_nits, static_cast<float>(es.hdr.highlight_boost));
+            hs.ui_nits = static_cast<float>(es.hdr.ui_nits);
         }
         hs.output = extras::OutputKind::Sdr8;     // the swapchain sets the real one
         extras::hdr_set_state(hs);
