@@ -36,11 +36,19 @@ pub fn tracked(ui: &mut egui::Ui, text: &str, size: f32, colour: Color32, tracki
         .iter()
         .map(|c| ui.fonts(|f| f.layout_no_wrap(c.to_string(), font.clone(), colour).size().x))
         .collect();
-    let total = widths.iter().sum::<f32>() + tracking * chars.len().saturating_sub(1) as f32;
+    // A tracked label is drawn glyph by glyph, so it would happily paint past the panel it lives in (the navigation
+    // rail's wordmark at a narrow width). Clamp the row to what is actually available and stop before a glyph that
+    // would spill: a shortened label is right, an overflowing one is not.
+    let room = ui.available_width().max(1.0);
+    let natural = widths.iter().sum::<f32>() + tracking * chars.len().saturating_sub(1) as f32;
+    let total = natural.min(room);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(total.max(1.0), size * 1.7), Sense::hover());
     let mut x = rect.left();
     let painter = ui.painter();
     for (c, w) in chars.iter().zip(&widths) {
+        if x + w > rect.right() + 0.5 {
+            break;
+        }
         painter.text(Pos2::new(x, rect.center().y), egui::Align2::LEFT_CENTER, c, font.clone(), colour);
         x += w + tracking;
     }
@@ -277,7 +285,10 @@ pub fn quick_tile(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, deta
 
 /// A clickable parent section in the navigation rail.
 pub fn nav_group_header(ui: &mut egui::Ui, p: &Palette, label: &str, open: bool, compact: bool, active: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), if compact { 14.0 } else { 28.0 }), Sense::click());
+    let (row, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), if compact { 14.0 } else { 28.0 }), Sense::click());
+    // Draw inside the panel's own gutter, not the full allocation: the allocation reaches the rail's edge, and a chevron
+    // pinned 14 px from that edge sat on the rail's border instead of next to the label it belongs to.
+    let rect = row.shrink2(Vec2::new(6.0, 0.0));
     if compact {
         if ui.is_rect_visible(rect) {
             ui.painter().hline((rect.left() + 8.0)..=(rect.right() - 8.0), rect.center().y, Stroke::new(1.0_f32, alpha(p.line, 180)));

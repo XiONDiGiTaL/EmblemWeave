@@ -246,14 +246,19 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
                 ui.horizontal_top(|ui| {
                     // Equal side gutters keep the lockup on the rail's true
                     // centre in every theme; the collapse control occupies the
-                    // right gutter instead of pushing the artwork left.
-                    ui.add_space(28.0);
+                    // right gutter instead of pushing the artwork left. Both
+                    // gutters shrink with the rail, so the wordmark is centred by
+                    // what is left rather than by a fixed 28 px that a narrow
+                    // rail cannot pay for.
+                    let gutter = ((header_w - 96.0) / 2.0).clamp(4.0, 28.0);
+                    let centre_w = (header_w - 2.0 * gutter - 16.0).max(24.0);
+                    ui.add_space(gutter);
                     ui.allocate_ui_with_layout(
-                        Vec2::new((header_w - 58.0).max(1.0), 0.0),
+                        Vec2::new(centre_w, 0.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
-                            ui.set_width((header_w - 58.0).max(1.0));
-                        logo::show_lockup(ui, &p, 100.0);
+                            ui.set_width(centre_w);
+                        logo::show_lockup(ui, &p, centre_w.min(100.0));
                         ui.add_space(1.0);
                         widgets::tracked(ui, "RECOMPILATION LAUNCHER", 6.8, p.muted, 0.8);
                         },
@@ -361,19 +366,30 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                     let (text, tone) = crate::pages::overview::readiness(app);
                     widgets::status_dot(ui, &p, tone);
                     ui.label(RichText::new(text.to_uppercase()).font(theme::semibold(9.0)).color(tone.colour(&p)));
-                    ui.label(RichText::new("·").size(10.0).color(p.muted));
-                    let (data, _) = data_state(app);
-                    ui.label(RichText::new(format!("data {data}")).size(10.0).color(p.muted));
+                    // The readiness line is the one thing the strip must always say. The data state is the first to go
+                    // when the window is too narrow to hold it beside the buttons on the right, instead of the two
+                    // running into each other.
+                    if ui.available_width() > 250.0 {
+                        ui.label(RichText::new("·").size(10.0).color(p.muted));
+                        let (data, _) = data_state(app);
+                        ui.label(RichText::new(format!("data {data}")).size(10.0).color(p.muted));
+                    }
+                    ui.add_space(10.0);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    if ctx.screen_rect().width() >= 880.0 {
-                        ui.label(RichText::new(super::clock()).font(theme::mono(9.5)).color(p.muted));
+                    // Right to left, each item is added only if the space that is left can hold it and a gap. The strip
+                    // used to decide from the screen width, which is not the space the strip has: a narrow window drew
+                    // the clock on top of LOG. The clock keeps a fixed slot so it cannot jitter as the time changes.
+                    if ui.available_width() >= 104.0 {
+                        ui.allocate_ui_with_layout(Vec2::new(80.0, 0.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(super::clock()).font(theme::mono(9.5)).color(p.muted));
+                        });
                     }
-                    if ctx.screen_rect().width() >= 760.0 && header_action(ui, &p, "LOG", "Open the game log").clicked() {
+                    if ui.available_width() >= 54.0 && header_action(ui, &p, "LOG", "Open the game log").clicked() {
                         app.page = Page::Log;
                     }
-                    if ctx.screen_rect().width() >= 1120.0 && app.jobs.iter().any(|j| !j.finished()) {
+                    if ui.available_width() >= 70.0 && app.jobs.iter().any(|j| !j.finished()) {
                         let (done, all) = app.jobs.iter().filter(|j| !j.finished()).fold((0, 0), |(d, a), j| {
                             let d = d + j.snapshot(|pr| pr.stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done)).count());
                             let a = a + j.snapshot(|pr| pr.stages.len());
