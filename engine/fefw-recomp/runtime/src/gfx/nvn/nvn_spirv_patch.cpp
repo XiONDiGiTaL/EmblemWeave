@@ -1151,7 +1151,11 @@ std::vector<SpvIntSampler> spirv_predict_int_fetches(const std::vector<uint32_t>
 
 namespace nxrt::nvn::be::gpu {
 
-bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out) {
+namespace {
+// func 1..7: the alpha test (a kill when alpha of colour output 0 fails against the push constant); func 0: colour output 0's rgb times the push
+// constant (alpha kept). Both read the float at push constant offset 0 and run before every return of the entry point.
+bool patch_output0(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out) {
+    enum : uint32_t { OpStoreOp = 62, OpCompositeInsertOp = 82, OpVectorTimesScalarOp = 142 };
     enum : uint32_t { OpEntryPointOp = 15, OpTypeIntOp = 21, OpTypeBoolOp = 20, OpTypeFloatOp = 22, OpTypeVectorOp = 23, OpTypeStructOp = 30,
                       OpTypePointerOp = 32, OpConstantOp = 43, OpFunctionOp = 54, OpFunctionEndOp = 56, OpVariableOp = 59, OpLoadOp = 61,
                       OpAccessChainOp = 65, OpDecorateOp = 71, OpMemberDecorateOp = 72, OpCompositeExtractOp = 81, OpFOrdEqualOp = 180,
@@ -1159,7 +1163,7 @@ bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vecto
                       OpFOrdGreaterThanEqualOp = 190, OpSelectionMergeOp = 247, OpLabelOp = 248, OpBranchConditionalOp = 250, OpKillOp = 252,
                       OpReturnOp = 253, DecBlock = 2, DecOffset = 35, DecLocation = 30, DecIndex = 32, DecComponent = 31, StorageOutput = 3,
                       StoragePushConstant = 9, ModelFragment = 4 };
-    if (in.size() < 5 || func < 1 || func > 7) return false;
+    if (in.size() < 5 || func > 7) return false;
     std::vector<Inst> insts;
     for (size_t i = 5; i < in.size();) {
         const uint32_t len = in[i] >> 16;
@@ -1249,7 +1253,18 @@ bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vecto
         if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
         if (n.op == OpFunctionOp) in_entry = w[2] == entry_func;
         else if (n.op == OpFunctionEndOp) in_entry = false;
-        if (in_entry && n.op == OpReturnOp) {
+        if (in_entry && n.op == OpReturnOp && func == 0) {
+            const uint32_t v = bound++, a = bound++, rp = bound++, r = bound++, t = bound++, nv = bound++;
+            const uint32_t seq[] = {(4u << 16) | OpLoadOp, vec4, v, var,
+                                    (5u << 16) | OpCompositeExtractOp, f32, a, v, 3,
+                                    (5u << 16) | OpAccessChainOp, ptr_float, rp, pc_var, int_zero,
+                                    (4u << 16) | OpLoadOp, f32, r, rp,
+                                    (5u << 16) | OpVectorTimesScalarOp, vec4, t, v, r,
+                                    (6u << 16) | OpCompositeInsertOp, vec4, nv, a, t, 3,
+                                    (3u << 16) | OpStoreOp, var, nv};
+            out.insert(out.end(), std::begin(seq), std::end(seq));
+            ++returns;
+        } else if (in_entry && n.op == OpReturnOp) {
             const uint32_t v = bound++, a = bound++, rp = bound++, r = bound++, c = bound++, merge = bound++, kill = bound++;
             const uint32_t rhs = func == 1 ? a : r;
             const uint32_t seq[] = {(4u << 16) | OpLoadOp, vec4, v, var,
@@ -1271,5 +1286,12 @@ bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vecto
     out[3] = bound;
     return true;
 }
+}  // namespace
+
+bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out) {
+    return func >= 1 && patch_output0(in, func, out);
+}
+
+bool spirv_scale_output0(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) { return patch_output0(in, 0, out); }
 
 }  // namespace nxrt::nvn::be::gpu

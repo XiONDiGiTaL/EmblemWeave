@@ -1241,11 +1241,12 @@ void Overlay::draw(const FrameInfo& f) {
         vkCmdEndRendering(f.cmd);
     };
     if (hdr_frame) {
-        // HDR: the overlay goes into the cleared RGBA8 target, then the composite maps it onto the swapchain image (UI white = paper white)
+        // HDR: the overlay goes into the cleared RGBA8 target, then the composite maps it onto the swapchain image (its white = the game UI's
+        // white: [hdr] ui_nits when set, else paper white)
         const extras::HdrState hs = extras::hdr_state();
         s.composite.begin_overlay(f.cmd);
         render_into(s.composite.target_view(), VK_ATTACHMENT_LOAD_OP_CLEAR);
-        s.composite.composite(f.cmd, f.view, f.format, f.extent, s.ctx.renderer->output_kind(), hs.paper_white_nits, hs.peak_nits);
+        s.composite.composite(f.cmd, f.view, f.format, f.extent, s.ctx.renderer->output_kind(), extras::hdr_output_white_nits(hs), hs.peak_nits);
     } else {
         render_into(f.view, VK_ATTACHMENT_LOAD_OP_LOAD);
     }

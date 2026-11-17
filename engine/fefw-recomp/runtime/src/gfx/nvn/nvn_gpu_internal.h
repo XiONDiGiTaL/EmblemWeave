@@ -273,6 +273,7 @@ void tex_mark_gpu_written(Texture* t);
 void tex_sparse_before_copy(Texture* t, uint32_t layer, uint32_t level);   // a sparse texture: bind the mapped tiles a copy writes
 VkImage tex_image(Texture* t);
 VkFormat tex_vk_format(Texture* t);
+bool tex_hdr_promoted(Texture* t);   // an 8-bit sRGB render target kept as RGBA16F for the HDR scene (hdr_promote_target)
 VkImageAspectFlags tex_aspect(Texture* t);
 VkExtent3D tex_extent(Texture* t, uint32_t level = 0);
 uint32_t tex_levels(Texture* t);
@@ -360,6 +361,9 @@ void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists);
 void replay_end_submit(Frame& f);
 void replay_abort_submit();     // after a recording threw (its command buffer is discarded)
 void replay_request_trace();      // trace the next whole presented frame (any thread)
+// Render thread, at each present before the output pass: ends the frame's [hdr] ui_nits bookkeeping (extras::hdr_set_ui_white_frame) and
+// reads the settings for the next frame. again: the last frame shown once more (nothing changes).
+void replay_frame_presented(bool again);
 void replay_shutdown();           // destroys pipelines and layouts (render thread, device idle)
 
 // ---- shared facts (nvn_gpu.cpp) ----------------------------------------------------------------------------------------

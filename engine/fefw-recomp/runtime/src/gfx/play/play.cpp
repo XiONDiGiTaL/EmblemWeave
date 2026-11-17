@@ -1262,6 +1262,7 @@ extras::Settings merge_env(const extras::Settings& from_file) {
     if (config_has("hdr", "peak_nits")) r.hdr.peak_nits = env.hdr.peak_nits;
     if (config_has("hdr", "paper_white_nits")) r.hdr.paper_white_nits = env.hdr.paper_white_nits;
     if (config_has("hdr", "highlight_boost")) r.hdr.highlight_boost = env.hdr.highlight_boost;
+    if (config_has("hdr", "ui_nits")) r.hdr.ui_nits = env.hdr.ui_nits;
     if (config_has("upscale", "mode")) r.upscale.mode = env.upscale.mode;
     if (config_has("upscale", "sharpness")) r.upscale.sharpness = env.upscale.sharpness;
     if (config_has("upscale", "quality")) r.upscale.quality = env.upscale.quality;

@@ -95,6 +95,9 @@ bool spirv_dual_source_output(const std::vector<uint32_t>& in, std::vector<uint3
 // NVNalphaFunc (1 NEVER, 2 LESS, 3 EQUAL, 4 LEQUAL, 5 GREATER, 6 NOTEQUAL, 7 GEQUAL; ALWAYS needs no variant).
 // False (out untouched) when the module has no such output or an unexpected shape; the caller then uses the unpatched module.
 bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vector<uint32_t>& out);
+// The same push constant (FRAGMENT offset 0, the alpha-test layout) as a factor on colour output 0's rgb before every return (alpha kept):
+// the scene gain of [hdr] ui_nits, on the scene's last pass before the UI. Same failure rules as spirv_alpha_test.
+bool spirv_scale_output0(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
 // A fragment shader of a pass without colour attachments: every Location output becomes a private variable (the decorations go, and
 // the entry point's interface loses them before SPIR-V 1.4). False (out untouched) when no Location output exists or a built-in output
