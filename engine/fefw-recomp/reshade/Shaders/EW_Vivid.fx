@@ -1,7 +1,16 @@
 // EmblemWeave: Vivid. A small, predictable contrast and colour lift for Fire Emblem: Fortune's Weave.
-// Saturation above neutral, luminance-weighted so skin tones do not turn orange; a gentle S-curve for contrast; the darkest
-// values pushed down so night scenes and the UI's dark panels keep their depth instead of washing out.
-#include "ReShade.fxh"
+// Self-contained on purpose: no ReShade.fxh, because that file ships with the shader repository, and a copy of the game with
+// only these effects beside it must still compile. ReShade supplies BUFFER_* and PostProcessVS through the header, so the
+// back buffer, the full-screen triangle and the screen size are declared here instead.
+texture2D BackBufferTex : COLOR;
+sampler2D BackBuffer { Texture = BackBufferTex; };
+static const float2 kScreenSize = float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+
+void EW_PostVS(in uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0)
+{
+    uv = float2((id << 1) & 2, id & 2);
+    pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
 
 uniform float Saturation <
     ui_type = "slider"; ui_min = 0.0; ui_max = 2.0; ui_step = 0.01;
@@ -15,26 +24,18 @@ uniform float Contrast <
 > = 1.06;
 
 uniform float BlackPoint <
-    ui_type = "slider"; ui_min = -0.1; ui_max = 0.1; ui_step = 0.005;
+    ui_type = "slider"; ui_min = -0.05; ui_max = 0.05; ui_step = 0.005;
     ui_label = "Black point";
-    ui_tooltip = "Negative deepens the darkest values; the game's UI panels sit there.";
+    ui_tooltip = "Negative deepens the darkest values; the game's UI panels sit there. The same control lightens the picture when positive, which is what the Bright preset uses.";
 > = -0.015;
 
-uniform float Lift <
-    ui_type = "slider"; ui_min = -0.1; ui_max = 0.1; ui_step = 0.005;
-    ui_label = "Lift";
-> = 0.0;
-
-float3 PS_EW_Vivid(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
+float3 PS_EW_Vivid(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 {
-    float3 c = tex2D(ReShade::BackBuffer, uv).rgb;
+    float3 c = tex2D(BackBuffer, uv).rgb;
 
-    // Contrast around a 0.5 pivot, then the black point, then the lift: the order keeps the S-curve centred.
     c = (c - 0.5) * Contrast + 0.5;
     c = c * (1.0 - BlackPoint) + BlackPoint;
-    c += Lift;
 
-    // Saturation against the Rec.709 luma, mixed by the slider.
     const float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
     c = lerp(luma.xxx, c, Saturation);
 
@@ -48,7 +49,7 @@ technique EW_Vivid <
 {
     pass
     {
-        VertexShader = PostProcessVS;
+        VertexShader = EW_PostVS;
         PixelShader = PS_EW_Vivid;
     }
 }

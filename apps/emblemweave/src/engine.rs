@@ -139,6 +139,101 @@ pub fn reshade_status() -> ReshadeStatus {
     ReshadeStatus { installed, enabled, configured, logged }
 }
 
+/// One preset the release ships, in `engine/fefw-recomp/reshade/Presets`.
+pub struct ShipPreset {
+    pub name: String,
+}
+
+/// The presets that travel with the engine, by name, from the folder they are kept in.
+pub fn ship_presets() -> Vec<ShipPreset> {
+    let Some(root) = root() else { return Vec::new() };
+    let dir = root.join("reshade").join("Presets");
+    let mut out: Vec<ShipPreset> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            (path.extension().is_some_and(|x| x.eq_ignore_ascii_case("ini")))
+                .then(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .flatten()
+                .map(|name| ShipPreset { name })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// The preset `ReShade.ini` names now, without its folder and extension.
+pub fn current_reshade_preset() -> Option<String> {
+    let dir = game_folder()?;
+    let text = std::fs::read_to_string(dir.join("ReShade.ini")).ok()?;
+    let line = text.lines().find(|l| l.trim_start().starts_with("PresetPath="))?;
+    let value = line.split_once('=')?.1.trim().trim_matches('"');
+    let file = Path::new(value).file_stem()?.to_string_lossy().into_owned();
+    (!file.is_empty()).then_some(file)
+}
+
+/// Copy the shipped shaders and one preset beside `fefw.exe` and make ReShade load it: `PresetPath` points at the copy,
+/// `EffectSearchPaths` at the shader folder, and F3/F4 step through every shipped preset in game (ReShade's own
+/// `PresetShortcutPaths`), so a player can compare looks without opening the overlay.
+pub fn apply_reshade_preset(name: &str) -> Result<String, String> {
+    let root = root().ok_or("the engine folder engine/fefw-recomp was not found")?;
+    let dir = game_folder().ok_or("the game is not built yet")?;
+    if !dir.join("ReShade.ini").is_file() {
+        return Err("ReShade.ini is not beside fefw.exe yet: run Set up ReShade first, and start the game once".into());
+    }
+    let shipped = root.join("reshade");
+    let preset = shipped.join("Presets").join(format!("{name}.ini"));
+    if !preset.is_file() {
+        return Err(format!("{name} is not one of the shipped presets"));
+    }
+    let shaders = dir.join("reshade-shaders").join("Shaders");
+    std::fs::create_dir_all(&shaders).map_err(|e| format!("creating {}: {e}", shaders.display()))?;
+    let mut copied = 0;
+    for e in std::fs::read_dir(shipped.join("Shaders")).map_err(|e| format!("reading the shipped shaders: {e}"))?.flatten() {
+        let to = shaders.join(e.file_name());
+        std::fs::copy(e.path(), &to).map_err(|e| format!("copying {}: {e}", to.display()))?;
+        copied += 1;
+    }
+    let target = dir.join(format!("{name}.ini"));
+    std::fs::copy(&preset, &target).map_err(|e| format!("copying {}: {e}", target.display()))?;
+
+    // The preset list for F3/F4, in folder order, so the keys walk the same sequence the picker shows.
+    let mut shortcuts: Vec<String> = Vec::new();
+    for p in ship_presets() {
+        let copy = dir.join(format!("{}.ini", p.name));
+        if !copy.is_file() {
+            let _ = std::fs::copy(shipped.join("Presets").join(format!("{}.ini", p.name)), &copy);
+        }
+        if copy.is_file() {
+            shortcuts.push(format!(".\\{}", copy.file_name().unwrap_or_default().to_string_lossy()));
+        }
+    }
+
+    let ini = dir.join("ReShade.ini");
+    let text = std::fs::read_to_string(&ini).map_err(|e| format!("reading {}: {e}", ini.display()))?;
+    let mut set = |key: &str, value: String, text: &str| -> String {
+        let prefix = format!("{key}=");
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        if let Some(line) = lines.iter_mut().find(|l| l.trim_start().starts_with(&prefix)) {
+            *line = format!("{prefix}{value}");
+        } else {
+            // Every key used here lives under [GENERAL] or [INPUT]; place it before the next section.
+            let after = lines.iter().position(|l| l.trim() == "[INPUT]").unwrap_or(lines.len());
+            lines.insert(after, format!("{prefix}{value}"));
+        }
+        lines.join("\r\n")
+    };
+    let text = set("PresetPath", format!(".\\{name}.ini"), &text);
+    let text = set("EffectSearchPaths", r".\reshade-shaders\Shaders".into(), &text);
+    let text = set("PresetShortcutPaths", shortcuts.join(","), &text);
+    let text = set("KeyNextPreset", "61,0,0,0".into(), &text);     // F3
+    let text = set("KeyPreviousPreset", "62,0,0,0".into(), &text); // F4
+    std::fs::write(&ini, text).map_err(|e| format!("writing {}: {e}", ini.display()))?;
+    Ok(format!("{name} is loaded: {copied} shaders beside the game, F3 and F4 step through the presets"))
+}
+
 /// Whether an INI `Apps=` list contains `game`. Windows paths compare without
 /// case and with either slash; the setup tool writes them absolute.
 fn reshade_apps_contains(path: &Path, game: &Path) -> bool {

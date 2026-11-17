@@ -1187,6 +1187,21 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    // The Graphics page's preset picker, runnable from a console: copies the shipped shaders and preset beside fefw.exe
+    // and points ReShade.ini at them.
+    if let Some(i) = args.iter().position(|a| a == "--apply-preset") {
+        let name = args.get(i + 1).cloned().unwrap_or_default();
+        match engine::apply_reshade_preset(&name) {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.iter().any(|a| a == "--check-toolchain") {
         std::process::exit(check_toolchain_cli());
     }

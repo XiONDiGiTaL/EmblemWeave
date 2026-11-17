@@ -525,6 +525,43 @@ fn reshade_settings(app: &mut App, ui: &mut egui::Ui) {
         };
         ui.label(RichText::new(detail).size(12.5).color(tone.colour(&p)));
         ui.add_space(theme::SPACE_S);
+
+        // The presets the release ships. Applying one copies the shaders and the preset beside fefw.exe and points
+        // ReShade.ini at it, so the look is a single press instead of files a player has to find.
+        let presets = crate::engine::ship_presets();
+        if !presets.is_empty() {
+            let current = crate::engine::current_reshade_preset();
+            let choice_id = egui::Id::new("reshade-preset-choice");
+            let mut choice: String = ui.data(|d| d.get_temp(choice_id)).unwrap_or_default();
+            if choice.is_empty() {
+                choice = current.clone().unwrap_or_default();
+            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Preset").font(theme::semibold(11.0)).color(p.ink));
+                egui::ComboBox::from_id_salt("reshade-preset")
+                    .selected_text(if choice.is_empty() { "Choose…".to_string() } else { choice.clone() })
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for preset in &presets {
+                            ui.selectable_value(&mut choice, preset.name.clone(), &preset.name);
+                        }
+                    });
+                if widgets::button(ui, &p, "Apply preset", !choice.is_empty()).clicked() {
+                    match crate::engine::apply_reshade_preset(&choice) {
+                        Ok(msg) => app.notify(msg, Tone::Ok),
+                        Err(e) => app.notify(e, Tone::Bad),
+                    }
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(choice_id, choice.clone()));
+            let hint = if status.configured {
+                "Copied beside fefw.exe. In game, F3 and F4 step through every preset and Home opens ReShade's overlay."
+            } else {
+                "ReShade.ini is written the first time the game runs with ReShade on; the preset can be applied then."
+            };
+            ui.label(RichText::new(hint).size(11.5).color(p.muted));
+        }
+        ui.add_space(theme::SPACE_S);
         let game = crate::engine::game_folder();
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, &p, "Set up ReShade…", true)
