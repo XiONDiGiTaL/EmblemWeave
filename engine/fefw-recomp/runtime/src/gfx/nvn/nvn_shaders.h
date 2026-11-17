@@ -263,6 +263,8 @@ struct ShaderInfo {
     // Not computed by this port (the original fills them from nvn_spirv_patch.cpp, which is not ported). masks_known
     // stays false and the replay must compute them on use.
     bool masks_known = false;
+    // The replay's memo of extras::hdr_is_tonemap for this shader (scene_upscale_for_draw): -1 not asked yet, else 0 / 1. Render thread only.
+    mutable int8_t tonemap_match = -1;
     uint64_t dynamic_uniforms = 0, written_storage = 0;
     // A generated stage that reads push constants (the pass-through tessellation control shader: its levels), bytes from offset 0; the
     // program's pipeline layout then has that range for this stage. 0 = none (every translated shader).
