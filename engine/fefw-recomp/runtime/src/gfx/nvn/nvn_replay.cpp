@@ -284,6 +284,7 @@ bool g_gain_draw = false;        // [hdr] ui_nits: the scene's draw into the win
 bool g_ui_split = false;         // extras::hdr_ui_split for this frame
 float g_ui_gain = 1.0f;          // extras::hdr_scene_gain for this frame
 bool g_scene_drawn = false;      // the tone-map draw ran and the scene has not reached a target of the window's kind yet
+bool g_scene_frame = false;      // a draw of this frame had a depth target: 3D content; the 2D startup/title screens do not
 bool g_tonemap_frame = false;    // the tone-map draw ran in this frame
 bool g_gain_frame = false;       // a draw of this frame got the scene gain
 bool g_tonemap_seen = false;     // the tone-map draw ran in some frame (the game's tone map is recognised at all)
@@ -3177,6 +3178,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!pl) return false;
     g_alpha_draw = false;
     g_gain_draw = false;
+    if (S.depth_tex) g_scene_frame = true;   // [hdr] ui_nits: depth means 3D content, unlike the depthless startup/title 2D screens
     // [hdr] ui_nits: the scene keeps paper white. The gain goes on the scene's last pass before the UI: the frame's first draw after the
     // tone-map draw into a target of the window's kind (an 8-bit sRGB target kept as float, or a window texture), or the tone-map draw itself
     // when it writes there (no pass in between). Not on a tone map followed by other passes: those (grading, anti-aliasing) are not linear,
@@ -5525,10 +5527,12 @@ void replay_request_trace() { g_trace_req.store(true); }
 
 void replay_frame_presented(bool again) {
     if (again) return;   // the same frame shown again: its verdict stands
-    // The UI's white is ui_nits when the scene got the gain, or when the frame drew no scene (a 2D screen: all of it is UI) in a game whose
-    // tone map was recognised. Otherwise (the scene missed the gain: alpha test, no patch, a copy or compute as the last pass) paper white.
-    extras::hdr_set_ui_white_frame(g_ui_split && (g_gain_frame || (g_tonemap_seen && !g_tonemap_frame)));
-    g_scene_drawn = g_tonemap_frame = g_gain_frame = false;
+    // The UI's white is ui_nits when the scene got the gain, or when the frame drew no scene (a 2D screen: all of it is UI). A depth-target
+    // draw marks a scene even before the game's tone map has been seen, so a missed gain never brightens one; the old tone-map-seen fallback
+    // still covers 2D frames after gameplay. Otherwise (the scene missed the gain: alpha test, no patch, a copy or compute as the last pass) paper white.
+    const bool no_scene = !g_tonemap_frame && !g_scene_frame;
+    extras::hdr_set_ui_white_frame(g_ui_split && (g_gain_frame || no_scene || (g_tonemap_seen && !g_tonemap_frame)));
+    g_scene_drawn = g_tonemap_frame = g_gain_frame = g_scene_frame = false;
     const extras::HdrState hs = extras::hdr_state();
     g_ui_split = extras::hdr_ui_split(hs);
     g_ui_gain = extras::hdr_scene_gain(hs);
