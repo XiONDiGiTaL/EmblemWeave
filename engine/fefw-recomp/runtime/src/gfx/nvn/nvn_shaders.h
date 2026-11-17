@@ -263,10 +263,15 @@ struct ShaderInfo {
     // Not computed by this port (the original fills them from nvn_spirv_patch.cpp, which is not ported). masks_known
     // stays false and the replay must compute them on use.
     bool masks_known = false;
+    // The replay's memo of extras::hdr_is_tonemap for this shader (scene_upscale_for_draw): -1 not asked yet, else 0 / 1. Render thread only.
+    mutable int8_t tonemap_match = -1;
     uint64_t dynamic_uniforms = 0, written_storage = 0;
     // A generated stage that reads push constants (the pass-through tessellation control shader: its levels), bytes from offset 0; the
     // program's pipeline layout then has that range for this stage. 0 = none (every translated shader).
     uint32_t push_bytes = 0;
+    // [hdr] ui_nits: what the replay found out about this fragment shader (hdr_tonemap_shader, hdr_gain_shader in nvn_pipeline.cpp), kept
+    // so that each is worked out once. Render thread only; 0 = nothing known yet.
+    mutable uint8_t hdr_ui = 0;
 };
 
 // Builds a ShaderInfo from a code block, its control section and the SPIR-V words (no I/O). `resources` = the

@@ -112,6 +112,9 @@ uint64_t digest_of(const uint64_t h[3], const uint8_t* rest) {
 // The record of a key; false when it cannot be recorded (tessellation, a stage the cache has no hash for).
 bool rec_of(const GraphicsKey& key, Rec* r) {
     if (key.tess[0] || key.tess[1]) return false;
+    // The record stops at the tessellation stages, so the fields after them (the alpha test's function and layout, the HDR scene gain of
+    // [hdr] ui_nits) are not in it: such a key would take the plain key's pipeline (the unpatched fragment shader, the other layout).
+    if (key.alpha_func || key.alpha_layout || key.scene_gain) return false;
     std::memset(r, 0, sizeof *r);
     for (int i = 0; i < 3; ++i) r->h[i] = key.stage[i] ? parse_hash(key.stage[i]->hash) : 0;
     if (!r->h[0]) return false;
@@ -330,6 +333,11 @@ void prewarm_init() {
                 boot ? "all queued from boot, in the order they were first used" : "each queued when the game sets one of its shaders ([nvn] prewarm_boot is false)");
     }
     for (const Rec& r : parts) queue_parts(r, false);           // outside g_mu: the pipeline-library side takes its own lock
+}
+
+bool prewarm_key_recordable(const GraphicsKey& key) {
+    Rec r;
+    return rec_of(key, &r);
 }
 
 void prewarm_record(const GraphicsKey& key) {

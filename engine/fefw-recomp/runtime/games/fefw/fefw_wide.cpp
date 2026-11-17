@@ -16,7 +16,8 @@
 //                no x translation, w 1) gets 1/(960k): the layout covers the centred 16:9 part of the output, the 3D picture the rest.
 //   backdrops    a picture or window that spans the whole 1920 layout width (dims, menu backdrops) gets x * k in the model-view its
 //                Calculate (0x595740, 0x5af080) puts in its constant buffer, so it still covers the output; a full-height one on one edge
-//                (side gradients) is stretched to the output's edge there. Children and text keep theirs. (Not in Kompas9's patch.)
+//                (side gradients) is stretched to the output's edge there; a picture on one edge wider than half the layout (the world
+//                map's art) is content and stays in the 16:9 area. Children and text keep theirs. (Not in Kompas9's patch.)
 //   scissor      the scissor pane (0x5975a0) works out its rectangle in viewport pixels from the layout size, not the matrix: when the
 //                draw info's x scale is ours the left edge and width are scaled by 1/k about the viewport's centre.
 //   markers      world-to-screen into 1920x1080 UI units (x * 960 + 960) at 13 sites: x * k, as the camera is k times wider. The
@@ -38,6 +39,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -192,6 +194,21 @@ ImageMode image_mode() {
     return m;
 }
 
+// One log line per distinct pane the edge rule looks at (vtable, size, extent; at most 32), with what it did.
+void log_edge_pane(uint64_t pane, float pw, float ph, float left, float right, const char* what) {
+    static std::mutex mu;
+    static std::vector<uint64_t> seen;
+    const uint64_t vt = rdv<uint64_t>(pane) - ws().base;
+    const uint64_t key = vt * 0x9e3779b97f4a7c15ull ^ (static_cast<uint64_t>(std::lround(pw)) << 48) ^ (static_cast<uint64_t>(std::lround(ph)) << 32) ^
+                         (static_cast<uint64_t>(std::lround(left + 4096.0f)) << 16) ^ static_cast<uint64_t>(std::lround(right + 4096.0f));
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (seen.size() >= 32 || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+        seen.push_back(key);
+    }
+    NXLOG_I(kTag, "ultrawide: edge pane (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) %s", static_cast<unsigned long long>(vt), pw, ph, left, right, what);
+}
+
 void widen_pane(uint64_t pane, uint64_t info, bool picture) {
     Wide& w = ws();
     if (rdv<uint32_t>(info + 0x10) != w.ui_scale) return;
@@ -223,13 +240,20 @@ void widen_pane(uint64_t pane, uint64_t info, bool picture) {
     // x' = a x + b in layout units: a full-width pane scales about the centre; a full-height one on one edge reaches the output's edge there
     float a = w.k, b = 0.0f;
     if (!(at_left && at_right)) {
-        if (std::fabs(rdv<float>(pane + kPaneSize + 4) * rdv<float>(m + 0x14)) < 1000.0f) return;
+        if (std::fabs(ph * m11) < 1000.0f) return;
+        // A picture on one edge wider than half the layout is content, not a side panel's backdrop: the world map's art (about 1480 wide on
+        // the right) came out 1.22 times wider than high and no longer under the panes drawn over it (markers, the cursor). It stays at 16:9.
+        if (picture && right - left > 960.0f) {
+            log_edge_pane(pane, pw, ph, left, right, "kept at 16:9 (content, not a side backdrop)");
+            return;
+        }
         const float edge = 960.0f * w.k;
         if (at_left) a = (right + edge) / (right - left), b = right - a * right;
         else a = (right - left + (edge - right)) / (right - left), b = left - a * left;   // keeps the left edge, the right one goes to +edge
     }
     for (int i = 0; i < 3; ++i) wrv<float>(mv + 4 * i, rdv<float>(mv + 4 * i) * a);
     wrv<float>(mv + 0xc, rdv<float>(mv + 0xc) * a + b);
+    if (!(at_left && at_right)) log_edge_pane(pane, pw, ph, left, right, picture ? "picture stretched to the output's edge" : "window stretched to the output's edge");
     if (first(kCBackdrop))
         NXLOG_I(kTag, "ultrawide: full-width / edge pane (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) drawn x %.0f..%.0f",
                 static_cast<unsigned long long>(rdv<uint64_t>(pane) - w.base), pw, rdv<float>(pane + kPaneSize + 4), left, right, a * left + b, a * right + b);

@@ -2584,6 +2584,11 @@ VkFormat tex_vk_format(Texture* t) {
     return g ? g->format : VK_FORMAT_UNDEFINED;
 }
 
+bool tex_hdr_promoted(Texture* t) {
+    TexGpu* g = tex_or_null(t);
+    return g && g->promoted;
+}
+
 VkImageAspectFlags tex_aspect(Texture* t) {
     TexGpu* g = tex_or_null(t);
     return g ? g->aspect : VK_IMAGE_ASPECT_COLOR_BIT;
