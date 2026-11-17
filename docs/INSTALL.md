@@ -17,6 +17,27 @@ removed, uses `%APPDATA%\EmblemWeave` (Windows) or `$XDG_CONFIG_HOME/EmblemWeave
 The zip and what it deliberately leaves out are listed in [PACKAGE.md](PACKAGE.md), and
 `tools/package_release.ps1` builds it reproducibly.
 
+## Updating: what to keep
+
+The launcher is the small part; the engine build and the fetched build tools are the expensive part, and a new release zip is
+really just a new launcher. So there is no need to delete the old folder and start again.
+
+- **Unzip the new release into the same folder.** It replaces the launcher and the docs, and leaves `data\` and `engine\`
+  alone — your saves, settings, decoded modules, build output and the game itself keep working, and nothing is rebuilt.
+- **If you would rather unpack into a fresh folder**, keep these two from the old one and move them across:
+  - `data\` — in a portable install this is where your saves (`data\save`), settings and build output live;
+  - `engine\` — the engine checkout and the built `fefw.exe`, plus the tools fetched into `engine\fefw-recomp\tools`.
+
+  Copy them in before the first launch and the new copy is the old one with a newer launcher.
+- **Or keep the engine anywhere at all.** A fresh copy that cannot find an engine asks for one on **Game Setup > Engine
+  folder**: press **Use another engine folder…** and choose the old copy's `engine\fefw-recomp` (or the old copy itself). The
+  launcher remembers it and plays the existing build. This is the one to use when the old build lives on another drive, or when
+  the old folder is kept as a backup.
+
+Saves are not touched by any of this: in a portable install they are in `data\save`, and in a profile install in
+`%APPDATA%\EmblemWeave\save` (Windows) or `$XDG_CONFIG_HOME/EmblemWeave/save` (Linux). **About > Storage** says which one
+this copy uses.
+
 ## The build tools, and making them the release's job
 
 The one part of the install that is still the player's is the build toolchain. Today the launcher finds, versions and

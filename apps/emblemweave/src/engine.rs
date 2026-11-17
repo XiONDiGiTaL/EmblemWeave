@@ -72,6 +72,25 @@ pub fn root() -> Option<PathBuf> {
     Some(pick)
 }
 
+/// Remember `picked` as the engine checkout, so every later lookup uses it instead of looking beside the launcher. Accepts the
+/// checkout (`…\engine\fefw-recomp`) or a folder that holds it, such as an older EmblemWeave copy. Returns the checkout.
+///
+/// The build is the expensive part of an install and the one thing a new release zip cannot carry, so keeping one engine folder
+/// anywhere on disk and pointing a fresh launcher at it is what spares a full rebuild when updating (issue #56).
+pub fn remember_root(picked: &Path) -> Result<PathBuf, String> {
+    let candidates = [picked.to_path_buf(), picked.join("engine").join("fefw-recomp")];
+    let root = candidates
+        .into_iter()
+        .find(|c| c.join("game-build").is_dir())
+        .ok_or_else(|| format!("{} does not hold an engine (expected engine\\fefw-recomp with game-build)", picked.display()))?;
+    let file = remembered().ok_or("the settings folder is unavailable")?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&file, root.display().to_string()).map_err(|e| format!("writing {}: {e}", file.display()))?;
+    Ok(root)
+}
+
 /// The built game, if it exists.
 pub fn game_exe(root: &Path) -> PathBuf {
     root.join("game-build").join("fefw").join("build").join("release").join("fefw.exe")
