@@ -8,6 +8,7 @@ other recompilation projects and deliberately not copied.
 | Change | Before | After | How it was measured |
 | --- | ---: | ---: | --- |
 | `/OPT:REF /OPT:ICF` on the `fefw.exe` link (`game-build/fefw/CMakeLists.txt`) | 173,405,696 bytes | 168,420,352 bytes | Relink only (`cmake --build . --target fefw`, 22 s), then a 50 s play run that presented frames and logged 55 fps lines. |
+| SSE4.2 CRC-32C in the `.nx` readers (instead of the scalar table) | 0.48 GB/s | 9.91 GB/s | CRC microbenchmark, 64 MiB buffer, 32 passes per path on the development PC; both paths produced the same checksum. Single-threaded integrity-check rate, not a whole-game frame rate. |
 
 `/DEBUG` leaves `/OPT:REF` and `/OPT:ICF` off unless they are named, and the recompiled code repeats the same small
 helpers in every translation unit. Naming them folds those copies: 4.9 MB less to page in, and a smaller

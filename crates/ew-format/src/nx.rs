@@ -142,12 +142,41 @@ fn crc32c_table() -> &'static [u32; 256] {
 }
 
 fn crc32c(bytes: &[u8]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Use the Castagnoli instruction when the host has it; the table covers older processors and
+        // other targets.
+        if std::is_x86_feature_detected!("sse4.2") {
+            // SAFETY: the feature check above guarantees the instruction is available.
+            return unsafe { crc32c_sse42(bytes) };
+        }
+    }
+    crc32c_scalar(bytes)
+}
+
+fn crc32c_scalar(bytes: &[u8]) -> u32 {
     let table = crc32c_table();
     let mut c = 0xFFFF_FFFFu32;
     for b in bytes {
         c = table[((c ^ *b as u32) & 0xFF) as usize] ^ (c >> 8);
     }
     c ^ 0xFFFF_FFFF
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_sse42(bytes: &[u8]) -> u32 {
+    use std::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
+    let mut c = 0xFFFF_FFFFu64;
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) yields eight bytes"));
+        c = _mm_crc32_u64(c, word);
+    }
+    for &byte in chunks.remainder() {
+        c = u64::from(_mm_crc32_u8(c as u32, byte));
+    }
+    (c as u32) ^ 0xFFFF_FFFF
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -718,6 +747,14 @@ mod tests {
     #[test]
     fn crc32c_matches_the_standard_check_value() {
         assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+    }
+
+    #[test]
+    fn crc32c_sse42_matches_the_scalar_path_at_every_remainder() {
+        let bytes: Vec<u8> = (0..=255).map(|i| (i as u8).wrapping_mul(37).wrapping_add(11)).collect();
+        for len in 0..=bytes.len() {
+            assert_eq!(crc32c(&bytes[..len]), crc32c_scalar(&bytes[..len]), "length {len}");
+        }
     }
 
     #[test]

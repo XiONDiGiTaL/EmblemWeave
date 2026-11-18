@@ -7,6 +7,10 @@
 
 #include <zstd.h>
 
+#if defined(_M_X64) || defined(__x86_64__)
+#include <nmmintrin.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -65,6 +69,24 @@ uint64_t u64(const std::vector<uint8_t>& b, uint64_t o) {
 }
 
 // ---- CRC-32C (Castagnoli), the check the archive uses for headers and block slices ------------------------------------------
+#if defined(_M_X64) || defined(__x86_64__)
+// The runtime already requires SSE4.2, and its CRC32 instruction implements the archive's Castagnoli check.
+#if defined(__clang__)
+__attribute__((target("sse4.2")))
+#endif
+uint32_t crc32c_hw(const uint8_t* p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    while (n >= 8) {
+        uint64_t v;
+        std::memcpy(&v, p, sizeof v);
+        c = static_cast<uint32_t>(_mm_crc32_u64(c, v));
+        p += 8;
+        n -= 8;
+    }
+    while (n-- > 0) c = _mm_crc32_u8(c, *p++);
+    return c ^ 0xFFFFFFFFu;
+}
+#else
 const std::array<uint32_t, 256>& crc_table() {
     static const std::array<uint32_t, 256> t = [] {
         std::array<uint32_t, 256> a{};
@@ -77,12 +99,17 @@ const std::array<uint32_t, 256>& crc_table() {
     }();
     return t;
 }
+#endif
 
 uint32_t crc32c(const uint8_t* p, size_t n) {
+#if defined(_M_X64) || defined(__x86_64__)
+    return crc32c_hw(p, n);
+#else
     const std::array<uint32_t, 256>& t = crc_table();
     uint32_t c = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; i++) c = t[(c ^ p[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;
+#endif
 }
 
 // ---- SHA-256, for the catalog, manifest and block index digests -------------------------------------------------------------
