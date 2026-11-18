@@ -60,7 +60,7 @@ The game draws with NVN. EmblemWeave already tracks NVN's devices, memory pools,
    the game last left in that texture, because clears and draws are not executed yet: that is the next step, and the first frame that is the game's own.
 2. Textures: the Switch's block-linear layouts and its compressed formats, uploaded to Vulkan.
 3. Shaders: the game's Maxwell/Ampere shader binaries translated to SPIR-V. This is the largest single piece; fefw-recomp uses
-   Ryujinx's translator (MIT) offline, and EmblemWeave can do the same as a build step before writing its own.
+   a MIT-licensed shader translator offline, and EmblemWeave can do the same as a build step before writing its own.
 4. Draw calls, render targets, blending, depth and the rest of the pipeline state.
 
 ## 4. Audio and input

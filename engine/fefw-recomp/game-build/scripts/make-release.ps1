@@ -7,7 +7,7 @@
 # Inputs, built beforehand from this checkout:
 #   fefw_rt.dll + fefw_rt.lib   pwsh game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON"
 #   fefw-launcher.exe           built here (npm, Rust) with the build machine's paths remapped, unless -Launcher names one
-#   the shader translator       staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1); this script runs dotnet publish
+#   the shader translator       staged shader-translator sources (tools\shaders\scripts\setup_ryujinx.ps1); this script runs dotnet publish
 # Third-party payload, downloaded into the cache folder from the official sites: Zig (checked against ziglang.org's sha256), the Python
 # embeddable package, and the wheels of capstone, lz4, zbic and zstandard (pip, for CPython 3.13 win_amd64).
 param(
@@ -123,7 +123,7 @@ Put "$root\locales\README.md" 'locales\README.md'
 $harness = Join-Path $Out 'harness'
 # Always rebuild: reusing Out/harness can silently ship an older translator after
 # the launcher invalidates the player's shader cache for a new translator version.
-Need "$root\tools\shaders\third_party\ryubing" 'staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1)'
+Need "$root\tools\shaders\third_party\ryubing" 'staged shader-translator sources (tools\shaders\scripts\setup_ryujinx.ps1)'
 dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness `
     -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$root=."
 if ($LASTEXITCODE) { throw 'dotnet publish failed' }

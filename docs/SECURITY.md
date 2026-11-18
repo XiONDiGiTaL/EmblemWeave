@@ -17,7 +17,7 @@ Everything the launcher starts, and why:
 | `dotnet --list-sdks` | start-up, build | reads the installed SDK version |
 | `spirv_harness.exe` | Build the game | the shader translator bundled in the zip; it carries its own .NET runtime and opens no network connection |
 | `dotnet build` | Build the game, only when the zip has no translator | builds the translator from the staged sources |
-| `git clone`, `git checkout` | Build the game | fetches the pinned Ryubing revision the shader translator is ported from |
+| `git clone`, `git checkout` | Build the game | fetches the pinned revision the shader translator is ported from |
 | `pwsh` | Build the game | runs the engine's build scripts (`-NoProfile -ExecutionPolicy Bypass`) |
 | `cmd /C recomp\scripts\build_game.cmd` | Build the game | drives the engine's own build |
 | `cmake`, `ninja`, `clang-cl` | Build the game | configures and compiles the engine, one compiler per CPU core |
@@ -50,7 +50,7 @@ and `uv` make their own connections during a build:
 | --- | --- | --- |
 | `api.github.com`, `github.com` and GitHub's release CDN | update check and update download | a plain `GET` for the release list or the zip; nothing about you or your game |
 | `gamebanana.com` | browsing or installing a mod you chose | the page or file id you asked for |
-| `git.ryujinx.app` | Build the game, shader step | a filtered clone of the Ryubing fork, checked out at the revision pinned in `engine.rs`; no credentials |
+| `git.ryujinx.app` | Build the game, shader step | a filtered clone of the shader translator's source, checked out at the revision pinned in `engine.rs`; no credentials |
 | `pypi.org` (through `uv`) | Build the game, Python step | installs the packages pinned in `recomp/requirements.txt` |
 
 There is no telemetry, no analytics and no crash upload: Diagnostics exports a text file, and Troubleshooter writes a
@@ -59,7 +59,7 @@ local zipped bundle that you review, attach and send yourself.
 **Build the game** downloads the engine's pinned third-party sources once, because the engine compiles them from
 source: SDL3, Vulkan-Headers, volk, VulkanMemoryAllocator, Dear ImGui and zstd through CMake
 (`runtime/cmake/gfx_deps.cmake`), and astc-encoder, bc7enc_rdo and ispc through the texture script
-(`tools/textures/scripts/fetch_third_party.ps1`). The shader step additionally clones the pinned Ryubing revision named
+(`tools/textures/scripts/fetch_third_party.ps1`). The shader step additionally clones the pinned revision named
 above, and stages three of its projects for the translator. Every one of those URLs is written out in those files, and
 each CMake download is checked against the `SHA256` pinned beside it.
 

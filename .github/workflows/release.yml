@@ -70,7 +70,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Stage the pinned Ryujinx sources
+      - name: Stage the pinned shader-translator sources
         env:
           RYUBING_REV: a82350bb774f70fcbd41c9987bf67a3775409963
         shell: bash
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Stage the pinned Ryujinx sources
+      - name: Stage the pinned shader-translator sources
         env:
           RYUBING_REV: a82350bb774f70fcbd41c9987bf67a3775409963
         run: |

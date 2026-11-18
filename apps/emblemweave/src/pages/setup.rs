@@ -344,7 +344,7 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
 
         ui.horizontal(|ui| {
             ui.label(RichText::new("Emulator saves").font(theme::semibold(13.0)).color(p.ink));
-            if widgets::button(ui, p, "Scan again", true).on_hover_text("Looks in yuzu, suyu, sudachi, citron, Eden, Lichii, Fritchii, torzu and Ryujinx-yuzu").clicked() {
+            if widgets::button(ui, p, "Scan again", true).on_hover_text("Looks in Switch emulator save folders").clicked() {
                 app.saves_ui.sources = crate::saves::find_here(title);
                 app.saves_ui.sources_title = Some(title);
                 app.saves_ui.sources_at = now;

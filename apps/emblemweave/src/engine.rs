@@ -10,7 +10,7 @@
 //! 3. the game code lifted and compiled (`recomp/scripts/build_game.cmd`);
 //! 4. the texture transcoder sources;
 //! 5. `fefw.exe`;
-//! 6. the shader translator (Ryujinx's shader code, MIT, at the engine's
+//! 6. the shader translator (MIT-licensed shader code, at the engine's
 //!    pinned revision);
 //! 7. the game's shaders translated to SPIR-V;
 //! 8. `fefw.ini` in the launcher's run folder.
@@ -24,9 +24,9 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Ryujinx revision the engine's shader translator is built against.
-const RYUBING_URL: &str = "https://git.ryujinx.app/ryubing/ryujinx.git";
-const RYUBING_REV: &str = "a82350bb774f70fcbd41c9987bf67a3775409963";
+/// Pinned revision the engine's shader translator is built against.
+const SHADER_TRANSLATOR_URL: &str = "https://git.ryujinx.app/ryubing/ryujinx.git";
+const SHADER_TRANSLATOR_REV: &str = "a82350bb774f70fcbd41c9987bf67a3775409963";
 
 pub const STAGES: [&str; 8] = [
     "Python environment",
@@ -1543,27 +1543,27 @@ fn textures_fetched(root: &Path) -> bool {
     .all(|p| p.is_file())
 }
 
-/// The Ryujinx checkout the shader translator builds from. It is cloned into a
+/// The shader translator checkout the build uses. It is cloned into a
 /// temporary folder and moved into place only after the pinned revision is
 /// checked out and the tree is complete: a clone that a cancel or a dropped
 /// connection interrupted otherwise leaves `.git` behind, which is exactly what
 /// the old "is it there" test accepted before failing much later in `dotnet`.
-fn ensure_ryubing_refs(ctx: &Ctx, root: &Path) -> Result<(), String> {
+fn ensure_translator_refs(ctx: &Ctx, root: &Path) -> Result<(), String> {
     let refs = root.join("work").join("refs").join("ryubing");
     let project = Path::new("src").join("Ryujinx.Graphics.Shader").join("Ryujinx.Graphics.Shader.csproj");
     if refs.join(&project).is_file() {
         return Ok(());
     }
     if refs.exists() {
-        ctx.log(format!("the Ryujinx checkout in {} is incomplete; cloning it again", refs.display()));
+        ctx.log(format!("the shader translator checkout in {} is incomplete; cloning it again", refs.display()));
         let _ = std::fs::remove_dir_all(&refs);
     }
     let tmp = root.join("work").join("refs").join("ryubing.partial");
     let mut last = String::new();
     for attempt in 1..=2 {
         let _ = std::fs::remove_dir_all(&tmp);
-        let result = run(ctx, root, "git", &["clone", "--quiet", "--filter=blob:none", "--no-checkout", RYUBING_URL, "work\\refs\\ryubing.partial"])
-            .and_then(|()| run(ctx, root, "git", &["-C", "work\\refs\\ryubing.partial", "checkout", "--quiet", RYUBING_REV]))
+        let result = run(ctx, root, "git", &["clone", "--quiet", "--filter=blob:none", "--no-checkout", SHADER_TRANSLATOR_URL, "work\\refs\\ryubing.partial"])
+            .and_then(|()| run(ctx, root, "git", &["-C", "work\\refs\\ryubing.partial", "checkout", "--quiet", SHADER_TRANSLATOR_REV]))
             .and_then(|()| {
                 if tmp.join(&project).is_file() {
                     Ok(())
@@ -1574,14 +1574,14 @@ fn ensure_ryubing_refs(ctx: &Ctx, root: &Path) -> Result<(), String> {
         match result {
             Ok(()) => {
                 std::fs::rename(&tmp, &refs)
-                    .map_err(|e| format!("moving the Ryujinx checkout into {}: {e}", refs.display()))?;
+                    .map_err(|e| format!("moving the shader translator checkout into {}: {e}", refs.display()))?;
                 return Ok(());
             }
             Err(e) => {
                 last = e;
                 let _ = std::fs::remove_dir_all(&tmp);
                 if attempt < 2 {
-                    ctx.log(format!("the Ryujinx checkout failed; trying once more ({last})"));
+                    ctx.log(format!("the shader translator checkout failed; trying once more ({last})"));
                 }
             }
         }
@@ -2192,7 +2192,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             None
         };
         let build_shaders = staged.clone().unwrap_or_else(|| shaders.clone());
-        ensure_ryubing_refs(ctx, &root)?;
+        ensure_translator_refs(ctx, &root)?;
         let setup = build_shaders.join("scripts").join("setup_ryujinx.ps1").display().to_string();
         let refs = root.join("work").join("refs").join("ryubing").display().to_string();
         run(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &setup, "-Ryubing", &refs])?;

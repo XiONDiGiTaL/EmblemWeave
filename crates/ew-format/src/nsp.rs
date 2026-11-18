@@ -1,4 +1,4 @@
-//! `.nsp` game containers: a PFS0 archive of plaintext NCAs, as NSP Box writes
+//! `.nsp` game containers: a PFS0 archive of plaintext NCAs
 //! them for emulators. Nothing here is encrypted, signed or licensed: every
 //! byte is read from the user's own file.
 //!

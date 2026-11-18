@@ -16,7 +16,7 @@
 #   sudo apt install build-essential file curl git rsync unzip python3 nodejs npm dotnet-sdk-10.0 \
 #       libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 #   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# The Ryujinx sources for the translator are cloned into work/refs/ryubing on first use (or RYUBING_DIR).
+# The shader translator sources are cloned into work/refs/ryubing on first use (or RYUBING_DIR).
 # Output: <out>/fefw-recomp-<version>-linux-x64.tar.gz (a tarball, so the executable bits survive).
 set -euo pipefail
 
@@ -42,15 +42,15 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     export PATH
 fi
 
-# keep these with make-release.ps1 (Zig) and launcher/src-tauri/src/setup.rs (Ryujinx revision)
+# keep these with make-release.ps1 (Zig) and launcher/src-tauri/src/setup.rs (shader translator revision)
 ZIG_VERSION=0.17.0
 ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 PYTHON_MINOR=3.13
 PYTHON_TAG=20261026   # python-build-standalone release
 PYTHON_BUILD=cpython-3.13.18+$PYTHON_TAG-x86_64-unknown-linux-gnu-install_only.tar.gz
 PYTHON_SHA256=126343c54daff4068efc1ac269518d0cc202d57857794948103dd1454e8881be
-RYUBING_GIT=https://git.ryujinx.app/ryubing/ryujinx.git
-RYUBING_COMMIT=a82350bb774f70fcbd41c9987bf67a3775409963
+SHADER_TRANSLATOR_GIT=https://git.ryujinx.app/ryubing/ryujinx.git
+SHADER_TRANSLATOR_COMMIT=a82350bb774f70fcbd41c9987bf67a3775409963
 
 NAME="fefw-recomp-$VERSION"
 CACHE="$OUT/cache"
@@ -83,8 +83,8 @@ echo "--- shader translator (linux-x64)"
 RYU="${RYUBING_DIR:-$ROOT/work/refs/ryubing}"
 if [ ! -d "$RYU/src" ]; then
     mkdir -p "$(dirname "$RYU")"
-    git clone -q --filter=blob:none --no-checkout "$RYUBING_GIT" "$RYU"
-    git -C "$RYU" checkout -q "$RYUBING_COMMIT"
+    git clone -q --filter=blob:none --no-checkout "$SHADER_TRANSLATOR_GIT" "$RYU"
+    git -C "$RYU" checkout -q "$SHADER_TRANSLATOR_COMMIT"
 fi
 dst="$ROOT/tools/shaders/third_party/ryubing"   # what tools/shaders/scripts/setup_ryujinx.ps1 stages
 mkdir -p "$dst/src"
