@@ -49,7 +49,7 @@ adapted into it. That project's repository has since been removed; its final rel
 
 ## Trademarks and presentation
 
-The launcher's visual language is inspired by the game's tactical-fantasy aesthetic and by [XiØN](https://github.com/XiONDiGiTaL)'s own identity. It uses no Nintendo artwork and no official Fire Emblem logo. The EmblemWeave logo is original [XiØN](https://github.com/XiONDiGiTaL) artwork: `assets/branding/logo-fe.png` is the render cut out of its background by `tools/cutout_logo.py`, and the XiØN and Arcade colourways are produced from it by `tools/recolor_logo.py`.
+The launcher's visual language is inspired by the game's tactical-fantasy aesthetic and by [XiØN](https://github.com/XiONDiGiTaL)'s own identity. It uses no Nintendo artwork and no official Fire Emblem logo.
 
 ## What the shipped build will contain
 
