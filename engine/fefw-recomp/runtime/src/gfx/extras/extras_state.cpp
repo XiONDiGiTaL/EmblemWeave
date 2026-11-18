@@ -59,6 +59,24 @@ Settings settings_from_config() {
     s.hdr.highlight_boost = std::clamp(config_get_double("hdr", "highlight_boost", 1.0), 0.0, 2.0);
     s.hdr.ui_nits = std::clamp(config_get_double("hdr", "ui_nits", 0.0), 0.0, 500.0);
     if (s.hdr.ui_nits != 0 && s.hdr.ui_nits < 40) s.hdr.ui_nits = 40;
+    const std::string sg = lower(config_get_str("hdr", "sdr_gamma", "2.2"));
+    s.hdr.dither = config_get_bool("hdr", "dither", false);
+    s.hdr.wide_gamut = config_get_bool("hdr", "wide_gamut", false);
+    s.hdr.grade_exposure = std::clamp(config_get_double("hdr", "grade_exposure", 0.0), -2.0, 2.0);
+    s.hdr.grade_contrast = std::clamp(config_get_double("hdr", "grade_contrast", 1.0), 0.5, 1.5);
+    s.hdr.grade_shadows = std::clamp(config_get_double("hdr", "grade_shadows", 1.0), 0.5, 1.5);
+    s.hdr.grade_highlights = std::clamp(config_get_double("hdr", "grade_highlights", 1.0), 0.5, 1.5);
+    s.hdr.grade_saturation = std::clamp(config_get_double("hdr", "grade_saturation", 1.0), 0.0, 2.0);
+    s.hdr.highlight_saturation = std::clamp(config_get_double("hdr", "highlight_saturation", 0.0), 0.0, 1.0);
+    s.hdr.hue_preserve = std::clamp(config_get_double("hdr", "hue_preserve", 0.0), 0.0, 1.0);
+    s.hdr.compare = config_get_bool("hdr", "compare", false);
+    s.hdr.bloom = std::clamp(config_get_double("hdr", "bloom", 1.0), 0.0, 4.0);
+    s.hdr.sharpen = std::clamp(config_get_double("hdr", "sharpen", 1.0), 0.0, 3.0);
+    s.hdr.motion_blur = std::clamp(config_get_double("hdr", "motion_blur", 1.0), 0.0, 2.0);
+    s.hdr.vignette = std::clamp(config_get_double("hdr", "vignette", 1.0), 0.0, 2.0);
+    s.hdr.depth_of_field = std::clamp(config_get_double("hdr", "depth_of_field", 1.0), 0.0, 2.0);
+    s.hdr.gamut_expand = std::clamp(config_get_double("hdr", "gamut_expand", 0.0), 0.0, 1.0);
+    s.hdr.sdr_gamma = sg == "srgb" || sg == "0" || sg == "off" ? 0.0 : std::clamp(config_get_double("hdr", "sdr_gamma", 2.2), 1.8, 2.6);
 
     const std::string um = lower(config_get_str("upscale", "mode", "off"));
     s.upscale.mode = um == "fsr1" || um == "spatial" ? UpscaleMode::Fsr1 : um == "fsr3" ? UpscaleMode::Fsr3 : um == "dlss" ? UpscaleMode::Dlss : um == "xess" ? UpscaleMode::Xess : um == "nis" ? UpscaleMode::Nis : um == "dlaa" ? UpscaleMode::Dlaa : UpscaleMode::Off;

@@ -185,7 +185,8 @@ void present_on_render_thread(Window* w, int index, bool again) {
     pp->set_flip_y(window_origin_mode() == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT);   // the game runs with the lower-left origin (mode 0)
     // HDR scene / HDR swapchain / FSR 1 or NIS / picture controls go through the output pass (S14); everything else is the plain present pass of the SDR path
     const extras::HdrState hs = extras::hdr_state();
-    const extras::PictureLive pic = extras::picture_live();
+    extras::PictureLive pic = extras::picture_live();
+    if (hs.output != extras::OutputKind::Sdr8) pic.active = false;   // HDR output: the picture controls are hidden and off (Scene grading instead)
     extras::OutputPass* op = output_pass();
     auto draw_picture = [&](VkImageView from, VkExtent2D from_extent, const int32_t* from_crop, VkImageView to) {   // also frame generation's HUD-less colour (nvn_framegen.h)
         if (op && (hs.scene_hdr || hs.output != extras::OutputKind::Sdr8 || extras::upscale_mode() == extras::UpscaleMode::Fsr1 ||
@@ -200,6 +201,10 @@ void present_on_render_thread(Window* w, int index, bool again) {
             prm.out = hs.output;
             prm.paper_white_nits = extras::hdr_output_white_nits(hs);   // the UI's white with [hdr] ui_nits, when this frame's scene got the gain
             prm.peak_nits = hs.peak_nits;
+            prm.sdr_gamma = hs.scene_hdr ? static_cast<float>(extras::settings().hdr.sdr_gamma) : 0.0f;   // [hdr] sdr_gamma: the TV's power curve
+            prm.dither = extras::settings().hdr.dither;
+            prm.gamut_expand = static_cast<float>(extras::settings().hdr.gamut_expand);
+            prm.scene_gain = prm.paper_white_nits > 0 ? hs.paper_white_nits / prm.paper_white_nits : 1.0f;
             prm.fsr1 = extras::upscale_mode() == extras::UpscaleMode::Fsr1;
             prm.nis = extras::upscale_mode() == extras::UpscaleMode::Nis;
             prm.sharpness = extras::upscale_sharpness();

@@ -527,6 +527,35 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "paper_white_nits") return set_zero_or_real(80.0, 500.0, &h.paper_white_nits);
             if (k == "highlight_boost") return set_real(0.0, 2.0, &h.highlight_boost);
             if (k == "ui_nits") return set_zero_or_real(40.0, 500.0, &h.ui_nits);
+            if (k == "dither") return set_bool(&h.dither);
+            if (k == "wide_gamut") return set_bool(&h.wide_gamut);
+            if (k == "grade_exposure") return set_real(-2.0, 2.0, &h.grade_exposure);
+            if (k == "grade_contrast") return set_real(0.5, 1.5, &h.grade_contrast);
+            if (k == "grade_shadows") return set_real(0.5, 1.5, &h.grade_shadows);
+            if (k == "grade_highlights") return set_real(0.5, 1.5, &h.grade_highlights);
+            if (k == "grade_saturation") return set_real(0.0, 2.0, &h.grade_saturation);
+            if (k == "highlight_saturation") return set_real(0.0, 1.0, &h.highlight_saturation);
+            if (k == "hue_preserve") return set_real(0.0, 1.0, &h.hue_preserve);
+            if (k == "compare") return set_bool(&h.compare);
+            if (k == "bloom") return set_real(0.0, 4.0, &h.bloom);
+            if (k == "sharpen") return set_real(0.0, 3.0, &h.sharpen);
+            if (k == "motion_blur") return set_real(0.0, 2.0, &h.motion_blur);
+            if (k == "vignette") return set_real(0.0, 2.0, &h.vignette);
+            if (k == "depth_of_field") return set_real(0.0, 2.0, &h.depth_of_field);
+            if (k == "gamut_expand") return set_real(0.0, 1.0, &h.gamut_expand);
+            if (k == "sdr_gamma") {
+                if (v == "srgb" || v == "sRGB" || v == "off") {
+                    h.sdr_gamma = 0;
+                    return true;
+                }
+                double x = 0;
+                if (!to_double(v, &x) || (x != 0 && (x < 1.8 || x > 2.6))) {
+                    *msg = k + " must be srgb (or 0) or 1.8..2.6, got '" + v + "'";
+                    return false;
+                }
+                h.sdr_gamma = x;
+                return true;
+            }
             break;
         }
         case Sec::Upscale: {
@@ -973,6 +1002,23 @@ std::string format_settings(const Settings& s) {
     kv("paper_white_nits", num_exact(s.extras.hdr.paper_white_nits));
     kv("highlight_boost", num_exact(s.extras.hdr.highlight_boost));
     kv("ui_nits", num_exact(s.extras.hdr.ui_nits));
+    kv("dither", flag(s.extras.hdr.dither));
+    kv("wide_gamut", flag(s.extras.hdr.wide_gamut));
+    kv("highlight_saturation", num_exact(s.extras.hdr.highlight_saturation));
+    kv("hue_preserve", num_exact(s.extras.hdr.hue_preserve));
+    kv("compare", flag(s.extras.hdr.compare));
+    kv("bloom", num_exact(s.extras.hdr.bloom));
+    kv("sharpen", num_exact(s.extras.hdr.sharpen));
+    kv("motion_blur", num_exact(s.extras.hdr.motion_blur));
+    kv("vignette", num_exact(s.extras.hdr.vignette));
+    kv("depth_of_field", num_exact(s.extras.hdr.depth_of_field));
+    kv("grade_exposure", num_exact(s.extras.hdr.grade_exposure));
+    kv("grade_contrast", num_exact(s.extras.hdr.grade_contrast));
+    kv("grade_shadows", num_exact(s.extras.hdr.grade_shadows));
+    kv("grade_highlights", num_exact(s.extras.hdr.grade_highlights));
+    kv("grade_saturation", num_exact(s.extras.hdr.grade_saturation));
+    kv("gamut_expand", num_exact(s.extras.hdr.gamut_expand));
+    kv("sdr_gamma", s.extras.hdr.sdr_gamma > 0 ? num_exact(s.extras.hdr.sdr_gamma) : std::string("srgb"));
 
     o += "\n[upscale]\n";
     kv("mode", kUpscaleWords[static_cast<int>(s.extras.upscale.mode)]);

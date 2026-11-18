@@ -36,6 +36,9 @@ layout(push_constant) uniform PushConstants {
     vec4 p;      // x: mode (0 copy, 1 linear to sRGB, 2 linear to HDR10, 3 linear to scRGB), y: paper white nits, z: peak nits,
                  // w: 1 = apply the picture controls in adj
     vec4 adj;    // picture controls: x contrast, y saturation, z black level, w gamma (neutral 1, 1, 0, 1)
+    vec4 g;      // x: the SDR display gamma for HDR output ([hdr] sdr_gamma; 0 = the sRGB curve, unchanged), y: the scene gain G of this
+                 // frame (paper white / output white, 1 without [hdr] ui_nits), z: gamut expansion 0..1 ([hdr] gamut_expand; 0 = off),
+                 // w: dither step = one code value of the target (1/1023 for 10-bit, 1/255 for 8-bit; 0 = no dither)
 } pc;
 
 // Picture controls on a display-encoded signal (0..1 in SDR; above 1 for HDR highlights): black level, contrast around mid grey, saturation
@@ -69,6 +72,49 @@ vec3 pq_encode(vec3 nits) {
     return pow((vec3(PQ_C1) + PQ_C2 * ym) / (vec3(1.0) + PQ_C3 * ym), vec3(PQ_M2));
 }
 
+// HDR output: the game's colour targets decode with the sRGB curve, but on the console its picture is shown by a TV, which displays the
+// SDR signal on a power curve (about 2.2). Re-decode each channel's SDR range with that power so shadows sit where the console puts them
+// (the sRGB curve lifts the darkest shades several times over). x / G is the game's own 0..1 signal; above 1 (the HDR highlights) it is
+// left alone, and 1 maps to 1 so paper white does not move.
+vec3 display_gamma(vec3 rgb) {
+    float gam = pc.g.x, G = max(pc.g.y, 1e-4);
+    if (gam <= 0.0) return rgb;
+    vec3 x = abs(rgb) / G;   // a negative channel (a colour outside BT.709, [hdr] wide_gamut) is re-decoded by its size and keeps its sign
+    vec3 d = sign(rgb) * G * pow(srgb_oetf(x), vec3(gam));
+    return vec3(x.r <= 1.0 ? d.r : rgb.r, x.g <= 1.0 ? d.g : rgb.g, x.b <= 1.0 ? d.b : rgb.b);
+}
+
+// BT.709 -> BT.2020, optionally with gamut expansion: saturated colours are partly re-read as if their primaries were DCI-P3 (a wider
+// gamut with the same D65 white), so they reach past BT.709; near-neutral colours (greys, skin, most UI) are left alone, and the
+// BT.2020 luminance is kept so nothing gets brighter or darker. amount 0 is the exact conversion (the console's colours).
+vec3 to_bt2020(vec3 rgb, float amount) {
+    vec3 exact = vec3(dot(vec3(0.6274, 0.3293, 0.0433), rgb),
+                      dot(vec3(0.0691, 0.9195, 0.0114), rgb),
+                      dot(vec3(0.0164, 0.0880, 0.8956), rgb));
+    if (amount <= 0.0) return exact;
+    vec3 c = max(rgb, vec3(0.0));
+    float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+    float sat = mx > 1e-6 ? (mx - mn) / mx : 0.0;
+    float w = amount * smoothstep(0.2, 0.8, sat);
+    if (w <= 0.0) return exact;
+    vec3 wide = vec3(dot(vec3(0.753833, 0.198597, 0.047570), c),
+                     dot(vec3(0.045744, 0.941777, 0.012479), c),
+                     dot(vec3(-0.001210, 0.017601, 0.983608), c));
+    const vec3 Y2020 = vec3(0.2627, 0.6780, 0.0593);
+    float ye = dot(Y2020, exact), yw = dot(Y2020, wide);
+    if (yw > 1e-6) wide *= ye / yw;
+    return mix(exact, max(wide, vec3(0.0)), w);
+}
+
+// Triangular-PDF noise of +-1 code value from the pixel position (a fixed pattern, so a still picture does not shimmer): breaks the
+// visible steps of a smooth gradient into fine grain once the signal is quantised to the target's 10 (or 8) bits.
+vec3 dither(vec3 c, float step) {
+    vec2 p = floor(gl_FragCoord.xy);
+    float a = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    float b = fract(sin(dot(p, vec2(39.3468, 11.1353))) * 24634.6345);
+    return c + (a + b - 1.0) * step;
+}
+
 void main() {
     vec2 local = (v_dst - pc.pic.xy) / pc.pic.zw;
     if (any(lessThan(local, vec2(0.0))) || any(greaterThan(local, vec2(1.0)))) {
@@ -83,6 +129,7 @@ void main() {
 
     int mode = int(pc.p.x + 0.5);
     bool adjust = pc.p.w > 0.5;
+    if (mode >= 2) rgb = display_gamma(rgb);
     if (adjust && mode >= 2) rgb = pow(picture(pow(max(rgb, vec3(0.0)), vec3(1.0 / 2.2))), vec3(2.2));   // HDR: on a 2.2 power curve
     vec3 outc;
     if (mode == 1) {
@@ -90,18 +137,165 @@ void main() {
         if (adjust) outc = clamp(picture(outc), 0.0, 1.0);
     } else if (mode == 2) {
         // scene-linear BT.709 with 1.0 = paper white -> BT.2020 -> nits, limited to the peak, then PQ
-        vec3 r2020 = vec3(dot(vec3(0.6274, 0.3293, 0.0433), rgb),
-                          dot(vec3(0.0691, 0.9195, 0.0114), rgb),
-                          dot(vec3(0.0164, 0.0880, 0.8956), rgb));
+        vec3 r2020 = to_bt2020(rgb, pc.g.z);
         vec3 nits = clamp(min(r2020 * pc.p.y, vec3(pc.p.z)), 0.0, 10000.0);
         outc = pq_encode(nits);
     } else if (mode == 3) {
+        if (pc.g.z > 0.0) {   // expanded colours go past BT.709: back to scRGB's BT.709 primaries (negative components carry them)
+            vec3 r2020 = to_bt2020(rgb, pc.g.z);
+            rgb = vec3(dot(vec3(1.660491, -0.587641, -0.072850), r2020),
+                       dot(vec3(-0.124550, 1.132900, -0.008349), r2020),
+                       dot(vec3(-0.018151, -0.100579, 1.118730), r2020));
+        }
         outc = min(rgb * pc.p.y, vec3(pc.p.z)) / 80.0;   // scRGB: 1.0 = 80 nits, limited to the peak like HDR10
     } else {
         outc = rgb;                  // mode 0 (and any other value): the texel unchanged
         if (adjust) outc = clamp(picture(outc), 0.0, 1.0);
     }
+    if (pc.g.w > 0.0 && (mode == 1 || mode == 2)) outc = clamp(dither(outc, pc.g.w), 0.0, 1.0);
     o_color = vec4(outc, 1.0);
+}
+"""
+
+# Fire Emblem Fortune's Weave tone map (ImageProcessing.bfsha aa98bfc2796de9bf), rewritten: the game's GT curve per channel on its BT.2020
+# scene, then BT.2020 -> BT.709. Interface identical to the game's translated shader (set 0 binding 22: its constant buffer c3; set 2 binding
+# 128: the scene; location 0 in/out), plus a 32-byte fragment push constant (the alpha-test layout's range). With the neutral push values
+# (R = the peak ratio, exposure 1, contrast/shadows/highlights/saturation 1, highlight saturation 0) it computes what the HDR variant of the
+# game's shader computes (spirv_hdr_tonemap_gt): P = max(c2.x, R), the same toe, linear section and shoulder.
+# [hdr] sharpen: Fortune's Weave's sharpen pass (filter.bfsha, fs e14b86c9fc0181d1), term for term: a 5-tap cross with the centre weight
+# (1 + k/3) and the neighbours -k/12, k = c1.x. The strength multiplier, the [hdr] ui_nits scene gain (this draw is the scene's last pass
+# before the UI, where hdr_gain_shader would put it) and the compare split come from the push constant.
+FEFW_SHARPEN_FRAG = r"""#version 450
+layout(set = 0, binding = 22, std140) uniform fp_c3 { vec4 c[4096]; } cb;
+layout(set = 2, binding = 128) uniform sampler2D u_src;
+layout(location = 0) in vec4 v_tc;
+layout(location = 0) out vec4 o_color;
+layout(push_constant) uniform PushConstants {
+    vec4 a;   // x: scene gain (1 = none), y: strength multiplier (1 = the game's), z: 1 = compare (the left half keeps the game's strength)
+} pc;
+
+void main() {
+    vec4 c0 = cb.c[0];
+    float maxv = fma(0.5, -c0.y, c0.w);
+    float maxu = fma(0.5, -c0.x, c0.z);
+    float u = v_tc.x * c0.z, v = v_tc.y * c0.w;
+    float cu = min(maxu, max(0.0, u)), cv = min(maxv, max(0.0, v));
+    vec4 l = texture(u_src, vec2(min(maxu, max(0.0, u - c0.x)), cv));
+    vec4 r = texture(u_src, vec2(min(maxu, max(0.0, u + c0.x)), cv));
+    vec4 d = texture(u_src, vec2(cu, min(maxv, max(0.0, v + c0.y))));
+    vec4 e = texture(u_src, vec2(cu, min(maxv, max(0.0, v - c0.y))));
+    vec4 m = texture(u_src, vec2(u, v));
+    float k = cb.c[1].x;
+    bool game_half = pc.a.z > 0.5 && gl_FragCoord.x < 0.5 * float(textureSize(u_src, 0).x);
+    if (!game_half) k *= pc.a.y;
+    float wn = (-k + 2.5) + fma(k, 0.16665999591350555419921875, -0.5);
+    wn = wn + fma(k, 2.0, -4.0);
+    wn = wn + fma(k, -1.33329999446868896484375, 2.0);
+    float wc = fma(k, 0.33329999446868896484375, 1.0) * 2.0;
+    vec3 rgb = fma(m.rgb, vec3(wc), fma(vec3(wn), e.rgb, fma(vec3(wn), d.rgb, fma(r.rgb, vec3(wn), vec3(wn) * l.rgb)))) * 0.5;
+    float al = fma(m.w, wc, fma(wn, e.w, fma(wn, d.w, fma(wn, l.w, fma(r.w, wn, 1.0))))) * 0.5;
+    o_color = vec4(rgb * pc.a.x, al);
+}
+"""
+
+FEFW_GT_GRADE_FRAG = r"""#version 450
+layout(set = 0, binding = 22, std140) uniform fp_c3 { vec4 c[4096]; } cb;
+layout(set = 2, binding = 128) uniform sampler2D u_scene;
+layout(location = 0) in vec4 v_tc;
+layout(location = 0) out vec4 o_color;
+layout(push_constant) uniform PushConstants {
+    vec4 a;   // x: peak ratio R (P = max(game P, R); <= 1: the game's P), y: exposure (multiplier), z: contrast, w: scene saturation
+    vec4 b;   // x: shadows, y: highlights, z: highlight saturation 0..1, w: 1 = keep colours outside BT.709 (no max(0, .))
+    vec4 c;   // x: 1 = compare: the left half of the target as the game draws it (no grading, no highlight saturation; testing aid),
+              // y: hue preservation 0..1 (the curve on luminance, the scene colour's ratios kept)
+} pc;
+
+const vec3 Y2020 = vec3(0.2627, 0.6780, 0.0593);
+const float MID = 0.18;
+
+// Scene grading on the BT.2020 scene colour before the curve (scene-linear, mid grey 0.18): exposure, then contrast, shadows and highlights
+// as powers of luminance around mid grey (shadows below it, highlights above it; the colour keeps its ratios), then saturation around the
+// luminance. Neutral values leave the colour exactly as it is.
+vec3 grade(vec3 x) {
+    x *= pc.a.y;
+    float y = dot(x, Y2020);
+    if (y > 1e-8 && (pc.a.z != 1.0 || pc.b.x != 1.0 || pc.b.y != 1.0)) {
+        float n = pow(y / MID, pc.a.z);
+        n = n < 1.0 ? pow(n, 2.0 - pc.b.x) : pow(n, pc.b.y);
+        x *= MID * n / y;
+    }
+    if (pc.a.w != 1.0) {
+        float l = dot(x, Y2020);
+        x = max(vec3(l) + (x - vec3(l)) * pc.a.w, vec3(0.0));
+    }
+    return x;
+}
+
+// The game's curve for one channel (the shader's own terms): power toe below m, linear from m, exponential shoulder towards P from S0.
+float gt(float x, float a, float m, float l, float c, float P, float scale) {
+    float l0 = ((P - m) * l) / a;
+    float S0 = m + l0;
+    float S1 = P - (a * l0 + m);
+    float C2 = -(P * a / S1) / P;
+    float t = clamp(x / m, 0.0, 1.0);
+    float sm = t * t * (3.0 - 2.0 * t);
+    float w2 = (x >= S0) ? 1.0 : 0.0;
+    float w1 = sm - w2;
+    float w0 = 1.0 - sm;
+    float T = m * exp2(log2(abs(x / m)) * c);
+    float L = m + a * (x - m);
+    float S = P - S1 * exp2((x - S0) * C2 * 1.4426950408889634);
+    return (w0 * T + w1 * L + w2 * S) * scale;
+}
+
+void main() {
+    vec2 uv = v_tc.xy;
+    vec4 s = texture(u_scene, uv);
+    vec4 c0 = cb.c[0], c2 = cb.c[2];
+    float P = pc.a.x > 1.001 ? max(c2.x, pc.a.x) : c2.x;
+    float half_w = 0.5 * float(textureSize(u_scene, 0).x);
+    bool game_half = pc.c.x > 0.5 && gl_FragCoord.x < half_w;
+    vec3 x = game_half ? s.rgb : grade(s.rgb);
+    vec3 t = vec3(gt(x.r, c0.x, c0.y, c0.z, c0.w, P, c2.y), gt(x.g, c0.x, c0.y, c0.z, c0.w, P, c2.y), gt(x.b, c0.x, c0.y, c0.z, c0.w, P, c2.y));
+    // Hue preservation: the game's curve applied per channel shifts hues as channels compress unevenly (bright orange toward yellow, saturated
+    // blue toward cyan-white). Blend toward the curve applied to luminance with the scene colour's own ratios, over the whole range; where a
+    // channel would pass the curve's maximum, back off toward the per-channel result just enough to fit.
+    float hue = game_half ? 0.0 : pc.c.y;
+    if (hue > 0.0) {
+        float yi = dot(x, Y2020);
+        if (yi > 1e-8) {
+            vec3 hp = x * (gt(yi, c0.x, c0.y, c0.z, c0.w, P, c2.y) / yi);
+            float lim = P * c2.y, f = 1.0;
+            for (int i = 0; i < 3; ++i)
+                if (hp[i] > lim && hp[i] > t[i]) f = min(f, max(lim - t[i], 0.0) / (hp[i] - t[i]));
+            t = mix(t, mix(t, hp, f), hue);
+        }
+    }
+    // Highlight saturation: the per-channel curve turns bright colours toward white. Blend toward the scene colour's own ratios at the
+    // curve's luminance (hue and saturation of the scene, brightness of the curve), only in the highlights (from 0.8 to 2.5 x paper white),
+    // limited so no channel passes the curve's maximum.
+    float hs = pc.b.z;
+    if (game_half) hs = 0.0;
+    if (hs > 0.0) {
+        float yt = dot(t, Y2020), yi = dot(x, Y2020);
+        float w = hs * smoothstep(0.8, 2.5, yt);
+        if (w > 0.0 && yi > 1e-8) {
+            // hp has the curve's luminance and the scene colour's ratios. Where a channel would pass the curve's maximum, keep as much of the
+            // colour as fits at that same luminance (mix toward the curve's own result, which fits): the hottest cores turn toward yellow-white
+            // rather than dimming.
+            vec3 hp = x * (yt / yi);
+            float lim = P * c2.y, s = 1.0;
+            for (int i = 0; i < 3; ++i)
+                if (hp[i] > lim && hp[i] > t[i]) s = min(s, max(lim - t[i], 0.0) / (hp[i] - t[i]));
+            hp = mix(t, hp, s);
+            t = mix(t, hp, w);
+        }
+    }
+    vec3 o = vec3(dot(vec3(1.6604902744293213, -0.5876390933990479, -0.0728515014052391), t),
+                  dot(vec3(-0.1245499029755592, 1.1328999996185303, -0.0083478996530175), t),
+                  dot(vec3(-0.0181511007249355, -0.1005787029862404, 1.1187298297882080), t));
+    if (pc.b.w < 0.5) o = max(o, vec3(0.0));
+    o_color = vec4(o, s.a);
 }
 """
 
@@ -287,6 +481,8 @@ void main() {
 SHADERS = [
     ("kOutVert", "out_encode.vert", OUT_VERT),
     ("kOutEncodeFrag", "out_encode.frag", OUT_ENCODE_FRAG),
+    ("kFefwGtGradeFrag", "fefw_gt_grade.frag", FEFW_GT_GRADE_FRAG),
+    ("kFefwSharpenFrag", "fefw_sharpen.frag", FEFW_SHARPEN_FRAG),
     ("kOverlayCompositeFrag", "overlay_composite.frag", OVERLAY_COMPOSITE_FRAG),
     ("kFsrEasuComp", "fsr_easu.comp", FSR_EASU_COMP),
     ("kFsrRcasComp", "fsr_rcas.comp", FSR_RCAS_COMP),

@@ -819,12 +819,56 @@ void hdr_group(UiHost& host, Menu& m) {
         if (slider(m, "##hb", &h.highlight_boost, 0.0, 2.0, 0.1, "%.2f")) apply(host, m);
         row(m, "UI brightness", When::Live, "Nits of white in menus, text and the HUD while the 3D scene keeps paper white; 0 = same as paper white. HDR output only.");
         if (zero_or_min_slider(m, "##ui", &h.ui_nits, 40, 500, 10, "same as paper white")) apply(host, m);
+        row(m, "Highlight saturation", When::Live, "0 = the game's highlights, which turn white as they brighten; higher keeps the scene's own colour in bright highlights (fire, magic, sunsets). Below paper white nothing changes.");
+        if (slider(m, "##hs", &h.highlight_saturation, 0.0, 1.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Hue preservation", When::Live, "0 = the game's tone curve, which shifts strong colours as they brighten (orange toward yellow, deep blue toward cyan). Higher keeps the scene's own hues through the whole range. HDR.");
+        if (slider(m, "##hp", &h.hue_preserve, 0.0, 1.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Wide colour", When::Restart, "HDR enhancement: keeps the colours the game itself renders beyond the standard range (it lights the scene in BT.2020), which SDR has to clip. Everything inside the standard range stays as in SDR. Off = SDR colours exactly.");
+        if (check(m, "##wg", &h.wide_gamut)) apply(host, m);
+        row(m, "Dither output", When::Live, "Adds very fine noise before the picture goes to the display, hiding faint steps in smooth dark gradients (night skies, fades).");
+        if (check(m, "##dt", &h.dither)) apply(host, m);
+        row(m, "Colour expansion", When::Live, "0 keeps the game's SDR colours exactly; higher pushes strongly saturated colours into the wider HDR range. Taste, not accuracy.");
+        if (slider(m, "##ge", &h.gamut_expand, 0.0, 1.0, 0.05, "%.2f")) apply(host, m);
         end_rows();
     }
     const extras::HdrState hs = extras::hdr_state();
     ImGui::TextDisabled(tr("Now: HDR scene %s, swapchain %s, paper white %.0f, peak %.0f nits; the display reports HDR: %s"), hs.scene_hdr ? "on" : "off",
                         extras::output_kind_name(hs.output), static_cast<double>(hs.paper_white_nits), static_cast<double>(hs.peak_nits),
                         hs.display_hdr ? "yes" : "no");
+}
+
+void grading_group(UiHost& host, Menu& m) {
+    extras::HdrSettings& h = m.edit.extras.hdr;
+    section("Scene grading");
+    if (begin_rows("grade")) {
+        row(m, "Exposure", When::Live, "Brightness of the 3D scene before the tone map, in stops. 0 = the game's.");
+        if (slider(m, "##ge", &h.grade_exposure, -2.0, 2.0, 0.1, "%+.1f")) apply(host, m);
+        row(m, "Contrast", When::Live, "Scene contrast around mid grey, before the tone map. 1 = the game's.");
+        if (slider(m, "##gc", &h.grade_contrast, 0.5, 1.5, 0.05, "%.2f")) apply(host, m);
+        row(m, "Shadows", When::Live, "Above 1 lifts the scene below mid grey, below 1 deepens it. 1 = the game's.");
+        if (slider(m, "##gsh", &h.grade_shadows, 0.5, 1.5, 0.05, "%.2f")) apply(host, m);
+        row(m, "Highlights", When::Live, "Above 1 brightens the scene above mid grey, below 1 tames it. 1 = the game's.");
+        if (slider(m, "##ghl", &h.grade_highlights, 0.5, 1.5, 0.05, "%.2f")) apply(host, m);
+        row(m, "Saturation", When::Live, "Scene colour intensity before the tone map (the UI is not touched). 1 = the game's.");
+        if (slider(m, "##gsa", &h.grade_saturation, 0.0, 2.0, 0.05, "%.2f")) apply(host, m);
+        end_rows();
+    }
+    section("Post effects");
+    if (begin_rows("post")) {
+        row(m, "Bloom", When::Live, "Strength of the game's glow around bright lights. 1 = the game's, 0 = none. SDR and HDR.");
+        if (slider(m, "##bl", &h.bloom, 0.0, 4.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Sharpening", When::Live, "Strength of the game's own sharpening of the finished picture. 1 = the game's, 0 = none. SDR and HDR.");
+        if (slider(m, "##sp", &h.sharpen, 0.0, 3.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Motion blur", When::Live, "Strength of the game's camera motion blur. 1 = the game's, 0 = none, 2 = twice the blur length. SDR and HDR.");
+        if (slider(m, "##mb", &h.motion_blur, 0.0, 2.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Depth of field", When::Live, "Strength of the game's out-of-focus blur. 1 = the game's, 0 = everything sharp, 2 = a wider aperture: more blur, starting closer to the focus. SDR and HDR.");
+        if (slider(m, "##df", &h.depth_of_field, 0.0, 2.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Vignette", When::Live, "Strength of the darkened screen edges in the scenes that have one (the world map, some story scenes). 1 = the game's, 0 = none. SDR and HDR.");
+        if (slider(m, "##vg", &h.vignette, 0.0, 2.0, 0.05, "%.2f")) apply(host, m);
+        row(m, "Compare with the game", When::Live, "Testing aid: the left half of the screen as the game draws it, the right half with your scene grading, highlight saturation and sharpening (HDR needed for grading and highlight saturation).");
+        if (check(m, "##cmp", &h.compare)) apply(host, m);
+        end_rows();
+    }
 }
 
 void picture_group(UiHost& host, Menu& m) {
@@ -934,7 +978,8 @@ void graphics_page(UiHost& host, Menu& m) {
     upscaler_group(m);
     live_status_group();
     hdr_group(host, m);
-    picture_group(host, m);
+    grading_group(host, m);
+    if (extras::hdr_state().output == extras::OutputKind::Sdr8) picture_group(host, m);   // HDR: Scene grading replaces the picture controls
 }
 
 // ---- Frame rate -------------------------------------------------------------------------------------------------------------------------

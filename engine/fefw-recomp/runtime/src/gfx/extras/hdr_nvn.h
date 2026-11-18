@@ -21,6 +21,16 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
 // True when `words` is the game's tone-map fragment shader (the structural match of hdr_tonemap_patch.h); cached by hash. Independent of the HDR scene.
 bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash);
 
+// Scene grading and highlight saturation ([hdr] grade_*, highlight_saturation) for the GT tone map (Fire Emblem Fortune's Weave): the
+// game's tone-map shader is replaced by kFefwGtGradeFrag (extras_shaders.inc), which takes its settings from a 32-byte fragment push constant.
+// hdr_is_gt_tonemap: `words` is that GT tone-map shader. hdr_gt_grade_words: the replacement. hdr_gt_grade_push: this frame's push values
+// (8 floats); false when every setting is neutral (the draw then keeps the HDR variant of the game's own shader).
+bool hdr_is_gt_tonemap(const std::vector<uint32_t>& words);
+const std::vector<uint32_t>& hdr_gt_grade_words();
+// [hdr] sharpen: kFefwSharpenFrag, the replacement of Fortune's Weave's sharpen pass (push: scene gain, strength multiplier, compare).
+const std::vector<uint32_t>& sharpen_words();
+bool hdr_gt_grade_push(float out[12]);
+
 // Scene upscaler (S14): the game renders the 3D scene below the output size ([upscale] scene_scale, the game's dynamic-resolution path) and its tone-map
 // pass reads that small HDR target and writes the full-size window texture. With FSR 1 or NIS on, the replay runs that upscaler on the HDR target first and the
 // tone-map draw reads the result instead of the small target (the game's bilinear filter is bypassed).

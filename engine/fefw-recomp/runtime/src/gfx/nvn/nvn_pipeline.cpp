@@ -344,7 +344,7 @@ static VkShaderModule hdr_fragment_module(const ShaderInfo* fs) {
 // [hdr] ui_nits. The answers are kept on the shader (ShaderInfo::hdr_ui, render thread) once the HDR scene runs; before that nothing is kept,
 // so a shader first seen while the HDR scene is off or switching is looked at again. The gain variant's words (the fragment shader, or its
 // HDR variant when it is the tone-map shader, with colour output 0's rgb times the push constant) wait in g_gain_words for hdr_gain_module.
-enum : uint8_t { kHdrUiTonemapKnown = 1, kHdrUiTonemap = 2, kHdrUiGainKnown = 4, kHdrUiGain = 8 };
+enum : uint8_t { kHdrUiTonemapKnown = 1, kHdrUiTonemap = 2, kHdrUiGainKnown = 4, kHdrUiGain = 8, kHdrUiGtKnown = 16, kHdrUiGt = 32, kBloomKnown = 64, kBloom = 128 };
 static std::unordered_map<const ShaderInfo*, std::vector<uint32_t>> g_gain_words;   // under g_module_mu
 
 static bool hdr_ui_can_look(const ShaderInfo* fs) { return extras::hdr_scene_active() && fs->spirv.size() <= 65536; }   // as hdr_fragment_module
@@ -377,6 +377,117 @@ bool hdr_gain_shader(const ShaderInfo* fs) {
         fs->hdr_ui |= kHdrUiGainKnown | (ok ? kHdrUiGain : 0);
     }
     return fs->hdr_ui & kHdrUiGain;
+}
+
+bool hdr_gt_shader(const ShaderInfo* fs) {
+    if (!(fs->hdr_ui & kHdrUiGtKnown)) {
+        if (!hdr_ui_can_look(fs)) return false;
+        const bool gt = extras::hdr_is_gt_tonemap(fs->spirv);
+        if (!extras::hdr_scene_active()) return false;
+        fs->hdr_ui |= kHdrUiGtKnown | (gt ? kHdrUiGt : 0);
+        if (gt) NXLOG_I(kTag, "%s: GT tone map: scene grading and highlight saturation available ([hdr] grade_*, highlight_saturation)", fs->hash.c_str());
+    }
+    return fs->hdr_ui & kHdrUiGt;
+}
+
+// [hdr] grade_*: the replacement tone map (GraphicsKey::grade), one module for every key.
+static VkShaderModule hdr_grade_module() {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static VkShaderModule m = VK_NULL_HANDLE;
+    if (!m) m = create_module(extras::hdr_gt_grade_words(), "fefw_gt_grade");
+    return m;
+}
+
+// [hdr] bloom. Fortune's Weave's bloom composite (ImageProcessing.bfsha variation 6): out = bloom.rgb * c3[1].x (0.125), alpha 1, blended
+// additively onto the scene before the tone map. Known by its hash: its shape (one texture times a constant) is too common to find otherwise.
+static std::unordered_map<const ShaderInfo*, std::vector<uint32_t>> g_bloom_words;   // under g_module_mu
+bool bloom_shader(const ShaderInfo* fs) {
+    if (!(fs->hdr_ui & kBloomKnown)) {
+        bool ok = false;
+        if (fs->hash == "cb69dc121eec3329") {
+            std::vector<uint32_t> scaled;
+            ok = spirv_scale_output0(fs->spirv, scaled);
+            if (ok) {
+                std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+                g_bloom_words.emplace(fs, std::move(scaled));
+            }
+            NXLOG_I(kTag, "%s: bloom composite: %s", fs->hash.c_str(), ok ? "strength from [hdr] bloom" : "no vec4 colour output 0 to scale: no bloom control");
+        }
+        fs->hdr_ui |= kBloomKnown | (ok ? kBloom : 0);
+    }
+    return fs->hdr_ui & kBloom;
+}
+
+constexpr uint16_t kSharpenKnown = 256, kSharpen = 512;
+bool sharpen_shader(const ShaderInfo* fs) {
+    if (!(fs->hdr_ui & kSharpenKnown)) {
+        const bool ok = fs->hash == "e14b86c9fc0181d1";
+        if (ok) NXLOG_I(kTag, "%s: sharpen pass: strength from [hdr] sharpen", fs->hash.c_str());
+        fs->hdr_ui |= kSharpenKnown | (ok ? kSharpen : 0);
+    }
+    return fs->hdr_ui & kSharpen;
+}
+
+// [hdr] motion_blur: fs 8c669d664aed5024, the velocity scale (shutter) c3[0].y times the strength. [hdr] vignette: fs 6611d2c152cab7a6 and
+// 84557fbbaa3f4503 (the GradationFilter variants with the vignette): scene * mix(colour, 1, pow(falloff, c3[5].w)); the falloff term becomes
+// max(1 - s * (1 - term), 0). [hdr] depth_of_field: fs f25437138604a382 writes the circle of confusion clamp(c4[1].x * (1 - c4[1].y / depth),
+// -1, 1) that the bokeh and the composite (dbdcae4a12205048: mix by smoothstep of it) follow; the aperture c4[1].x times the strength.
+constexpr uint16_t kPostKnown = 1024, kPostBlur = 2048, kPostVignette = 4096, kPostDof = 8192;
+static std::unordered_map<const ShaderInfo*, std::vector<uint32_t>> g_post_words;   // under g_module_mu
+int post_scale_shader(const ShaderInfo* fs) {
+    if (!(fs->hdr_ui & kPostKnown)) {
+        uint16_t kind = 0;
+        std::vector<uint32_t> w;
+        if (fs->hash == "8c669d664aed5024") {
+            if (spirv_push_scale_cb(fs->spirv, 0, 1, 0, w)) kind = kPostBlur;
+            NXLOG_I(kTag, "%s: motion blur: %s", fs->hash.c_str(), kind ? "strength from [hdr] motion_blur" : "unexpected shape: no motion blur control");
+        } else if (fs->hash == "6611d2c152cab7a6" || fs->hash == "84557fbbaa3f4503") {
+            if (spirv_push_scale_cb(fs->spirv, 5, 3, 1, w)) kind = kPostVignette;
+            NXLOG_I(kTag, "%s: vignette: %s", fs->hash.c_str(), kind ? "strength from [hdr] vignette" : "unexpected shape: no vignette control");
+        } else if (fs->hash == "f25437138604a382") {
+            if (spirv_push_scale_cb(fs->spirv, 1, 0, 0, w, 23)) kind = kPostDof;   // fp_c4: descriptor binding 23
+            NXLOG_I(kTag, "%s: depth of field: %s", fs->hash.c_str(), kind ? "strength from [hdr] depth_of_field" : "unexpected shape: no depth-of-field control");
+        }
+        if (kind) {
+            std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+            g_post_words.emplace(fs, std::move(w));
+        }
+        fs->hdr_ui |= kPostKnown | kind;
+    }
+    return (fs->hdr_ui & kPostBlur) ? 1 : (fs->hdr_ui & kPostVignette) ? 2 : (fs->hdr_ui & kPostDof) ? 3 : 0;
+}
+
+static VkShaderModule post_module(const ShaderInfo* fs) {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static std::unordered_map<const ShaderInfo*, VkShaderModule> cache;
+    auto it = cache.find(fs);
+    if (it != cache.end()) return it->second;
+    auto w = g_post_words.find(fs);
+    if (w == g_post_words.end()) return shader_module(fs);
+    VkShaderModule m = create_module(w->second, fs->hash.c_str());
+    g_post_words.erase(w);
+    cache[fs] = m;
+    return m;
+}
+
+static VkShaderModule sharpen_module() {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static VkShaderModule m = VK_NULL_HANDLE;
+    if (!m) m = create_module(extras::sharpen_words(), "fefw_sharpen");
+    return m;
+}
+
+static VkShaderModule bloom_module(const ShaderInfo* fs) {
+    std::lock_guard<std::recursive_mutex> lk(g_module_mu);
+    static std::unordered_map<const ShaderInfo*, VkShaderModule> cache;
+    auto it = cache.find(fs);
+    if (it != cache.end()) return it->second;
+    auto w = g_bloom_words.find(fs);
+    if (w == g_bloom_words.end()) return shader_module(fs);   // not kept: never expected
+    VkShaderModule m = create_module(w->second, fs->hash.c_str());
+    g_bloom_words.erase(w);
+    cache[fs] = m;
+    return m;
 }
 
 // The scene-gain variant (GraphicsKey::scene_gain). Only keys of draws whose shader passed hdr_gain_shader have it, so the words are there.
@@ -691,6 +802,10 @@ bool resolve_stage_modules(const GraphicsKey& key, StageModules* out) {
                            : (i == 1 && key.dual_src)    ? dual_source_module(key.stage[i])
                            : (i == 1 && key.alpha_func) ? alpha_test_module(key.stage[i], key.alpha_func)
                            : (i == 1 && key.scene_gain)  ? hdr_gain_module(key.stage[i])
+                           : (i == 1 && key.grade)       ? hdr_grade_module()
+                           : (i == 1 && key.bloom)       ? bloom_module(key.stage[i])
+                           : (i == 1 && key.sharpen)     ? sharpen_module()
+                           : (i == 1 && key.post)        ? post_module(key.stage[i])
                            : (i == 1)                    ? hdr_fragment_module(key.stage[i])
                                                          : shader_module(key.stage[i]);
         if (!m) return false;
@@ -712,7 +827,7 @@ const ProgLayout* alpha_layout(const ProgLayout& base) {
     std::lock_guard<std::mutex> lk(g_layout_mu);
     auto it = g_alpha_layouts.find(&base);
     if (it != g_alpha_layouts.end()) return &it->second;
-    const VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};
+    const VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48};   // 4 bytes for the alpha reference, the scene gain or [hdr] bloom, 48 for [hdr] grade_*
     VkPipelineLayoutCreateInfo pci = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pci.setLayoutCount = base.sets[kPoolSet] ? 5 : 4;
     pci.pSetLayouts = base.sets;

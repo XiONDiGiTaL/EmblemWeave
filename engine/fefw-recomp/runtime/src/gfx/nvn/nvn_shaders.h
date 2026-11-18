@@ -271,7 +271,7 @@ struct ShaderInfo {
     uint32_t push_bytes = 0;
     // [hdr] ui_nits: what the replay found out about this fragment shader (hdr_tonemap_shader, hdr_gain_shader in nvn_pipeline.cpp), kept
     // so that each is worked out once. Render thread only; 0 = nothing known yet.
-    mutable uint8_t hdr_ui = 0;
+    mutable uint16_t hdr_ui = 0;
 };
 
 // Builds a ShaderInfo from a code block, its control section and the SPIR-V words (no I/O). `resources` = the

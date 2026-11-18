@@ -199,6 +199,19 @@ void sanitize(Settings& s) {
     h.peak_nits = h.peak_nits <= 0 ? 0 : std::clamp(h.peak_nits, 200.0, 10000.0);
     h.paper_white_nits = h.paper_white_nits <= 0 ? 0 : std::clamp(h.paper_white_nits, 80.0, 500.0);
     h.highlight_boost = std::clamp(h.highlight_boost, 0.0, 2.0);
+    h.gamut_expand = std::clamp(h.gamut_expand, 0.0, 1.0);
+    h.highlight_saturation = std::clamp(h.highlight_saturation, 0.0, 1.0);
+    h.hue_preserve = std::clamp(h.hue_preserve, 0.0, 1.0);
+    h.bloom = std::clamp(h.bloom, 0.0, 4.0);
+    h.sharpen = std::clamp(h.sharpen, 0.0, 3.0);
+    h.motion_blur = std::clamp(h.motion_blur, 0.0, 2.0);
+    h.vignette = std::clamp(h.vignette, 0.0, 2.0);
+    h.depth_of_field = std::clamp(h.depth_of_field, 0.0, 2.0);
+    h.grade_exposure = std::clamp(h.grade_exposure, -2.0, 2.0);
+    h.grade_contrast = std::clamp(h.grade_contrast, 0.5, 1.5);
+    h.grade_shadows = std::clamp(h.grade_shadows, 0.5, 1.5);
+    h.grade_highlights = std::clamp(h.grade_highlights, 0.5, 1.5);
+    h.grade_saturation = std::clamp(h.grade_saturation, 0.0, 2.0);
     s.extras.upscale.sharpness = std::clamp(s.extras.upscale.sharpness, 0.0, 1.0);
     s.extras.picture = extras::picture_clamped(s.extras.picture);
     s.audio.volume = std::clamp(s.audio.volume, 0.0, 2.0);
@@ -658,6 +671,16 @@ void hdr_group(Page& p) {
     tip("The brightness of ordinary white in the game, in nits; auto follows Windows' SDR content brightness when HDR is on there, else 203.");
     if (slider("Highlight boost", &h.highlight_boost, 0.0, 2.0, "%.2f")) mark(p);
     tip("0 keeps the game's SDR look up to its own white, 1 lets highlights reach the display's peak, 2 pushes them further.");
+    if (ImGui::Checkbox("Wide colour (game's own)", &h.wide_gamut)) mark(p);
+    tip("HDR enhancement: keeps the colours the game itself renders beyond the standard (BT.709) range, which SDR has to clip at the tone map. "
+        "Everything inside the standard range stays as in SDR. Off = SDR colours exactly. Applies after a restart.");
+    restart_badge();
+    if (ImGui::Checkbox("Dither output", &h.dither)) mark(p);
+    tip("Adds a very fine noise to the picture before it is sent to the display, which hides faint steps in smooth dark gradients "
+        "(night skies, fades). Off by default; the grain is one code value, too fine to see as noise.");
+    if (slider("Colour expansion", &h.gamut_expand, 0.0, 1.0, "%.2f")) mark(p);
+    tip("0 keeps the game's SDR colours exactly. Higher values push strongly saturated colours past them into the wider HDR colour "
+        "range (toward DCI-P3); greys and most of the UI stay as they are, skin tones barely move. A matter of taste, not accuracy. HDR output only.");
     if (auto_nits_slider("UI brightness##hdr_ui", &h.ui_nits, 40, 500, "same as paper white")) mark(p);
     tip("The brightness of white in the menus, text and HUD, in nits, while the 3D scene keeps paper white. Applies live, HDR output only. "
         "The first change from \"same as paper white\" builds the pipeline of the scene's last pass before the UI (a short pause).");

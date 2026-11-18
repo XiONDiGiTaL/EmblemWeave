@@ -21,6 +21,8 @@ struct EncodePush {
     float src[4];     // whole source size, z = flip
     float p[4];       // x = mode, y = paper white nits, z = peak nits, w = 1: apply the picture controls
     float adj[4];     // picture controls: contrast, saturation, black, gamma
+    float g[4];       // x = SDR display gamma for HDR output (0 = the sRGB curve), y = scene gain of this frame, z = gamut expansion 0..1,
+                      // w = dither step (one code value of the target; 0 = off)
 };
 VkShaderModule make_module(VkDevice d, const uint32_t* code, size_t bytes) {
     VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -188,7 +190,7 @@ VkPipeline OutputPass::encode_pipeline(VkFormat fmt) {
 }
 
 void OutputPass::encode(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_format, VkExtent2D dst_extent, VkImageView src, VkExtent2D src_extent, const int32_t crop_in[4],
-                        bool keep_aspect, bool flip_y, int mode, float paper, float peak, VkImageLayout src_layout, const float* pic) {
+                        bool keep_aspect, bool flip_y, int mode, float paper, float peak, VkImageLayout src_layout, const float* pic, float sdr_gamma, float gain, float gamut, bool dither) {
     VkPipeline pipe = encode_pipeline(dst_format);
     if (!pipe) return;
     const int32_t sw = static_cast<int32_t>(src_extent.width), sh = static_cast<int32_t>(src_extent.height);
@@ -234,6 +236,16 @@ void OutputPass::encode(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_f
     pc.p[2] = peak;
     pc.p[3] = pic ? 1.0f : 0.0f;
     for (int i = 0; i < 4; ++i) pc.adj[i] = pic ? pic[i] : (i == 2 ? 0.0f : 1.0f);
+    pc.g[0] = sdr_gamma;
+    pc.g[1] = gain;
+    pc.g[2] = gamut;
+    // dither: only into a UNORM target whose code values the shader writes directly (10-bit HDR10 or 8-bit SDR; not float or sRGB-format)
+    float step = 0.0f;
+    if (dither) {
+        if (dst_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || dst_format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) step = 1.0f / 1023.0f;
+        else if (dst_format == VK_FORMAT_B8G8R8A8_UNORM || dst_format == VK_FORMAT_R8G8B8A8_UNORM || dst_format == VK_FORMAT_A8B8G8R8_UNORM_PACK32) step = 1.0f / 255.0f;
+    }
+    pc.g[3] = step;
 
     VkDescriptorSet set = enc_sets_[next_enc_];
     next_enc_ = (next_enc_ + 1) % kSetRing;
@@ -304,11 +316,11 @@ int OutputPass::record(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_fo
         // display-referred picture: the HDR window texture is 1.0 = paper white, so no pre-scale; SDR bytes are already [0,1]
         if (VkImageView up = su ? su->upscale(cb, p.src, in_view, p.src_extent, out, p.src_linear, 1.0f, p.sharpness) : VK_NULL_HANDLE) {
             const int32_t whole[4] = {0, 0, 0, 0};
-            encode(cb, dst_view, dst_format, dst_extent, up, VkExtent2D{upw, uph}, whole, p.keep_aspect, p.flip_y, mode, p.paper_white_nits, p.peak_nits, VK_IMAGE_LAYOUT_GENERAL, pic);
+            encode(cb, dst_view, dst_format, dst_extent, up, VkExtent2D{upw, uph}, whole, p.keep_aspect, p.flip_y, mode, p.paper_white_nits, p.peak_nits, VK_IMAGE_LAYOUT_GENERAL, pic, p.sdr_gamma, p.scene_gain, p.gamut_expand, p.dither);
             return mode;
         }
     }
-    encode(cb, dst_view, dst_format, dst_extent, p.src, p.src_extent, p.crop, p.keep_aspect, p.flip_y, mode, p.paper_white_nits, p.peak_nits, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, pic);
+    encode(cb, dst_view, dst_format, dst_extent, p.src, p.src_extent, p.crop, p.keep_aspect, p.flip_y, mode, p.paper_white_nits, p.peak_nits, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, pic, p.sdr_gamma, p.scene_gain, p.gamut_expand, p.dither);
     return mode;
 }
 

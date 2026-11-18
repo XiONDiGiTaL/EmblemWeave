@@ -66,6 +66,17 @@ const ProgLayout* alpha_layout(const ProgLayout& base);
 // push constant at offset 0, spirv_scale_output0; GraphicsKey::scene_gain selects it) and its words are ready for the pipeline.
 bool hdr_tonemap_shader(const ShaderInfo* fs);
 bool hdr_gain_shader(const ShaderInfo* fs);
+// [hdr] grade_*: fs is the GT tone-map shader (extras::hdr_is_gt_tonemap), kept on the shader once the HDR scene runs.
+bool hdr_gt_shader(const ShaderInfo* fs);
+// [hdr] bloom: fs is the game's bloom composite (Fire Emblem Fortune's Weave, ImageProcessing.bfsha: bloom times a constant, added onto the
+// scene before the tone map) and its output-scaled variant is ready. SDR and HDR.
+bool bloom_shader(const ShaderInfo* fs);
+// [hdr] sharpen: fs is the game's sharpen pass (Fire Emblem Fortune's Weave, filter.bfsha), replaced by kFefwSharpenFrag when it is not neutral.
+bool sharpen_shader(const ShaderInfo* fs);
+// [hdr] motion_blur, vignette, depth_of_field: fs is the game's motion blur (1), its vignette + gradation filter (2) or its depth-of-field
+// circle-of-confusion pass (3) (Fire Emblem Fortune's Weave,
+// ImageProcessing.bfsha), which then runs as its spirv_push_scale_cb variant (GraphicsKey::post); 0 for any other shader.
+int post_scale_shader(const ShaderInfo* fs);
 
 // Vertex input for the key.
 struct KeyAttr {
@@ -109,7 +120,12 @@ struct GraphicsKey {
     // dual-source blend) keeps alpha_func = 0 but still uses the other layout, and pipelines of incompatible layouts must not share a cache entry.
     // scene_gain = 1: [hdr] ui_nits, the fragment shader runs as its scene-gain variant (spirv_scale_output0), the factor in the same push
     // constant (with alpha_layout = 1). Exclusive with alpha_func.
-    uint8_t alpha_func = 0, alpha_layout = 0, scene_gain = 0, alpha_pad[5] = {};
+    // grade = 1: the GT tone-map draw runs kFefwGtGradeFrag ([hdr] grade_*, highlight_saturation; extras/hdr_nvn.h), its settings in the
+    // push constant (with alpha_layout = 1). Exclusive with alpha_func and scene_gain.
+    // bloom = 1: the game's bloom composite runs as its output-scaled variant, the factor ([hdr] bloom) in the push constant (alpha_layout = 1).
+    // sharpen = 1: the game's sharpen pass runs kFefwSharpenFrag ([hdr] sharpen, compare; the scene gain too), its settings in the push constant.
+    // post = 1: the game's motion blur or vignette runs as its strength variant ([hdr] motion_blur, vignette), the strength in the push constant.
+    uint8_t alpha_func = 0, alpha_layout = 0, scene_gain = 0, grade = 0, bloom = 0, sharpen = 0, post = 0, alpha_pad[1] = {};
     bool operator==(const GraphicsKey& o) const;
     uint64_t hash() const;
 };

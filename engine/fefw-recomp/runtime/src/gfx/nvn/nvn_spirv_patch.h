@@ -98,6 +98,12 @@ bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vecto
 // The same push constant (FRAGMENT offset 0, the alpha-test layout) as a factor on colour output 0's rgb before every return (alpha kept):
 // the scene gain of [hdr] ui_nits, on the scene's last pass before the UI. Same failure rules as spirv_alpha_test.
 bool spirv_scale_output0(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+// The same push constant as a strength on one constant-buffer float (Ryujinx: AccessChain(cb, 0, vec, comp), one constant buffer):
+// mode 0: every load of it is multiplied by the push constant ([hdr] motion_blur on the velocity scale). mode 1: every GLSL Exp2 whose
+// operand is an FMul by that load (a falloff pow(x, c)) becomes max(1 - s * (1 - exp2), 0): 0 none, 1 the game's ([hdr] vignette).
+// binding >= 0: only the constant buffer at that descriptor binding (when the shader reads several). False (out untouched) when there is no
+// such load or the module has push constants of its own.
+bool spirv_push_scale_cb(const std::vector<uint32_t>& in, uint32_t vec, uint32_t comp, int mode, std::vector<uint32_t>& out, int binding = -1);
 
 // A fragment shader of a pass without colour attachments: every Location output becomes a private variable (the decorations go, and
 // the entry point's interface loses them before SPIR-V 1.4). False (out untouched) when no Location output exists or a built-in output
