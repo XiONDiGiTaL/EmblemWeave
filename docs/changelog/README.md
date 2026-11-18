@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.40](0.1.40.md) | 2026-11-18 | Update and Play without a rebuild, cleaner add-on failures, and a bounded packed-audio cache. |
 | [0.1.39](0.1.39.md) | 2026-11-18 | Standard mode, DLC discovery, special-character build paths, and an updater that keeps the built game. |
 | [0.1.38](0.1.38.md) | 2026-11-17 | Save-profile corrections, a build fix when another Python's paths are inherited, and a rebuilt launcher. |
 | [0.1.37](0.1.37.md) | 2026-11-17 | A guided first run, RomFS mods that stay above package data, faster lifted code, HDR UI brightness, and a broad engine update. |
