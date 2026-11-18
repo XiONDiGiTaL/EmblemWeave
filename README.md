@@ -86,7 +86,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 - [Unicorn](https://www.unicorn-engine.org): the independent CPU model used in development
 - [zbic](https://github.com/kinnay/zbic): the ZBIC decoder used by the decode helper
 
-Follow development on [GitHub](https://github.com/XiONDiGiTaL/EmblemWeave).
+
 Copyright © 2026 [XiØN](https://github.com/XiONDiGiTaL). EmblemWeave is free software under the GNU General Public License,
 version 3 ([LICENSE](LICENSE)). Third-party code
 keeps its own licence; [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) lists it.
