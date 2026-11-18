@@ -65,6 +65,10 @@ game code, no assets and no keys, and it only ever reads your files.
 | [Privacy](docs/PRIVACY.md) | What stays on your PC and what the report bundle contains. |
 | [Credits](#credits) | The people and projects behind EmblemWeave. |
 
+## Disclaimer
+
+EmblemWeave contains no game code, no game assets, no firmware and no keys, and downloads none of them. You need your own legally obtained copy of the game. It is not affiliated with, endorsed by or supported by Nintendo or Intelligent Systems.
+
 ## Credits
 
 - **[XiØN](https://github.com/XiONDiGiTaL)**: Creator, Project Lead, Architecture & Design
