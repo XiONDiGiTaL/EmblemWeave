@@ -25,7 +25,7 @@ which build tools it found and runs, in order, with the log on screen:
 3. the recompile: lift and compile the six modules into `work\build\fefw` (the long step)
 4. the texture transcoder sources (astc-encoder, bc7enc_rdo)
 5. `fefw.exe` in `game-build\fefw\build\release`
-6. the shader translator (fetches Ryujinx's shader code, MIT, at a pinned revision, and builds it)
+6. the shader translator (fetches the MIT-licensed shader code at a pinned revision, and builds it)
 7. the shaders: found in your romfs and translated to SPIR-V in `work\shaders\spirv`
 8. `fefw.ini` in the run folder (`work\play` unless you choose another)
 
@@ -48,7 +48,7 @@ recomp\scripts\build_game.cmd fefw
 pwsh -File tools\textures\scripts\fetch_third_party.ps1
 pwsh -File game-build\scripts\build_fefw.ps1
 
-:: 5. the shader translator: Ryujinx's sources at the pinned revision, then the harness
+:: 5. the shader translator: the pinned sources, then the harness
 git clone --filter=blob:none --no-checkout https://git.ryujinx.app/ryubing/ryujinx.git work\refs\ryubing
 git -C work\refs\ryubing checkout a82350bb774f70fcbd41c9987bf67a3775409963
 pwsh -File tools\shaders\scripts\setup_ryujinx.ps1 -Ryubing work\refs\ryubing

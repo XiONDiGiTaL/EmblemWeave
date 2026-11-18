@@ -141,8 +141,8 @@ folder does not decide this: a tree labelled 1.1.1 that carries these same
 seven modules is the supported build, while a folder renamed to look newer but
 holding different bytes is reported as the different build it is.
 
-An **`.nsp` package** works too, when it is a plaintext repack: NSP Box writes
-those without keys, as unsigned program, control and meta NCAs. Pick it with
+An **`.nsp` package** works too, when it is a plaintext repack: one written
+without keys, as unsigned program, control and meta NCAs. Pick it with
 **Choose package…** as well. EmblemWeave unpacks it itself, once, into
 the launcher's `work\nsp` folder, then uses that folder like an extracted dump,
 so the game boots from it and the recompiler reads it. The unpack is repeated
@@ -154,7 +154,7 @@ the card's HFS0 root, opens its `secure` partition, and unpacks the program and
 control NCAs into `work\xci`; the game and the recompiler then use that folder
 like an extracted dump. Retail cartridge images keep their NCAs encrypted, so
 they are refused with the name of the first NCA that needs a console key. A
-decrypted XCI created by your own dump tool is what this path reads.
+decrypted XCI created by your own dump tool is what this path reads. EmblemWeave never asks for keys and cannot decrypt a retail image.
 
 You can also use an extracted copy. EmblemWeave then needs:
 

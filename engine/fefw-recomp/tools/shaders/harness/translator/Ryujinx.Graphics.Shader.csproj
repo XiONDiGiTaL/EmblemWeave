@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Ryujinx's shader translator (MIT), built from the checkout in third_party/ryubing (staged by scripts/setup_ryujinx.ps1) with our patches.
-       Same assembly name as upstream, so Ryujinx.Common finds the GLSL helper resources by assembly name. Each
+  <!-- Shader translator (MIT), built from the checkout in third_party/ryubing (staged by scripts/setup_ryujinx.ps1) with our patches.
+       Same assembly name as upstream, so the Common assembly finds the GLSL helper resources by assembly name. Each
        patch applies to a copy of one source file under the build folder; the checkout itself is never modified.
        See SuperMarioWonderRecomp docs/nvn/TRANSLATOR.md ("Local patches"). -->
 

@@ -190,3 +190,31 @@ apps/emblemweave     launcher
 tools/              zbic_extract.py, verification scripts, assembler probes
 docs/               feasibility, architecture, status, legal
 ```
+
+## How the recompilation works
+
+The pipeline below is fefw-recomp's, and the launcher orchestrates it:
+
+```
+  your game data (folder, .nsp, .nx, .nup, .xci)
+        │  validate the modules and the build ID
+        ▼
+  ExeFS ──► unpack main (ZBIC) ──► fefw-recomp lifter (recomp/)
+        │                              decode AArch64, recover functions, emit C++
+        ▼
+  generated C++ per module ──► clang-cl + lld-link ──► fefw.exe (six modules, runtime, hook sites)
+        │
+        ▼
+  fefw.exe: module mapping, console SDK start-up, kernel and service HLE,
+            NVN on Vulkan, XAudio2 audio, RomFS and save data ──► the game runs
+```
+
+| Piece | Responsibility |
+| --- | --- |
+| `engine/fefw-recomp/recomp` | The lifter, its C++ emitter, the module build definitions and the hook-site format |
+| `engine/fefw-recomp/runtime` | Execution: scheduler, kernel objects, services, RomFS and saves, NVN/Vulkan, audio, input, in-game menu and diagnostics |
+| `engine/fefw-recomp/game-build` | Configure and build `fefw.exe`, the runtime checks and the tooling |
+| `apps/emblemweave` | The launcher: dump validation, build orchestration, toolchain and CPU target, configuration, saves, mods, cheats and diagnostics |
+| `crates/` | Supporting Rust tools: format parsing, the reference interpreter and experimental runtime work, used for verification and tooling |
+
+The engine's own documentation is in `engine/fefw-recomp/README.md` and `engine/fefw-recomp/runtime/docs/`.

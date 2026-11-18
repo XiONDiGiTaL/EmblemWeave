@@ -9,7 +9,7 @@
 //!   lift     work/build/fefw/fefw_*.lib: lift and compile the six modules (recomp/scripts/build_game.cmd fefw)
 //!   textures tools/textures/third_party: astc-encoder and bc7enc sources for the ASTC to BC7 transcoder (fetch_third_party.ps1)
 //!   exe      game-build/fefw/build/release/fefw.exe (game-build/scripts/build_fefw.ps1)
-//!   harness  the shader translator (tools/shaders: Ryujinx sources staged, dotnet build)
+//!   harness  the shader translator (tools/shaders: translator sources staged, dotnet build)
 //!   shaders  work/shaders/spirv: shaders found in the romfs and main, translated to SPIR-V
 //!   ini      fefw.ini in the run folder (settings.rs)
 //! Pause kills the running step's process tree; the build tools keep finished work (ninja, the harness's results.tsv).
@@ -555,11 +555,11 @@ pub fn check_tools(package: bool) -> Vec<Tool> {
         .collect()
 }
 
-/// The Ryujinx source tree the shader translator is built from (MIT). `RYUBING_DIR`, else `<repo>/work/refs/ryubing`, cloned on
+/// The shader translator source tree (MIT). `RYUBING_DIR`, else `<repo>/work/refs/ryubing`, cloned on
 /// first use from the project's public repository.
-const RYUBING_GIT: &str = "https://git.ryujinx.app/ryubing/ryujinx.git";
+const SHADER_TRANSLATOR_GIT: &str = "https://git.ryujinx.app/ryubing/ryujinx.git";
 /// The revision tools/shaders' patches were made against (tools/shaders/scripts/setup_ryujinx.ps1).
-const RYUBING_COMMIT: &str = "a82350bb774f70fcbd41c9987bf67a3775409963";
+const SHADER_TRANSLATOR_COMMIT: &str = "a82350bb774f70fcbd41c9987bf67a3775409963";
 
 fn run_package_steps(r: &Runner, p: &Paths, tools: &Path, jobs: usize) -> Result<bool, String> {
     let game = &p.game_dir;
@@ -746,12 +746,12 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
             if !src.is_dir() {
                 let git = find_tool(&["git.exe"], &[]).ok_or("Git was not found; it is needed once to fetch the shader translator's sources.")?;
                 let mut c = Command::new(&git);
-                c.args(["clone", "--filter=blob:none", "--no-checkout", RYUBING_GIT]).arg(&src);
-                if !r.run("harness", "Fetching the Ryujinx shader translator sources (MIT)", c, repo)? {
+                c.args(["clone", "--filter=blob:none", "--no-checkout", SHADER_TRANSLATOR_GIT]).arg(&src);
+                if !r.run("harness", "Fetching the shader translator sources (MIT)", c, repo)? {
                     return Ok(false);
                 }
                 let mut c = Command::new(&git);
-                c.arg("-C").arg(&src).args(["checkout", RYUBING_COMMIT]);
+                c.arg("-C").arg(&src).args(["checkout", SHADER_TRANSLATOR_COMMIT]);
                 if !r.run("harness", "Checking out the translator's tested revision", c, repo)? {
                     return Ok(false);
                 }

@@ -769,7 +769,7 @@ mod tests {
         DEPS.iter().find(|d| d.key == key).unwrap()
     }
 
-    /// The README and the troubleshooting guide carry this table verbatim, so a
+    /// The requirements doc and the troubleshooting guide carry this table verbatim, so a
     /// registry change that is not written into both is a failing test rather
     /// than a release whose docs describe something else.
     #[test]
@@ -777,7 +777,7 @@ mod tests {
         let want = markdown();
         let start = "<!-- requirements:start -->";
         let end = "<!-- requirements:end -->";
-        for rel in ["../../README.md", "../../docs/TROUBLESHOOTING.md"] {
+        for rel in ["../../docs/REQUIREMENTS.md", "../../docs/TROUBLESHOOTING.md"] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
             let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let open = text.find(start).unwrap_or_else(|| panic!("{rel} has no {start}"));
