@@ -113,6 +113,36 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     });
 
+    widgets::section(ui, &p, "Updates and existing builds", |ui| {
+        ui.label(
+            RichText::new(
+                "An EmblemWeave update replaces the launcher, documentation and engine sources in place. It does not delete your settings, saves, mods, fetched tools or built game, and it does not force a rebuild. Build reuses what is already there and only regenerates when the engine revision, compiler/toolchain or build settings actually changed.",
+            )
+            .size(12.0)
+            .color(p.body),
+        );
+        ui.add_space(5.0);
+        for (name, path) in [
+            ("Settings, saves, mods and logs", crate::config::Config::dir()),
+            ("Engine sources and build", crate::engine::root()),
+            ("The game's run folder", crate::engine::run_dir()),
+        ] {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("{name}:")).size(11.0).color(p.muted));
+                match path {
+                    Some(path) => ui.label(RichText::new(path.display().to_string()).size(11.0).monospace().color(p.ink)),
+                    None => ui.label(RichText::new("not selected yet").size(11.0).color(p.muted)),
+                };
+            });
+        }
+        ui.add_space(4.0);
+        widgets::pending_note(
+            ui,
+            &p,
+            "Keep these folders when moving or backing up the launcher. Do not delete them to \"start fresh\" unless you intend to lose saves and rebuild the game.",
+        );
+    });
+
     if !blocking.is_empty() {
         widgets::section(ui, &p, "Needs attention", |ui| {
             for row in &blocking {

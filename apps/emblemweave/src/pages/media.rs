@@ -2,6 +2,7 @@
 //! ReShade Vulkan layer. Values are written into the engine's ini files before
 //! every start; ReShade itself stays an external, user-installed tool.
 
+use crate::config::InterfaceMode;
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
@@ -10,6 +11,10 @@ use eframe::egui::{self, RichText};
 /// Every upscaler the engine can run itself. `engine::upscale_mode` maps these
 /// labels to the modes in its ini.
 const UPSCALERS: &[&str] = &["Off", "FSR 1.0", "FSR 3.1", "NVIDIA Image Scaling", "DLSS", "DLAA", "XeSS"];
+
+/// The Standard-mode upscalers: the two that need no vendor DLLs. A value the
+/// player already selected in Advanced mode stays visible in the combo box.
+const BASIC_UPSCALERS: &[&str] = &["Off", "FSR 1.0"];
 
 /// The engine's `[upscale] sharpness` steps: Off, Low, its own 0.8, and 1.0.
 const SHARPENING: &[&str] = &["Off", "Low", "Default", "High"];
@@ -70,6 +75,148 @@ fn combo_num(ui: &mut egui::Ui, id: &str, value: &mut u32, options: &[(u32, &str
 }
 
 pub fn graphics(app: &mut App, ui: &mut egui::Ui) {
+    if app.config.interface_mode == InterfaceMode::Standard {
+        standard_graphics(app, ui);
+    } else {
+        advanced_graphics(app, ui);
+    }
+}
+
+/// The Standard-mode graphics page: the choices that change how the game looks
+/// and runs, without compiler, Vulkan, upscaler-DLL or cache controls.
+fn standard_graphics(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.config.theme.palette();
+    widgets::page_header(
+        ui,
+        &p,
+        "Graphics",
+        "A few practical presets, with the display and picture controls most players need.",
+    );
+    widgets::pending_note(
+        ui,
+        &p,
+        "Presets change only the picture and frame cap; your resolution, display mode and saves stay as they are. Advanced mode adds upscaler DLLs, frame generation, ReShade and shader-compile tuning.",
+    );
+    let mut preset = None;
+    widgets::section(ui, &p, "Presets", |ui| {
+        ui.label(
+            RichText::new("Pick a starting point, then adjust anything below. Changing a preset never changes the game installation.")
+                .size(12.0)
+                .color(p.body),
+        );
+        ui.add_space(7.0);
+        ui.horizontal_wrapped(|ui| {
+            if widgets::button(ui, &p, "Performance", true)
+                .on_hover_text("Lower internal resolution with FSR 1.0 and a 60 fps cap")
+                .clicked()
+            {
+                preset = Some("Performance");
+            }
+            if widgets::button(ui, &p, "Balanced", true)
+                .on_hover_text("Native render scale, no upscaler, 60 fps cap")
+                .clicked()
+            {
+                preset = Some("Balanced");
+            }
+            if widgets::button(ui, &p, "Quality", true)
+                .on_hover_text("Native render scale with sharper output")
+                .clicked()
+            {
+                preset = Some("Quality");
+            }
+        });
+        ui.add_space(6.0);
+        let g = &app.config.graphics;
+        ui.label(
+            RichText::new(format!(
+                "Current: {:.2}× render scale · {} · {} fps cap · {} shading",
+                g.render_scale,
+                g.upscaling,
+                g.frame_limit,
+                if g.shader_precompile { "precompiled" } else { "on demand" },
+            ))
+            .size(10.8)
+            .color(p.muted),
+        );
+    });
+    if let Some(name) = preset {
+        apply_graphics_preset(app, name);
+    }
+    let g = &mut app.config.graphics;
+    widgets::section(ui, &p, "Display", |ui| {
+        widgets::setting_row(ui, &p, "Resolution", "The picture's size and the window's, taken at the game's next start. Native display keeps the game's own console size.", |ui| {
+            combo(ui, "std-res", &mut g.resolution, &["Native display", "1280 × 720", "1920 × 1080", "2560 × 1440", "3840 × 2160"]);
+        });
+        widgets::setting_row(ui, &p, "Display mode", "Windowed, borderless or exclusive, from the game's next start.", |ui| {
+            combo(ui, "std-mode", &mut g.display_mode, &["Windowed", "Borderless window", "Exclusive fullscreen"]);
+        });
+        widgets::setting_row(ui, &p, "VSync", "Synchronise presentation with the display. Applies at the next start.", |ui| {
+            widgets::toggle(ui, &p, &mut g.vsync);
+        });
+        widgets::setting_row(ui, &p, "Frame-rate limit", "Caps presentation only: the game's simulation keeps its own tick. The engine reads it at the next start.", |ui| {
+            let mut fps = g.frame_limit as f32;
+            if widgets::Slider::new(&mut fps, 30.0..=240.0).suffix(" fps").show(ui, &p).changed() {
+                g.frame_limit = fps.round() as u32;
+            }
+        });
+    });
+    widgets::section(ui, &p, "Picture", |ui| {
+        widgets::setting_row(ui, &p, "Render scale", "Internal resolution relative to the output; the upscaler fills the rest. Applies at the next start.", |ui| {
+            widgets::Slider::new(&mut g.render_scale, 0.5..=2.0).fixed_decimals(2).suffix("×").show(ui, &p);
+        });
+        widgets::setting_row(ui, &p, "Upscaling", "FSR 1.0 works on any GPU. Off keeps the native render scale.", |ui| {
+            combo(ui, "std-upscale", &mut g.upscaling, BASIC_UPSCALERS);
+        });
+        widgets::setting_row(ui, &p, "Sharpening", "How crisp the final picture is. Default is the engine's own setting.", |ui| {
+            combo(ui, "std-sharpening", &mut g.sharpening, SHARPENING);
+        });
+        widgets::setting_row(ui, &p, "Precompile shaders", "Translate the game's shaders before play to reduce first-area stutter.", |ui| {
+            widgets::toggle(ui, &p, &mut g.shader_precompile);
+        });
+    });
+    ui.add_space(5.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Need frame generation, a specific GPU, ReShade or shader-compilation tuning?").size(10.8).color(p.muted));
+        if widgets::button(ui, &p, "Show advanced graphics", true).clicked() {
+            app.config.interface_mode = InterfaceMode::Advanced;
+            app.note("Advanced graphics controls are now visible", Tone::Neutral);
+        }
+    });
+}
+
+fn apply_graphics_preset(app: &mut App, name: &str) {
+    let g = &mut app.config.graphics;
+    match name {
+        "Performance" => {
+            g.render_scale = 0.75;
+            g.upscaling = "FSR 1.0".into();
+            g.sharpening = "Default".into();
+            g.frame_limit = 60;
+            g.vsync = true;
+            g.shader_precompile = true;
+        }
+        "Balanced" => {
+            g.render_scale = 1.0;
+            g.upscaling = "Off".into();
+            g.sharpening = "Default".into();
+            g.frame_limit = 60;
+            g.vsync = true;
+            g.shader_precompile = true;
+        }
+        "Quality" => {
+            g.render_scale = 1.0;
+            g.upscaling = "Off".into();
+            g.sharpening = "High".into();
+            g.frame_limit = 60;
+            g.vsync = true;
+            g.shader_precompile = true;
+        }
+        _ => return,
+    }
+    app.note(format!("{name} graphics preset applied"), Tone::Neutral);
+}
+
+fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     widgets::page_header(ui, &p, "Graphics", "Display and rendering options for the game's integrated engine, plus the optional ReShade layer.");
     widgets::pending_note(

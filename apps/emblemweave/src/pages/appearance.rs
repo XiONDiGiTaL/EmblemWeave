@@ -1,5 +1,7 @@
 //! Appearance: choose the launcher's colour scheme from compact live previews.
 
+use crate::config::InterfaceMode;
+use crate::pages::Page;
 use crate::theme::{self, Scheme};
 use crate::widgets::{self, Tone};
 use crate::{logo, App};
@@ -10,6 +12,32 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let header = format!("{} coordinated schemes. Each preview uses its own palette and logo colourway; the choice is saved.", Scheme::ALL.len());
     widgets::page_header(ui, &p, "Appearance", &header);
     ui.add_space(2.0);
+    widgets::section(ui, &p, "Interface", |ui| {
+        ui.label(
+            RichText::new("Choose how much of the launcher you want to see. Both modes use the same installation, settings, saves and build.")
+                .size(12.0)
+                .color(p.body),
+        );
+        ui.add_space(7.0);
+        ui.horizontal_wrapped(|ui| {
+            for mode in [InterfaceMode::Standard, InterfaceMode::Advanced] {
+                if app.config.interface_mode == mode {
+                    let _ = widgets::primary_button(ui, &p, mode.label(), true);
+                    widgets::pill(ui, &p, "Current", Tone::Accent);
+                } else if widgets::button(ui, &p, mode.label(), true).clicked() {
+                    set_mode(app, mode);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new(app.config.interface_mode.detail()).size(11.0).color(p.muted));
+        ui.label(
+            RichText::new("Advanced pages are hidden in Standard mode, not removed. Switch back at any time; no setting or installation data changes.")
+                .size(10.5)
+                .color(p.muted),
+        );
+    });
+    ui.add_space(6.0);
     let mut chosen = None;
 
     let available = ui.available_width();
@@ -83,4 +111,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.config.theme = s;
         app.note(format!("Theme set to {}", s.label()), Tone::Neutral);
     }
+}
+
+fn set_mode(app: &mut App, mode: InterfaceMode) {
+    if app.config.interface_mode == mode {
+        return;
+    }
+    app.config.interface_mode = mode;
+    if !app.page.available(mode) {
+        app.page = Page::Overview;
+    }
+    app.note(format!("{} mode selected", mode.label()), Tone::Neutral);
 }

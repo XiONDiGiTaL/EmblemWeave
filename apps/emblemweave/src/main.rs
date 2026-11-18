@@ -303,7 +303,12 @@ impl App {
             match a.as_str() {
                 "--boot-test" => app.boot_on_start = true,
                 "--build-engine" => app.build_on_start = true,
-                "--tour" => app.tour = Some(Instant::now()),
+                "--tour" => {
+                    app.tour = Some(Instant::now());
+                    // The recorded tour visits every page, including the ones
+                    // Standard mode normally hides. Tour settings are not saved.
+                    app.config.interface_mode = crate::config::InterfaceMode::Advanced;
+                }
                 "--screenshot" => {
                     app.screenshot = args.get(i + 1).map(|p| (std::path::PathBuf::from(p), 0))
                 }
@@ -314,6 +319,12 @@ impl App {
                                 .eq_ignore_ascii_case(name.replace('-', " ").as_str())
                         }) {
                             app.page = *p;
+                            // An explicit advanced page from a shortcut or a
+                            // support reply must not land on Overview because
+                            // Standard mode hides it.
+                            if p.advanced() {
+                                app.config.interface_mode = crate::config::InterfaceMode::Advanced;
+                            }
                         }
                     }
                 }
@@ -771,7 +782,7 @@ impl App {
                 .enumerate()
                 {
                     if i.key_pressed(key) {
-                        if let Some(p) = pages.get(n) {
+                        if let Some(p) = pages.get(n).filter(|p| p.available(self.config.interface_mode)) {
                             self.page = *p;
                         }
                     }

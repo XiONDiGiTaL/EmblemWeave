@@ -1159,17 +1159,73 @@ pub fn cmd_breaker(path: &Path) -> Option<char> {
         .find(|c| CMD_BREAKERS.contains(c))
 }
 
-/// The folder the game is built from, refused when its path holds a character cmd.exe splits a command line at. Every later
-/// error in that case is about a truncated path (`CMakeFiles\G_\Games\PC_Ports_`), which reads like a missing build file and
-/// sends people looking in the wrong place, so the build stops here with the reason and the fix.
-fn build_root(root: &Path) -> Result<PathBuf, String> {
-    let Some(bad) = cmd_breaker(root) else {
-        return Ok(root.to_path_buf());
+/// The 8.3 spelling of a path, when the volume has short names enabled. The
+/// short form contains no cmd.exe separators, so a folder such as
+/// `G:\Games\PC Ports & Recomps` can be used as the build's working directory
+/// without changing the real project path or moving the user's files.
+#[cfg(windows)]
+fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+            wide.as_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+        )
     };
+    if length == 0 || length as usize >= buffer.len() {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
+}
+
+/// A file path handed to a generated command line, spelled so cmd.exe cannot
+/// split it. This is needed for paths inside the project too: CMake embeds the
+/// absolute `FEFW_SITES` path in its generated lift command, and a short working
+/// directory alone would not remove the separator from that argument.
+#[cfg(windows)]
+fn cmd_safe_path(path: &Path) -> PathBuf {
+    if cmd_breaker(path).is_none() {
+        return path.to_path_buf();
+    }
+    short_path(path).filter(|short| cmd_breaker(short).is_none()).unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(not(windows))]
+fn cmd_safe_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// The folder the game is built from. A path containing a character cmd.exe
+/// splits a command line at is mapped to its 8.3 spelling when Windows provides
+/// one. That keeps the original folder, saves and build outputs in place; only
+/// the working directory passed to the build changes. If short names are
+/// disabled, stop with the reason instead of letting ninja report a truncated
+/// path (`CMakeFiles\G_\Games\PC_Ports_`).
+fn build_root(root: &Path) -> Result<PathBuf, String> {
+    if cmd_breaker(root).is_none() {
+        return Ok(root.to_path_buf());
+    }
+    #[cfg(windows)]
+    if let Some(short) = short_path(root) {
+        if cmd_breaker(&short).is_none() {
+            return Ok(short);
+        }
+    }
+    let bad = cmd_breaker(root).unwrap_or('?');
     Err(format!(
         "the project is in a folder whose path contains '{bad}':\n\n{}\\n\ncmd.exe splits its command line at & | < > ^ ( ) %, even inside quotes, so the linker step CMake generates for the \
-         lifted code is cut in half at that character and ninja reports a path that does not exist (\"CMakeFiles\\G_\\Games\\
-         PC_Ports_\") instead of saying what happened.\n\nMove EmblemWeave to a folder whose path has none of & | < > ^ ( ) %, \
+         lifted code would be cut in half and ninja would report a path that does not exist (\"CMakeFiles\\G_\\Games\\
+         PC_Ports_\").\n\nWindows can normally build this folder through its short 8.3 name, but short names are disabled on this \
+         volume. Enable 8.3 names for the volume or move EmblemWeave to a folder whose path has none of & | < > ^ ( ) %, \
          for example C:\\EmblemWeave, then press Build the game again. An existing game folder can be moved as it is; only \
          paths outside it are written into its ini.",
         root.display()
@@ -2547,7 +2603,11 @@ pub fn build(
     // cmd.exe splits its command line at & | < > ^ ( ) % even when the line is quoted, which is how `G:\Games\PC Ports &
     // Recomps` became a command called `CMakeFiles\G_\Games\PC_Ports_`. Stop with that explanation instead of building.
     let root_here = build_root(&root)?;
-    let site_list = site_list.display().to_string();
+    // CMake copies this path into the generated lift command; a long path with
+    // an ampersand would still be split even though cmd's working directory is
+    // the safe short spelling above.
+    let site_path = cmd_safe_path(&site_list);
+    let site_list = site_path.display().to_string();
     envs.push(("FEFW_SITES", &site_list));
     let built = run_env(
         ctx,
@@ -4982,13 +5042,32 @@ mod tests {
             super::build_root(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")).unwrap_err();
         assert!(said.contains("contains '&'"), "names the character: {said}");
         assert!(
-            said.contains("Move EmblemWeave to a folder"),
-            "says what to do: {said}"
+            said.contains("short 8.3"),
+            "explains the short-name fallback: {said}"
         );
         assert!(
             said.contains("PC Ports & Recomps"),
             "names the folder: {said}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_real_special_path_uses_its_short_name_or_reports_why_it_cannot() {
+        use std::path::Path;
+        let dir = std::env::temp_dir().join(format!("EmblemWeave & path {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = super::build_root(&dir);
+        match super::short_path(&dir) {
+            Some(short) if super::cmd_breaker(&short).is_none() => {
+                assert_eq!(result.unwrap(), short, "the safe spelling is used for the build");
+            }
+            _ => {
+                let said = result.unwrap_err();
+                assert!(said.contains("short 8.3"), "the fallback limit is named: {said}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

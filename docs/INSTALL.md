@@ -14,9 +14,10 @@ The build needs Visual Studio 2022 Build Tools with the C++ workload, LLVM, CMak
 ## Install the release
 
 Download `EmblemWeave-<version>-windows-x64.zip` from the [releases page](https://github.com/XiONDiGiTaL/EmblemWeave/releases),
-unzip it anywhere and run `EmblemWeave.exe`. Choose your game on **Game Setup**, then press **Build the game** on the
-Overview page (once; it lists any build tools you still need) and **Play**. To build the launcher yourself, see
-[docs/BUILDING.md](BUILDING.md).
+unzip it anywhere and run `EmblemWeave.exe`. A new install opens in **Standard** mode, which keeps the everyday pages in
+front; **Appearance → Interface** switches to Advanced without moving files. Choose your game on **Game Setup**, then press
+**Build the game** on the Overview page (once; it lists any build tools you still need) and **Play**. To build the launcher
+yourself, see [docs/BUILDING.md](BUILDING.md).
 
 A release zip contains `portable.txt`, so its settings, decoded modules, build output and saves start in `data` beside
 `EmblemWeave.exe`; your game folder is never written to. A copy made before portable-by-default, or one whose marker was

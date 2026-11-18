@@ -223,6 +223,7 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
 /// can fold to an icon strip, with every label still available as a tooltip.
 pub fn nav(app: &mut App, ctx: &egui::Context) {
     let p = app.config.theme.palette();
+    let mode = app.config.interface_mode;
     let auto_compact = ctx.screen_rect().width() < 1200.0;
     let compact = app.config.nav.rail || auto_compact;
     let width = if compact { theme::NAV_RAIL_WIDTH } else { theme::NAV_WIDTH };
@@ -286,17 +287,21 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 for group in NavGroup::ALL {
+                    let pages = group.pages_for(mode);
+                    if pages.is_empty() {
+                        continue;
+                    }
                     let open = !app.config.nav.collapsed.iter().any(|k| k == group.key());
                     if compact {
                         ui.add_space(5.0);
                         let _ = widgets::nav_group_header(ui, &p, group.label(), false, true, false);
-                        for page in group.pages() {
+                        for page in &pages {
                             if widgets::nav_item_page(ui, &p, *page, app.page == *page, true).clicked() {
                                 app.page = *page;
                             }
                         }
                     } else {
-                        let active = group.pages().contains(&app.page);
+                        let active = pages.contains(&app.page);
                         if widgets::nav_group_header(ui, &p, group.label(), open, false, active).clicked() {
                             if open {
                                 app.config.nav.collapsed.push(group.key().to_string());
@@ -305,7 +310,7 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
                             }
                         }
                         if open {
-                            for page in group.pages() {
+                            for page in &pages {
                                 let i = Page::ALL.iter().position(|q| q == page).unwrap_or(0);
                                 let tip = if i < 9 { format!("{}  (Ctrl+{})", page.label(), i + 1) } else { page.label().to_string() };
                                 if widgets::nav_item_page(ui, &p, *page, app.page == *page, false).on_hover_text(tip).clicked() {

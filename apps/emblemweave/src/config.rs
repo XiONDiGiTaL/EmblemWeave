@@ -292,6 +292,35 @@ impl Default for NavState {
     }
 }
 
+/// How much of the launcher the player wants to see. Both modes operate on the
+/// same configuration and installation; the mode only changes navigation and
+/// the amount of detail a page puts in front of the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InterfaceMode {
+    /// The default for a new installation: Play, setup and everyday settings.
+    #[default]
+    Standard,
+    /// Every diagnostic, build and engine control, for players who want them.
+    Advanced,
+}
+
+impl InterfaceMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            InterfaceMode::Standard => "Standard",
+            InterfaceMode::Advanced => "Advanced",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            InterfaceMode::Standard => "Play, setup, saves, mods and everyday graphics and audio settings.",
+            InterfaceMode::Advanced => "Everything in Standard, plus builds, diagnostics, logs and engine options.",
+        }
+    }
+}
+
 /// A named set of mods to switch on together.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -371,9 +400,27 @@ pub struct Config {
     pub profile_portraits: BTreeMap<String, String>,
     /// First-run guided setup progress.
     pub onboarding: Onboarding,
+    /// How much of the launcher is shown. Standard is the default for a fresh
+    /// install; an older config is migrated to Advanced in `load` so existing
+    /// users keep the interface they already know.
+    pub interface_mode: InterfaceMode,
     /// Built engine checkouts (as `engine.txt` records them) whose reuse offer was declined. The offer for one folder does not
     /// hide an offer for another, and a declined one stays declined across restarts.
     pub reuse_dismissed: Vec<String>,
+}
+
+/// Keep an existing user's full launcher after this field is introduced. A
+/// config written before interface modes existed has no `interface_mode` key;
+/// someone already using the full launcher should not suddenly lose pages. A
+/// genuinely new install has no file and starts with `Config::default`.
+fn apply_saved_mode(text: &str, cfg: &mut Config) {
+    let has_mode = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value.get("interface_mode").cloned())
+        .is_some();
+    if !has_mode {
+        cfg.interface_mode = InterfaceMode::Advanced;
+    }
 }
 
 impl Config {
@@ -400,8 +447,11 @@ impl Config {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                match serde_json::from_str(&text) {
-                    Ok(cfg) => (cfg, None),
+                match serde_json::from_str::<Config>(&text) {
+                                        Ok(mut cfg) => {
+                        apply_saved_mode(&text, &mut cfg);
+                        (cfg, None)
+                    }
                     Err(e) => {
                         let _ = std::fs::rename(&path, path.with_extension("json.bad"));
                         (Config::default(), Some(format!("config.json could not be read ({e}); it was kept as config.json.bad")))
@@ -498,8 +548,26 @@ mod tests {
         let mut cfg = Config::default();
         cfg.system.user_name = "XiØN".into();
         cfg.graphics.frame_limit = 120;
+        cfg.interface_mode = InterfaceMode::Advanced;
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.system.user_name, "XiØN");
         assert_eq!(back.graphics.frame_limit, 120);
+        assert_eq!(back.interface_mode, InterfaceMode::Advanced);
+    }
+
+    #[test]
+    fn a_new_config_starts_in_standard_mode() {
+        assert_eq!(Config::default().interface_mode, InterfaceMode::Standard);
+    }
+
+    #[test]
+    fn a_config_from_before_interface_modes_keeps_the_advanced_interface() {
+        let mut old = Config::default();
+        apply_saved_mode(r#"{"system":{},"graphics":{}}"#, &mut old);
+        assert_eq!(old.interface_mode, InterfaceMode::Advanced);
+
+        let mut current = Config::default();
+        apply_saved_mode(r#"{"interface_mode":"standard"}"#, &mut current);
+        assert_eq!(current.interface_mode, InterfaceMode::Standard);
     }
 }

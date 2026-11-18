@@ -16,6 +16,7 @@ pub mod saves;
 pub mod setup;
 pub mod troubleshoot;
 
+use crate::config::InterfaceMode;
 use crate::App;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, StrokeKind};
 
@@ -77,6 +78,19 @@ impl Page {
             Page::About => "About",
             Page::Requirements => "Requirements",
         }
+    }
+
+    /// Pages that expose build internals, logs or diagnostics. Standard mode
+    /// keeps them available through Advanced mode rather than removing them.
+    pub fn advanced(self) -> bool {
+        matches!(self, Page::Recompile | Page::Diagnostics | Page::Log | Page::Requirements)
+    }
+
+    /// Whether the page belongs in this interface mode. This is the single
+    /// source of truth used by the rail, keyboard navigation and the page
+    /// dispatcher, so a hidden page cannot be opened by accident.
+    pub fn available(self, mode: InterfaceMode) -> bool {
+        mode == InterfaceMode::Advanced || !self.advanced()
     }
 
     /// Where this page belongs in the sidebar.
@@ -228,9 +242,21 @@ impl NavGroup {
             NavGroup::Settings => &[Page::Appearance, Page::About],
         }
     }
+
+    /// The pages in this group that the selected interface mode shows. Groups
+    /// with no visible pages are omitted by the rail, so Standard mode does not
+    /// leave empty headings behind.
+    pub fn pages_for(self, mode: InterfaceMode) -> Vec<Page> {
+        self.pages().iter().copied().filter(|page| page.available(mode)).collect()
+    }
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    // Keep direct links, command-line page selection and a mode switch from
+    // leaving an advanced page on screen after Standard mode is selected.
+    if !app.page.available(app.config.interface_mode) {
+        app.page = Page::Overview;
+    }
     match app.page {
         Page::Overview => overview::show(app, ui),
         Page::Setup => setup::show(app, ui),
@@ -271,6 +297,30 @@ mod tests {
     fn navigation_labels_are_unique() {
         for (i, page) in Page::ALL.iter().enumerate() {
             assert!(!Page::ALL[i + 1..].iter().any(|q| q.label() == page.label()), "duplicate page label {}", page.label());
+        }
+    }
+
+    #[test]
+    fn standard_mode_hides_only_advanced_pages() {
+        let hidden: Vec<Page> = Page::ALL
+            .into_iter()
+            .filter(|page| !page.available(InterfaceMode::Standard))
+            .collect();
+        assert_eq!(
+            hidden,
+            vec![Page::Recompile, Page::Diagnostics, Page::Log, Page::Requirements]
+        );
+        for page in Page::ALL {
+            assert!(page.available(InterfaceMode::Advanced), "{} must remain reachable in Advanced mode", page.label());
+        }
+    }
+
+    #[test]
+    fn no_navigation_group_is_emptied_in_either_mode() {
+        for mode in [InterfaceMode::Standard, InterfaceMode::Advanced] {
+            for group in NavGroup::ALL {
+                assert!(!group.pages_for(mode).is_empty(), "{} is empty in {:?}", group.label(), mode);
+            }
         }
     }
 }
