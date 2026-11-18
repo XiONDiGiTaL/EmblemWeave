@@ -97,6 +97,11 @@ can contain local paths, settings, and logs; review it before sharing. See
 Security reports should go through the repository's **Security** tab as a
 private advisory rather than a public issue.
 
+Copyright complaints are not security reports. Use the hosting provider's
+copyright/DMCA process first, then the project's
+[copyright and takedown policy](DMCA.md). Do not post game files, keys or
+personal data in a public issue.
+
 ## Contributions
 
 By submitting code, documentation, artwork, or other material, you confirm that

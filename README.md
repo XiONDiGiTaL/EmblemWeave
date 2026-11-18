@@ -9,7 +9,13 @@
 </p>
 
 <p align="center">
-  <a href="https://xiondigital.net/EmblemWeave/">Site</a>
+  <a href="https://xiondigital.net/EmblemWeave/">Site</a> ·
+  <a href="https://github.com/XiONDiGiTaL/EmblemWeave/releases">Releases</a> ·
+  <a href="docs/OVERVIEW.md">Docs</a> ·
+  <a href="https://github.com/XiONDiGiTaL/EmblemWeave">GitHub</a> ·
+  <a href="https://gitlab.com/XiONDiGiTaL/emblemweave">GitLab</a> ·
+  <a href="https://gitgud.io/xiondigital/EmblemWeave">GitGud</a> ·
+  <a href="https://emblemweave.xiondigital.workers.dev">Fallback</a>
 </p>
 
 <p align="center">
@@ -33,10 +39,11 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current release: 0.1.39.** The built-in updater installs the new release over
-your folder while keeping `data`, the built game and the fetched tools. Updating
-does not require rebuilding; if Overview shows the optional "built by an older
-release" notice, **Play** still uses the existing build.
+> **Current release: 0.1.40.** The built-in updater now carries the existing build
+> across an in-place update: it records `carried_by` in `fefw.ini`, restarts once,
+> and opens ready to play without rebuilding. This release also cleans up failed
+> `.nsp`/`.xci` add-on scans and bounds the packed `.nup` audio cache. See the
+> [0.1.40 changelog](docs/changelog/0.1.40.md).
 
 ## Documentation
 
@@ -67,12 +74,26 @@ release" notice, **Play** still uses the existing build.
 | 📁 **Project** |  |
 | [Legal](docs/LEGAL.md) | Not affiliated with Nintendo or Intelligent Systems; no game code, assets or keys. |
 | [Terms](docs/TERMS.md) | Disclaimer, acceptable use and contributions. |
+| [Copyright and takedown](docs/DMCA.md) | Copyright notices, the host DMCA process and the project's takedown policy. |
 | [Privacy](docs/PRIVACY.md) | What stays on your PC and what the report bundle contains. |
 | [Credits](#credits) | The people and projects behind EmblemWeave. |
 
+## Project copies
+
+The canonical repository and releases are on GitHub. The other repositories are source mirrors; the fallback is a static copy of the project site. Releases are published on GitHub.
+
+| Where | What it is |
+| --- | --- |
+| [GitHub](https://github.com/XiONDiGiTaL/EmblemWeave) | Canonical source, releases and issue tracker. |
+| [GitLab](https://gitlab.com/XiONDiGiTaL/emblemweave) | Source mirror. |
+| [GitGud](https://gitgud.io/xiondigital/EmblemWeave) | Source mirror. |
+| [Project site](https://xiondigital.net/EmblemWeave/) | Project page and release links. |
+| [Fallback site](https://emblemweave.xiondigital.workers.dev) | Static copy of the project page outside GitHub. |
+| [Releases](https://github.com/XiONDiGiTaL/EmblemWeave/releases) | Windows x64 downloads and release notes. |
+
 ## Disclaimer
 
-EmblemWeave contains no game code, no game assets, no firmware and no keys, and downloads none of them. You need your own legally obtained copy of the game. It is not affiliated with, endorsed by or supported by Nintendo or Intelligent Systems.
+EmblemWeave contains no game code, no game assets, no firmware and no keys, and downloads none of them. It does not provide decryption keys, circumvention instructions or links to game content. You need your own legally obtained copy of the game, and you are responsible for using it lawfully where you live. It is not affiliated with, endorsed by or supported by Nintendo or Intelligent Systems; the names identify the software it interoperates with. The launcher is GPL-3.0-only; the engine keeps its own GPL-3.0 licence and notices, and third-party components keep theirs. See [Legal](docs/LEGAL.md), [Terms](docs/TERMS.md) and [Copyright and takedown](docs/DMCA.md). This documentation is not legal advice.
 
 ## Credits
 

@@ -28,7 +28,7 @@ carries the measurement and ENGINE.md carries the detail.
 
 ## Current status
 
-> **Current status: 0.1.39, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes. The 0.1.39 download includes the FSR 3.1 upscaler code path; the AMD FidelityFX DLLs are still yours to obtain (see Graphics page). The built-in updater keeps `data`, the built game and the fetched tools, so an update does not require rebuilding. Later releases are checked by building and by headless runs of the real game — see [Development status](DEVELOPMENT.md) and the [changelog](changelog/README.md).
+> **Current status: 0.1.40, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes. The 0.1.40 download includes the FSR 3.1 upscaler code path; the AMD FidelityFX DLLs are still yours to obtain (see Graphics page). The 0.1.40 updater records the kept build as carried forward, so an in-place update opens ready to play without rebuilding. Later releases are checked by building and by headless runs of the real game — see [Development status](DEVELOPMENT.md) and the [changelog](changelog/README.md).
 
 ## How to read the states
 

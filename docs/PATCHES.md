@@ -5,10 +5,9 @@ before the recompiler lifts the game. This is **not** a runtime patch: the built
 `fefw.exe` contains the changed code, so installing, editing, enabling,
 disabling or removing a patch requires **Build the game** before **Play**.
 
-> **Status:** the patch support in this document is implemented in the current
-> source tree but is **not** part of the released 0.1.36 build. Game version
-> 1.1.1 has not been verified. Do not describe a patch as released until a build
-> containing this code has been validated.
+> **Status:** the patch formats in this document have shipped since 0.1.37.
+> Game version 1.1.1 has not been verified. Do not describe a patch as supported
+> on 1.1.1 until a build containing it has been validated.
 
 ## What is supported
 

@@ -13,7 +13,7 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 ├── README.md              the README from the tag the zip was built from
 ├── docs/                  every guide page the README links, the changelog and its screenshots
 │   ├── PACKAGE.md         this file
-│   ├── INSTALL.md, USAGE.md, BUILDING.md, SECURITY.md, TERMS.md, PRIVACY.md
+│   ├── INSTALL.md, USAGE.md, BUILDING.md, SECURITY.md, TERMS.md, PRIVACY.md, LEGAL.md, DMCA.md
 │   ├── changelog/         what changed in each release, newest first
 │   └── screenshots/       the images the README shows
 └── engine/

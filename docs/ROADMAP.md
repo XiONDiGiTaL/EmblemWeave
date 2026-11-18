@@ -1,8 +1,7 @@
 # Roadmap
 
-This is a working order, not a release promise. It starts from the code in this
-tree, which includes changes that are **not** in the released 0.1.36 build. The
-current public release remains 0.1.36; anything marked unreleased below needs a
+This is a working order, not a release promise. It starts from the current tree
+and the 0.1.40 public release; anything still marked unreleased below needs a
 build and real-hardware checks before it can be described as shipped.
 
 Priority means what should be done first to make the next build trustworthy, not
@@ -14,7 +13,7 @@ how interesting the work is. P0 is a release gate.
 | P1 | Game 1.1.1 compatibility | Issue #41 is running 1.1.1 and cannot be answered with a supported build ID yet | L |
 | P1 | Controller trigger verification and diagnostics | ZL/ZR and vibration could not be exercised on this machine; a report must be actionable on a user's PC | M |
 | P2 | Low Memory profile validation | The profile exists, but only emulated hardware and log fixtures test it | M |
-| P2 | ExeFS patch system hardening and release | `.ips`, `.ips32` and `.pchtxt` support is implemented and unreleased; it changes the code that is lifted | M |
+| P2 | ExeFS patch system hardening | `.ips`, `.ips32` and `.pchtxt` support has shipped since 0.1.37; wider game-version validation remains | M |
 | P3 | Save profile compatibility and recovery | Save failures are high-impact and hard for users to diagnose | M |
 | P3 | Upscaler discovery and failure messages | Issue #29 still needs a reliable answer about missing files and SDK layouts | S |
 | P3 | Build diagnostics and report bundles | Issues #37 and #41 need measurements that separate game, driver and launcher faults | S |
@@ -24,7 +23,7 @@ how interesting the work is. P0 is a release gate.
 
 ## A. Real-hardware release validation (P0)
 
-**Description.** Build the unreleased tree as a release candidate and run the
+**Description.** Build the current tree as a release candidate and run the
 same matrix on physical hardware: a 16 GB shared-memory handheld, a 24 GB
 handheld if available, one NVIDIA discrete system, one AMD discrete system, and
 a clean Windows profile with no build tools on `PATH`.
@@ -124,7 +123,7 @@ generic failure.
 
 ## D. Low Memory profile validation (P2)
 
-**Description.** Validate the implemented but unreleased Low Memory profile on
+**Description.** Validate the Low Memory profile (shipped in 0.1.37) on
 16 GB and 24 GB shared-memory systems. Confirm that detection uses installed
 RAM and the engine's Vulkan budget, that the recommendation does not appear on
 a discrete GPU with ample memory, that **Apply** changes only graphics, and that
@@ -157,16 +156,17 @@ a report showing which limit was still reached. On the 24 GB machine it is not
 recommended unless the measured budget is genuinely constrained. The release
 notes call it a stability preset, not a leak fix.
 
-## E. ExeFS patch system hardening and release (P2)
+## E. ExeFS patch system hardening (P2)
 
-**Description.** Finish the unreleased `.ips`, `.ips32` and IPSwitch `.pchtxt`
-support: install patch-only mods, validate the build ID, apply deterministically
-to the launcher's uncompressed `main`, refuse conflicts, record a fingerprint,
-and require a rebuild when the active set changes. Before release, exercise a
-real patch on a real dump and document the supported subset.
+**Description.** Harden the `.ips`, `.ips32` and IPSwitch `.pchtxt` support that
+shipped in 0.1.37: install patch-only mods, validate the build ID, apply
+deterministically to the launcher's uncompressed `main`, refuse conflicts,
+record a fingerprint, and require a rebuild when the active set changes. Before
+calling it supported on more game versions, exercise real patches on real dumps
+and document the supported subset.
 
-**Why.** 0.1.36 does not install patch-only mods at all. The new code is the
-first thing that writes the code the lifter consumes; a wrong offset or a
+**Why.** 0.1.36 and older do not install patch-only mods at all. This code is
+the first thing that writes the code the lifter consumes; a wrong offset or a
 silently ignored build ID is worse than a clear refusal.
 
 **Who needs it.** Mod authors and users of code patches, including #39 if
@@ -190,8 +190,9 @@ pipeline writes uncompressed.
 a rebuild that restores the original bytes. Wrong build IDs, other modules,
 truncated records, out-of-bounds writes, RLE errors and conflicting patches are
 refused before the lifter. The dump's hash is unchanged. The Mods page shows
-the patch state and the rebuild reason. The feature is described as unreleased
-until this passes.
+the patch state and the rebuild reason. The feature has shipped since 0.1.37;
+this validation is required before calling it supported on 1.1.1 or widening the
+supported formats.
 
 ## F. Save profile compatibility and recovery (P3)
 
@@ -303,7 +304,7 @@ records the preset and the result.
 ## J. Linux / Steam Deck guidance (P4)
 
 **Description.** Treat issue #7 as two separate requests. The archive separator
-fix is already in 0.1.36. A native Linux launcher and engine build is a port,
+fix is in 0.1.36 and later. A native Linux launcher and engine build is a port,
 not a packaging change. For Steam Deck, document and test the supported path:
 build on Windows, copy the result, run under Proton, and edit `fefw.ini` as
 `docs/STEAMDECK.md` describes.

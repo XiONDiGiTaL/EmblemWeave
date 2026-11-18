@@ -133,6 +133,7 @@ try {
     $required = @(
         'EmblemWeave.exe', 'portable.txt', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/INSTALL.md',
         'docs/USAGE.md', 'docs/BUILDING.md', 'docs/SECURITY.md', 'docs/TERMS.md', 'docs/PRIVACY.md',
+        'docs/LEGAL.md', 'docs/DMCA.md',
         'docs/screenshots/overview.png', 'docs/changelog/README.md',
         'engine/fefw-recomp/runtime/CMakeLists.txt', 'engine/fefw-recomp/game-build/fefw/CMakeLists.txt',
         'engine/fefw-recomp/recomp/requirements.txt', 'engine/fefw-recomp/tools/shaders/harness/Program.cs',

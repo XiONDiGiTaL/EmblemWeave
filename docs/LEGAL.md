@@ -15,6 +15,10 @@ EmblemWeave ships no Nintendo content. It contains:
 
 The application consumes an extracted dump that the user has produced from a copy they legally own. Every tool in this repository is read-only with respect to that dump: `ew-inspect`, `ew-lift` and the runtime never modify game files. Decoded output (`work/decoded/…`, `build/lift/…`) is derived from the user's own data and must not be redistributed; `work/` and `build/` are excluded from version control.
 
+## Copyright and takedown
+
+EmblemWeave does not operate a user-uploaded content service. Copyright complaints should go to the hosting provider first, because the provider controls the repository and release hosting. The project's review policy, the elements of a formal notice and the counter-notice path are in [DMCA.md](DMCA.md). This project does not claim protection under 17 U.S.C. §512, and this page is not legal advice.
+
 ## Analysis of the supplied package
 
 The supplied `.nup` package is encrypted retail content. This project consumed an already-decrypted, already-extracted view present on the machine (ExeFS + romfs). No circumvention of the package's protection was performed by this project, and no keys are stored or embedded here.
