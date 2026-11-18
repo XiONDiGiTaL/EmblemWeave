@@ -815,15 +815,22 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     // output in R11G11B10F; the console's 8-bit SDR output hides the steps, the HDR output's wider range shows them as banding in the sky
     // (blue first). Render targets only (compressible or display flags, as the HDR promotion): their bytes in memory are never the image's
     // (the promotion's rule: they start cleared), and a view of the NVN format reads the image's own (promoted_view_format, the fallback rule).
-    if (g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && (t->b.flags & 0x9) && float16_scene_on() &&
+    // Shader-written images too (NVN's image flag 0x4): Fortune's Weave's compute passes write its sky panorama (2048x1024) and its reflection and
+    // ambient probes (64x64 and 16x16 cubes) in R11G11B10F through storage images declared without a format, so the shaders take RGBA16F as is.
+    if (g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && (t->b.flags & 0xd) && float16_scene_on() &&
         device().image_supported(make_desc(s, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                             base_flags(s, VK_FORMAT_R16G16B16A16_SFLOAT)))) {
         static std::atomic<int> said{0};
-        if (said.fetch_add(1) < 12)
+        if (said.fetch_add(1) < 64)
             NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x, %u levels) kept as float16 ([gfx] float16_scene)", t->id, s.base.width,
                     s.base.height, static_cast<unsigned>(t->b.flags), s.levels);
         chosen = VK_FORMAT_R16G16B16A16_SFLOAT;
         g->promoted = true;
+    } else if (g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && float16_scene_on()) {
+        static std::atomic<int> said{0};   // the ones left at 6/5-bit mantissas, to find what the rule misses
+        if (said.fetch_add(1) < 32)
+            NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x, %u levels, %u layers) left as R11G11B10F ([gfx] float16_scene: not a render target or image)",
+                    t->id, s.base.width, s.base.height, static_cast<unsigned>(t->b.flags), s.levels, s.layers);
     }
 
     g->format = chosen;
