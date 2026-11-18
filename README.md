@@ -103,6 +103,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 - [ranbinrang-rgb](https://github.com/ranbinrang-rgb): code mods, the DLL interface (`nxrt/mod_api.h`), the mod hook-site format and the loader (issue #31, PR #32)
 - [moistman7](https://github.com/moistman7): the GT tone-curve HDR patch for Fortune's Weave's `ImageProcessing` shader (PR #40), the fefw-recomp 0.2.3/0.2.4 engine integration (PR #52), and the replay/HDR/sampler improvements (PRs #53–#55)
 - [metrist38](https://github.com/metrist38/fefw-recomp): maintains the fefw-recomp fork that supplies updates beyond the original 0.2.0
+- [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber): another fork based on fefw-recomp, with updates beyond 0.2.0. We are in full support of others extending the life of the original beyond its development
 - [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause) and [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause): the host video decoders the baseline build links
 - [roxmltree](https://github.com/RazrFalcon/roxmltree) (MIT / Apache-2.0) reads Cheat Engine tables; [windows-sys](https://github.com/microsoft/windows-rs) (MIT / Apache-2.0) reaches the game's memory and the controller
 - [GameBanana](https://gamebanana.com/mods/games/26274) hosts the mods the Mods page lists; each mod belongs to its author

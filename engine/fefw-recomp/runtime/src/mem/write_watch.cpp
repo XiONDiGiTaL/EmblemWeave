@@ -226,6 +226,33 @@ int final_retry(uint64_t addr, ULONG_PTR kind, uint64_t generation) {
     return accessible ? 1 : changed ? -1 : 0;
 }
 
+// A write fault on a heap page that is read-write by the time this handler looks, with no region claiming it: the page was read-only
+// only for a moment, nearly always an import freeze (ImportFreeze) that ended between the fault and freeze_overlaps in on_fault (the
+// destructor gives the pages back and only then clears its slot, so the freeze is gone before the handler sees it). The write can simply
+// run again. retired_retry does the same for retired pages only. Seen on an Arc B390 in the ObeliskChamber fork (its issue 81, fixed in
+// its PR 93): a guest write to the first page of a 4 KiB pool being imported crashed with the page read-write in the report and no owner.
+// Bounded per thread and page, so a fault that keeps coming back still reports.
+std::atomic<uint64_t> g_late_retries{0};
+bool heap_write_landed_late(uint64_t addr) {
+    if (addr < kHeapBase || addr - kHeapBase >= kHeapMax) return false;
+    thread_local uint64_t t_page = 0;
+    thread_local int t_count = 0;
+    const uint64_t pg = addr & ~(kPage - 1);
+    if (pg != t_page) {
+        t_page = pg;
+        t_count = 0;
+    }
+    if (++t_count > 8) return false;
+    const DWORD pr = page_protect(addr);
+    if (pr & PAGE_GUARD) return false;
+    const DWORD p = pr & 0xff;
+    if (p != PAGE_READWRITE && p != PAGE_EXECUTE_READWRITE) return false;
+    if (g_late_retries.fetch_add(1, std::memory_order_relaxed) == 0)
+        NXLOG_W(kTag, "write fault at %llx on a page that is read-write again (an import freeze ended meanwhile): the write runs again",
+                static_cast<unsigned long long>(addr));
+    return true;
+}
+
 // One page of a region becomes writable and counts as written. True when the page is ours to handle (the faulting write may retry).
 // The caller holds the region's lock shared.
 bool release_page(Region* r, uint64_t page) {
@@ -409,6 +436,10 @@ retry:
             g_busy.fetch_sub(1, std::memory_order_seq_cst);
             goto retry; // a replacement region may now own the protection
         }
+    }
+    if (!ours && heap_write_landed_late(addr)) {   // an import freeze ended between the fault and freeze_overlaps: run the write again
+        g_busy.fetch_sub(1, std::memory_order_seq_cst);
+        return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (!ours) {   // a write fault in a tracked region that no region claims: what each one holds for the page (the crash report follows)
         const DWORD pr = page_protect(addr);

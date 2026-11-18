@@ -220,8 +220,18 @@ This project stands on the work of others. Thank you.
 - [drakolordx7/switch2-recomp](https://github.com/drakolordx7/switch2-recomp): the launcher design this launcher follows.
 - [nxnative-penis6](https://git.eden-emu.dev/penis6/nxnative-penis6) by seedds (MIT): the movie decoder front end, its dav1d copy and
   several hardware facts (notices in `runtime/THIRD_PARTY_NOTICES.md`).
+- [metrist38/fefw-recomp](https://github.com/metrist38/fefw-recomp): the frame-rate fixes; the movie decoder's thread priority, automatic
+  thread count and decode-ahead work; and the frame-fix site map `[fefw] frame_fixes` follows.
+- [xinthefreefallxai/ObeliskChamber](https://github.com/xinthefreefallxai/ObeliskChamber): another fork based on fefw-recomp, with updates
+  beyond 0.2.0; its import-freeze write-watch race fix, and the performance, stability and frame-pacing findings reviewed while adapting this engine.
 - [Kompas9's Switch-Game-Patches](https://github.com/Kompas9/Switch-Game-Patches) (MIT): the Fortune's Weave ultrawide patch, whose sites and
-  findings `[fefw] ultrawide` re-implements as runtime hooks.
+  findings `[fefw] ultrawide` re-implements as runtime hooks; also the alpha-test shader variant, shader preparation and quieter logs.
+- [Fortune's Eden](https://github.com/TheSneakyBadger/Fortunes-Eden) by TheSneakyBadger (GPL-3.0-or-later), whose map started from Jbuck7's
+  60 FPS cheat: the per-frame sites and scaling rule `[fefw] frame_fixes` re-implements as runtime hooks.
+- [CheezerWheezer/CheezyEmu](https://github.com/CheezerWheezer/CheezyEmu): an independent Switch 2 emulator; its frame-pacing and
+  shader-stutter diagnostics were reviewed for this work, with no code copied.
+- [Eglantine](https://github.com/Eglantine-Community/Eglantine) (GPL-3.0-or-later): an emulator whose renderer, texture and upscaler work
+  was reviewed for portable findings, with no code copied; its Fire Emblem DLSS preset finding sets the default below.
 - [Shader translator source](https://git.ryujinx.app/ryubing/ryujinx) (MIT): the shader translator and tiling code; [Mesa](https://gitlab.freedesktop.org/mesa/mesa) NAK (MIT).
 - SuperMarioWonderRecomp (MIT); smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0); [yuzu and Eden](https://git.eden-emu.dev/eden-emu/eden)
   (GPL); libnx (ISC); LLVM libc++abi (Apache-2.0 with LLVM exceptions).

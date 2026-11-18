@@ -63,3 +63,75 @@ inline 0x71017d90b0
 # (vtable + 0x110); the midhook draws, puts the viewport back and returns
 inline 0x7101904b5c
 midhook 0x7101904c20
+
+# frame-rate fixes (runtime games/fefw/fefw_frame.cpp, [fefw] frame_fixes): per-frame amounts made for 30 fps kept at
+# their real speed at 60 and 120 (site map after Fortune's Eden, TheSneakyBadger, GPL-3.0-or-later). Each inline site is the instruction after
+# the one that makes the game's value: after the movk of a per-frame constant (dt 1/30, PhysX step, cloth gravity, easing factors, UI
+# timers), and in the cloth step (0xa68640), CharacterIllusion, CharacterLookAt, the map markers / UI angle / timer, PhysX substeps, the BGM
+# marquee and the avatar turntable. 0x652960 and 0x66af3c are the title / menu target stores (60, beside the gameplay one at 0x7bf1c0).
+inline 0x7100652960
+inline 0x710066af3c
+inline 0x7100a686ec
+inline 0x7100a68738
+inline 0x7100a687e8
+inline 0x7100a687f4
+inline 0x7100a68994
+inline 0x7100a68a9c
+inline 0x7100ab2490
+inline 0x7100da1f4c
+inline 0x7100f3a968
+inline 0x710107eadc
+inline 0x710108049c
+inline 0x71010804cc
+inline 0x7101084ee8
+inline 0x7101087658
+inline 0x7101089594
+inline 0x71010896a8
+inline 0x7101089848
+inline 0x7101089a64
+inline 0x71010ad648
+inline 0x71010d7324
+inline 0x7101121a60
+inline 0x7101121ab4
+inline 0x710112291c
+inline 0x71011271dc
+inline 0x7101128584
+inline 0x7101129e08
+inline 0x710112bfcc
+inline 0x710112c014
+inline 0x710113ed70
+inline 0x710113edb8
+inline 0x71011e62c4
+inline 0x710133fb94
+inline 0x710133fd1c
+inline 0x710133feb8
+inline 0x71014cf5dc
+inline 0x71014cfdc0
+inline 0x710159b818
+inline 0x71016665ec
+inline 0x71016a8d6c
+inline 0x71016a8d78
+inline 0x71016a8ef8
+inline 0x71016a8efc
+inline 0x71016a8f44
+inline 0x71017cc0ec
+inline 0x71017cea78
+inline 0x71017cee44
+inline 0x71017cf37c
+inline 0x71017cf3fc
+inline 0x71017cf418
+inline 0x71017cf444
+inline 0x71017cf478
+inline 0x71017cf498
+inline 0x71017cf540
+inline 0x71017cf55c
+inline 0x71017cf580
+inline 0x71017cf5a4
+# the cutscene quake block of evt::demo::Seq (0x11e9b50, from 0x11ea5cc to 0x11eb084) draws a new random offset each frame: it runs on 30 Hz
+# ticks, and on the other frames the midhook at its start runs the function's rest from the block's end (f_11eb084; flags are set again at
+# 0x11eb0b4 before anything reads them)
+midhook 0x71011ea5cc
+midhook 0x71011eb084
+# spoken text (fefw_frame.cpp, [fefw] frame_fixes): the talk sequence asks the text step 0x115d330 (x0 = the window's text, w1 =
+# letters to add, 3 a frame from 0x1154754) -> w0 finished; the entry hook skips it off the 30 Hz ticks (after Fortune's Eden v1.6.8.6)
+entryhook 0x710115d330

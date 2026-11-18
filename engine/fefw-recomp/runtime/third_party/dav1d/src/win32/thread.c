@@ -54,9 +54,16 @@ COLD void dav1d_set_thread_name(const wchar_t *const name) {
         set_thread_description(GetCurrentThread(), name);
 }
 
+/* nxrt: called on each dav1d thread as it starts (1) and before it ends (0). The runtime sets it (media/movie_vdec.cpp) to give the task
+ * threads its priority and register them for its diagnostics; null leaves the threads as Windows makes them. */
+void (*dav1d_nxrt_thread_hook)(int begin) = NULL;
+
 static COLD unsigned __stdcall thread_entrypoint(void *const data) {
     pthread_t *const t = data;
+    void (*const hook)(int) = dav1d_nxrt_thread_hook;
+    if (hook) hook(1);
     t->arg = t->func(t->arg);
+    if (hook) hook(0);
     return 0;
 }
 

@@ -257,7 +257,13 @@ public:
                     }
                 }
             }
-            if ((m != last_mode_ || !same_out) && s.set_options(vp, options(m, f.out)) != sl::Result::eOk) return fail("slDLSSSetOptions");
+            if ((m != last_mode_ || !same_out) && s.set_options(vp, options(m, f.out)) != sl::Result::eOk) {
+                // A preset this Streamline does not know must not cost the player DLSS: retry once with the driver's choice.
+                if (preset() == sl::DLSSPreset::eDefault) return fail("slDLSSSetOptions");
+                NXLOG_W(kTag, "[dlss] preset was rejected by Streamline: using the driver's default instead");
+                preset() = sl::DLSSPreset::eDefault;
+                if (s.set_options(vp, options(m, f.out)) != sl::Result::eOk) return fail("slDLSSSetOptions");
+            }
             {
                 static bool modules_logged = false;
                 if (!modules_logged) {
@@ -325,10 +331,12 @@ private:
         return e.width >= r.min_w && e.height >= r.min_h && e.width <= r.max_w && e.height <= r.max_h && r.max_w;
     }
     // [dlss] preset: the DLSS model for every mode (DLAA included): default (the driver's / an override's choice), or a letter j, k, l or m
-    // (sl_dlss.h DLSSPreset; the older letters were removed or revert to the default). Read once.
-    static sl::DLSSPreset preset() {
-        static const sl::DLSSPreset p = [] {
-            std::string v = nxrt::config_get_str("dlss", "preset", "default");
+    // (sl_dlss.h DLSSPreset; the older letters were removed or revert to the default). K is the default because Eglantine found that
+    // NVIDIA's defaults for Performance and Ultra Performance (M and L) draw thin horizontal lines in this game at 2x. Read once; a
+    // Streamline that rejects K falls back to the driver's choice in evaluate().
+    static sl::DLSSPreset& preset() {
+        static sl::DLSSPreset p = [] {
+            std::string v = nxrt::config_get_str("dlss", "preset", "k");
             for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             if (v.rfind("preset", 0) == 0) v = v.substr(6);
             while (!v.empty() && (v[0] == ' ' || v[0] == '_')) v.erase(0, 1);

@@ -29,3 +29,20 @@ EmblemWeave's reader.
 | `crates/ew-format/src/nx.rs` | an independent reader written from NXFormat's `docs/SPEC.md` |
 | `crates/ew-format/tests/nx-fixtures/*.nx` | `tests/fixtures/` from NXFormat V1.0.3 and V1.0.4, unmodified (the 0.3 wire-format fixture is `source_resource_v103.nx`) |
 | `engine/fefw-recomp/runtime/src/loader/nx.cpp` | the same reader in the engine, written from that specification |
+
+## ObeliskChamber
+
+ObeliskChamber by xinthefreefallxai, GPL-3.0, is another fork based on fefw-recomp with updates beyond 0.2.0. We are in
+full support of others extending the life of the original engine beyond its development. Its import-freeze write-watch
+race fix (ObeliskChamber issue 81, fixed in PR 93) is reimplemented in EmblemWeave's write-watch handler.
+
+| EmblemWeave file | Adapted from |
+| --- | --- |
+| `engine/fefw-recomp/runtime/src/mem/write_watch.cpp` | the late heap-write retry for a page released while an import freeze was ending, reimplemented for EmblemWeave's handler |
+
+## Eglantine
+
+Eglantine by the Eglantine Community, GPL-3.0-or-later. Its renderer, texture-cache and upscaler work was reviewed for
+portable findings. No source code is copied. Its Fire Emblem-specific DLSS finding, that NVIDIA's default Performance and
+Ultra Performance presets draw thin horizontal lines at 2× scale while preset K does not, is why `[dlss] preset` now
+defaults to `k` in EmblemWeave.

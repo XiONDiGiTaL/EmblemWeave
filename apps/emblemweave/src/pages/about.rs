@@ -238,6 +238,7 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
             ("Obersteinn", "preserving the final fefw-recomp 0.2.0 release after its repository was removed"),
             ("moistman7", "the GT tone-curve HDR patch and the 0.2.3/0.2.4 engine improvements (PRs #40, #52-#55)"),
             ("metrist38", "the fefw-recomp fork that supplies the 0.2.3 and 0.2.4 engine updates"),
+            ("xinthefreefallxai / ObeliskChamber", "another fefw-recomp fork with updates beyond 0.2.0; we support others extending the original's life"),
             ("Shader translator", "SPIR-V shader translation (MIT)"),
             ("egui / eframe", "the launcher interface (MIT / Apache-2.0)"),
             ("roxmltree, windows-sys", "Cheat Engine tables, game memory and controller access (MIT / Apache-2.0)"),
