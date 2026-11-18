@@ -2096,21 +2096,57 @@ pub fn refresh_build_stamp() -> Option<(String, String)> {
     Some((old, now.to_string()))
 }
 
-/// A game folder the launcher can play but that was built by another release.
-/// The Overview offers one press that rebuilds it and writes the packed-file
-/// overlay in the same run, so an update does not leave a mixed folder behind
-/// (#24, #34). `built` is the release that wrote `fefw.ini`, or `None` for a
-/// build older than the stamp itself.
+/// A game folder the launcher can play but that was built by another release and was not carried across by this
+/// launcher's updater. The Overview offers one press that rebuilds it and writes the packed-file overlay in the same
+/// run, so a manually mixed folder is not left behind (#24, #34). `built` is the release that wrote `fefw.ini`, or
+/// `None` for a build older than the stamp itself. An in-place update writes `carried_by`, which suppresses this notice
+/// because the updater deliberately kept the existing build (issue #56).
 pub fn stale_build() -> Option<(Option<String>, &'static str)> {
     if !ready() {
         return None;
     }
-    let now = env!("CARGO_PKG_VERSION");
-    match built_by() {
+    stale_build_in(&run_dir()?, env!("CARGO_PKG_VERSION"))
+}
+
+/// The check behind [`stale_build`], with the run folder and version passed in so it can be tested. `carried_by` is
+/// written by the updater after an in-place update: the build was deliberately kept, so a newer launcher must not ask for
+/// a rebuild merely because `built_by` names the release that compiled it (issue #56). `built_by` itself stays intact for
+/// reports and for the packed-package guard, which needs the engine's real age.
+fn stale_build_in(dir: &Path, now: &'static str) -> Option<(Option<String>, &'static str)> {
+    let ini = ini_map(&dir.join("fefw.ini"));
+    if ini
+        .get("engine.carried_by")
+        .is_some_and(|v| v.trim() == now)
+    {
+        return None;
+    }
+    match ini.get("engine.built_by").cloned() {
         Some(v) if v == now => None,
         Some(v) => Some((Some(v), now)),
         None => Some((None, now)),
     }
+}
+
+/// Record that `release` carried this folder's existing build across an in-place update. The updater calls this after it
+/// has written the release, so the restarted launcher opens ready to play instead of offering Repair/Rebuild for a build
+/// that was intentionally kept (issue #56). Does nothing when there is no built game or no run folder.
+pub fn mark_build_carried(engine: &Path, release: &str) {
+    if !game_exe(engine).is_file() {
+        return;
+    }
+    let Some(dir) = run_dir() else {
+        return;
+    };
+    let _ = carry_build_forward(&dir, release);
+}
+
+/// The write behind [`mark_build_carried`]: replaces `carried_by` in `dir`'s `fefw.ini`, preserving every other key.
+fn carry_build_forward(dir: &Path, release: &str) -> Result<(), String> {
+    let ini = dir.join("fefw.ini");
+    let text = std::fs::read_to_string(&ini)
+        .map_err(|e| format!("reading {}: {e}", ini.display()))?;
+    let updated = set_ini_value(&text, "engine", "carried_by", release);
+    std::fs::write(&ini, updated).map_err(|e| format!("writing {}: {e}", ini.display()))
 }
 
 /// Throw away the game's compiled runtime before a repair. An incremental rebuild can leave the old
@@ -4919,6 +4955,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(play_blocker_in(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_in_place_update_does_not_make_the_carried_build_stale() {
+        let dir = std::env::temp_dir().join(format!("ew-carried-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("fefw.ini"),
+            "[engine]\nbuilt_by = 0.1.39\npacked_nup = 1\n[fs]\nromfs = game.nup\n",
+        )
+        .unwrap();
+        // A launcher that only moved on is still told the build came from another release...
+        assert!(stale_build_in(&dir, "0.1.40").is_some());
+        // ...until the updater records that it carried this build forward on purpose.
+        carry_build_forward(&dir, "0.1.40").unwrap();
+        assert_eq!(stale_build_in(&dir, "0.1.40"), None);
+        let text = std::fs::read_to_string(dir.join("fefw.ini")).unwrap();
+        assert!(
+            text.contains("built_by = 0.1.39"),
+            "the build's own stamp is kept for reports: {text}"
+        );
+        assert!(
+            text.contains("carried_by = 0.1.40"),
+            "the update is recorded: {text}"
+        );
+        // A later launcher is stale again until its updater carries the same build.
+        assert!(stale_build_in(&dir, "0.1.41").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

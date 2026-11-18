@@ -66,6 +66,11 @@ public:
         uint32_t package_overlay_files = 0;                 // of those, files taken from the launcher's package overlay
         uint32_t shadowed_mod_files = 0;                    // mod files a later overlay replaced
         uint32_t edited_files = 0;                          // files served from memory after an edit (RomfsEdits)
+        uint64_t packed_cache_bytes = 0;                    // decompressed .nup entries retained now
+        uint64_t packed_cache_peak = 0;                     // largest retained total since build()
+        uint32_t packed_cache_files = 0;                    // entries retained now
+        uint64_t packed_cache_evictions = 0;                // LRU entries dropped to make room
+        uint64_t packed_cache_skipped = 0;                  // entries too large for the per-file cap
     };
     Stats stats() const;
     // Image offset and size of a file by its path inside the image ("/a/b.bin", case sensitive), for tests and logs. False when absent.

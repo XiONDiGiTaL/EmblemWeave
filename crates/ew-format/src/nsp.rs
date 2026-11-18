@@ -231,20 +231,51 @@ impl Nsp {
         Ok(out)
     }
 
-    /// The NCA that carries the game program.
+    /// The NCA that carries the game program. Other NCAs are optional content:
+    /// an encrypted or malformed add-on must not keep the base game from being
+    /// detected. Their errors are still returned when no program can be found.
     pub fn program(&self) -> Result<Nca> {
-        let list = self.ncas()?;
-        list.into_iter().find(|n| n.kind == ContentKind::Program).ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} holds no program NCA; this is not a game package (a DLC or update alone cannot be recompiled)",
-                self.path.display()
-            )
-        })
+        let mut f = File::open(&self.path)?;
+        let mut first_error = None;
+        for e in &self.entries {
+            if !e.name.ends_with(".nca") || e.size < NCA_HEADER {
+                continue;
+            }
+            match nca(&mut f, e) {
+                Ok(n) if n.kind == ContentKind::Program => return Ok(n),
+                Ok(_) => {}
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        bail!(
+            "{} holds no program NCA; this is not a game package (a DLC or update alone cannot be recompiled)",
+            self.path.display()
+        )
     }
 
     /// The NCA that carries the control metadata, when the package has one.
+    /// An unreadable control or add-on NCA only leaves the metadata out; the
+    /// program and RomFS are still usable.
     pub fn control(&self) -> Result<Option<Nca>> {
-        Ok(self.ncas()?.into_iter().find(|n| n.kind == ContentKind::Control))
+        let mut f = File::open(&self.path)?;
+        for e in &self.entries {
+            if !e.name.ends_with(".nca") || e.size < NCA_HEADER {
+                continue;
+            }
+            if let Ok(n) = nca(&mut f, e) {
+                if n.kind == ContentKind::Control {
+                    return Ok(Some(n));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Every data NCA, the content type add-on packs use. The caller narrows

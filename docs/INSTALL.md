@@ -32,7 +32,9 @@ The zip and what it deliberately leaves out are listed in [PACKAGE.md](PACKAGE.m
 **Use the launcher's updater.** When a newer release is published, Overview shows **Update available** with an **Update now**
 button; **About > Updates** has the same action. The launcher downloads the release, writes the new launcher, docs and engine
 sources over this install, and restarts once. `data\` (saves, settings, decoded modules and logs), the built game in
-`engine\fefw-recomp\game-build`, the fetched build tools and the third-party sources are kept. It never adds or removes
+`engine\fefw-recomp\game-build`, the fetched build tools and the third-party sources are kept. The updater records the
+existing build as carried forward, so after an in-place update the restarted launcher opens ready to play: a launcher
+version change alone does not make Overview ask for Repair or Rebuild. It never adds or removes
 `portable.txt`, so a portable install stays portable and a profile install stays a profile install. An update started by a
 launcher older than this one leaves the rest of the release in the download cache; the new launcher writes it on first
 start, so those engine sources catch up without another download.

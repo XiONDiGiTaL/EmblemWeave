@@ -25,6 +25,7 @@
 #include <zstd.h>
 
 #include "../src/services/fs_romfs.h"
+#include "../src/services/packed_cache.h"
 #include "nxrt/config.h"
 #include "nxrt/log.h"
 #include "nxrt/services.h"
@@ -34,6 +35,7 @@ NXTEST_GROUP(svc_fs_romfs)
 
 namespace {
 
+using nxrt::services::fs::PackedCache;
 using nxrt::services::fs::RomfsEdits;
 using nxrt::services::fs::RomfsImage;
 using nxrt::services::fs::RomfsOverlay;
@@ -722,7 +724,8 @@ NXTEST(romfs_concurrent_reads_identical) {
 // A minimal .nup (SPEC.md v1, written here by hand): one update package whose romfs holds /a.bin and /d/b.bin, stored raw or
 // as one zstd frame each. The image built from the package must serve the same bytes as the files in both cases.
 namespace {
-std::vector<uint8_t> tiny_nup(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, uint8_t codec) {
+std::vector<uint8_t> tiny_nup(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, uint8_t codec,
+                             const std::string& a_name = "a.bin", const std::string& b_name = "b.bin") {
     auto put = [](std::vector<uint8_t>& v, size_t o, uint64_t x, int n) { for (int i = 0; i < n; i++) v[o + i] = static_cast<uint8_t>(x >> (8 * i)); };
     auto pack = [&](const std::vector<uint8_t>& src) {
         if (!codec) return src;
@@ -733,7 +736,8 @@ std::vector<uint8_t> tiny_nup(const std::vector<uint8_t>& a, const std::vector<u
         return out;
     };
     const std::vector<uint8_t> sa = pack(a), sb = pack(b);
-    const std::string pool = "romfsda.binb.bin";                  // romfs@0 d@5 a.bin@6 b.bin@11
+    const std::string pool = "romfsd" + a_name + b_name;          // romfs@0 d@5 a@6 b@6+a_name.size()
+    const uint32_t a_off = 6, b_off = a_off + static_cast<uint32_t>(a_name.size());
     const size_t dirs = 3, files = 2, slots = 4;
     const size_t dir_at = 0x30 + 0x40, file_at = dir_at + 0x18 * dirs, child_at = file_at + 0x50 * files, pool_at = child_at + 4 * slots;
     const size_t toc_size = pool_at + pool.size(), blob = (0x80 + toc_size + 15) & ~size_t(15);
@@ -749,13 +753,13 @@ std::vector<uint8_t> tiny_nup(const std::vector<uint8_t>& a, const std::vector<u
     put(v, t + 0x30 + 0x14, 655360, 4); v[t + 0x30 + 0x18] = 1;                                            // update
     const uint32_t dir_rec[3][4] = {{0, 0, 0, 1}, {0, 5, 1, 2}, {5, 1, 3, 1}};                             // name off, len, first, count
     for (size_t i = 0; i < dirs; i++) for (int k = 0; k < 4; k++) put(v, t + dir_at + 0x18 * i + 4 * k, dir_rec[i][k], 4);
-    const uint64_t fr[2][5] = {{6, 5, a.size(), a_at, sa.size()}, {11, 5, b.size(), b_at, sb.size()}};
+    const uint64_t fr[2][5] = {{a_off, a_name.size(), a.size(), a_at, sa.size()}, {b_off, b_name.size(), b.size(), b_at, sb.size()}};
     for (size_t i = 0; i < files; i++) {
         const size_t r = t + file_at + 0x50 * i;
         put(v, r, fr[i][0], 4); put(v, r + 4, fr[i][1], 4); put(v, r + 8, fr[i][2], 8); put(v, r + 0x10, fr[i][3], 8); put(v, r + 0x18, fr[i][4], 8);
         v[r + 0x40] = codec;
     }
-    const uint32_t kids[4] = {1, 3, 2, 4};                       // root: romfs; romfs: a.bin, d; d: b.bin (ids >= 3 are files)
+    const uint32_t kids[4] = {1, 3, 2, 4};                       // root: romfs; romfs: a, d; d: b (ids >= 3 are files)
     for (size_t i = 0; i < slots; i++) put(v, t + child_at + 4 * i, kids[i], 4);
     std::memcpy(v.data() + t + pool_at, pool.data(), pool.size());
     std::memcpy(v.data() + a_at, sa.data(), sa.size());
@@ -784,11 +788,85 @@ NXTEST(romfs_from_nup_package) {
             REQUIRE(img.read(off, got.data(), size));
             CHECK(got == *want);
         }
-        if (codec) continue;   // the oracle parses the image's directory, not the package's compressed extents
+        if (codec) {
+            const auto st = img.stats();
+            CHECK_EQ(st.packed_cache_files, 2u);
+            CHECK_EQ(st.packed_cache_bytes, a.size() + b.size());
+            CHECK_EQ(st.packed_cache_peak, a.size() + b.size());
+            CHECK_EQ(st.packed_cache_evictions, 0u);
+            CHECK_EQ(st.packed_cache_skipped, 0u);
+            continue;   // the oracle parses the image's directory, not the package's compressed extents
+        }
         Oracle o(img);
         REQUIRE(o.load());
         o.check_layout(2, 2);
     }
+}
+
+// The .nup cache is bounded: it evicts the least recently used entry instead of clearing every entry, and an entry over the per-file
+// cap is served but not retained. The tiny limits make the policy visible without allocating a gigabyte-sized fixture.
+NXTEST(packed_cache_evicts_lru_and_skips_oversize_entries) {
+    PackedCache cache(12, 4);
+    auto bytes = [](size_t n, uint8_t fill) {
+        return std::make_shared<const std::vector<uint8_t>>(n, fill);
+    };
+    CHECK(cache.put(1, bytes(4, 1)));
+    CHECK(cache.put(2, bytes(4, 2)));
+    CHECK(cache.put(3, bytes(4, 3)));
+    auto st = cache.stats();
+    CHECK_EQ(st.entries, 3u);
+    CHECK_EQ(st.bytes, 12u);
+    CHECK_EQ(st.peak, 12u);
+    CHECK_EQ(st.evictions, 0u);
+
+    // Reading 1 makes it the most recently used entry, so adding 4 evicts 2, not 1.
+    CHECK(cache.get(1) != nullptr);
+    CHECK(cache.put(4, bytes(4, 4)));
+    st = cache.stats();
+    CHECK_EQ(st.entries, 3u);
+    CHECK_EQ(st.bytes, 12u);
+    CHECK_EQ(st.evictions, 1u);
+    CHECK(cache.get(1) != nullptr);
+    CHECK(cache.get(2) == nullptr);
+    CHECK(cache.get(3) != nullptr);
+    CHECK(cache.get(4) != nullptr);
+
+    // A file larger than the per-file cap is not retained, even when the budget has room.
+    CHECK(!cache.put(5, bytes(5, 5)));
+    st = cache.stats();
+    CHECK_EQ(st.skipped, 1u);
+    CHECK(cache.get(5) == nullptr);
+    CHECK_EQ(st.peak, 12u);
+
+    // Reserving room for an entry that cannot be retained drops the old buffers before decoding it.
+    cache.make_room(5);
+    st = cache.stats();
+    CHECK_EQ(st.entries, 0u);
+    CHECK_EQ(st.bytes, 0u);
+    CHECK_EQ(st.evictions, 4u);
+}
+
+// A packed audio entry is named `audio.elf.zst` in the real packages. The extension is not special to the reader, but this checks its
+// first read through RomfsImage and the retained/peak byte accounting, rather than only the cache class's tiny limits.
+NXTEST(romfs_packed_elf_zst_cache_peak) {
+    TempTree t;
+    const std::vector<uint8_t> audio = pattern(4u << 20, 31), tail = pattern(1000, 32);
+    const auto path = t.root / "audio.nup";
+    const std::vector<uint8_t> bytes = tiny_nup(audio, tail, 1, "audio.elf.zst", "b.bin");
+    { std::ofstream(path, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+    RomfsImage img;
+    std::string err;
+    REQUIRE(img.build(utf8(path), &err));
+    uint64_t off = 0, size = 0;
+    REQUIRE(img.file_extent("/audio.elf.zst", &off, &size));
+    CHECK_EQ(size, audio.size());
+    std::vector<uint8_t> got(size);
+    REQUIRE(img.read(off, got.data(), size));
+    CHECK(got == audio);
+    const auto st = img.stats();
+    CHECK_EQ(st.packed_cache_files, 1u);
+    CHECK_EQ(st.packed_cache_bytes, audio.size());
+    CHECK_EQ(st.packed_cache_peak, audio.size());
 }
 
 // #39: the launcher writes the originals of zstd-packed .nup files into its package overlay, below installed mods. A mod that

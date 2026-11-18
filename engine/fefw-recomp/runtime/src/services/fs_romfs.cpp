@@ -6,6 +6,7 @@
 #define NOMINMAX
 #endif
 #include "fs_romfs.h"
+#include "packed_cache.h"
 
 #include <nxrt/config.h>
 
@@ -736,18 +737,16 @@ struct RomfsImage::Impl {
     mutable std::vector<OpenSlot> cache;    // at most kOpenFiles entries
     mutable uint64_t tick = 0;
 
-    // Decompressed zstd entries of the package, by file index, while the budget allows: one frame per file has no random access into it,
-    // so the whole file is decoded on its first read and its ranges are copied from here.
+    // Decompressed zstd entries of the package, by file index: one frame per file has no random access into it, so the whole file is
+    // decoded on its first read and its ranges are copied from here. The cache evicts by LRU and leaves an entry above the per-file cap
+    // uncached, so a large packed audio file cannot pin the whole budget or make the next read clear it all.
     static constexpr uint64_t kPackedBudget = 1536ull << 20;
-    mutable std::map<uint32_t, std::shared_ptr<const std::vector<uint8_t>>> packed_cache;
-    mutable uint64_t packed_bytes = 0;
+    static constexpr uint64_t kPackedEntryCap = 256ull << 20;
+    mutable PackedCache packed_cache{kPackedBudget, kPackedEntryCap};
 
     std::shared_ptr<const std::vector<uint8_t>> packed_content(uint32_t idx) const {
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            auto it = packed_cache.find(idx);
-            if (it != packed_cache.end()) return it->second;
-        }
+        if (auto hit = packed_cache.get(idx)) return hit;
+        packed_cache.make_room(l.files[idx].pkg.size);
         std::vector<uint8_t> data;
         std::string err;
         if (!nup::read_file(l.package, l.files[idx].pkg, data, &err)) {
@@ -755,13 +754,7 @@ struct RomfsImage::Impl {
             return nullptr;
         }
         auto box = std::make_shared<const std::vector<uint8_t>>(std::move(data));
-        std::lock_guard<std::mutex> lk(mu);
-        if (packed_bytes + box->size() > kPackedBudget && !packed_cache.empty()) {
-            packed_cache.clear();
-            packed_bytes = 0;
-        }
-        packed_cache[idx] = box;
-        packed_bytes += box->size();
+        packed_cache.put(idx, box);
         return box;
     }
 
@@ -847,6 +840,7 @@ bool RomfsImage::build(const std::string& host_dir, std::string* err, const std:
     const bool ok = make_layout(host_dir, overlays, edits, fresh, err);
     std::lock_guard<std::mutex> lk(p_->mu);
     p_->cache.clear();
+    p_->packed_cache.clear();
     p_->l = ok ? std::move(fresh) : Layout{};
     p_->read_seen.assign(p_->l.files.size(), 0);
     return ok;
@@ -854,7 +848,16 @@ bool RomfsImage::build(const std::string& host_dir, std::string* err, const std:
 
 bool RomfsImage::built() const { return p_->l.built; }
 uint64_t RomfsImage::size() const { return p_->l.size; }
-RomfsImage::Stats RomfsImage::stats() const { return p_->l.stats; }
+RomfsImage::Stats RomfsImage::stats() const {
+    Stats s = p_->l.stats;
+    const PackedCache::Stats packed = p_->packed_cache.stats();
+    s.packed_cache_bytes = packed.bytes;
+    s.packed_cache_peak = packed.peak;
+    s.packed_cache_files = static_cast<uint32_t>(packed.entries);
+    s.packed_cache_evictions = packed.evictions;
+    s.packed_cache_skipped = packed.skipped;
+    return s;
+}
 
 bool RomfsImage::read(uint64_t offset, void* dst, uint64_t len) const {
     const Layout& L = p_->l;

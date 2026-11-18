@@ -583,7 +583,13 @@ fn unpack_package_addons(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<AddonOutcome, String> {
     let mut packs = std::collections::BTreeMap::new();
-    for nca in package.addons().map_err(|e| format!("{e:#}"))? {
+    // A failed scan must not leave a previous complete unpack where detection
+    // would serve it as part of this package.
+    let addons = package.addons().map_err(|e| {
+        discard_dir(dest);
+        format!("{e:#}")
+    })?;
+    for nca in addons {
         if is_this_titles_addon(base, nca.title_id) && nca.has_romfs() {
             packs.entry(nca.title_id).or_insert(nca);
         }
@@ -2010,6 +2016,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn xci_hfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut offsets = Vec::new();
+        for (name, _) in files {
+            offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let mut out = b"HFS0".to_vec();
+        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut data_off = 0u64;
+        for (i, (_, data)) in files.iter().enumerate() {
+            out.extend_from_slice(&data_off.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&offsets[i].to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&[0u8; 8]);
+            out.extend_from_slice(&[0u8; 32]);
+            data_off += data.len() as u64;
+        }
+        out.extend_from_slice(&names);
+        for (_, data) in files {
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
+    /// A plaintext card image whose secure partition holds `files`.
+    fn xci_image(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let secure = xci_hfs0(files);
+        let root = xci_hfs0(&[("secure", &secure)]);
+        let mut image = vec![0u8; 0x200];
+        image[0x100..0x104].copy_from_slice(b"HEAD");
+        image[0x130..0x138].copy_from_slice(&0x200u64.to_le_bytes());
+        image.extend_from_slice(&root);
+        image
+    }
+
     fn nsp_pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut names = Vec::new();
         let mut offsets = Vec::new();
@@ -2108,6 +2154,188 @@ mod tests {
         let at = (section_at + level_off as u64) as usize;
         nca[at..at + romfs.len()].copy_from_slice(&romfs);
         nca
+    }
+
+    #[test]
+    fn a_synthetic_xci_detects_its_addon() {
+        let _lock = NUP_DETECT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ew-xci-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = nsp_exefs_nca();
+        let addon = nsp_romfs_nca("dlc.bin", b"GOOD", 0x0400_7EF0_1F8A_F001);
+        let other = nsp_romfs_nca("other.bin", b"OTHER", 0x0400_7EF0_1F8B_F001);
+        let path = dir.join("addons.xci");
+        std::fs::write(
+            &path,
+            xci_image(&[
+                ("program.nca", &program),
+                ("addon.nca", &addon),
+                ("other.nca", &other),
+            ]),
+        )
+        .unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let dump = Config::work_dir()
+            .expect("work dir")
+            .join("xci")
+            .join(format!("04007EF01F8AE000-{size}"));
+        let dest = dump.join("dlc");
+        let _ = std::fs::remove_dir_all(&dump);
+
+        let g = detect_with(
+            &Paths {
+                game_root: path.to_string_lossy().into(),
+                ..Default::default()
+            },
+            &mut |_, _| {},
+            &|| false,
+        );
+        assert_eq!(g.dlc.as_deref(), Some(dest.as_path()), "{:?}", g.checks);
+        assert_eq!(g.dlc_ids, vec!["04007EF01F8AF001".to_string()]);
+        assert_eq!(
+            std::fs::read(dest.join("04007EF01F8AF001/romfs/dlc.bin")).unwrap(),
+            b"GOOD".as_slice()
+        );
+        assert!(!dest.join("04007EF01F8BF001").exists());
+        let marker = std::fs::read_to_string(dest.join(ADDON_MARKER)).unwrap();
+        assert!(marker.contains("04007EF01F8AF001"));
+        assert!(!marker.contains("04007EF01F8BF001"));
+
+        // A cancelled callback would make a fresh unpack fail. Ready here proves
+        // the dump and add-on marker were both reused.
+        let g = detect_with(
+            &Paths {
+                game_root: path.to_string_lossy().into(),
+                ..Default::default()
+            },
+            &mut |_, _| panic!("a reused unpack reported progress"),
+            &|| true,
+        );
+        assert_eq!(g.dlc.as_deref(), Some(dest.as_path()), "{:?}", g.checks);
+
+        let _ = std::fs::remove_dir_all(&dump);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_package_addon_scan_clears_the_managed_dlc() {
+        let _lock = NUP_DETECT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ew-addon-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = nsp_exefs_nca();
+        let mut encrypted = nsp_romfs_nca("dlc.bin", b"GOOD", 0x0400_7EF0_1F8A_F001);
+        encrypted[0x206] = 1; // an encrypted NCA cannot be parsed without keys
+        let nsp_path = dir.join("addons.nsp");
+        std::fs::write(
+            &nsp_path,
+            nsp_pfs0(&[("program.nca", &program), ("addon.nca", &encrypted)]),
+        )
+        .unwrap();
+        let xci_path = dir.join("addons.xci");
+        std::fs::write(
+            &xci_path,
+            xci_image(&[("program.nca", &program), ("addon.nca", &encrypted)]),
+        )
+        .unwrap();
+        let nsp_size = std::fs::metadata(&nsp_path).unwrap().len();
+        let xci_size = std::fs::metadata(&xci_path).unwrap().len();
+
+        for (kind, path, size) in [
+            ("nsp", &nsp_path, nsp_size),
+            ("xci", &xci_path, xci_size),
+        ] {
+            let dump = Config::work_dir()
+                .expect("work dir")
+                .join(kind)
+                .join(format!("04007EF01F8AE000-{size}"));
+            let dest = dump.join("dlc");
+            let _ = std::fs::remove_dir_all(&dump);
+            std::fs::create_dir_all(dest.join("04007EF01F8AF001/romfs")).unwrap();
+            std::fs::write(dest.join("04007EF01F8AF001/romfs/stale.bin"), b"OLD").unwrap();
+            std::fs::write(dest.join(ADDON_MARKER), "stale\n").unwrap();
+            // The base unpack is already recorded, so detection reuses it and
+            // reaches the add-on scan with the previous DLC still in place.
+            let stamp = format!("{size}-{}", modified_stamp(path));
+            std::fs::write(dump.join("dump.txt"), format!("{stamp}\n0 0 0\n")).unwrap();
+
+            let g = detect_with(
+                &Paths {
+                    game_root: path.to_string_lossy().into(),
+                    ..Default::default()
+                },
+                &mut |_, _| {},
+                &|| false,
+            );
+            assert!(g.dlc.is_none(), "{kind}: a stale add-on folder survived: {:?}", g.checks);
+            assert!(!dest.exists(), "{kind}: the failed unpack left {}", dest.display());
+            assert!(
+                g.checks.iter().any(|c| {
+                    c.label == "Add-on content" && c.detail.contains("could not unpack")
+                }),
+                "{kind}: no add-on warning: {:?}",
+                g.checks
+            );
+            let _ = std::fs::remove_dir_all(&dump);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_with_an_encrypted_addon_still_detects_its_base() {
+        let _lock = NUP_DETECT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ew-addon-encrypted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = nsp_exefs_nca();
+        let mut encrypted = nsp_romfs_nca("dlc.bin", b"GOOD", 0x0400_7EF0_1F8A_F001);
+        encrypted[0x206] = 1;
+        let nsp_path = dir.join("addons.nsp");
+        std::fs::write(
+            &nsp_path,
+            nsp_pfs0(&[("program.nca", &program), ("addon.nca", &encrypted)]),
+        )
+        .unwrap();
+        let xci_path = dir.join("addons.xci");
+        std::fs::write(
+            &xci_path,
+            xci_image(&[("program.nca", &program), ("addon.nca", &encrypted)]),
+        )
+        .unwrap();
+
+        for (kind, path) in [("nsp", &nsp_path), ("xci", &xci_path)] {
+            let size = std::fs::metadata(path).unwrap().len();
+            let dump = Config::work_dir()
+                .expect("work dir")
+                .join(kind)
+                .join(format!("04007EF01F8AE000-{size}"));
+            let dest = dump.join("dlc");
+            let _ = std::fs::remove_dir_all(&dump);
+            let g = detect_with(
+                &Paths {
+                    game_root: path.to_string_lossy().into(),
+                    ..Default::default()
+                },
+                &mut |_, _| {},
+                &|| false,
+            );
+            assert!(g.exefs.is_some(), "{kind}: the base game was not detected: {:?}", g.checks);
+            assert!(g.romfs.is_some(), "{kind}: the base dump was not kept: {:?}", g.checks);
+            assert!(g.dlc.is_none(), "{kind}: an encrypted add-on was served: {:?}", g.checks);
+            assert!(!dest.exists(), "{kind}: the failed unpack left {}", dest.display());
+            assert!(
+                g.checks.iter().any(|c| {
+                    c.label == "Add-on content" && c.detail.contains("could not unpack")
+                }),
+                "{kind}: no add-on warning: {:?}",
+                g.checks
+            );
+            let _ = std::fs::remove_dir_all(&dump);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

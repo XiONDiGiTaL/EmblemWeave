@@ -48,6 +48,14 @@ pub fn is_newer(tag: &str, now: (u32, u32, u32)) -> bool {
     parse_version(tag).is_some_and(|v| v > now)
 }
 
+/// A release tag in the same `major.minor.patch` form as `CARGO_PKG_VERSION`, which is how the carried-build stamp is
+/// compared. A tag that is not a version is kept as written.
+fn version_text(tag: &str) -> String {
+    parse_version(tag)
+        .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+        .unwrap_or_else(|| tag.trim().to_string())
+}
+
 fn system_tool(name: &str) -> PathBuf {
     let sys = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
@@ -266,13 +274,25 @@ pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
 /// the docs and engine sources from it before [`clean_cache`] removes the folder. A release downloaded by this version
 /// still has its executable (it is copied, not moved), so it is skipped: its overlay already ran.
 pub fn finish_interrupted_update(install: &Path, engine: &Path) -> Result<usize, String> {
-    let Some(release) = incomplete_release(&cache_dir().join("unpacked")) else {
+    let cache = cache_dir().join("unpacked");
+    let Some(release) = incomplete_release(&cache) else {
+        // A launcher from before `carried_by` existed wrote the whole release but left its executable in the cache. Its
+        // presence proves this launcher came from an in-place update, so record the carry even though the sources were
+        // already written (issue #56). This is idempotent with the marker [`install`] writes.
+        if release_of_this_version(&cache).is_some() {
+            crate::engine::mark_build_carried(engine, env!("CARGO_PKG_VERSION"));
+        }
         return Ok(0);
     };
-    overlay_release(&release, install, engine)
+    let copied = overlay_release(&release, install, engine)?;
+    crate::engine::mark_build_carried(engine, env!("CARGO_PKG_VERSION"));
+    Ok(copied)
 }
 
-fn incomplete_release(cache: &Path) -> Option<PathBuf> {
+/// The unpacked release for this launcher's own version, executable included or not. A matching folder in the update
+/// cache is how the first start after an update knows the build beside it was carried forward; whether it still needs
+/// its sources written is [`incomplete_release`]'s question.
+fn release_of_this_version(cache: &Path) -> Option<PathBuf> {
     for entry in std::fs::read_dir(cache).ok()?.flatten() {
         let root = entry.path();
         if !root.is_dir() {
@@ -283,16 +303,18 @@ fn incomplete_release(cache: &Path) -> Option<PathBuf> {
         if parse_version(tag) != Some(version_now()) {
             continue;
         }
-        // The old updater's signature: the executable was moved out, but the release and its manifest remain.
-        if root.join("EmblemWeave.exe").is_file() || !root.join("docs").join("PACKAGE.md").is_file()
+        if root.join("docs").join("PACKAGE.md").is_file()
+            && root.join("engine").join("fefw-recomp").is_dir()
         {
-            continue;
-        }
-        if root.join("engine").join("fefw-recomp").is_dir() {
             return Some(root);
         }
     }
     None
+}
+
+fn incomplete_release(cache: &Path) -> Option<PathBuf> {
+    // The old updater's signature: the executable was moved out, but the release and its manifest remain.
+    release_of_this_version(cache).filter(|root| !root.join("EmblemWeave.exe").is_file())
 }
 
 fn find_exe(dir: &Path, depth: usize) -> Option<PathBuf> {
@@ -326,6 +348,7 @@ pub fn install(
     new_exe: &Path,
     engine_root: Option<&Path>,
     keep_previous: bool,
+    release_tag: &str,
 ) -> Result<(), String> {
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
     let backup = backup_exe().ok_or("the launcher's own path is unknown")?;
@@ -345,6 +368,9 @@ pub fn install(
         let _ = std::fs::remove_file(&staged);
         return Err(e);
     }
+    // The compiled game was deliberately kept: say so before the restart, so Overview opens ready to play instead of
+    // treating the carried build as one from another release (issue #56).
+    crate::engine::mark_build_carried(&engine, &version_text(release_tag));
     if keep_previous {
         // Copying a running executable is allowed; replacing it is not. Do it only once the release is known to be
         // complete, so a failed update does not overwrite the version Restore would go back to.
@@ -709,6 +735,8 @@ mod tests {
 
         write(&root.join("EmblemWeave.exe"), "new launcher");
         assert_eq!(incomplete_release(&cache), None);
+        // A completed release still identifies the update to the first start of this launcher.
+        assert_eq!(release_of_this_version(&cache), Some(root.clone()));
 
         // A newer release left in the cache is not this build's unfinished update.
         let other = cache.join("EmblemWeave-v9.9.9");
@@ -722,6 +750,7 @@ mod tests {
     fn tags_compare_like_versions() {
         assert_eq!(parse_version("v0.1.4"), Some((0, 1, 4)));
         assert_eq!(parse_version("0.2.0"), Some((0, 2, 0)));
+        assert_eq!(version_text("v0.1.4-rc1"), "0.1.4");
         assert_eq!(parse_version("v0.1.4-rc1"), Some((0, 1, 4)));
         assert!(is_newer("v0.1.5", (0, 1, 4)));
         assert!(is_newer("v0.2.0", (0, 1, 9)));

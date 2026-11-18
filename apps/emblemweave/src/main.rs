@@ -654,12 +654,14 @@ impl App {
             Tone::Accent,
         );
         let engine = crate::engine::root();
+        let release_tag = release.tag.clone();
         let slot: Slot<std::path::PathBuf> = std::sync::Arc::new(std::sync::Mutex::new(None));
         let handle = slot.clone();
         std::thread::spawn(move || {
             let dir = std::env::temp_dir().join("emblemweave-update");
-            let r = updater::download(&release, &dir)
-                .and_then(|exe| updater::install(&exe, engine.as_deref(), true).map(|()| exe));
+            let r = updater::download(&release, &dir).and_then(|exe| {
+                updater::install(&exe, engine.as_deref(), true, &release_tag).map(|()| exe)
+            });
             *handle.lock().unwrap() = Some(r);
         });
         self.update.install = Some(slot);

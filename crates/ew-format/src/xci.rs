@@ -169,19 +169,51 @@ impl Xci {
         Ok(out)
     }
 
-    /// The NCA that carries the game program.
+    /// The NCA that carries the game program. Other NCAs are optional content:
+    /// an encrypted or malformed add-on must not keep the base game from being
+    /// detected. Their errors are still returned when no program can be found.
     pub fn program(&self) -> Result<Nca> {
-        self.ncas()?.into_iter().find(|n| n.kind == ContentKind::Program).ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} holds no program NCA; this is not a game card image (a DLC or update alone cannot be recompiled)",
-                self.path.display()
-            )
-        })
+        let mut f = File::open(&self.path)?;
+        let mut first_error = None;
+        for e in &self.secure.entries {
+            if !e.name.to_ascii_lowercase().ends_with(".nca") || e.size < 0xc00 {
+                continue;
+            }
+            match nca_at(&mut f, &e.name, e.offset, e.size) {
+                Ok(n) if n.kind == ContentKind::Program => return Ok(n),
+                Ok(_) => {}
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        bail!(
+            "{} holds no program NCA; this is not a game card image (a DLC or update alone cannot be recompiled)",
+            self.path.display()
+        )
     }
 
-    /// The NCA that carries the control metadata, when the image has one.
+    /// The NCA that carries the control metadata, when the image has one. An
+    /// unreadable control or add-on NCA only leaves the metadata out; the
+    /// program and RomFS are still usable.
     pub fn control(&self) -> Result<Option<Nca>> {
-        Ok(self.ncas()?.into_iter().find(|n| n.kind == ContentKind::Control))
+        let mut f = File::open(&self.path)?;
+        for e in &self.secure.entries {
+            if !e.name.to_ascii_lowercase().ends_with(".nca") || e.size < 0xc00 {
+                continue;
+            }
+            if let Ok(n) = nca_at(&mut f, &e.name, e.offset, e.size) {
+                if n.kind == ContentKind::Control {
+                    return Ok(Some(n));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Every data NCA, the content type add-on packs use. The caller narrows
@@ -431,8 +463,22 @@ mod tests {
     fn opens_a_real_xci() {
         let path = std::env::var("EW_XCI").expect("EW_XCI");
         let xci = Xci::open(Path::new(&path)).unwrap();
-        eprintln!("{}", xci.summary().unwrap());
-        let program = xci.program().unwrap();
-        assert_eq!(program.kind, ContentKind::Program);
+        eprintln!(
+            ".xci: root {} entries, secure {} entries",
+            xci.root.entries.len(),
+            xci.secure.entries.len()
+        );
+        assert!(!xci.secure.entries.is_empty());
+        // A retail card is encrypted. The container is still readable, and the
+        // refusal must name the crypto type instead of turning into a panic;
+        // the synthetic tests above cover a plaintext program and add-on.
+        match xci.program() {
+            Ok(program) => assert_eq!(program.kind, ContentKind::Program),
+            Err(err) => {
+                let text = format!("{err:#}");
+                assert!(text.contains("encrypted"), "unexpected program error: {text}");
+                eprintln!("the supplied .xci is encrypted: {text}");
+            }
+        }
     }
 }

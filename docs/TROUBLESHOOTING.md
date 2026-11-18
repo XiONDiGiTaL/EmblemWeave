@@ -161,7 +161,9 @@ does not have to be compiled again.
 now**; **About > Updates** has the same button. It downloads the release and writes the new launcher, docs and engine sources
 over this install, then restarts once. `data\`, the built game, the fetched tools and third-party sources are kept, and
 `portable.txt` is left as it is. If the running executable cannot be replaced, the old launcher starts and the reason is in
-`logs\update.log`. No release zip has to be downloaded or unpacked by hand.
+`logs\update.log`. No release zip has to be downloaded or unpacked by hand. The updater records the existing build as
+carried forward, so the restarted launcher opens ready to play and does not offer Repair or Rebuild merely because the
+launcher version changed.
 
 **If you update by hand: unzip over the old folder.** Close the launcher, unpack the new release into the same folder, and
 start it. The zip replaces `EmblemWeave.exe`, the docs and the engine sources; `data\` stays where it is, so settings, saves,

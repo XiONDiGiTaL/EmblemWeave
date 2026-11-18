@@ -77,10 +77,17 @@ a bad package or a write error, so a later detection cannot serve a partial or
 stale pack; a completion marker reuses a finished unpack. The `.nup` path skips
 an add-on whose RomFS index is invalid instead of failing the whole extraction,
 and both paths reject NCA paths with a drive prefix or any non-normal component.
-Synthetic `.nup` and `.nsp` detection tests cover the real `detect_with` wiring,
-the title filter, progress, cancel, reuse and the stale-folder failure case; the
-`ew-format` tests cover the `.nsp`/`.xci` NCA RomFS copy, including the secure
-partition of an XCI.
+Synthetic `.nup`, `.nsp` and `.xci` detection tests cover the real
+`detect_with` wiring, the title filter, progress, cancel, reuse and the
+stale-folder failure case; the `.xci` test proves the secure-partition NCAs and
+the managed add-on marker through detection. A focused failure test also starts
+with a complete old pack and an encrypted add-on NCA, and proves the managed
+folder is removed when the add-on scan fails. The `ew-format` tests cover the
+`.nsp`/`.xci` NCA RomFS copy, including the secure partition of an XCI.
+The program and control lookups scan for their own NCA kind instead of
+parsing every NCA first, so an encrypted add-on leaves the base game and its
+RomFS detectable; the add-on scan still fails, which is what clears the old
+managed folder.
 
 No real DLC payload was present in the audited data, so no DLC build/run was
 possible. The feature is covered by scanner and synthetic-package tests and an
@@ -101,13 +108,25 @@ the same RomFS path as any asset: `services/fs_romfs.cpp` `RomfsImage::read` →
 - an extracted `.nsp`/`.xci`/folder file: `Impl::acquire` (16 open handles,
   `kOpenFiles`) and a positioned `ReadFile`; no file-content cache.
 
-The decoded **outer** `.nup` entry is not freed per read. `packed_content` moves
-it into a `shared_ptr` and stores it in `packed_cache`, keyed by file index, under
-`kPackedBudget = 1536 MiB`. When adding the next entry would exceed the budget,
-the whole map is cleared; entries are not evicted individually. A single entry
-larger than the budget is still inserted, so the peak is the budget plus the
-largest cached file, not a hard 1.5 GiB cap. For a packed `.elf.zst` that entry
-is the decompressed `.zst` file, not the game's decoded PCM/ELF.
+A decoded **outer** `.nup` entry is retained rather than freed per read when it
+fits the cache. `packed_content` moves it into a `shared_ptr` and stores it in
+`PackedCache`, keyed by file index, under `kPackedBudget = 1536 MiB`. The cache evicts the least recently used entry when
+adding the next one would exceed the budget, so one large file no longer clears
+every cached entry. Entries larger than `kPackedEntryCap = 256 MiB` are served
+for the current read but not retained; this keeps a packed `.elf.zst` from
+pinning the whole budget. Before decoding an entry that will not fit, the cache
+drops its retained references, so old buffers are not held alongside its output.
+For such an entry the game still gets the decoded `.zst` file, not its PCM/ELF,
+and a later read of a differently positioned range will decode the frame again
+rather than find it in memory. For an entry within the cap, the retained total
+stays at or below 1.5 GiB; during the read that adds it, the transient total is
+at most the retained total plus one 256 MiB entry.
+`RomfsImage::Stats` reports the retained and peak bytes, entry count, evictions
+and skips. `packed_cache_evicts_lru_and_skips_oversize_entries` tests the policy
+with tiny limits, and `romfs_packed_elf_zst_cache_peak` reads a packed
+`audio.elf.zst` through `RomfsImage` and checks the peak accounting. These are
+cache-accounting measurements; no real `.elf.zst` package was available for a
+process-RSS measurement.
 
 The game then decompresses the inner `.elf.zst` frame through
 `nx_hle_zstd_multiframe` (`game-build/fefw/src/fefw_hle.cpp`). It calls
@@ -119,12 +138,13 @@ previous output. A native error falls back to the lifted original. Whether the
 guest frees its decoded audio buffer is title-side behaviour; this runtime does
 not retain it.
 
-So the decoded audio **file** is not necessarily freed per read: a packed `.nup`
-entry is cached up to roughly 1.5 GiB plus one file, and `.nx` blocks are cached
-within 4 MiB. The only growth path found beyond the previously audited `.nx`
-block cache is `packed_cache`; `nx::Reader::Impl::spans` also keeps one small
-span vector per file (metadata, not decoded audio) without a byte budget. No
-unbounded per-read decoded-PCM growth was found.
+So the decoded audio **file** is not necessarily freed per read: a small packed
+`.nup` entry is cached within the 1.5 GiB budget, a large one is decoded for the
+current read and dropped, and `.nx` blocks are cached within 4 MiB. The only
+growth path found beyond the previously audited `.nx` block cache is
+`packed_cache`; `nx::Reader::Impl::spans` also keeps one small span vector per
+file (metadata, not decoded audio) without a byte budget. No unbounded per-read
+decoded-PCM growth was found.
 
 ## C. External projects
 
