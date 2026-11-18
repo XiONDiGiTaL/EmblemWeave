@@ -26,6 +26,10 @@ measurement here is still the 9 to 10 November one. [docs/ENGINE.md](ENGINE.md)
 is the engine's own plan and follows the code; where the two disagree, this page
 carries the measurement and ENGINE.md carries the detail.
 
+## Current status
+
+> **Current status: 0.1.38, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes. The 0.1.38 download includes the FSR 3.1 upscaler code path; the AMD FidelityFX DLLs are still yours to obtain (see Graphics page). Later releases are checked by building and by headless runs of the real game — see [Development status](DEVELOPMENT.md) and the [changelog](changelog/README.md).
+
 ## How to read the states
 
 | State | Meaning |
