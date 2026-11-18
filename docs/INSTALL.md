@@ -1,6 +1,15 @@
 # Installation, portable storage and game data
 
-The release zip is self-contained apart from the game data and the Windows build tools. Start with the quick steps on the main README; this page has the full layouts and the decode helper.
+The release zip is self-contained apart from the game data and the Windows build tools. Start with the quick steps below; this page has the full layouts and the decode helper.
+
+## Quick start
+
+1. Download `EmblemWeave-<version>-windows-x64.zip` from the [releases page](https://github.com/XiONDiGiTaL/EmblemWeave/releases) and unzip it anywhere.
+2. Run `EmblemWeave.exe`. A fresh release is **portable by default**: settings, saves, builds, mods and logs stay in `data` beside the executable, so the whole folder can be moved as one piece.
+3. On **Game Setup**, choose your own dump: a `.nup`, `.nx`, plaintext `.nsp`, plaintext `.xci`, or an extracted folder.
+4. Press **Build the game** once on **Overview**, then **Play**.
+
+The build needs Visual Studio 2022 Build Tools with the C++ workload, LLVM, CMake and Ninja. The launcher checks each one and offers the install command. The shader translator ships in the zip with its own runtime, so the .NET SDK is not needed.
 
 ## Install the release
 

@@ -33,122 +33,37 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-The engine underneath is **fefw-recomp** by
-[Goldoire](https://github.com/Goldoire/fefw-recomp) and its contributors. Its
-author stepped away and the repository was removed;
-[Obersteinn](https://github.com/Obersteinn) preserved the final 0.2.0 release with its build tools, so the
-reference build and its tested-dump manifest are still available. EmblemWeave
-carries that engine forward as the launcher around it, and
-[docs/UPSTREAM.md](docs/UPSTREAM.md) records exactly what was kept.
-
-> **Current status: 0.1.38, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes. The 0.1.38 download includes the FSR 3.1 upscaler code path; the AMD FidelityFX DLLs are still yours to obtain (see Graphics page). Later releases are checked by building and by headless runs of the real game — see [Development status](docs/DEVELOPMENT.md) and the [changelog](docs/changelog/README.md).
-
-Designed and directed by [XiØN](https://github.com/XiONDiGiTaL) and developed with the help of AI coding tools. Every change is tested against the real game and the project's own test suite before it is published.
-
-<p align="center">
-  <img src="docs/screenshots/overview.png" alt="The EmblemWeave launcher" width="880">
-</p>
-
 ## Documentation
-
-The front page is the short version. Everything else lives in `docs/`:
-
-- **Play:** [Install and play](#install-and-play) · [Using EmblemWeave](#using-emblemweave) · [Troubleshooting](docs/TROUBLESHOOTING.md)
-- **Build and run:** [System requirements](docs/REQUIREMENTS.md) · [Install and play](#install-and-play) · [Building from source](docs/BUILDING.md) · [How the recompilation works](docs/ARCHITECTURE.md#how-the-recompilation-works)
-- **Status:** [Development status](docs/DEVELOPMENT.md) · [Status](docs/STATUS.md) · [Roadmap](docs/ROADMAP.md) · [Changelog](docs/changelog/README.md) · [Screenshots](docs/SCREENSHOTS.md)
-- **Reference:** [Features](#features) · [Key capabilities](docs/CAPABILITIES.md) · [Security](docs/SECURITY.md) · [Installation and game data](docs/INSTALL.md) · [Engine](docs/ENGINE.md) · [Graphics](docs/GRAPHICS.md)
-- **Project:** [Legal](#legal) · [Terms](docs/TERMS.md) · [Privacy](docs/PRIVACY.md) · [Credits](#credits)
-
-## What EmblemWeave does
-
-EmblemWeave is a launcher first, and the engine underneath it is fefw-recomp: the recompiler, build system and runtime
-in `engine/fefw-recomp` (GPL-3.0, with its own licence and notices in that folder). It plays *Fire Emblem: Fortune's
-Weave* on Windows with no emulator. The engine translates the game's code to C++, compiles it into `fefw.exe`, draws
-with Vulkan, plays audio through XAudio2 and decodes the game's movies. EmblemWeave is the application around it: it
-finds and checks your dump, drives the build, keeps your saves (including imports from Switch emulators), manages your
-mods, starts the game and shows what happened when something fails.
-
-| Stage | What happens |
-| --- | --- |
-| **Validate** | Your dump is located and checked against the title's module hashes and build ID. |
-| **Prepare** | The console's compressed `main` is unpacked, and the RomFS is served from a folder, a plaintext `.nsp` or `.xci`, an `.nx`, or a `.nup`. |
-| **Recompile** | fefw-recomp's lifter decodes every AArch64 instruction, recovers functions and control flow, and emits C++ for each of the six modules. |
-| **Compile and link** | clang-cl compiles the emitted code and the runtime, and links `fefw.exe` for the processor and hook-site list this PC needs. |
-| **Run** | The runtime maps the modules, starts them the way the console SDK does, serves their system calls natively, and drives NVN on the host GPU. |
-
-The launcher wraps all of this in one application: it shows exactly what is
-ready, what is running and where the runtime stops, and it never presents a
-feature as working before it is.
-
-## Features
 
 | | |
 | --- | --- |
-| **Play natively** | Build the game once from your own dump, then play it at 60 fps with sound and its cutscenes, windowed or full screen. |
-| **In-game enhancements** | F10 or Back + RB while playing: pause, screenshot, restart, stop and return, display settings and cheats. |
-| **Saves** | Save profiles to switch between, imports saves from Switch emulators, and a save editor (gold, renown, level, experience, stats, weapon masteries, items and spells). |
-| **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. Mods are made by their authors and hosted by GameBanana; EmblemWeave does not review or host them. |
-| **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
-| **Launcher** | A custom shell with its own window controls, a rail of grouped pages, a status column that says where the game, the recompiler and the runtime stand, a live Game Log you can pop out, liquid-glass controls and sliders that take the colour and glow of the scheme, six schemes (XiØN, Arcade, FE, Ember, Verdant, Frost), diagnostics, and a recompilation pipeline you can watch run. |
-| **Troubleshooter** | Re-runs the real game-data and toolchain checks, offers the safe repairs the launcher already knows (rebuild, reset graphics, open logs), and creates one timestamped `.zip` with settings, logs, the game log and any freeze report to attach to an issue. |
-
-## Changelog
-
-Each release is written up in [`docs/changelog/`](docs/changelog/README.md), newest first, with the version number and
-what changed. The README keeps the current state; the changelog keeps the history.
-
-## Status and roadmap
-
-The game is playable: see [Development status](docs/DEVELOPMENT.md) for the measured evidence, [STATUS.md](docs/STATUS.md) for the compatibility matrix and known limitations, and [ROADMAP.md](docs/ROADMAP.md) for what is planned next, in priority order.
-
-## Security
-
-EmblemWeave is one Rust executable plus the engine folder it drives. It installs no service, driver, or browser extension, has no accounts, and uploads nothing. It starts only the tools a build or a play needs, and every program and network destination is listed in [docs/SECURITY.md](docs/SECURITY.md).
-
-The release zip is not code-signed; its SHA-256 is published in every release note. The source is public, so the strongest check is to build the same binary yourself. Report vulnerabilities privately through the repository's **Security** tab.
-
-## Install and play
-
-1. Download `EmblemWeave-<version>-windows-x64.zip` from the [releases page](https://github.com/XiONDiGiTaL/EmblemWeave/releases) and unzip it anywhere.
-2. Run `EmblemWeave.exe`. A fresh release is **portable by default**: settings, saves, builds, mods and logs stay in `data` beside the executable, so the whole folder can be moved as one piece.
-3. On **Game Setup**, choose your own dump: a `.nup`, `.nx`, plaintext `.nsp`, plaintext `.xci`, or an extracted folder.
-4. Press **Build the game** once on **Overview**, then **Play**.
-
-The build needs Visual Studio 2022 Build Tools with the C++ workload, LLVM, CMake and Ninja. The launcher checks each one and offers the install command. The shader translator ships in the zip with its own runtime, so the .NET SDK is not needed.
-
-Full layouts, the ZBIC decode helper, portable switching and the exact release contents are in [docs/INSTALL.md](docs/INSTALL.md) and [docs/PACKAGE.md](docs/PACKAGE.md).
-
-## Using EmblemWeave
-
-The rail groups the pages: **Play** (Overview, Game Setup), **Library** (Saves, Mods, Cheats), **Runtime** (Recompilation, Graphics, Audio, Controls) and **System** (Appearance, Diagnostics, Troubleshooter, Requirements, Game Log, About). The top strip is the launcher's own shell, with the window controls, version and build revision; the strip along the bottom carries the current job and the readiness line.
-
-**Overview** is the landing page: Play, Build, save profiles, the main-menu carousel, and the three status cards. **Troubleshooter** collects the checks a support reply would ask for, the safe repairs the launcher can run, and a button that builds an attachable report bundle. The other pages cover game setup, save profiles and the editor, mods, cheats, the recompilation pipeline, graphics and audio settings, controls, appearance, diagnostics, requirements and the live game log.
-
-The full page-by-page guide, display settings, upscaling file layout and the in-game menu are in [docs/USAGE.md](docs/USAGE.md).
-
-## How the recompilation works
-
-The pipeline is fefw-recomp's, and the launcher orchestrates it — the diagram, the stages and what each piece owns are in [ARCHITECTURE.md](docs/ARCHITECTURE.md#how-the-recompilation-works).
-
-## Build from source
-
-To build the launcher and the tools from source, see [BUILDING.md](docs/BUILDING.md).
-
-## Legal
-
-EmblemWeave is an independent project, not affiliated with,
-endorsed by, or supported by Nintendo or Intelligent Systems. "Fire Emblem" and
-"Fortune's Weave" are trademarks of their respective owners and are used only to
-identify the software EmblemWeave works with.
-
-The repository and its releases contain no game code, no game assets, no
-firmware and no encryption keys, and EmblemWeave downloads none of them. Files
-derived from your copy of the game (decoded modules and generated C) stay on
-your machine and must not be redistributed. See [docs/LEGAL.md](docs/LEGAL.md).
-
-## Terms and privacy
-
-The project is free and open source, ships no game data or keys, does not condone piracy, and is not affiliated with Nintendo or Intelligent Systems. The full disclaimer, acceptable-use rules and contribution policy are in [docs/TERMS.md](docs/TERMS.md); what stays on your PC and what the optional report bundle contains is in [docs/PRIVACY.md](docs/PRIVACY.md).
+| 🚀 **Start here** |  |
+| [Overview](docs/OVERVIEW.md) | What EmblemWeave does, the engine underneath, and the feature list. |
+| [Install and play](docs/INSTALL.md) | Download, unzip, choose your dump, build once, play. |
+| [Using EmblemWeave](docs/USAGE.md) | The rail of pages and the full page-by-page guide. |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | When the build or the game stops, and how to report it. |
+| 🛠️ **Build and run** |  |
+| [System requirements](docs/REQUIREMENTS.md) | Hardware, Windows and the build tools the game needs. |
+| [Building from source](docs/BUILDING.md) | The launcher, the command-line tools and the engine build. |
+| [How the recompilation works](docs/ARCHITECTURE.md#how-the-recompilation-works) | The pipeline, the stages and what each piece owns. |
+| 📊 **Status** |  |
+| [Current status](docs/STATUS.md#current-status) | The game is playable — what was measured, and what is next. |
+| [Development status](docs/DEVELOPMENT.md) | Playable-build evidence, engine integration and known limitations. |
+| [Roadmap](docs/ROADMAP.md) | What is planned next, in priority order. |
+| [Changelog](docs/changelog/README.md) | What changed in each release, newest first. |
+| [Screenshots](docs/SCREENSHOTS.md) | The launcher's pages, from the current source tree. |
+| 📚 **Reference** |  |
+| [Key capabilities](docs/CAPABILITIES.md) | The deeper technical capabilities behind the feature list. |
+| [Engine](docs/ENGINE.md) | The engine research log and the supporting Rust crates. |
+| [Graphics](docs/GRAPHICS.md) | Upscalers, frame generation and ReShade. |
+| [Performance](docs/PERFORMANCE.md) | Measured performance and the hardware matrix. |
+| [Linux](docs/LINUX.md) | The Linux plan: what already works, and what is still to do. |
+| [Security](docs/SECURITY.md) | What the launcher runs and reaches, and how to report a problem. |
+| 📁 **Project** |  |
+| [Legal](docs/LEGAL.md) | Not affiliated with Nintendo or Intelligent Systems; no game code, assets or keys. |
+| [Terms](docs/TERMS.md) | Disclaimer, acceptable use and contributions. |
+| [Privacy](docs/PRIVACY.md) | What stays on your PC and what the report bundle contains. |
+| [Credits](#credits) | The people and projects behind EmblemWeave. |
 
 ## Credits
 

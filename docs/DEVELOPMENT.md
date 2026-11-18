@@ -116,3 +116,7 @@ and are not on the shipping path.
 
 The compatibility matrix and the milestone notes live in [STATUS.md](STATUS.md);
 the detailed roadmap is in [ROADMAP.md](ROADMAP.md).
+
+## How it is built
+
+Designed and directed by [XiØN](https://github.com/XiONDiGiTaL) and developed with the help of AI coding tools. Every change is tested against the real game and the project's own test suite before it is published.
