@@ -2,7 +2,7 @@
 
 **The game is playable through the engine.** EmblemWeave builds and runs the
 game with [fefw-recomp](https://github.com/Goldoire/fefw-recomp) (GPL-3.0, at
-`engine/fefw-recomp`): on this PC (AMD Radeon RX 7900 XT) the retail game,
+`engine/fefw-recomp`): on the dev's PC (AMD Radeon RX 7900 XT) the retail game,
 update 131072, runs at about 60 fps with sound, from the launcher's **Build the
 game** and **Play**.
 
