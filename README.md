@@ -37,29 +37,29 @@ game code, no assets and no keys, and it only ever reads your files.
 
 | | |
 | --- | --- |
-| **Start here** |  |
+| 🚀 **Start here** |  |
 | [Overview](docs/OVERVIEW.md) | What EmblemWeave does, the engine underneath, and the feature list. |
 | [Install and play](docs/INSTALL.md) | Download, unzip, choose your dump, build once, play. |
 | [Using EmblemWeave](docs/USAGE.md) | The rail of pages and the full page-by-page guide. |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | When the build or the game stops, and how to report it. |
-| **Build and run** |  |
+| 🛠️ **Build and run** |  |
 | [System requirements](docs/REQUIREMENTS.md) | Hardware, Windows and the build tools the game needs. |
 | [Building from source](docs/BUILDING.md) | The launcher, the command-line tools and the engine build. |
 | [How the recompilation works](docs/ARCHITECTURE.md#how-the-recompilation-works) | The pipeline, the stages and what each piece owns. |
-| **Status** |  |
+| 📊 **Status** |  |
 | [Current status](docs/STATUS.md#current-status) | The game is playable — what was measured, and what is next. |
 | [Development status](docs/DEVELOPMENT.md) | Playable-build evidence, engine integration and known limitations. |
 | [Roadmap](docs/ROADMAP.md) | What is planned next, in priority order. |
 | [Changelog](docs/changelog/README.md) | What changed in each release, newest first. |
 | [Screenshots](docs/SCREENSHOTS.md) | The launcher's pages, from the current source tree. |
-| **Reference** |  |
+| 📚 **Reference** |  |
 | [Key capabilities](docs/CAPABILITIES.md) | The deeper technical capabilities behind the feature list. |
 | [Engine](docs/ENGINE.md) | The engine research log and the supporting Rust crates. |
 | [Graphics](docs/GRAPHICS.md) | Upscalers, frame generation and ReShade. |
 | [Performance](docs/PERFORMANCE.md) | Measured performance and the hardware matrix. |
 | [Linux](docs/LINUX.md) | The Linux plan: what already works, and what is still to do. |
 | [Security](docs/SECURITY.md) | What the launcher runs and reaches, and how to report a problem. |
-| **Project** |  |
+| 📁 **Project** |  |
 | [Legal](docs/LEGAL.md) | Not affiliated with Nintendo or Intelligent Systems; no game code, assets or keys. |
 | [Terms](docs/TERMS.md) | Disclaimer, acceptable use and contributions. |
 | [Privacy](docs/PRIVACY.md) | What stays on your PC and what the report bundle contains. |
