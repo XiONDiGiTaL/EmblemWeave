@@ -447,6 +447,22 @@ fn reset_managed_dir(dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("creating {}: {e}", dest.display()))
 }
 
+/// Removes the managed DLC folder unless the unpack armed it off after writing
+/// its completion marker. Every early return, error and panic after the folder
+/// is reset therefore leaves no partial pack for a later detection to find.
+struct UnpackGuard<'a> {
+    dest: &'a Path,
+    armed: bool,
+}
+
+impl Drop for UnpackGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            discard_dir(self.dest);
+        }
+    }
+}
+
 /// What came of unpacking a `.nup`'s add-on packages.
 enum AddonOutcome {
     Ready,
@@ -469,23 +485,21 @@ fn unpack_nup_addons(
         .packages
         .iter()
         .filter(|p| {
-            p.kind == ew_format::nup::PackageKind::AddOn && is_this_titles_addon(base, p.title_id)
+            p.kind == ew_format::nup::PackageKind::AddOn
+                && is_this_titles_addon(base, p.title_id)
+                && (p.romfs as usize) < nup.dirs.len()
         })
         .map(|p| (format!("{:016X}", p.title_id), p))
         .collect();
 
     if packs.is_empty() {
-        // A package that has lost its add-ons must not leave last run's packs
-        // for the engine to serve as if they were still part of it.
+        // A package that has lost its add-ons, or whose only add-on has no
+        // RomFS, must not leave last run's packs for the engine to serve as if
+        // they were still part of it.
         discard_dir(dest);
         return Ok(AddonOutcome::Ready);
     }
 
-    for (id, pkg) in &packs {
-        if pkg.romfs as usize >= nup.dirs.len() {
-            return Err(format!("add-on {id} has no RomFS"));
-        }
-    }
     let total = packs
         .iter()
         .flat_map(|(_, pkg)| nup.walk(pkg.romfs))
@@ -510,39 +524,35 @@ fn unpack_nup_addons(
         return Ok(AddonOutcome::Ready);
     }
 
-    reset_managed_dir(dest)?;
+    if let Err(e) = reset_managed_dir(dest) {
+        discard_dir(dest);
+        return Err(e);
+    }
+    let mut cleanup = UnpackGuard { dest, armed: true };
     progress(0, total);
     let mut done = 0u64;
     for (id, pkg) in &packs {
         let root = dest.join(id).join("romfs");
         if let Err(e) = std::fs::create_dir_all(&root) {
-            discard_dir(dest);
             return Err(format!("creating {}: {e}", root.display()));
         }
         for (rel, index) in nup.walk(pkg.romfs) {
             if cancelled() {
-                discard_dir(dest);
                 return Ok(AddonOutcome::Cancelled);
             }
             let Some(out) = safe_relative(&root, &rel) else {
-                discard_dir(dest);
                 return Err(format!("the .nup has an unsafe add-on path {rel:?}"));
             };
             if let Some(parent) = out.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    discard_dir(dest);
                     return Err(format!("creating {}: {e}", parent.display()));
                 }
             }
             let data = match nup.read(index) {
                 Ok(data) => data,
-                Err(e) => {
-                    discard_dir(dest);
-                    return Err(format!("reading {rel} from {}: {e}", nup.path.display()));
-                }
+                Err(e) => return Err(format!("reading {rel} from {}: {e}", nup.path.display())),
             };
             if let Err(e) = std::fs::write(&out, &data) {
-                discard_dir(dest);
                 return Err(format!("writing {}: {e}", out.display()));
             }
             done += nup.files[index as usize].size;
@@ -550,15 +560,76 @@ fn unpack_nup_addons(
             // A progress callback may have set the stop flag; do not go on to
             // finish the marker for an unpack the user just cancelled.
             if cancelled() {
-                discard_dir(dest);
                 return Ok(AddonOutcome::Cancelled);
             }
         }
     }
     if let Err(e) = std::fs::write(&marker, format!("{stamp}\n")) {
-        discard_dir(dest);
         return Err(format!("writing {}: {e}", marker.display()));
     }
+    cleanup.armed = false;
+    Ok(AddonOutcome::Ready)
+}
+
+/// Write every data NCA for `base` from a `.nsp` or `.xci` into
+/// `<dest>/<title id>/romfs`, the same layout `.nup` add-ons use. Reuses a
+/// complete unpack by its source stamp; on any failure or cancellation the
+/// cleanup guard removes the folder, so detection cannot serve a stale pack.
+fn unpack_package_addons(
+    package: &Container,
+    base: u64,
+    dest: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<AddonOutcome, String> {
+    let mut packs = std::collections::BTreeMap::new();
+    for nca in package.addons().map_err(|e| format!("{e:#}"))? {
+        if is_this_titles_addon(base, nca.title_id) && nca.has_romfs() {
+            packs.entry(nca.title_id).or_insert(nca);
+        }
+    }
+    if packs.is_empty() {
+        discard_dir(dest);
+        return Ok(AddonOutcome::Ready);
+    }
+
+    let source = package.path();
+    let ids: Vec<String> = packs.keys().map(|id| format!("{id:016X}")).collect();
+    let marker = dest.join(ADDON_MARKER);
+    let stamp = format!(
+        "{:016X}|{}|{}|{}|{}",
+        base,
+        source.display(),
+        package.size(),
+        modified_stamp(source),
+        ids.join(",")
+    );
+    let reusable = std::fs::read_to_string(&marker)
+        .map(|s| s.trim() == stamp)
+        .unwrap_or(false)
+        && ids.iter().all(|id| dest.join(id).join("romfs").is_dir());
+    if reusable {
+        return Ok(AddonOutcome::Ready);
+    }
+
+    if let Err(e) = reset_managed_dir(dest) {
+        discard_dir(dest);
+        return Err(e);
+    }
+    let mut cleanup = UnpackGuard { dest, armed: true };
+    for (id, nca) in &packs {
+        let root = dest.join(format!("{id:016X}")).join("romfs");
+        if let Err(e) = package.dump_addon(nca, &root, progress, cancelled) {
+            if e.downcast_ref::<ew_format::nsp::Cancelled>().is_some() {
+                return Ok(AddonOutcome::Cancelled);
+            }
+            return Err(format!("{e:#}"));
+        }
+    }
+    if let Err(e) = std::fs::write(&marker, format!("{stamp}\n")) {
+        return Err(format!("writing {}: {e}", marker.display()));
+    }
+    cleanup.armed = false;
     Ok(AddonOutcome::Ready)
 }
 
@@ -887,6 +958,27 @@ impl Container {
             Container::Xci(x) => x.size,
         }
     }
+    fn path(&self) -> &Path {
+        match self {
+            Container::Nsp(n) => &n.path,
+            Container::Xci(x) => &x.path,
+        }
+    }
+    fn addons(&self) -> anyhow::Result<Vec<ew_format::nsp::Nca>> {
+        match self {
+            Container::Nsp(n) => n.addons(),
+            Container::Xci(x) => x.addons(),
+        }
+    }
+    fn dump_addon(
+        &self,
+        nca: &ew_format::nsp::Nca,
+        dest: &Path,
+        progress: &mut dyn FnMut(u64, u64),
+        cancelled: &dyn Fn() -> bool,
+    ) -> anyhow::Result<(usize, u64)> {
+        ew_format::nsp::dump_nca_romfs(self.path(), nca, dest, progress, cancelled)
+    }
     fn kind(&self) -> &'static str {
         match self {
             Container::Nsp(_) => ".nsp",
@@ -1044,6 +1136,21 @@ fn use_package(
         .then(|| dir.join("data").join("control").join("control.nacp"))
     {
         g.nacp = Some(nacp);
+    }
+    // Add-on content is optional: a package with none clears an older unpack,
+    // and a failure leaves the base game usable but never a partial DLC folder.
+    match unpack_package_addons(&package, program.title_id, &dir.join("dlc"), progress, cancelled) {
+        Ok(AddonOutcome::Ready) => {}
+        Ok(AddonOutcome::Cancelled) => g.checks.push(Check::new(
+            Severity::Info,
+            "Add-on content",
+            "the add-on unpack was cancelled; those packs are not used",
+        )),
+        Err(e) => g.checks.push(Check::new(
+            Severity::Warn,
+            "Add-on content",
+            format!("could not unpack the add-on content ({e}); those packs are not used"),
+        )),
     }
     g.title_id = Some(program.title_id);
     g.romfs = Some(dir.join("romfs"));
@@ -1833,6 +1940,215 @@ mod tests {
         out.extend(toc);
         out.extend(payload);
         std::fs::write(path, out).unwrap();
+    }
+
+    static NUP_DETECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Break the add-on package's RomFS index in the TOC and re-sign the TOC.
+    /// The container still opens; only its add-on extraction is impossible.
+    fn break_addon_romfs(path: &Path) {
+        use sha2::{Digest, Sha256};
+        let mut bytes = std::fs::read(path).unwrap();
+        let toc_size = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+        let mut toc = bytes[0x80..0x80 + toc_size].to_vec();
+        // Package 0 is the base; package 1 is the valid add-on. Its romfs field
+        // is at +0x10 in the 0x40-byte package record, after the 0x30-byte TOC header.
+        let romfs = 0x30 + 0x40 + 0x10;
+        toc[romfs..romfs + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[0x80..0x80 + toc_size].copy_from_slice(&toc);
+        bytes[24..56].copy_from_slice(&Sha256::digest(&toc));
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_synthetic_nup_detection_uses_only_this_titles_addons() {
+        let _lock = NUP_DETECT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ew-nup-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("addons.nup");
+        write_addon_nup(&path);
+
+        let base = 0x0400_7EF0_1F8A_E000u64;
+        let dump = Config::work_dir()
+            .expect("work dir")
+            .join("nup")
+            .join(format!("{base:016X}-v1"));
+        let dest = dump.join("dlc");
+        let _ = std::fs::remove_dir_all(&dump);
+        let g = detect_with(
+            &Paths {
+                game_root: path.to_string_lossy().into(),
+                ..Default::default()
+            },
+            &mut |_, _| {},
+            &|| false,
+        );
+        assert_eq!(g.dlc.as_deref(), Some(dest.as_path()), "{:?}", g.checks);
+        assert_eq!(g.dlc_ids, vec!["04007EF01F8AF001".to_string()]);
+        assert_eq!(
+            std::fs::read(dest.join("04007EF01F8AF001/romfs/dlc.bin")).unwrap(),
+            b"GOOD".as_slice()
+        );
+        assert!(!dest.join("04007EF01F8BF001").exists());
+
+        // A failed add-on extraction must also clear the previous complete
+        // folder: otherwise detection would serve the old pack as current.
+        break_addon_romfs(&path);
+        let g = detect_with(
+            &Paths {
+                game_root: path.to_string_lossy().into(),
+                ..Default::default()
+            },
+            &mut |_, _| {},
+            &|| false,
+        );
+        assert!(g.dlc.is_none(), "a stale add-on folder survived: {:?}", g.checks);
+        assert!(!dest.exists(), "the failed unpack left {}", dest.display());
+
+        let _ = std::fs::remove_dir_all(&dump);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn nsp_pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut offsets = Vec::new();
+        for (name, _) in files {
+            offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let mut out = b"PFS0".to_vec();
+        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut data_off = 0u64;
+        for (i, (_, data)) in files.iter().enumerate() {
+            out.extend_from_slice(&data_off.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            out.extend_from_slice(&offsets[i].to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            data_off += data.len() as u64;
+        }
+        out.extend_from_slice(&names);
+        for (_, data) in files {
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
+    /// A plaintext program NCA with a minimal ExeFS; enough for the NSP
+    /// detection path to dump and find its `main`.
+    fn nsp_exefs_nca() -> Vec<u8> {
+        let exefs = nsp_pfs0(&[("main", b"main-bytes"), ("main.npdm", b"npdm")]);
+        let section_at = 0xc00u64;
+        let data_at = 0x200u64;
+        let section_end = (section_at + data_at + exefs.len() as u64 + 0x1ff) & !0x1ff;
+        let mut nca = vec![0u8; section_end as usize];
+        nca[0x200..0x204].copy_from_slice(b"NCA3");
+        nca[0x205] = 0; // program
+        nca[0x208..0x210].copy_from_slice(&section_end.to_le_bytes());
+        nca[0x210..0x218].copy_from_slice(&0x0400_7EF0_1F8A_E000u64.to_le_bytes());
+        nca[0x240..0x244].copy_from_slice(&((section_at / 0x200) as u32).to_le_bytes());
+        nca[0x244..0x248].copy_from_slice(&((section_end / 0x200) as u32).to_le_bytes());
+        let fs = 0x400usize;
+        nca[fs..fs + 2].copy_from_slice(&2u16.to_le_bytes());
+        nca[fs + 0x40..fs + 0x48].copy_from_slice(&data_at.to_le_bytes());
+        nca[fs + 0x48..fs + 0x50].copy_from_slice(&(exefs.len() as u64).to_le_bytes());
+        let at = (section_at + data_at) as usize;
+        nca[at..at + exefs.len()].copy_from_slice(&exefs);
+        nca
+    }
+
+    /// A plaintext data NCA with one RomFS file, mirroring the fixture in
+    /// `ew-format`'s NCA tests.
+    fn nsp_romfs_nca(name: &str, data: &[u8], title: u64) -> Vec<u8> {
+        let dir_meta_at = 0x50usize;
+        let file_meta_at = dir_meta_at + 0x18;
+        let file_meta_len = 0x20 + name.len();
+        let data_at = file_meta_at + file_meta_len;
+        let level_off = 0x200usize;
+        let romfs_len = data_at + data.len();
+        let mut romfs = vec![0u8; romfs_len];
+        for (field, value) in [
+            (3, dir_meta_at as u64),
+            (4, 0x18u64),
+            (7, file_meta_at as u64),
+            (8, file_meta_len as u64),
+            (9, data_at as u64),
+        ] {
+            romfs[8 * field..8 * field + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        romfs[dir_meta_at + 8..dir_meta_at + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        romfs[dir_meta_at + 12..dir_meta_at + 16].copy_from_slice(&0u32.to_le_bytes());
+        romfs[file_meta_at + 4..file_meta_at + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        romfs[file_meta_at + 16..file_meta_at + 24]
+            .copy_from_slice(&(data.len() as u64).to_le_bytes());
+        romfs[file_meta_at + 28..file_meta_at + 32]
+            .copy_from_slice(&(name.len() as u32).to_le_bytes());
+        romfs[file_meta_at + 0x20..file_meta_at + 0x20 + name.len()]
+            .copy_from_slice(name.as_bytes());
+        romfs[data_at..].copy_from_slice(data);
+
+        let section_at = 0xc00u64;
+        let section_size = ((level_off + romfs_len + 0x1ff) & !0x1ff) as u64;
+        let section_end = section_at + section_size;
+        let mut nca = vec![0u8; section_end as usize];
+        nca[0x200..0x204].copy_from_slice(b"NCA3");
+        nca[0x205] = 4; // data
+        nca[0x208..0x210].copy_from_slice(&section_end.to_le_bytes());
+        nca[0x210..0x218].copy_from_slice(&title.to_le_bytes());
+        nca[0x240..0x244].copy_from_slice(&((section_at / 0x200) as u32).to_le_bytes());
+        nca[0x244..0x248].copy_from_slice(&((section_end / 0x200) as u32).to_le_bytes());
+        let fs = 0x400usize;
+        nca[fs + 8..fs + 12].copy_from_slice(b"IVFC");
+        nca[fs + 0x14..fs + 0x18].copy_from_slice(&1u32.to_le_bytes());
+        nca[fs + 0x18..fs + 0x20].copy_from_slice(&(level_off as u64).to_le_bytes());
+        nca[fs + 0x20..fs + 0x28].copy_from_slice(&(romfs_len as u64).to_le_bytes());
+        let at = (section_at + level_off as u64) as usize;
+        nca[at..at + romfs.len()].copy_from_slice(&romfs);
+        nca
+    }
+
+    #[test]
+    fn a_synthetic_nsp_detects_its_addon() {
+        let _lock = NUP_DETECT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ew-nsp-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = nsp_exefs_nca();
+        let addon = nsp_romfs_nca("dlc.bin", b"GOOD", 0x0400_7EF0_1F8A_F001);
+        let path = dir.join("addons.nsp");
+        std::fs::write(
+            &path,
+            nsp_pfs0(&[("program.nca", &program), ("addon.nca", &addon)]),
+        )
+        .unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let dump = Config::work_dir()
+            .expect("work dir")
+            .join("nsp")
+            .join(format!("04007EF01F8AE000-{size}"));
+        let dest = dump.join("dlc");
+        let _ = std::fs::remove_dir_all(&dump);
+
+        let g = detect_with(
+            &Paths {
+                game_root: path.to_string_lossy().into(),
+                ..Default::default()
+            },
+            &mut |_, _| {},
+            &|| false,
+        );
+        assert_eq!(g.dlc.as_deref(), Some(dest.as_path()), "{:?}", g.checks);
+        assert_eq!(g.dlc_ids, vec!["04007EF01F8AF001".to_string()]);
+        assert_eq!(
+            std::fs::read(dest.join("04007EF01F8AF001/romfs/dlc.bin")).unwrap(),
+            b"GOOD".as_slice()
+        );
+
+        let _ = std::fs::remove_dir_all(&dump);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

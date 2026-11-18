@@ -184,6 +184,16 @@ impl Xci {
         Ok(self.ncas()?.into_iter().find(|n| n.kind == ContentKind::Control))
     }
 
+    /// Every data NCA, the content type add-on packs use. The caller narrows
+    /// these to the base title's add-on range before writing them out.
+    pub fn addons(&self) -> Result<Vec<Nca>> {
+        Ok(self
+            .ncas()?
+            .into_iter()
+            .filter(|n| matches!(n.kind, ContentKind::Data | ContentKind::PublicData))
+            .collect())
+    }
+
     /// Copy the ExeFS, RomFS and control metadata into `dest`, exactly as
     /// `.nsp` does. A cancelled unpack leaves the caller to remove what it
     /// wrote.
@@ -363,6 +373,31 @@ mod tests {
         let dumped = xci.dump(&out, &mut |_, _| {}, &|| false).unwrap();
         assert_eq!(dumped.exefs, 2);
         assert_eq!(std::fs::read_to_string(out.join("exefs").join("main")).unwrap(), "main-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extracts_an_addon_romfs_from_the_secure_partition() {
+        let dir = temp("addon-romfs");
+        let nca = crate::nsp::test_data::nca_with_romfs("pack.bin", b"ADDON", 5, 0x0400_7EF0_1F8A_F001);
+        let secure = build_hfs0(&[("addon.nca", &nca)]);
+        let root = build_hfs0(&[("secure", &secure)]);
+        let mut image = vec![0u8; HEADER as usize];
+        image[0x100..0x104].copy_from_slice(b"HEAD");
+        image[0x130..0x138].copy_from_slice(&HEADER.to_le_bytes());
+        image.extend_from_slice(&root);
+        let path = dir.join("addons.xci");
+        std::fs::write(&path, &image).unwrap();
+
+        let xci = Xci::open(&path).unwrap();
+        let addons = xci.addons().unwrap();
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].kind, ContentKind::PublicData);
+        assert!(addons[0].has_romfs());
+        let out = dir.join("pack");
+        let (files, bytes) = crate::nsp::dump_nca_romfs(&path, &addons[0], &out, &mut |_, _| {}, &|| false).unwrap();
+        assert_eq!((files, bytes), (1, 5));
+        assert_eq!(std::fs::read(out.join("pack.bin")).unwrap(), b"ADDON");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

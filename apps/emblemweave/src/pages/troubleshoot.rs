@@ -91,10 +91,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "Start here", |ui| {
         if row(ui, &p, data_tone, "Game files", &data_text, Some("Game Setup")) {
-            app.page = Page::Setup;
+            app.open(Page::Setup);
         }
         if row(ui, &p, tools_tone, "Build tools", &tools_text, Some("Requirements")) {
-            app.page = Page::Requirements;
+            app.open(Page::Requirements);
         }
         if row(
             ui,
@@ -105,11 +105,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if built { Some("Overview") } else { Some("Build") },
         ) {
             if built {
-                app.page = Page::Overview;
+                app.open(Page::Overview);
             } else if app.game.exefs.is_some() && (app.game.romfs.is_some() || app.game.nup.is_some()) {
                 app.start(JobKind::Engine);
             } else {
-                app.page = Page::Setup;
+                app.open(Page::Setup);
                 app.notify("Choose your game data first; the build uses your own dump.", Tone::Warn);
             }
         }

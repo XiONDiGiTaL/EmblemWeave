@@ -607,7 +607,7 @@ fn session_bar(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette, ctx:
                         app.ingame.open = false;
                         app.ingame.paused = false;
                         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
-                        app.page = crate::pages::Page::Overview;
+                        app.open(crate::pages::Page::Overview);
                         app.notify("The game was stopped", Tone::Ok);
                     }
                     app.ingame.confirm_stop = false;

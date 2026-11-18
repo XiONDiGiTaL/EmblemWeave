@@ -318,13 +318,7 @@ impl App {
                             p.label()
                                 .eq_ignore_ascii_case(name.replace('-', " ").as_str())
                         }) {
-                            app.page = *p;
-                            // An explicit advanced page from a shortcut or a
-                            // support reply must not land on Overview because
-                            // Standard mode hides it.
-                            if p.advanced() {
-                                app.config.interface_mode = crate::config::InterfaceMode::Advanced;
-                            }
+                            app.open(*p);
                         }
                     }
                 }
@@ -595,8 +589,8 @@ impl App {
         ];
         while self.tour_step < steps.len() && t >= steps[self.tour_step] {
             match self.tour_step {
-                0 => self.page = Page::Overview,
-                1 => self.page = Page::Saves,
+                0 => self.open(Page::Overview),
+                1 => self.open(Page::Saves),
                 2 => {
                     let auto = Config::save_dir()
                         .map(|d| crate::saves::account_dir(&d).join("000").join("Auto"));
@@ -605,15 +599,15 @@ impl App {
                         self.saves_ui.scroll_to_editor = true;
                     }
                 }
-                3 => self.page = Page::Mods,
+                3 => self.open(Page::Mods),
                 4 => pages::mods::load_gamebanana(self),
-                5 => self.page = Page::Cheats,
-                6 => self.page = Page::Log,
-                7 => self.page = Page::Appearance,
+                5 => self.open(Page::Cheats),
+                6 => self.open(Page::Log),
+                7 => self.open(Page::Appearance),
                 8 => self.config.theme = theme::Scheme::Arcade,
                 9 => self.config.theme = theme::Scheme::Fe,
                 10 => self.config.theme = theme::Scheme::Xion,
-                11 => self.page = Page::About,
+                11 => self.open(Page::About),
                 _ => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
             self.tour_step += 1;
@@ -783,7 +777,7 @@ impl App {
                 {
                     if i.key_pressed(key) {
                         if let Some(p) = pages.get(n).filter(|p| p.available(self.config.interface_mode)) {
-                            self.page = *p;
+                            self.open(*p);
                         }
                     }
                 }
@@ -941,6 +935,15 @@ pub fn fmt_count(n: u64) -> String {
 }
 
 impl App {
+    /// Show `page`. An advanced page is an explicit request for Advanced mode, so the rail reveals its siblings instead
+    /// of leaving the player on a page Standard does not list. Nothing else changes.
+    pub fn open(&mut self, page: Page) {
+        self.page = page;
+        if !page.available(self.config.interface_mode) {
+            self.config.interface_mode = crate::config::InterfaceMode::Advanced;
+        }
+    }
+
     /// For `--screenshot`: once the page has settled, ask the renderer for
     /// this window's frame, save it as PNG, and close. The image comes from
     /// the GPU frame itself, so other windows can never appear in it.

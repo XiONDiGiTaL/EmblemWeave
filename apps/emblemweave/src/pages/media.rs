@@ -2,7 +2,7 @@
 //! ReShade Vulkan layer. Values are written into the engine's ini files before
 //! every start; ReShade itself stays an external, user-installed tool.
 
-use crate::config::InterfaceMode;
+use crate::config::{Graphics, InterfaceMode};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
@@ -97,7 +97,7 @@ fn standard_graphics(app: &mut App, ui: &mut egui::Ui) {
         &p,
         "Presets change only the picture and frame cap; your resolution, display mode and saves stay as they are. Advanced mode adds upscaler DLLs, frame generation, ReShade and shader-compile tuning.",
     );
-    let mut preset = None;
+    let mut chosen = None;
     widgets::section(ui, &p, "Presets", |ui| {
         ui.label(
             RichText::new("Pick a starting point, then adjust anything below. Changing a preset never changes the game installation.")
@@ -106,23 +106,13 @@ fn standard_graphics(app: &mut App, ui: &mut egui::Ui) {
         );
         ui.add_space(7.0);
         ui.horizontal_wrapped(|ui| {
-            if widgets::button(ui, &p, "Performance", true)
-                .on_hover_text("Lower internal resolution with FSR 1.0 and a 60 fps cap")
-                .clicked()
-            {
-                preset = Some("Performance");
-            }
-            if widgets::button(ui, &p, "Balanced", true)
-                .on_hover_text("Native render scale, no upscaler, 60 fps cap")
-                .clicked()
-            {
-                preset = Some("Balanced");
-            }
-            if widgets::button(ui, &p, "Quality", true)
-                .on_hover_text("Native render scale with sharper output")
-                .clicked()
-            {
-                preset = Some("Quality");
+            for preset in Preset::ALL {
+                if widgets::button(ui, &p, preset.label(), true)
+                    .on_hover_text(preset.detail())
+                    .clicked()
+                {
+                    chosen = Some(preset);
+                }
             }
         });
         ui.add_space(6.0);
@@ -139,8 +129,9 @@ fn standard_graphics(app: &mut App, ui: &mut egui::Ui) {
             .color(p.muted),
         );
     });
-    if let Some(name) = preset {
-        apply_graphics_preset(app, name);
+    if let Some(preset) = chosen {
+        preset.apply(&mut app.config.graphics);
+        app.note(format!("{} graphics preset applied", preset.label()), Tone::Neutral);
     }
     let g = &mut app.config.graphics;
     widgets::section(ui, &p, "Display", |ui| {
@@ -184,36 +175,48 @@ fn standard_graphics(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn apply_graphics_preset(app: &mut App, name: &str) {
-    let g = &mut app.config.graphics;
-    match name {
-        "Performance" => {
-            g.render_scale = 0.75;
-            g.upscaling = "FSR 1.0".into();
-            g.sharpening = "Default".into();
-            g.frame_limit = 60;
-            g.vsync = true;
-            g.shader_precompile = true;
+/// The Standard graphics presets: labels, hover text and values in one place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Preset {
+    Performance,
+    Balanced,
+    Quality,
+}
+
+impl Preset {
+    const ALL: [Preset; 3] = [Preset::Performance, Preset::Balanced, Preset::Quality];
+
+    fn label(self) -> &'static str {
+        match self {
+            Preset::Performance => "Performance",
+            Preset::Balanced => "Balanced",
+            Preset::Quality => "Quality",
         }
-        "Balanced" => {
-            g.render_scale = 1.0;
-            g.upscaling = "Off".into();
-            g.sharpening = "Default".into();
-            g.frame_limit = 60;
-            g.vsync = true;
-            g.shader_precompile = true;
-        }
-        "Quality" => {
-            g.render_scale = 1.0;
-            g.upscaling = "Off".into();
-            g.sharpening = "High".into();
-            g.frame_limit = 60;
-            g.vsync = true;
-            g.shader_precompile = true;
-        }
-        _ => return,
     }
-    app.note(format!("{name} graphics preset applied"), Tone::Neutral);
+
+    fn detail(self) -> &'static str {
+        match self {
+            Preset::Performance => "Lower internal resolution with FSR 1.0 and a 60 fps cap",
+            Preset::Balanced => "Native render scale, no upscaler, 60 fps cap",
+            Preset::Quality => "Native render scale with sharper output",
+        }
+    }
+
+    /// Apply the picture and frame-cap values this preset owns. The resolution, the display mode and every Advanced-only
+    /// field (`upscale_quality`, `frame_gen`, `re_shade`, the compiler controls and the rest) stay exactly as they were.
+    fn apply(self, g: &mut Graphics) {
+        let (render_scale, upscaling, sharpening) = match self {
+            Preset::Performance => (0.75, "FSR 1.0", "Default"),
+            Preset::Balanced => (1.0, "Off", "Default"),
+            Preset::Quality => (1.0, "Off", "High"),
+        };
+        g.render_scale = render_scale;
+        g.upscaling = upscaling.into();
+        g.sharpening = sharpening.into();
+        g.frame_limit = 60;
+        g.vsync = true;
+        g.shader_precompile = true;
+    }
 }
 
 fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
@@ -1074,4 +1077,93 @@ fn waiting_line(ui: &mut egui::Ui, p: &theme::Palette, pending: Vec<&'static str
             .color(p.muted),
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_display(resolution: &str, mode: &str) -> Graphics {
+        Graphics {
+            resolution: resolution.into(),
+            display_mode: mode.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_preset_keeps_the_resolution_and_display_mode() {
+        for (resolution, mode) in [
+            ("Native display", "Borderless window"),
+            ("3840 × 2160", "Exclusive fullscreen"),
+            ("1280 × 720", "Windowed"),
+        ] {
+            for preset in Preset::ALL {
+                let mut g = with_display(resolution, mode);
+                preset.apply(&mut g);
+                assert_eq!(g.resolution, resolution, "{} must not change the resolution", preset.label());
+                assert_eq!(g.display_mode, mode, "{} must not change the display mode", preset.label());
+            }
+        }
+    }
+
+    #[test]
+    fn the_presets_set_the_picture_and_frame_cap_they_describe() {
+        let mut g = Graphics::default();
+
+        Preset::Performance.apply(&mut g);
+        assert_eq!(g.render_scale, 0.75);
+        assert_eq!(g.upscaling, "FSR 1.0");
+        assert_eq!(g.sharpening, "Default");
+        assert_eq!(g.frame_limit, 60);
+        assert!(g.vsync && g.shader_precompile);
+
+        Preset::Balanced.apply(&mut g);
+        assert_eq!(g.render_scale, 1.0);
+        assert_eq!(g.upscaling, "Off");
+        assert_eq!(g.sharpening, "Default");
+
+        Preset::Quality.apply(&mut g);
+        assert_eq!(g.render_scale, 1.0);
+        assert_eq!(g.upscaling, "Off");
+        assert_eq!(g.sharpening, "High");
+        assert_eq!(g.frame_limit, 60);
+        assert!(g.vsync && g.shader_precompile);
+    }
+
+    #[test]
+    fn presets_leave_advanced_only_values_alone() {
+        let mut g = Graphics {
+            upscale_quality: "Ultra performance".into(),
+            scene_scale: 80,
+            frame_gen: "FSR 3 Frame Generation".into(),
+            re_shade: false,
+            dlss_upscaler: "DLSS".into(),
+            astc_quality: "Fast".into(),
+            gpu: "Discrete".into(),
+            compile_threads: 6,
+            compile_priority: "Normal".into(),
+            compile_eco: false,
+            quality: "Sharp".into(),
+            aspect: "21:9".into(),
+            ..Default::default()
+        };
+        for preset in Preset::ALL {
+            preset.apply(&mut g);
+        }
+        // Everything below is set only on the Advanced graphics page; a Standard preset must not reset it.
+        assert_eq!(g.upscale_quality, "Ultra performance");
+        assert_eq!(g.scene_scale, 80);
+        assert_eq!(g.frame_gen, "FSR 3 Frame Generation");
+        assert!(!g.re_shade);
+        assert_eq!(g.dlss_upscaler, "DLSS");
+        assert_eq!(g.astc_quality, "Fast");
+        assert_eq!(g.gpu, "Discrete");
+        assert_eq!(g.compile_threads, 6);
+        assert_eq!(g.compile_priority, "Normal");
+        assert!(!g.compile_eco);
+        assert_eq!(g.quality, "Sharp");
+        assert_eq!(g.aspect, "21:9");
+    }
+
 }

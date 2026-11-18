@@ -301,7 +301,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Action::SetupPage => {
             app.config.onboarding.dismissed = true;
             app.config.onboarding.step = 1;
-            app.page = crate::pages::Page::Setup;
+            app.open(crate::pages::Page::Setup);
         }
         Action::ChooseFolder => {
             if let Some(folder) = rfd::FileDialog::new().set_title("Choose the folder holding exefs and romfs").pick_folder() {

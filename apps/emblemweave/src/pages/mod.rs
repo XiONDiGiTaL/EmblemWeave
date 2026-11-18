@@ -252,12 +252,6 @@ impl NavGroup {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    // A build-details, diagnostics or log link is an explicit request for an
-    // advanced page. Reveal the mode instead of dropping the click on Overview;
-    // the rail stays uncluttered until the player asks for one of these pages.
-    if !app.page.available(app.config.interface_mode) {
-        app.config.interface_mode = InterfaceMode::Advanced;
-    }
     match app.page {
         Page::Overview => overview::show(app, ui),
         Page::Setup => setup::show(app, ui),
@@ -314,6 +308,50 @@ mod tests {
         for page in Page::ALL {
             assert!(page.available(InterfaceMode::Advanced), "{} must remain reachable in Advanced mode", page.label());
         }
+    }
+
+    #[test]
+    fn each_navigation_group_filters_its_own_pages_by_mode() {
+        for group in NavGroup::ALL {
+            let all = group.pages().to_vec();
+            assert_eq!(
+                group.pages_for(InterfaceMode::Advanced),
+                all,
+                "{} must keep every page in Advanced mode",
+                group.label()
+            );
+            let expected: Vec<Page> = all.iter().copied().filter(|page| !page.advanced()).collect();
+            assert_eq!(
+                group.pages_for(InterfaceMode::Standard),
+                expected,
+                "{} must hide exactly its advanced pages in Standard mode",
+                group.label()
+            );
+        }
+    }
+
+    #[test]
+    fn standard_navigation_is_advanced_navigation_without_the_three_internal_pages() {
+        let advanced: Vec<Page> = NavGroup::ALL
+            .into_iter()
+            .flat_map(|group| group.pages_for(InterfaceMode::Advanced))
+            .collect();
+        let standard: Vec<Page> = NavGroup::ALL
+            .into_iter()
+            .flat_map(|group| group.pages_for(InterfaceMode::Standard))
+            .collect();
+
+        assert_eq!(advanced.len(), Page::ALL.len(), "Advanced mode must show every page");
+        for page in Page::ALL {
+            assert!(advanced.contains(&page), "{} is missing from Advanced navigation", page.label());
+        }
+        // Standard keeps the rail's order and drops only what is advanced; nothing is regrouped or reordered.
+        let expected: Vec<Page> = advanced.iter().copied().filter(|page| !page.advanced()).collect();
+        assert_eq!(standard, expected);
+        assert!(
+            !standard.iter().any(|page| page.advanced()),
+            "an advanced page must never reach Standard navigation"
+        );
     }
 
     #[test]

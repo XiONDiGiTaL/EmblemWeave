@@ -1,6 +1,6 @@
 //! Appearance: choose the launcher's colour scheme from compact live previews.
 
-use crate::config::InterfaceMode;
+use crate::config::{Config, InterfaceMode};
 use crate::pages::Page;
 use crate::theme::{self, Scheme};
 use crate::widgets::{self, Tone};
@@ -113,13 +113,78 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// Select an interface mode. The page moves to Overview only when the new mode hides it, and every setting — including
+/// the values only the Advanced graphics page can edit — is left exactly as it was. Returns whether the mode changed.
+fn switch_mode(config: &mut Config, page: &mut Page, mode: InterfaceMode) -> bool {
+    if config.interface_mode == mode {
+        return false;
+    }
+    config.interface_mode = mode;
+    if !page.available(mode) {
+        *page = Page::Overview;
+    }
+    true
+}
+
 fn set_mode(app: &mut App, mode: InterfaceMode) {
-    if app.config.interface_mode == mode {
-        return;
+    if switch_mode(&mut app.config, &mut app.page, mode) {
+        app.note(format!("{} mode selected", mode.label()), Tone::Neutral);
     }
-    app.config.interface_mode = mode;
-    if !app.page.available(mode) {
-        app.page = Page::Overview;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration carrying values only the Advanced graphics page can set.
+    fn advanced_config() -> Config {
+        let mut config = Config::default();
+        config.interface_mode = InterfaceMode::Advanced;
+        config.graphics.upscaling = "DLSS".into();
+        config.graphics.upscale_quality = "Performance".into();
+        config.graphics.scene_scale = 75;
+        config.graphics.frame_gen = "FSR 3 Frame Generation".into();
+        config.graphics.re_shade = false;
+        config.graphics.compile_threads = 8;
+        config.graphics.compile_eco = false;
+        config
     }
-    app.note(format!("{} mode selected", mode.label()), Tone::Neutral);
+
+    #[test]
+    fn switching_modes_keeps_advanced_values_and_a_visible_page() {
+        let mut config = advanced_config();
+        let graphics = config.graphics.clone();
+        let mut page = Page::Graphics;
+
+        assert!(switch_mode(&mut config, &mut page, InterfaceMode::Standard));
+        assert_eq!(config.interface_mode, InterfaceMode::Standard);
+        assert_eq!(page, Page::Graphics, "both modes show Graphics, so it stays selected");
+        assert_eq!(config.graphics, graphics, "switching to Standard must not rewrite an Advanced setting");
+
+        assert!(switch_mode(&mut config, &mut page, InterfaceMode::Advanced));
+        assert_eq!(config.interface_mode, InterfaceMode::Advanced);
+        assert_eq!(config.graphics, graphics, "and switching back changes nothing either");
+    }
+
+    #[test]
+    fn a_page_the_new_mode_hides_falls_back_to_overview() {
+        let mut config = advanced_config();
+        let graphics = config.graphics.clone();
+        let mut page = Page::Diagnostics;
+
+        assert!(switch_mode(&mut config, &mut page, InterfaceMode::Standard));
+        assert_eq!(page, Page::Overview, "Diagnostics is hidden in Standard");
+        assert_eq!(config.graphics, graphics, "the setting behind the hidden page is kept");
+    }
+
+    #[test]
+    fn choosing_the_current_mode_changes_nothing() {
+        let mut config = advanced_config();
+        let graphics = config.graphics.clone();
+        let mut page = Page::Log;
+
+        assert!(!switch_mode(&mut config, &mut page, InterfaceMode::Advanced));
+        assert_eq!(page, Page::Log, "an advanced page stays selected in Advanced mode");
+        assert_eq!(config.graphics, graphics);
+    }
 }

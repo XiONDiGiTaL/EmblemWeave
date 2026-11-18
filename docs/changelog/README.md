@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.39](0.1.39.md) | 2026-11-18 | Standard mode, DLC discovery, special-character build paths, and an updater that keeps the built game. |
 | [0.1.38](0.1.38.md) | 2026-11-17 | Save-profile corrections, a build fix when another Python's paths are inherited, and a rebuilt launcher. |
 | [0.1.37](0.1.37.md) | 2026-11-17 | A guided first run, RomFS mods that stay above package data, faster lifted code, HDR UI brightness, and a broad engine update. |
 | [0.1.36](0.1.36.md) | 2026-11-16 | The GT tone map is recognised by every HDR hook, build-cache resets only fire on real CMake errors, an existing mod folder uses its absolute path, and advanced settings fold into drawers. |

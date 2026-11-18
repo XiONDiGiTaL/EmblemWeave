@@ -1159,77 +1159,102 @@ pub fn cmd_breaker(path: &Path) -> Option<char> {
         .find(|c| CMD_BREAKERS.contains(c))
 }
 
-/// The 8.3 spelling of a path, when the volume has short names enabled. The
-/// short form contains no cmd.exe separators, so a folder such as
-/// `G:\Games\PC Ports & Recomps` can be used as the build's working directory
-/// without changing the real project path or moving the user's files.
-#[cfg(windows)]
-fn short_path(path: &Path) -> Option<PathBuf> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+/// The folder the game is built from, as the build's commands spell it.
+///
+/// A path containing a character cmd.exe splits a command line at is reached through a directory junction in the temporary
+/// folder, whose spelling has none of those characters. An 8.3 short name is not enough on its own: CMake writes a custom
+/// command's `WORKING_DIRECTORY` (the engine's lift command sets it to the checkout root, NxRecomp.cmake) and a target's
+/// output folder as absolute paths, and it turns a short name back into the real long spelling there. The junction gives
+/// the same files another name, so the working directory the build actually runs in has no separator in it, and every
+/// path CMake generates from it stays that way. It is removed when the build is over; the checkout, saves and build
+/// outputs never move.
+#[derive(Debug)]
+struct BuildDir {
+    /// What the build commands run in.
+    path: PathBuf,
+    /// The junction to remove, when one was made.
+    link: Option<PathBuf>,
+}
 
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut buffer = vec![0u16; 32_768];
-    let length = unsafe {
-        windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
-            wide.as_ptr(),
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-        )
-    };
-    if length == 0 || length as usize >= buffer.len() {
-        return None;
+impl Drop for BuildDir {
+    fn drop(&mut self) {
+        if let Some(link) = self.link.take() {
+            // Removing a junction removes the name, not the folder it points at: the build outputs stay where they are.
+            let _ = std::fs::remove_dir(link);
+        }
     }
-    buffer.truncate(length as usize);
-    Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
 }
 
-/// A file path handed to a generated command line, spelled so cmd.exe cannot
-/// split it. This is needed for paths inside the project too: CMake embeds the
-/// absolute `FEFW_SITES` path in its generated lift command, and a short working
-/// directory alone would not remove the separator from that argument.
-#[cfg(windows)]
-fn cmd_safe_path(path: &Path) -> PathBuf {
-    if cmd_breaker(path).is_none() {
-        return path.to_path_buf();
-    }
-    short_path(path).filter(|short| cmd_breaker(short).is_none()).unwrap_or_else(|| path.to_path_buf())
-}
-
-#[cfg(not(windows))]
-fn cmd_safe_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
-}
-
-/// The folder the game is built from. A path containing a character cmd.exe
-/// splits a command line at is mapped to its 8.3 spelling when Windows provides
-/// one. That keeps the original folder, saves and build outputs in place; only
-/// the working directory passed to the build changes. If short names are
-/// disabled, stop with the reason instead of letting ninja report a truncated
-/// path (`CMakeFiles\G_\Games\PC_Ports_`).
-fn build_root(root: &Path) -> Result<PathBuf, String> {
+fn build_dir(root: &Path) -> Result<BuildDir, String> {
     if cmd_breaker(root).is_none() {
-        return Ok(root.to_path_buf());
+        return Ok(BuildDir {
+            path: root.to_path_buf(),
+            link: None,
+        });
     }
     #[cfg(windows)]
-    if let Some(short) = short_path(root) {
-        if cmd_breaker(&short).is_none() {
-            return Ok(short);
-        }
+    if let Some(link) = junction_view(root) {
+        return Ok(BuildDir {
+            path: link.clone(),
+            link: Some(link),
+        });
     }
     let bad = cmd_breaker(root).unwrap_or('?');
     Err(format!(
-        "the project is in a folder whose path contains '{bad}':\n\n{}\\n\ncmd.exe splits its command line at & | < > ^ ( ) %, even inside quotes, so the linker step CMake generates for the \
-         lifted code would be cut in half and ninja would report a path that does not exist (\"CMakeFiles\\G_\\Games\\
-         PC_Ports_\").\n\nWindows can normally build this folder through its short 8.3 name, but short names are disabled on this \
-         volume. Enable 8.3 names for the volume or move EmblemWeave to a folder whose path has none of & | < > ^ ( ) %, \
-         for example C:\\EmblemWeave, then press Build the game again. An existing game folder can be moved as it is; only \
-         paths outside it are written into its ini.",
+        "the project is in a folder whose path contains '{bad}':\n\n{}\\n\ncmd.exe splits its command line at & | < > ^ ( ) %, even inside quotes, so the linker and lift steps CMake generates \
+         for the lifted code would be cut in half and ninja would report a path that does not exist (\"CMakeFiles\\G_\\Games\\
+         PC_Ports_\").\n\nEmblemWeave builds such a folder through a temporary junction, \
+         but one could not be made here (the temporary folder is unavailable, or creating the junction was refused). Move EmblemWeave to a folder whose path has none of & | < > ^ ( ) %, for example \
+         C:\\EmblemWeave, then press Build the game again. An existing game folder can \
+         be moved as it is; only paths outside it are written into its ini.",
         root.display()
     ))
+}
+
+/// A junction in the temporary folder that names `root` without the characters cmd.exe splits at, or nothing when one
+/// cannot be made. The name is derived from the real path, so the same checkout reuses the same junction across builds;
+/// a leftover from a killed build is replaced.
+#[cfg(windows)]
+fn junction_view(root: &Path) -> Option<PathBuf> {
+    let temp = std::env::temp_dir();
+    if !temp.is_dir() || cmd_breaker(&temp).is_some() {
+        return None;
+    }
+    let real = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // FNV-1a over the real path: stable across runs, and only a naming hint, never a security decision.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in real.to_string_lossy().to_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for attempt in 0..4 {
+        let name = if attempt == 0 {
+            format!("emblemweave-build-{hash:016x}")
+        } else {
+            format!("emblemweave-build-{hash:016x}-{attempt}")
+        };
+        let link = temp.join(name);
+        match std::fs::symlink_metadata(&link) {
+            // Only a link is removed: an unrelated real folder with this name is left alone, and the next name is tried.
+            Ok(meta) if meta.is_dir() && meta.file_type().is_symlink() => {
+                let _ = std::fs::remove_dir(&link);
+            }
+            Ok(_) => continue,
+            Err(_) => {}
+        }
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::toolchain::hidden(&mut cmd);
+        if cmd.status().is_ok_and(|s| s.success()) && link.is_dir() {
+            return Some(link);
+        }
+    }
+    None
 }
 
 fn run_env(
@@ -2601,17 +2626,20 @@ pub fn build(
         ));
     }
     // cmd.exe splits its command line at & | < > ^ ( ) % even when the line is quoted, which is how `G:\Games\PC Ports &
-    // Recomps` became a command called `CMakeFiles\G_\Games\PC_Ports_`. Stop with that explanation instead of building.
-    let root_here = build_root(&root)?;
-    // CMake copies this path into the generated lift command; a long path with
-    // an ampersand would still be split even though cmd's working directory is
-    // the safe short spelling above.
-    let site_path = cmd_safe_path(&site_list);
+    // Recomps` became a command called `CMakeFiles\G_\Games\PC_Ports_`. The build runs through a spelling of the checkout
+    // that has none of those characters, or stops with that explanation instead of building.
+    let build_view = build_dir(&root)?;
+    // CMake copies this path into the generated lift command; it gets the same spelling as the build folder, so the
+    // generated `WORKING_DIRECTORY`/output paths and this argument agree and neither is cut.
+    let site_path = site_list
+        .strip_prefix(&root)
+        .map(|rel| build_view.path.join(rel))
+        .unwrap_or(site_list);
     let site_list = site_path.display().to_string();
     envs.push(("FEFW_SITES", &site_list));
     let built = run_env(
         ctx,
-        &root_here,
+        &build_view.path,
         "cmd",
         &["/C", "recomp\\scripts\\build_game.cmd", "fefw"],
         &envs,
@@ -2640,7 +2668,7 @@ pub fn build(
         let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
         run_env(
             ctx,
-            &root_here,
+            &build_view.path,
             "cmd",
             &["/C", "recomp\\scripts\\build_game.cmd", "fefw"],
             &envs,
@@ -5037,13 +5065,13 @@ mod tests {
             Some('%')
         );
 
-        assert!(super::build_root(Path::new(r"C:\Users\me\EmblemWeave")).is_ok());
+        assert!(super::build_dir(Path::new(r"C:\Users\me\EmblemWeave")).is_ok());
         let said =
-            super::build_root(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")).unwrap_err();
+            super::build_dir(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")).unwrap_err();
         assert!(said.contains("contains '&'"), "names the character: {said}");
         assert!(
-            said.contains("short 8.3"),
-            "explains the short-name fallback: {said}"
+            said.contains("temporary junction"),
+            "explains the junction and why it failed: {said}"
         );
         assert!(
             said.contains("PC Ports & Recomps"),
@@ -5053,20 +5081,188 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_real_special_path_uses_its_short_name_or_reports_why_it_cannot() {
+    fn a_cmake_ninja_build_runs_from_a_folder_cmd_would_split() {
         use std::path::Path;
-        let dir = std::env::temp_dir().join(format!("EmblemWeave & path {}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let result = super::build_root(&dir);
-        match super::short_path(&dir) {
-            Some(short) if super::cmd_breaker(&short).is_none() => {
-                assert_eq!(result.unwrap(), short, "the safe spelling is used for the build");
-            }
-            _ => {
-                let said = result.unwrap_err();
-                assert!(said.contains("short 8.3"), "the fallback limit is named: {said}");
-            }
+
+        // The engine's own build tools. A PC without them cannot compile anything, so the test says what it skipped
+        // instead of failing on a missing install.
+        if !super::which_tool("cmake") || !super::which_tool("ninja") {
+            eprintln!("skipping the end-to-end special-path build: cmake and ninja are not installed");
+            return;
         }
+        let toolchain = match crate::toolchain::init() {
+            Ok(toolchain) => toolchain,
+            Err(e) => {
+                eprintln!("skipping the end-to-end special-path build: the Windows toolchain is unavailable: {e}");
+                return;
+            }
+        };
+
+        // A folder name with an ampersand, the shape of the reported `G:\Games\PC Ports & Recomps`.
+        let root = std::env::temp_dir().join(format!(
+            "EmblemWeave & Regression {}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let sites = root.join("hook sites").join("main.sites");
+        std::fs::create_dir_all(sites.parent().unwrap()).unwrap();
+        std::fs::write(&sites, "fefw:main\n").unwrap();
+        std::fs::write(root.join("main.c"), "int main(void) { return 0; }\n").unwrap();
+        // The parts of the engine's build this exercises: a Ninja project, the hook-site list embedded in a command
+        // ninja runs through cmd.exe, and an absolute path from the folder cmd.exe would split.
+        std::fs::write(
+            root.join("CMakeLists.txt"),
+            r#"cmake_minimum_required(VERSION 3.25)
+project(ew_special_path_probe C)
+if(DEFINED ENV{FEFW_SITES} AND NOT "$ENV{FEFW_SITES}" STREQUAL "")
+    set(FEFW_SITES "$ENV{FEFW_SITES}")
+endif()
+if(NOT DEFINED FEFW_SITES OR FEFW_SITES STREQUAL "")
+    message(FATAL_ERROR "FEFW_SITES is not set")
+endif()
+configure_file("${FEFW_SITES}" "${CMAKE_BINARY_DIR}/main.sites" COPYONLY)
+add_executable(probe main.c)
+# The engine's lift rule (NxRecomp.cmake): an absolute working directory and the hook-site list in a command ninja runs
+# through cmd.exe. CMake writes both as absolute paths, which is where the long spelling of the checkout used to be cut.
+add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/lift.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FEFW_SITES}" "${CMAKE_BINARY_DIR}/lift.txt"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    DEPENDS "${FEFW_SITES}")
+add_custom_target(lift ALL DEPENDS "${CMAKE_BINARY_DIR}/lift.txt")
+add_dependencies(lift probe)
+"#,
+        )
+        .unwrap();
+
+        // The mapping the build applies before it starts: the folder it runs in, and the hook-site path beneath it.
+        let view = super::build_dir(&root)
+            .unwrap_or_else(|e| panic!("the build folder for a real '&' path was refused: {e}"));
+        let build_root = &view.path;
+        assert_ne!(
+            build_root, &root,
+            "the build has to run from a spelling cmd.exe can carry, not the long one"
+        );
+        assert_eq!(
+            super::cmd_breaker(build_root),
+            None,
+            "the build folder still splits a cmd line: {}",
+            build_root.display()
+        );
+        assert!(
+            build_root.is_dir(),
+            "the build folder does not name the checkout: {}",
+            build_root.display()
+        );
+        let safe_sites = build_root.join(sites.strip_prefix(&root).unwrap());
+        assert_eq!(
+            super::cmd_breaker(&safe_sites),
+            None,
+            "the hook-site path still splits a cmd line: {}",
+            safe_sites.display()
+        );
+
+        let build = Path::new("work").join("build").join("fefw");
+        let mut configure = Command::new("cmake");
+        configure
+            .current_dir(build_root)
+            .args(["-G", "Ninja"])
+            .arg("-S")
+            .arg(build_root)
+            .arg("-B")
+            .arg(build_root.join(&build))
+            .arg("-DCMAKE_BUILD_TYPE=Release")
+            .arg(format!("-DCMAKE_C_COMPILER={}", toolchain.compiler.display()))
+            .env("FEFW_SITES", &safe_sites);
+        // The environment every build step gets, from the same toolchain probe (INCLUDE, LIB and PATH from vcvars).
+        crate::toolchain::scrub(&mut configure);
+        for (k, v) in &toolchain.env {
+            configure.env(k, v);
+        }
+        crate::toolchain::hidden(&mut configure);
+        let out = configure.output().expect("starting cmake");
+        assert!(
+            out.status.success(),
+            "cmake could not configure in {}:\n{}{}",
+            build_root.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let mut compile = Command::new("cmake");
+        compile
+            .current_dir(build_root)
+            .arg("--build")
+            .arg(build_root.join(&build));
+        crate::toolchain::scrub(&mut compile);
+        for (k, v) in &toolchain.env {
+            compile.env(k, v);
+        }
+        crate::toolchain::hidden(&mut compile);
+        let out = compile.output().expect("starting cmake --build");
+        assert!(
+            out.status.success(),
+            "ninja could not build in {}:\n{}{}",
+            build_root.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let exe = build_root.join(&build).join("probe.exe");
+        assert!(
+            exe.is_file(),
+            "the compiler and linker did not write {}; ninja ran, so its command line was cut somewhere",
+            exe.display()
+        );
+        // The lift-shaped command runs with an absolute working directory and carries the hook-site path: the two places
+        // the long spelling used to be cut.
+        assert_eq!(
+            std::fs::read_to_string(build_root.join(&build).join("lift.txt"))
+                .expect("the lift-shaped command did not run"),
+            "fefw:main\n"
+        );
+        // The end-to-end point: CMake wrote the whole build with the short spelling. A long path in this file is what
+        // cmd.exe splits before the linker runs (`CMakeFiles\G_\Games\PC_Ports_`).
+        let ninja = std::fs::read_to_string(build_root.join(&build).join("build.ninja"))
+            .expect("reading build.ninja");
+        assert!(
+            !ninja.to_lowercase().contains("emblemweave & regression"),
+            "build.ninja still names the long folder, so cmd.exe can split a generated command:\n{ninja}"
+        );
+
+        let junction = view.link.clone();
+        drop(view);
+        assert!(
+            junction.is_none_or(|link| !link.exists()),
+            "the junction was left behind after the build"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_real_special_path_gets_a_build_folder_cmd_can_carry() {
+        let dir = std::env::temp_dir().join(format!("EmblemWeave & path {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let view = super::build_dir(&dir).unwrap_or_else(|e| panic!("{e}"));
+        assert_ne!(view.path, dir, "the build needs another spelling of the folder");
+        assert_eq!(
+            super::cmd_breaker(&view.path),
+            None,
+            "the build folder still splits a cmd line: {}",
+            view.path.display()
+        );
+        assert!(view.path.is_dir(), "{} does not name the folder", view.path.display());
+        // The same folder: what the build writes lands in the checkout, not in a copy.
+        std::fs::write(dir.join("marker.txt"), "kept").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(view.path.join("marker.txt")).unwrap(),
+            "kept"
+        );
+        let link = view.link.clone().expect("the mapping must use a junction");
+        drop(view);
+        assert!(!link.exists(), "removing the view must remove only the junction");
+        assert!(dir.join("marker.txt").is_file(), "the checkout must be untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

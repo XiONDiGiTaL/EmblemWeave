@@ -453,7 +453,7 @@ fn system_panel(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                     .link(RichText::new("Full status").size(10.0).color(p.accent_hi))
                     .clicked()
                 {
-                    app.page = Page::Requirements;
+                    app.open(Page::Requirements);
                 }
             });
         });
@@ -539,7 +539,7 @@ fn system_panel(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 app.notify("Checking the game folder and build tools", Tone::Accent);
             }
             if let Some(page) = goto {
-                app.page = page;
+                app.open(page);
             }
         });
     });
@@ -714,7 +714,7 @@ fn quick_access(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 continue;
             }
             if widgets::shortcut_pill(ui, p, page, &detail, tone).clicked() {
-                app.page = page;
+                app.open(page);
             }
         }
     });
@@ -874,7 +874,7 @@ fn game_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     }
     ui.add_space(5.0);
     if widgets::button(ui, p, "Open Game Setup", true).clicked() {
-        app.page = Page::Setup;
+        app.open(Page::Setup);
         app.overview_popup = None;
     }
     ui.add_space(4.0);
@@ -951,7 +951,7 @@ fn build_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         }
         ui.add_space(5.0);
         if widgets::button(ui, p, "Open build details", true).clicked() {
-            app.page = Page::Recompile;
+            app.open(Page::Recompile);
             app.overview_popup = None;
         }
     } else if ready {
@@ -994,7 +994,7 @@ fn build_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                     .color(p.body),
             );
             if widgets::primary_button(ui, p, "Review requirements", true).clicked() {
-                app.page = Page::Requirements;
+                app.open(Page::Requirements);
                 app.overview_popup = None;
             }
         } else if widgets::primary_button(
@@ -1056,15 +1056,15 @@ fn quick_help_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         if widgets::button(ui, p, "Requirements", true).clicked() {
-            app.page = Page::Requirements;
+            app.open(Page::Requirements);
             app.overview_popup = None;
         }
         if widgets::button(ui, p, "Troubleshooter", true).clicked() {
-            app.page = Page::Troubleshoot;
+            app.open(Page::Troubleshoot);
             app.overview_popup = None;
         }
         if widgets::button(ui, p, "Game Log", true).clicked() {
-            app.page = Page::Log;
+            app.open(Page::Log);
             app.overview_popup = None;
         }
     });
@@ -1413,7 +1413,7 @@ fn setup_stages(app: &App) -> Vec<SetupStage> {
 
 fn run_action(app: &mut App, action: Action) {
     match action {
-        Action::Open(page) => app.page = page,
+        Action::Open(page) => app.open(page),
         Action::Run(kind) => app.start(kind),
         Action::Play => app.play(),
         Action::InstallTools => match crate::engine::start_install() {

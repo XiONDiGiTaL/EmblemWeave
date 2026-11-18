@@ -247,6 +247,16 @@ impl Nsp {
         Ok(self.ncas()?.into_iter().find(|n| n.kind == ContentKind::Control))
     }
 
+    /// Every data NCA, the content type add-on packs use. The caller narrows
+    /// these to the base title's add-on range before writing them out.
+    pub fn addons(&self) -> Result<Vec<Nca>> {
+        Ok(self
+            .ncas()?
+            .into_iter()
+            .filter(|n| matches!(n.kind, ContentKind::Data | ContentKind::PublicData))
+            .collect())
+    }
+
     /// Copy the ExeFS, the RomFS and the control metadata into `dest`, where the
     /// launcher reads them like an NSP extraction. `progress` is told how many
     /// bytes have been copied and how many there are to copy, about every
@@ -373,6 +383,12 @@ fn nca(f: &mut File, e: &Entry) -> Result<Nca> {
 }
 
 impl Nca {
+    /// Whether this NCA carries a RomFS section, which is what makes it an
+    /// add-on pack rather than, say, a control or metadata NCA.
+    pub fn has_romfs(&self) -> bool {
+        self.sections.iter().any(|s| s.is_romfs())
+    }
+
     /// Every ExeFS file, as a range to copy out.
     pub fn exefs(&self, f: &mut File) -> Result<Vec<Extent>> {
         let Some(section) = self.sections.iter().find(|s| !s.is_romfs() && u16_at(&s.fs, 0) == 2) else {
@@ -460,6 +476,100 @@ impl Nca {
         }
         out.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(out)
+    }
+}
+
+/// Copy one add-on NCA's RomFS into `dest`, preserving its paths. `dest` is the
+/// pack's `romfs` folder; `progress` counts this NCA's bytes, and `cancelled` is
+/// polled between files. Shared by `.nsp` and `.xci` so both containers produce
+/// exactly the same managed DLC layout as a `.nup`.
+pub fn dump_nca_romfs(
+    source: &Path,
+    nca: &Nca,
+    dest: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(usize, u64)> {
+    let mut f = File::open(source).with_context(|| format!("opening {}", source.display()))?;
+    let files = nca.romfs(&mut f)?;
+    let total = files.iter().map(|e| e.size).sum::<u64>();
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    progress(0, total);
+    let mut done = 0u64;
+    let mut reported = 0u64;
+    for e in &files {
+        if cancelled() {
+            return Err(anyhow::Error::new(Cancelled));
+        }
+        safe_path(&e.path)?;
+        let to = dest.join(e.path.replace('\\', "/"));
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        copy_range(&mut f, e.offset, e.size, &to)?;
+        done += e.size;
+        if done - reported >= (16 << 20) || done == total {
+            reported = done;
+            progress(done, total);
+        }
+    }
+    Ok((files.len(), done))
+}
+
+#[cfg(test)]
+pub(crate) mod test_data {
+    /// A plaintext NCA with one RomFS section holding `data` at `name`. It is
+    /// deliberately small but follows the same IVFC/RomFS table layout the real
+    /// parser reads, so `.nsp` and `.xci` add-on tests share it.
+    pub(crate) fn nca_with_romfs(name: &str, data: &[u8], kind: u8, title: u64) -> Vec<u8> {
+        let dir_meta_at = 0x50usize;
+        let dir_meta_len = 0x18usize;
+        let file_meta_at = dir_meta_at + dir_meta_len;
+        let file_meta_len = 0x20 + name.len();
+        let data_at = file_meta_at + file_meta_len;
+        let level_off = 0x200usize;
+        let romfs_len = data_at + data.len();
+        let mut romfs = vec![0u8; romfs_len];
+        for (field, value) in [
+            (3, dir_meta_at as u64),
+            (4, dir_meta_len as u64),
+            (7, file_meta_at as u64),
+            (8, file_meta_len as u64),
+            (9, data_at as u64),
+        ] {
+            romfs[8 * field..8 * field + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        // The root directory's only child is the file entry at offset 0.
+        romfs[dir_meta_at + 8..dir_meta_at + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        romfs[dir_meta_at + 12..dir_meta_at + 16].copy_from_slice(&0u32.to_le_bytes());
+        romfs[file_meta_at + 4..file_meta_at + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        romfs[file_meta_at + 8..file_meta_at + 16].copy_from_slice(&0u64.to_le_bytes());
+        romfs[file_meta_at + 16..file_meta_at + 24]
+            .copy_from_slice(&(data.len() as u64).to_le_bytes());
+        romfs[file_meta_at + 28..file_meta_at + 32]
+            .copy_from_slice(&(name.len() as u32).to_le_bytes());
+        romfs[file_meta_at + 0x20..file_meta_at + 0x20 + name.len()]
+            .copy_from_slice(name.as_bytes());
+        romfs[data_at..].copy_from_slice(data);
+
+        let section_at = 0xc00u64;
+        let section_size = ((level_off + romfs_len + 0x1ff) & !0x1ff) as u64;
+        let section_end = section_at + section_size;
+        let mut nca = vec![0u8; section_end as usize];
+        nca[0x200..0x204].copy_from_slice(b"NCA3");
+        nca[0x205] = kind;
+        nca[0x208..0x210].copy_from_slice(&section_end.to_le_bytes());
+        nca[0x210..0x218].copy_from_slice(&title.to_le_bytes());
+        nca[0x240..0x244].copy_from_slice(&((section_at / 0x200) as u32).to_le_bytes());
+        nca[0x244..0x248].copy_from_slice(&((section_end / 0x200) as u32).to_le_bytes());
+        let fs = 0x400usize;
+        nca[fs + 8..fs + 12].copy_from_slice(b"IVFC");
+        nca[fs + 0x14..fs + 0x18].copy_from_slice(&1u32.to_le_bytes());
+        nca[fs + 0x18..fs + 0x20].copy_from_slice(&(level_off as u64).to_le_bytes());
+        nca[fs + 0x20..fs + 0x28].copy_from_slice(&(romfs_len as u64).to_le_bytes());
+        let at = (section_at + level_off as u64) as usize;
+        nca[at..at + romfs.len()].copy_from_slice(&romfs);
+        nca
     }
 }
 
@@ -590,6 +700,24 @@ mod tests {
     }
 
     #[test]
+    fn extracts_an_addon_nca_romfs() {
+        let dir = temp("addon-romfs");
+        let nca = test_data::nca_with_romfs("pack.bin", b"ADDON", 4, 0x0400_7EF0_1F8A_F001);
+        let path = dir.join("addons.nsp");
+        std::fs::write(&path, pfs0_bytes(&[("addon.nca", &nca)])).unwrap();
+        let nsp = Nsp::open(&path).unwrap();
+        let addons = nsp.addons().unwrap();
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].kind, ContentKind::Data);
+        assert!(addons[0].has_romfs());
+        let out = dir.join("pack");
+        let (files, bytes) = dump_nca_romfs(&path, &addons[0], &out, &mut |_, _| {}, &|| false).unwrap();
+        assert_eq!((files, bytes), (1, 5));
+        assert_eq!(std::fs::read(out.join("pack.bin")).unwrap(), b"ADDON");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_encrypted_nca_is_refused_with_the_crypto_type_named() {
         let dir = temp("encrypted");
         let nca = nca_with_exefs(1);
@@ -644,9 +772,18 @@ mod tests {
     }
 }
 
-/// A path from inside the package must stay inside the unpack folder.
+/// A path from inside the package must stay inside the unpack folder. Only
+/// normal components are allowed: this also rejects a Windows drive prefix,
+/// which `Path::join` would otherwise use to replace the destination.
 fn safe_path(name: &str) -> Result<()> {
-    ensure!(!name.contains("..") && !name.starts_with('/') && !name.starts_with('\\'), "{name} names an unsafe path");
+    // Check separators the same way the copy joins them, so a backslash path
+    // cannot become `../` after the join on a non-Windows host.
+    let name = name.replace('\\', "/");
+    let path = Path::new(&name);
+    ensure!(
+        !name.is_empty() && path.components().all(|c| matches!(c, std::path::Component::Normal(_))),
+        "{name} names an unsafe path"
+    );
     Ok(())
 }
 

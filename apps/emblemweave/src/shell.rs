@@ -214,7 +214,7 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                 });
             });
             if let Some(page) = goto {
-                app.page = page;
+                app.open(page);
             }
         });
 }
@@ -297,7 +297,7 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
                         let _ = widgets::nav_group_header(ui, &p, group.label(), false, true, false);
                         for page in &pages {
                             if widgets::nav_item_page(ui, &p, *page, app.page == *page, true).clicked() {
-                                app.page = *page;
+                                app.open(*page);
                             }
                         }
                     } else {
@@ -314,7 +314,7 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
                                 let i = Page::ALL.iter().position(|q| q == page).unwrap_or(0);
                                 let tip = if i < 9 { format!("{}  (Ctrl+{})", page.label(), i + 1) } else { page.label().to_string() };
                                 if widgets::nav_item_page(ui, &p, *page, app.page == *page, false).on_hover_text(tip).clicked() {
-                                    app.page = *page;
+                                    app.open(*page);
                                 }
                             }
                         }
@@ -399,7 +399,7 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                         });
                     }
                     if ui.available_width() >= 54.0 && header_action(ui, &p, "LOG", "Open the game log").clicked() {
-                        app.page = Page::Log;
+                        app.open(Page::Log);
                     }
                     if ui.available_width() >= 70.0 && app.jobs.iter().any(|j| !j.finished()) {
                         let (done, all) = app.jobs.iter().filter(|j| !j.finished()).fold((0, 0), |(d, a), j| {
@@ -568,7 +568,7 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
                     });
                     ui.add_space(5.0);
                     if widgets::button(ui, &p, "Open game log", true).clicked() {
-                        app.page = Page::Log;
+                        app.open(Page::Log);
                         close = true;
                     }
                 });
