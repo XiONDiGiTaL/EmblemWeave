@@ -710,6 +710,9 @@ fn quick_access(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         widgets::tracked(ui, "QUICK ACCESS", 8.5, p.muted, 2.0);
         ui.add_space(4.0);
         for (page, detail, tone) in tiles {
+            if !page.available(app.config.interface_mode) {
+                continue;
+            }
             if widgets::shortcut_pill(ui, p, page, &detail, tone).clicked() {
                 app.page = page;
             }

@@ -2,21 +2,21 @@
 
 The rail groups pages by what you are doing. This page is the full tour: every page, the display settings, upscaling files, and the in-game menu.
 
-## Orientation
-
-A new installation starts in **Standard** mode. It has **Home** (Overview), **Game** (Game Setup), **Library** (Saves,
-Mods, Cheats), **Runtime** (Graphics, Audio, Controls), **System** (Troubleshooter) and **Settings** (Appearance, About).
-**Appearance → Interface → Advanced** adds **Requirements**, **Recompilation**, **Diagnostics** and **Game Log** without
-moving files or changing any setting; a configuration from an older release stays in Advanced. The choice is saved.
+A new installation starts in **Standard** mode. It has **Home** (Overview), **Game** (Game Setup, Requirements), **Library**
+(Saves, Mods, Cheats), **Runtime** (Graphics, Audio, Controls), **System** (Troubleshooter) and **Settings** (Appearance,
+About). **Appearance → Interface → Advanced** adds **Recompilation**, **Diagnostics** and **Game Log** without moving files
+or changing any setting; a configuration from an older release stays in Advanced. A direct Build details, Diagnostics or
+Game Log link reveals Advanced automatically. The choice is saved.
 
 The top strip is the launcher's own shell, with the window controls, version and build revision; the strip along the bottom
 carries the current job and the readiness line.
 
 ## The rail and the pages
 
-The rail groups the pages by mode. **Standard** has **Home** (Overview), **Game** (Game Setup), **Library** (Saves,
-Mods, Cheats), **Runtime** (Graphics, Audio, Controls), **System** (Troubleshooter) and **Settings** (Appearance, About).
-**Advanced** restores **Requirements**, **Recompilation**, **Diagnostics** and **Game Log**. The strip along the top carries
+The rail groups the pages by mode. **Standard** has **Home** (Overview), **Game** (Game Setup, Requirements), **Library**
+(Saves, Mods, Cheats), **Runtime** (Graphics, Audio, Controls), **System** (Troubleshooter) and **Settings** (Appearance,
+About). **Advanced** restores **Recompilation**, **Diagnostics** and **Game Log**; a direct link to one of those pages
+reveals Advanced automatically. The strip along the top carries
 the wordmark, the page you are on, and the version with the build revision; the strip along the bottom carries the current
 job's progress or the readiness line, and the last thing the launcher did. On **Overview**, the column on the right shows
 where the game data, the recompiler and the runtime stand, and what the launcher has just done.

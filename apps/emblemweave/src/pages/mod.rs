@@ -83,7 +83,7 @@ impl Page {
     /// Pages that expose build internals, logs or diagnostics. Standard mode
     /// keeps them available through Advanced mode rather than removing them.
     pub fn advanced(self) -> bool {
-        matches!(self, Page::Recompile | Page::Diagnostics | Page::Log | Page::Requirements)
+        matches!(self, Page::Recompile | Page::Diagnostics | Page::Log)
     }
 
     /// Whether the page belongs in this interface mode. This is the single
@@ -252,10 +252,11 @@ impl NavGroup {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    // Keep direct links, command-line page selection and a mode switch from
-    // leaving an advanced page on screen after Standard mode is selected.
+    // A build-details, diagnostics or log link is an explicit request for an
+    // advanced page. Reveal the mode instead of dropping the click on Overview;
+    // the rail stays uncluttered until the player asks for one of these pages.
     if !app.page.available(app.config.interface_mode) {
-        app.page = Page::Overview;
+        app.config.interface_mode = InterfaceMode::Advanced;
     }
     match app.page {
         Page::Overview => overview::show(app, ui),
@@ -308,7 +309,7 @@ mod tests {
             .collect();
         assert_eq!(
             hidden,
-            vec![Page::Recompile, Page::Diagnostics, Page::Log, Page::Requirements]
+            vec![Page::Recompile, Page::Diagnostics, Page::Log]
         );
         for page in Page::ALL {
             assert!(page.available(InterfaceMode::Advanced), "{} must remain reachable in Advanced mode", page.label());
