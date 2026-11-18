@@ -31,6 +31,7 @@
 #include "nxrt/log.h"
 #include "nxrt/menu_i18n.h"
 #include "nxrt/nvn.h"
+#include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
 #include "extras/framegen.h"
@@ -193,6 +194,7 @@ struct Overlay::Impl {
     std::atomic<bool> visible{false};
     std::mutex mu;                    // guards the ImGui context: events arrive on the game's main thread, drawing happens on the presenting thread
     int toggle_sc = SDL_SCANCODE_F1;
+    int trace_sc = SDL_SCANCODE_UNKNOWN;   // [gfx] trace_key: trace the next frame (draws, shaders, targets) into the log
     bool restore_relative = false;
     std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
     uint64_t drawn = 0;
@@ -423,6 +425,13 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     const std::string key = config_get_str("gfx", "overlay_key", "F1");
     if (const SDL_Scancode sc = SDL_GetScancodeFromName(key.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.toggle_sc = sc;
     else NXLOG_W(kTag, "unknown [gfx] overlay_key '%s': using F1", key.c_str());
+    {   // [gfx] trace_key: empty = off
+        const std::string tk = config_get_str("gfx", "trace_key", "");
+        if (!tk.empty()) {
+            if (const SDL_Scancode sc = SDL_GetScancodeFromName(tk.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.trace_sc = sc;
+            else NXLOG_W(kTag, "unknown [gfx] trace_key '%s': no trace key", tk.c_str());
+        }
+    }
     {   // [gfx] overlay_pad: Switch buttons joined by '+' (after the player's mapping), "none" = no chord
         std::string chord = config_get_str("gfx", "overlay_pad", "minus+plus");
         for (char& c : chord) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -958,6 +967,13 @@ uint64_t Overlay::set_menu_pad(uint64_t b, int lx, int ly) {
 bool Overlay::handle_event(const input::Event& e) {
     Impl& s = *impl_;
     using input::EventType;
+    if (s.trace_sc != SDL_SCANCODE_UNKNOWN && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.trace_sc) {
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
+            NXLOG_I(kTag, "trace key: tracing the next frame");
+            nvn::backend_trace_next_frame();
+        }
+        return true;
+    }
     if ((e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.toggle_sc) {
         if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle();
         return true;   // the toggle key never reaches the game (press, repeat and release)

@@ -33,6 +33,10 @@ struct OutputParams {
     bool src_linear = false;                 // scene-linear float source (HDR scene) rather than sRGB-encoded bytes
     OutputKind out = OutputKind::Sdr8;       // what the destination carries
     float paper_white_nits = 203, peak_nits = 1000;
+    float sdr_gamma = 0;                     // HDR output: re-decode the game's SDR range with this power ([hdr] sdr_gamma); 0 = the sRGB curve
+    float scene_gain = 1;                    // the factor the scene got this frame ([hdr] ui_nits): paper white / paper_white_nits
+    bool dither = false;                     // [hdr] dither: +-1 code value of noise before the target's 10/8-bit quantisation
+    float gamut_expand = 0;                  // HDR output: 0 = the exact BT.709 colours, up to 1 = saturated colours pushed toward DCI-P3
     bool fsr1 = false;                       // upscale with FSR 1 when the picture is larger than the source
     bool nis = false;                        // upscale with NVIDIA Image Scaling instead (FSR 1 when the scale is beyond 2x)
     float sharpness = 0.8f;                  // 0..1 (RCAS / NIS)
@@ -63,7 +67,7 @@ public:
 private:
     VkPipeline encode_pipeline(VkFormat fmt);
     void encode(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_format, VkExtent2D dst_extent, VkImageView src, VkExtent2D src_extent, const int32_t crop[4],
-                bool keep_aspect, bool flip_y, int mode, float paper, float peak, VkImageLayout src_layout, const float* pic);
+                bool keep_aspect, bool flip_y, int mode, float paper, float peak, VkImageLayout src_layout, const float* pic, float sdr_gamma, float gain, float gamut, bool dither);
 
     gfx::Device* dev_ = nullptr;
     VkSampler linear_ = VK_NULL_HANDLE, nearest_ = VK_NULL_HANDLE;

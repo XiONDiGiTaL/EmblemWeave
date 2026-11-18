@@ -1295,3 +1295,125 @@ bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vecto
 bool spirv_scale_output0(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) { return patch_output0(in, 0, out); }
 
 }  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn::be::gpu {
+
+bool spirv_push_scale_cb(const std::vector<uint32_t>& in, uint32_t vec, uint32_t comp, int mode, std::vector<uint32_t>& out, int binding) {
+    enum : uint32_t { OpEntryPointOp = 15, OpExtInstImportOp = 11, OpExtInstOp = 12, OpTypeIntOp = 21, OpTypeFloatOp = 22, OpTypeStructOp = 30,
+                      OpTypePointerOp = 32, OpConstantOp = 43, OpFunctionOp = 54, OpVariableOp = 59, OpLoadOp = 61, OpAccessChainOp = 65,
+                      OpDecorateOp = 71, OpMemberDecorateOp = 72, OpFSubOp = 131, OpFMulOp = 133, DecBlock = 2, DecOffset = 35, DecBinding = 33,
+                      StorageUniform = 2, StoragePushConstant = 9, ModelFragment = 4, GlslExp2 = 29, GlslFMax = 40 };
+    if (in.size() < 5 || in[0] != 0x07230203u || mode < 0 || mode > 1) return false;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    uint32_t bound = in[3], f32 = 0, sint = 0, glsl = 0, entries = 0;
+    bool fragment = false;
+    size_t first_function = 0, first_type = 0;
+    std::map<uint32_t, uint32_t> int_value;   // 32-bit integer constant -> value
+    std::map<uint32_t, bool> int_type, uniform_var;
+    std::map<uint32_t, uint32_t> binding_of;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpFunctionOp) { if (!first_function) first_function = n.at; continue; }
+        if (first_function) continue;
+        if (!first_type && n.op >= 19 && n.op < OpDecorateOp) first_type = n.at;
+        if (n.op == OpEntryPointOp && n.len >= 4) { if (!entries++ && w[1] == ModelFragment) fragment = true; }
+        else if (n.op == OpExtInstImportOp && n.len >= 5 && std::memcmp(&w[2], "GLSL.std.450", 12) == 0) glsl = w[1];
+        else if (n.op == OpTypeFloatOp && n.len >= 3 && w[2] == 32) f32 = w[1];
+        else if (n.op == OpTypeIntOp && n.len == 4 && w[2] == 32) { int_type[w[1]] = true; if (w[3] == 1) sint = w[1]; }
+        else if (n.op == OpDecorateOp && n.len >= 4 && w[2] == DecBinding) binding_of[w[1]] = w[3];
+        else if (n.op == OpVariableOp && n.len >= 4 && w[3] == StorageUniform) uniform_var[w[2]] = true;
+        else if (n.op == OpVariableOp && n.len >= 4 && w[3] == StoragePushConstant) return false;   // the module has its own push constants
+    }
+    if (binding >= 0)   // only the constant buffer at that binding
+        for (auto it = uniform_var.begin(); it != uniform_var.end();) {
+            auto b = binding_of.find(it->first);
+            if (b == binding_of.end() || b->second != static_cast<uint32_t>(binding)) it = uniform_var.erase(it);
+            else ++it;
+        }
+    if (entries != 1 || !fragment || !f32 || !glsl || !first_function || !first_type) return false;
+    uint32_t int_zero = 0;
+    for (const Inst& n : insts) {
+        if (n.at >= first_function || n.op != OpConstantOp || n.len != 4 || !int_type.count(in[n.at + 1])) continue;
+        int_value[in[n.at + 2]] = in[n.at + 3];
+        if (in[n.at + 1] == sint && in[n.at + 3] == 0) int_zero = in[n.at + 2];
+    }
+    auto is_int = [&](uint32_t id, uint32_t v) { auto it = int_value.find(id); return it != int_value.end() && it->second == v; };
+    // the float's pointers: AccessChain(cb, 0, vec, comp) of one constant buffer
+    std::map<uint32_t, bool> ptr;
+    uint32_t base = 0;
+    for (const Inst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op != OpAccessChainOp || n.len != 7 || !uniform_var.count(w[3])) continue;
+        if (!is_int(w[4], 0) || !is_int(w[5], vec) || !is_int(w[6], comp)) continue;
+        if (base && base != w[3]) return false;
+        base = w[3];
+        ptr[w[2]] = true;
+    }
+    std::map<uint32_t, bool> loaded, product;
+    std::vector<size_t> targets;   // instructions whose result is replaced
+    for (const Inst& n : insts)
+        if (n.op == OpLoadOp && n.len == 4 && in[n.at + 1] == f32 && ptr.count(in[n.at + 3])) {
+            loaded[in[n.at + 2]] = true;
+            if (mode == 0) targets.push_back(n.at);
+        }
+    if (loaded.empty()) return false;
+    if (mode == 1) {
+        for (const Inst& n : insts)
+            if (n.op == OpFMulOp && n.len == 5 && in[n.at + 1] == f32 && (loaded.count(in[n.at + 3]) || loaded.count(in[n.at + 4]))) product[in[n.at + 2]] = true;
+        for (const Inst& n : insts)
+            if (n.op == OpExtInstOp && n.len == 6 && in[n.at + 1] == f32 && in[n.at + 3] == glsl && in[n.at + 4] == GlslExp2 && product.count(in[n.at + 5]))
+                targets.push_back(n.at);
+    }
+    if (targets.empty()) return false;
+
+    std::vector<uint32_t> decls, annots;
+    if (!sint) {
+        sint = bound++;
+        decls.insert(decls.end(), {(4u << 16) | OpTypeIntOp, sint, 32u, 1u});
+    }
+    if (!int_zero) {
+        int_zero = bound++;
+        decls.insert(decls.end(), {(4u << 16) | OpConstantOp, sint, int_zero, 0u});
+    }
+    const uint32_t block = bound++, ptr_block = bound++, ptr_float = bound++, pc_var = bound++, one = bound++, zero = bound++;
+    annots.insert(annots.end(), {(3u << 16) | OpDecorateOp, block, DecBlock, (5u << 16) | OpMemberDecorateOp, block, 0u, DecOffset, 0u});
+    decls.insert(decls.end(), {(3u << 16) | OpTypeStructOp, block, f32});
+    decls.insert(decls.end(), {(4u << 16) | OpTypePointerOp, ptr_block, StoragePushConstant, block});
+    decls.insert(decls.end(), {(4u << 16) | OpTypePointerOp, ptr_float, StoragePushConstant, f32});
+    decls.insert(decls.end(), {(4u << 16) | OpVariableOp, ptr_block, pc_var, StoragePushConstant});
+    decls.insert(decls.end(), {(4u << 16) | OpConstantOp, f32, one, 0x3f800000u});
+    decls.insert(decls.end(), {(4u << 16) | OpConstantOp, f32, zero, 0u});
+
+    out.clear();
+    out.reserve(in.size() + decls.size() + annots.size() + 24 * targets.size());
+    out.insert(out.end(), in.begin(), in.begin() + 5);
+    size_t ti = 0;
+    for (const Inst& n : insts) {
+        if (n.at == first_type) out.insert(out.end(), annots.begin(), annots.end());
+        if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
+        out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.at), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
+        if (ti >= targets.size() || targets[ti] != n.at) continue;
+        ++ti;
+        // the instruction's result gets a new id (raw); the old id is defined after it from raw and the push constant
+        const uint32_t res = in[n.at + 2], raw = bound++, rp = bound++, s = bound++;
+        out[out.size() - n.len + 2] = raw;
+        out.insert(out.end(), {(5u << 16) | OpAccessChainOp, ptr_float, rp, pc_var, int_zero, (4u << 16) | OpLoadOp, f32, s, rp});
+        if (mode == 0) {
+            out.insert(out.end(), {(5u << 16) | OpFMulOp, f32, res, raw, s});
+        } else {   // max(1 - s * (1 - raw), 0)
+            const uint32_t a = bound++, b = bound++, c = bound++;
+            out.insert(out.end(), {(5u << 16) | OpFSubOp, f32, a, one, raw, (5u << 16) | OpFMulOp, f32, b, a, s,
+                                   (5u << 16) | OpFSubOp, f32, c, one, b, (7u << 16) | OpExtInstOp, f32, res, glsl, GlslFMax, c, zero});
+        }
+    }
+    out[3] = bound;
+    return true;
+}
+
+}  // namespace nxrt::nvn::be::gpu

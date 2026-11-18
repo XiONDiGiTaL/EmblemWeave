@@ -36,6 +36,8 @@ bool spirv_hdr_tonemap_lut(const std::vector<uint32_t>& in, float peak_ratio, st
 // built from P in the shader (the linear section's length and the shoulder follow it), so every load of P becomes max(P, R) with R the peak
 // ratio: shadows and mid-tones are unchanged and highlights roll off to the display's peak instead of paper white. Matched by structure: a
 // fragment shader with the four BT.2020 -> BT.709 coefficients, at least three exp2 and float loads of (constant buffer, 0, 2, 0).
-bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out);
+// keep_wide ([hdr] wide_gamut): the final max(0, .) of each BT.709 channel becomes max(x, x) = x, so colours of the BT.2020 scene outside
+// BT.709 reach the (float) target as negative components instead of being clipped; the output pass converts them back to BT.2020.
+bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out, bool keep_wide = false);
 
 }  // namespace nxrt::extras

@@ -279,6 +279,17 @@ void gpu_wrote(uint64_t addr, uint64_t size, int use) {
 const ProgLayout* g_pl = nullptr;
 const ProgLayout* g_last_draw_pl = nullptr;
 bool g_alpha_draw = false;       // this draw uses the alpha-test layout: build_key sets the key's alpha_func
+bool g_grade_draw = false;       // [hdr] grade_*: the GT tone-map draw runs the replacement (alpha-test layout, g_grade_push pushed)
+float g_grade_push[12] = {};       // extras::hdr_gt_grade_push for this frame
+bool g_sharp_draw = false;       // [hdr] sharpen: the sharpen pass runs kFefwSharpenFrag (alpha-test layout, g_sharp_push pushed)
+float g_sharp_push[4] = {1, 1, 0, 0};   // scene gain (per draw), strength multiplier, compare
+bool g_sharp_on = false;         // ... and whether the setting is not neutral (or compare is on)
+bool g_bloom_draw = false;       // [hdr] bloom: the bloom composite draw runs its scaled variant (alpha-test layout, g_bloom_gain pushed)
+float g_bloom_gain = 1.0f;       // [hdr] bloom for this frame
+bool g_post_draw = false;        // [hdr] motion_blur, vignette: the draw runs its strength variant (alpha-test layout, g_post_val pushed)
+float g_post_val = 1.0f;
+float g_post_strength[4] = {1.0f, 1.0f, 1.0f, 1.0f};   // [1] motion_blur, [2] vignette, [3] depth_of_field for this frame
+bool g_grade_on = false;          // ... and whether any setting is not neutral
 bool g_gain_draw = false;        // [hdr] ui_nits: the scene's draw into the window texture: alpha-test layout, the scene gain pushed (hdr_gain_shader)
 // [hdr] ui_nits, per frame (render thread; replay_frame_presented starts the next frame). The settings are read once per frame, not per draw.
 bool g_ui_split = false;         // extras::hdr_ui_split for this frame
@@ -2875,9 +2886,13 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
         for (uint32_t i = 0; i < 8; ++i) key.blend_enable[i] = 0;
     }
     // The game's alpha test (alpha_test_wanted, begin_draw chose the alpha-test layout): the fragment shader variant; the reference is a push constant.
-    key.alpha_layout = (g_alpha_draw || g_gain_draw) ? 1 : 0;   // the layout begin_draw chose, also when the variant is ruled out below
+    key.alpha_layout = (g_alpha_draw || g_gain_draw || g_grade_draw || g_bloom_draw || g_sharp_draw || g_post_draw) ? 1 : 0;   // the layout begin_draw chose, also when the variant is ruled out below
     if (g_alpha_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.alpha_func = static_cast<uint8_t>(S.color.alpha_test);
     if (g_gain_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.scene_gain = 1;   // [hdr] ui_nits
+    if (g_grade_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.grade = 1;   // [hdr] grade_*
+    if (g_bloom_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.bloom = 1;   // [hdr] bloom
+    if (g_sharp_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.sharpen = 1;   // [hdr] sharpen
+    if (g_post_draw && key.stage[1] && !key.no_out && !key.dual_src && !key.xfb && key.color_format[0] != 0) key.post = 1;   // [hdr] motion_blur, vignette
     return true;
 }
 
@@ -3244,6 +3259,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!pl) return false;
     g_alpha_draw = false;
     g_gain_draw = false;
+    g_grade_draw = false;
+    g_bloom_draw = false;
+    g_sharp_draw = false;
+    g_post_draw = false;
     if (S.depth_tex) g_scene_frame = true;   // [hdr] ui_nits: depth means 3D content, unlike the depthless startup/title 2D screens
     // [hdr] ui_nits: the scene keeps paper white. The gain goes on the scene's last pass before the UI: the frame's first draw after the
     // tone-map draw into a target of the window's kind (an 8-bit sRGB target kept as float, or a window texture), or the tone-map draw itself
@@ -3265,16 +3284,38 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (alpha_test_wanted()) {
         const ProgLayout* ap = alpha_layout(*pl);
         if (ap != pl) { pl = ap; g_alpha_draw = true; }
+    } else if (g_sharp_on && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && sharpen_shader(S.stage[kFragment])) {
+        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range: the replacement also carries the scene gain
+        if (ap != pl) {
+            pl = ap;
+            g_sharp_draw = true;
+            g_sharp_push[0] = gain_wanted ? g_ui_gain : 1.0f;
+            if (gain_wanted) g_gain_frame = true;
+        }
     } else if (gain_wanted && hdr_gain_shader(S.stage[kFragment])) {
         const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the scene gain
         if (ap != pl) { pl = ap; g_gain_draw = g_gain_frame = true; }
+    } else if (g_grade_on && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && extras::hdr_scene_active() &&
+               hdr_gt_shader(S.stage[kFragment])) {
+        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range, 32 bytes
+        if (ap != pl) { pl = ap; g_grade_draw = true; }
+    } else if (g_bloom_gain != 1.0f && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && bloom_shader(S.stage[kFragment])) {
+        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the bloom factor
+        if (ap != pl) { pl = ap; g_bloom_draw = true; }
+    } else if ((g_post_strength[1] != 1.0f || g_post_strength[2] != 1.0f || g_post_strength[3] != 1.0f) && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active &&
+               S.ncolor > 0) {
+        const int kind = post_scale_shader(S.stage[kFragment]);
+        if (kind && g_post_strength[kind] != 1.0f) {
+            const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the strength
+            if (ap != pl) { pl = ap; g_post_draw = true; g_post_val = g_post_strength[kind]; }
+        }
     }
     if (gain_wanted) {
         static int told = 0;
         if (told < 3) {
             ++told;
             NXLOG_I("hdr", "UI brightness: the scene's last draw before the UI, into t%u (fs %s), %s, gain %.3f", S.color_tex[0]->id, S.stage[kFragment]->hash.c_str(),
-                    g_gain_draw ? "gets the scene gain" : "cannot take it (alpha test, patch or layout): the frame keeps paper white", static_cast<double>(g_ui_gain));
+                    (g_gain_draw || g_sharp_draw) ? "gets the scene gain" : "cannot take it (alpha test, patch or layout): the frame keeps paper white", static_cast<double>(g_ui_gain));
         }
     }
     if (pl != g_last_draw_pl) {   // another layout than the last draw's (the alpha test came or went): the sets and the pipeline are bound again
@@ -3523,6 +3564,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_alpha_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof S.alpha_ref, &S.alpha_ref);
     if (g_gain_draw)   // [hdr] ui_nits: the scene keeps paper white while the output pass maps 1.0 to the UI's white
         vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof g_ui_gain, &g_ui_gain);
+    if (g_grade_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof g_grade_push, g_grade_push);
+    if (g_bloom_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof g_bloom_gain, &g_bloom_gain);
+    if (g_post_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof g_post_val, &g_post_val);
+    if (g_sharp_draw) vkCmdPushConstants(F->cb, pl->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof g_sharp_push, g_sharp_push);
     if (pl->push_bytes && g_gen_tcs) {
         // the pass-through control shader's tessellation levels (NVN's fixed SetInner/OuterTessellationLevels), every draw: cheap, and
         // the layout may have changed since the last push
@@ -5620,6 +5665,15 @@ void replay_frame_presented(bool again) {
     const extras::HdrState hs = extras::hdr_state();
     g_ui_split = extras::hdr_ui_split(hs);
     g_ui_gain = extras::hdr_scene_gain(hs);
+    g_grade_on = extras::hdr_gt_grade_push(g_grade_push);
+    const extras::HdrSettings hset = extras::settings().hdr;
+    g_bloom_gain = static_cast<float>(hset.bloom);
+    g_post_strength[1] = static_cast<float>(hset.motion_blur);
+    g_post_strength[2] = static_cast<float>(hset.vignette);
+    g_post_strength[3] = static_cast<float>(hset.depth_of_field);
+    g_sharp_push[1] = static_cast<float>(hset.sharpen);
+    g_sharp_push[2] = hset.compare ? 1.0f : 0.0f;
+    g_sharp_on = hset.sharpen != 1.0 || hset.compare;
 }
 
 void trace_dump_targets() {

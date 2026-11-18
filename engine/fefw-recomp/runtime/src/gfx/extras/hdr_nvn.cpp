@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "extras/hdr_nvn.h"
 
+#include <cmath>
 #include <mutex>
 #include <map>
 #include <set>
@@ -10,6 +11,7 @@
 #include "extras/fsr1_spatial.h"
 #include "extras/nis_spatial.h"
 #include "extras/hdr_tonemap_patch.h"
+#include "extras/extras_shaders.inc"
 
 namespace nxrt::extras {
 namespace {
@@ -33,9 +35,10 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
     bool ok = false;
     if (words.size() <= 16384) {
         ok = spirv_hdr_tonemap(words, out);
-        if (!ok && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out)) {
+        const bool wide = settings().hdr.wide_gamut;
+        if (!ok && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out, wide)) {
             ok = true;
-            kind = "GT shoulder moved to peak";
+            kind = wide ? "GT shoulder moved to peak, BT.2020 colours kept" : "GT shoulder moved to peak";
         }
     }
     if (!ok && spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out)) {
@@ -46,6 +49,39 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
     if (tried.insert(hash).second && ok)
         NXLOG_I("hdr", "tone-map shader %s: HDR variant made (%s, peak ratio %.2f)", hash.c_str(), kind, static_cast<double>(hdr_state().peak_ratio));
     return ok;
+}
+
+bool hdr_is_gt_tonemap(const std::vector<uint32_t>& words) {
+    std::vector<uint32_t> out;
+    return words.size() <= 16384 && spirv_hdr_tonemap_gt(words, 2.0f, out);
+}
+
+const std::vector<uint32_t>& hdr_gt_grade_words() {
+    static const std::vector<uint32_t> w(kFefwGtGradeFrag, kFefwGtGradeFrag + sizeof kFefwGtGradeFrag / sizeof kFefwGtGradeFrag[0]);
+    return w;
+}
+
+const std::vector<uint32_t>& sharpen_words() {
+    static const std::vector<uint32_t> w(kFefwSharpenFrag, kFefwSharpenFrag + sizeof kFefwSharpenFrag / sizeof kFefwSharpenFrag[0]);
+    return w;
+}
+
+bool hdr_gt_grade_push(float out[12]) {
+    const HdrSettings h = settings().hdr;
+    const bool neutral = h.grade_exposure == 0 && h.grade_contrast == 1 && h.grade_shadows == 1 && h.grade_highlights == 1 &&
+                         h.grade_saturation == 1 && h.highlight_saturation == 0 && h.hue_preserve == 0;
+    out[0] = hdr_state().peak_ratio;
+    out[1] = static_cast<float>(std::exp2(h.grade_exposure));
+    out[2] = static_cast<float>(h.grade_contrast);
+    out[3] = static_cast<float>(h.grade_saturation);
+    out[4] = static_cast<float>(h.grade_shadows);
+    out[5] = static_cast<float>(h.grade_highlights);
+    out[6] = static_cast<float>(h.highlight_saturation);
+    out[7] = h.wide_gamut ? 1.0f : 0.0f;
+    out[8] = h.compare ? 1.0f : 0.0f;   // split screen: the left half as the game draws it
+    out[9] = static_cast<float>(h.hue_preserve);
+    out[10] = out[11] = 0.0f;
+    return !neutral || h.compare;
 }
 
 bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash) {

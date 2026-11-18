@@ -313,7 +313,7 @@ bool spirv_hdr_tonemap_lut(const std::vector<uint32_t>& in, float peak_ratio, st
     return true;
 }
 
-bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out) {
+bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std::vector<uint32_t>& out, bool keep_wide) {
     enum : uint32_t { kOpTypeInt = 21, kOpVariable = 59, kOpAccessChain = 65, kScUniform = 2, kGlslExp2 = 29 };
     if (!(peak_ratio > 1.001f) || in.size() < 8 || in[0] != 0x07230203u) return false;
     std::vector<Inst> insts;
@@ -400,6 +400,22 @@ bool spirv_hdr_tonemap_gt(const std::vector<uint32_t>& in, float peak_ratio, std
         out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.pos), in.begin() + static_cast<std::ptrdiff_t>(n.pos + n.len));
     }
     out[3] = bound;
+    if (keep_wide) {   // FMax(0, x) -> FMax(x, x): the BT.709 output keeps its negative components (the colours outside BT.709)
+        uint32_t zero = 0;
+        for (const Inst& n : insts)
+            if (n.op == kOpConstant && n.len == 4 && in[n.pos + 1] == t_float && in[n.pos + 3] == 0) zero = in[n.pos + 2];
+        int changed = 0;
+        for (size_t i = 5; zero && i < out.size();) {
+            const uint32_t op = out[i] & 0xffff, len = out[i] >> 16;
+            if (len == 0) break;
+            if (op == kOpExtInst && len == 7 && out[i + 3] == glsl && out[i + 4] == kGlslFMax && out[i + 5] == zero) {
+                out[i + 5] = out[i + 6];
+                ++changed;
+            }
+            i += len;
+        }
+        if (changed != 3) return false;   // not the expected three output clamps: leave the shader alone rather than guess
+    }
     return true;
 }
 
