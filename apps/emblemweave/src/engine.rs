@@ -58,13 +58,28 @@ pub fn root() -> Option<PathBuf> {
     if let Some(text) = remembered().and_then(|f| std::fs::read_to_string(f).ok()) {
         found.push(PathBuf::from(text.trim()));
     }
-    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()].into_iter().flatten() {
-        found.extend(start.ancestors().map(|a| a.join("engine").join("fefw-recomp")));
+    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()]
+        .into_iter()
+        .flatten()
+    {
+        found.extend(
+            start
+                .ancestors()
+                .map(|a| a.join("engine").join("fefw-recomp")),
+        );
     }
     found.retain(|e| e.join("game-build").is_dir());
-    let pick = found.iter().find(|e| game_exe(e).is_file()).or(found.first()).cloned()?;
+    let pick = found
+        .iter()
+        .find(|e| game_exe(e).is_file())
+        .or(found.first())
+        .cloned()?;
     if let Some(f) = remembered() {
-        if std::fs::read_to_string(&f).ok().map(|t| t.trim().to_string()) != Some(pick.display().to_string()) {
+        if std::fs::read_to_string(&f)
+            .ok()
+            .map(|t| t.trim().to_string())
+            != Some(pick.display().to_string())
+        {
             let _ = std::fs::create_dir_all(f.parent().unwrap_or(Path::new(".")));
             let _ = std::fs::write(&f, pick.display().to_string());
         }
@@ -85,15 +100,25 @@ pub fn remember_root(picked: &Path) -> Result<PathBuf, String> {
 /// The write behind [`remember_root`], with the file named so it can be tested: creates its folder, writes the checkout and
 /// returns it. A folder that holds no engine is refused before anything is written.
 pub(crate) fn remember_in(file: &Path, picked: &Path) -> Result<PathBuf, String> {
-    let candidates = [picked.to_path_buf(), picked.join("engine").join("fefw-recomp")];
+    let candidates = [
+        picked.to_path_buf(),
+        picked.join("engine").join("fefw-recomp"),
+    ];
     let root = candidates
         .into_iter()
         .find(|c| c.join("game-build").is_dir())
-        .ok_or_else(|| format!("{} does not hold an engine (expected engine\\fefw-recomp with game-build)", picked.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "{} does not hold an engine (expected engine\\fefw-recomp with game-build)",
+                picked.display()
+            )
+        })?;
     if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
-    std::fs::write(&file, root.display().to_string()).map_err(|e| format!("writing {}: {e}", file.display()))?;
+    std::fs::write(&file, root.display().to_string())
+        .map_err(|e| format!("writing {}: {e}", file.display()))?;
     Ok(root)
 }
 
@@ -139,7 +164,11 @@ pub fn existing_build() -> Option<Existing> {
 
 /// The detection behind [`existing_build`], with the folders passed in so it can be tested without touching a real install.
 /// `current` is the checkout this copy would use; when it already holds a built game there is nothing to offer.
-pub(crate) fn find_existing(here: &Path, settings: &[PathBuf], current: Option<&Path>) -> Option<Existing> {
+pub(crate) fn find_existing(
+    here: &Path,
+    settings: &[PathBuf],
+    current: Option<&Path>,
+) -> Option<Existing> {
     if current.is_some_and(|c| game_exe(c).is_file()) {
         return None;
     }
@@ -167,7 +196,9 @@ pub(crate) fn find_existing(here: &Path, settings: &[PathBuf], current: Option<&
         if current.is_some_and(|c| c == root) {
             continue;
         }
-        let Ok(meta) = std::fs::metadata(game_exe(&root)) else { continue };
+        let Ok(meta) = std::fs::metadata(game_exe(&root)) else {
+            continue;
+        };
         if !meta.is_file() {
             continue;
         }
@@ -177,10 +208,20 @@ pub(crate) fn find_existing(here: &Path, settings: &[PathBuf], current: Option<&
         }
         seen.push(canonical);
         let built = meta.modified().ok();
-        let newer = best.as_ref().is_none_or(|b| b.built.is_none_or(|t| built.is_some_and(|at| at > t)));
+        let newer = best
+            .as_ref()
+            .is_none_or(|b| b.built.is_none_or(|t| built.is_some_and(|at| at > t)));
         if newer {
-            let install = root.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| root.clone());
-            best = Some(Existing { root, install, built });
+            let install = root
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.clone());
+            best = Some(Existing {
+                root,
+                install,
+                built,
+            });
         }
     }
     best
@@ -188,7 +229,11 @@ pub(crate) fn find_existing(here: &Path, settings: &[PathBuf], current: Option<&
 
 /// The built game, if it exists.
 pub fn game_exe(root: &Path) -> PathBuf {
-    root.join("game-build").join("fefw").join("build").join("release").join("fefw.exe")
+    root.join("game-build")
+        .join("fefw")
+        .join("build")
+        .join("release")
+        .join("fefw.exe")
 }
 
 /// Where the game runs: its `fefw.ini`, log, mods and album live here.
@@ -241,7 +286,9 @@ pub fn reshade_status() -> ReshadeStatus {
         && common.join("ReShade64.json").is_file();
     let game = root().map(|r| game_exe(&r));
     let enabled = installed
-        && game.as_deref().is_some_and(|exe| reshade_apps_contains(&common.join("ReShadeApps.ini"), exe));
+        && game
+            .as_deref()
+            .is_some_and(|exe| reshade_apps_contains(&common.join("ReShadeApps.ini"), exe));
     let configured = game
         .as_deref()
         .and_then(Path::parent)
@@ -250,7 +297,12 @@ pub fn reshade_status() -> ReshadeStatus {
         .as_deref()
         .and_then(Path::parent)
         .is_some_and(|dir| dir.join("ReShade.log").is_file());
-    ReshadeStatus { installed, enabled, configured, logged }
+    ReshadeStatus {
+        installed,
+        enabled,
+        configured,
+        logged,
+    }
 }
 
 /// One preset the release ships, in `engine/fefw-recomp/reshade/Presets`.
@@ -263,12 +315,17 @@ pub struct ShipPreset {
 const PRESET_ORDER: [&str; 4] = ["Vivid", "Bright", "RetroCRT", "GameBoy"];
 
 fn preset_rank(name: &str) -> usize {
-    PRESET_ORDER.iter().position(|n| n.eq_ignore_ascii_case(name)).unwrap_or(PRESET_ORDER.len())
+    PRESET_ORDER
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(name))
+        .unwrap_or(PRESET_ORDER.len())
 }
 
 /// The presets that travel with the engine, in [`PRESET_ORDER`], from the folder they are kept in.
 pub fn ship_presets() -> Vec<ShipPreset> {
-    let Some(root) = root() else { return Vec::new() };
+    let Some(root) = root() else {
+        return Vec::new();
+    };
     let dir = root.join("reshade").join("Presets");
     let mut out: Vec<ShipPreset> = std::fs::read_dir(dir)
         .into_iter()
@@ -276,13 +333,19 @@ pub fn ship_presets() -> Vec<ShipPreset> {
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            (path.extension().is_some_and(|x| x.eq_ignore_ascii_case("ini")))
-                .then(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
-                .flatten()
-                .map(|name| ShipPreset { name })
+            (path
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("ini")))
+            .then(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .flatten()
+            .map(|name| ShipPreset { name })
         })
         .collect();
-    out.sort_by(|a, b| preset_rank(&a.name).cmp(&preset_rank(&b.name)).then_with(|| a.name.cmp(&b.name)));
+    out.sort_by(|a, b| {
+        preset_rank(&a.name)
+            .cmp(&preset_rank(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     out
 }
 
@@ -290,7 +353,9 @@ pub fn ship_presets() -> Vec<ShipPreset> {
 pub fn current_reshade_preset() -> Option<String> {
     let dir = game_folder()?;
     let text = std::fs::read_to_string(dir.join("ReShade.ini")).ok()?;
-    let line = text.lines().find(|l| l.trim_start().starts_with("PresetPath="))?;
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("PresetPath="))?;
     let value = line.split_once('=')?.1.trim().trim_matches('"');
     let file = Path::new(value).file_stem()?.to_string_lossy().into_owned();
     (!file.is_empty()).then_some(file)
@@ -311,9 +376,13 @@ pub fn apply_reshade_preset(name: &str) -> Result<String, String> {
         return Err(format!("{name} is not one of the shipped presets"));
     }
     let shaders = dir.join("reshade-shaders").join("Shaders");
-    std::fs::create_dir_all(&shaders).map_err(|e| format!("creating {}: {e}", shaders.display()))?;
+    std::fs::create_dir_all(&shaders)
+        .map_err(|e| format!("creating {}: {e}", shaders.display()))?;
     let mut copied = 0;
-    for e in std::fs::read_dir(shipped.join("Shaders")).map_err(|e| format!("reading the shipped shaders: {e}"))?.flatten() {
+    for e in std::fs::read_dir(shipped.join("Shaders"))
+        .map_err(|e| format!("reading the shipped shaders: {e}"))?
+        .flatten()
+    {
         let to = shaders.join(e.file_name());
         std::fs::copy(e.path(), &to).map_err(|e| format!("copying {}: {e}", to.display()))?;
         copied += 1;
@@ -326,54 +395,84 @@ pub fn apply_reshade_preset(name: &str) -> Result<String, String> {
     for p in ship_presets() {
         let copy = dir.join(format!("{}.ini", p.name));
         if !copy.is_file() {
-            let _ = std::fs::copy(shipped.join("Presets").join(format!("{}.ini", p.name)), &copy);
+            let _ = std::fs::copy(
+                shipped.join("Presets").join(format!("{}.ini", p.name)),
+                &copy,
+            );
         }
         if copy.is_file() {
-            shortcuts.push(format!(".\\{}", copy.file_name().unwrap_or_default().to_string_lossy()));
+            shortcuts.push(format!(
+                ".\\{}",
+                copy.file_name().unwrap_or_default().to_string_lossy()
+            ));
         }
     }
 
     let ini = dir.join("ReShade.ini");
-    let text = std::fs::read_to_string(&ini).map_err(|e| format!("reading {}: {e}", ini.display()))?;
+    let text =
+        std::fs::read_to_string(&ini).map_err(|e| format!("reading {}: {e}", ini.display()))?;
     let mut set = |key: &str, value: String, text: &str| -> String {
         let prefix = format!("{key}=");
         let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-        if let Some(line) = lines.iter_mut().find(|l| l.trim_start().starts_with(&prefix)) {
+        if let Some(line) = lines
+            .iter_mut()
+            .find(|l| l.trim_start().starts_with(&prefix))
+        {
             *line = format!("{prefix}{value}");
         } else {
             // Every key used here lives under [GENERAL] or [INPUT]; place it before the next section.
-            let after = lines.iter().position(|l| l.trim() == "[INPUT]").unwrap_or(lines.len());
+            let after = lines
+                .iter()
+                .position(|l| l.trim() == "[INPUT]")
+                .unwrap_or(lines.len());
             lines.insert(after, format!("{prefix}{value}"));
         }
         lines.join("\r\n")
     };
     let text = set("PresetPath", format!(".\\{name}.ini"), &text);
-    let text = set("EffectSearchPaths", r".\reshade-shaders\Shaders".into(), &text);
+    let text = set(
+        "EffectSearchPaths",
+        r".\reshade-shaders\Shaders".into(),
+        &text,
+    );
     let text = set("PresetShortcutPaths", shortcuts.join(","), &text);
     // ReShade.ini stores virtual-key codes, not scancodes: its own KeyOverlay=36 is VK_HOME, so F3 is 0x72 (114) and
     // F4 is 0x73 (115).
-    let text = set("KeyNextPreset", "114,0,0,0".into(), &text);     // F3
+    let text = set("KeyNextPreset", "114,0,0,0".into(), &text); // F3
     let text = set("KeyPreviousPreset", "115,0,0,0".into(), &text); // F4
     std::fs::write(&ini, text).map_err(|e| format!("writing {}: {e}", ini.display()))?;
-    Ok(format!("{name} is loaded: {copied} shaders beside the game, F3 and F4 step through the presets"))
+    Ok(format!(
+        "{name} is loaded: {copied} shaders beside the game, F3 and F4 step through the presets"
+    ))
 }
 
 /// Whether an INI `Apps=` list contains `game`. Windows paths compare without
 /// case and with either slash; the setup tool writes them absolute.
 fn reshade_apps_contains(path: &Path, game: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
     // The setup writes this file as UTF-8 with a byte order mark, so the first
     // key arrives as `\u{feff}Apps` and would never match.
     let text = text.trim_start_matches('\u{feff}');
-    let wanted = game.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let wanted = game
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
     for line in text.lines() {
         let line = line.trim();
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         if !key.trim().eq_ignore_ascii_case("Apps") {
             continue;
         }
         for entry in value.split(',') {
-            let entry = entry.trim().trim_matches('"').replace('/', "\\").to_ascii_lowercase();
+            let entry = entry
+                .trim()
+                .trim_matches('"')
+                .replace('/', "\\")
+                .to_ascii_lowercase();
             if entry == wanted {
                 return true;
             }
@@ -396,10 +495,16 @@ pub fn find_reshade_setup() -> Option<PathBuf> {
         dirs.push(cwd);
     }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_ascii_lowercase();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             if name.starts_with("reshade_setup") && name.ends_with(".exe") {
                 return Some(path);
             }
@@ -450,7 +555,9 @@ pub fn launch_reshade_setup(setup: &Path) -> Result<(), String> {
 /// back to 0 makes the key the Graphics page names work. Returns whether the file
 /// had to change; a missing file or another setting is left alone.
 fn allow_plain_shortcuts(ini: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(ini) else { return false };
+    let Ok(text) = std::fs::read_to_string(ini) else {
+        return false;
+    };
     let mut out = String::with_capacity(text.len() + 2);
     let mut input_section = false;
     let mut changed = false;
@@ -491,8 +598,15 @@ pub fn tool_path() -> String {
 /// Whether `name` answers along the PATH every build step gets.
 pub fn which_tool(name: &str) -> bool {
     let mut cmd = Command::new(name);
-    cmd.arg("--version").env("PATH", tool_path()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    crate::toolchain::hidden(&mut cmd).status().map(|s| s.success()).unwrap_or(false)
+    cmd.arg("--version")
+        .env("PATH", tool_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::toolchain::hidden(&mut cmd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// The PowerShell the engine's scripts run in: PowerShell 7 when it is installed, otherwise the Windows PowerShell that ships with
@@ -536,7 +650,11 @@ pub fn vc_tools_any() -> Option<(PathBuf, u32)> {
 /// what to install (issue 10).
 pub fn dotnet_sdk_major() -> Option<u32> {
     let mut cmd = Command::new("dotnet");
-    cmd.args(["--list-sdks"]).env("PATH", tool_path()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(["--list-sdks"])
+        .env("PATH", tool_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -564,7 +682,10 @@ fn sdk_major_from(listing: &str) -> Option<u32> {
 /// which claims nothing.
 pub fn missing_tools() -> Vec<&'static str> {
     let rows = crate::deps::cached().unwrap_or_default();
-    crate::deps::blocking_for(&rows, crate::deps::Stage::Build).into_iter().map(|r| r.dep.name).collect()
+    crate::deps::blocking_for(&rows, crate::deps::Stage::Build)
+        .into_iter()
+        .map(|r| r.dep.name)
+        .collect()
 }
 
 /// The winget line that installs Visual Studio's C++ tools. It is the one tool
@@ -574,14 +695,22 @@ pub const VS_INSTALL: &str = r#"winget install --id Microsoft.VisualStudio.2022.
 
 /// Whether winget is there to run that line at all.
 pub fn have_winget() -> bool {
-    tool_path().split(';').any(|d| Path::new(d).join("winget.exe").is_file())
+    tool_path()
+        .split(';')
+        .any(|d| Path::new(d).join("winget.exe").is_file())
 }
 
 /// The runnable install lines for a list of registry names.
 pub fn install_lines_for(tools: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for tool in tools {
-        let Some(install) = crate::deps::DEPS.iter().find(|d| d.name == *tool).and_then(|d| d.install) else { continue };
+        let Some(install) = crate::deps::DEPS
+            .iter()
+            .find(|d| d.name == *tool)
+            .and_then(|d| d.install)
+        else {
+            continue;
+        };
         if !install.runnable() {
             continue;
         }
@@ -608,7 +737,9 @@ pub fn install_script_lines(lines: &[String]) -> String {
     for line in lines {
         s.push_str(&format!("echo === {line} ===\r\n{line}\r\nif errorlevel 1 echo That one did not finish.\r\necho.\r\n"));
     }
-    s.push_str("echo Done. Close this window, then press Check again on Requirements.\r\npause\r\n");
+    s.push_str(
+        "echo Done. Close this window, then press Check again on Requirements.\r\npause\r\n",
+    );
     s
 }
 
@@ -626,15 +757,18 @@ pub fn start_install_lines(lines: &[String]) -> Result<PathBuf, String> {
     let dir = Config::work_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let script = dir.join("install-build-tools.cmd");
-    std::fs::write(&script, install_script_lines(lines)).map_err(|e| format!("writing {}: {e}", script.display()))?;
+    std::fs::write(&script, install_script_lines(lines))
+        .map_err(|e| format!("writing {}: {e}", script.display()))?;
     let mut cmd = Command::new("cmd");
-    cmd.args(["/C", "start", "", &script.display().to_string()]).stdin(Stdio::null());
+    cmd.args(["/C", "start", "", &script.display().to_string()])
+        .stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, so only the installer console shows
     }
-    cmd.spawn().map_err(|e| format!("starting the installer: {e}"))?;
+    cmd.spawn()
+        .map_err(|e| format!("starting the installer: {e}"))?;
     Ok(script)
 }
 
@@ -720,7 +854,11 @@ print("EW_PY_PROBE " + json.dumps({
 /// Parse the probe's stdout without starting Python, so healthy and unusable
 /// environments can be tested on every platform.
 fn parse_python_probe(stdout: &str, stderr: &str) -> PythonEnv {
-    let Some(line) = stdout.lines().rev().find_map(|l| l.strip_prefix("EW_PY_PROBE ")) else {
+    let Some(line) = stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("EW_PY_PROBE "))
+    else {
         let detail = stderr
             .lines()
             .rev()
@@ -728,31 +866,52 @@ fn parse_python_probe(stdout: &str, stderr: &str) -> PythonEnv {
             .or_else(|| stdout.lines().rev().find(|l| !l.trim().is_empty()))
             .unwrap_or("the interpreter printed nothing");
         return PythonEnv::Unusable {
-            why: format!("the interpreter did not report its version: {}", detail.trim()),
+            why: format!(
+                "the interpreter did not report its version: {}",
+                detail.trim()
+            ),
         };
     };
     let Ok(report) = serde_json::from_str::<serde_json::Value>(line) else {
-        return PythonEnv::Unusable { why: "the interpreter's probe report is not valid JSON".into() };
+        return PythonEnv::Unusable {
+            why: "the interpreter's probe report is not valid JSON".into(),
+        };
     };
-    let version = report.get("version").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let version = report
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let executable = report
         .get("executable")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
     if version.is_empty() || executable.is_empty() {
-        return PythonEnv::Unusable { why: "the interpreter's probe report does not name its version and executable".into() };
+        return PythonEnv::Unusable {
+            why: "the interpreter's probe report does not name its version and executable".into(),
+        };
     }
     let parts = crate::toolchain::version_parts(&version).unwrap_or_default();
     if parts.len() < 2 || (parts[0], parts[1]) < (3, 9) {
-        return PythonEnv::Unusable { why: format!("Python {version} is older than the engine's 3.9 minimum") };
+        return PythonEnv::Unusable {
+            why: format!("Python {version} is older than the engine's 3.9 minimum"),
+        };
     }
-    if !report.get("venv").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if !report
+        .get("venv")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         return PythonEnv::Unusable {
             why: format!("Python {version} at {executable} is not a virtual environment"),
         };
     }
-    if !report.get("identity").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if !report
+        .get("identity")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         return PythonEnv::Unusable {
             why: format!("the interpreter reports {executable}, not the tools\\.venv python.exe the launcher started"),
         };
@@ -760,14 +919,25 @@ fn parse_python_probe(stdout: &str, stderr: &str) -> PythonEnv {
     let imports: Vec<String> = report
         .get("imports")
         .and_then(serde_json::Value::as_array)
-        .map(|a| a.iter().filter_map(serde_json::Value::as_str).map(str::to_string).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     if !imports.is_empty() {
         return PythonEnv::Unusable {
-            why: format!("required Python module(s) do not import: {}", imports.join("; ")),
+            why: format!(
+                "required Python module(s) do not import: {}",
+                imports.join("; ")
+            ),
         };
     }
-    PythonEnv::Healthy { version, executable }
+    PythonEnv::Healthy {
+        version,
+        executable,
+    }
 }
 
 /// Probe the existing interpreter before reusing it. A missing file is not an
@@ -786,7 +956,9 @@ fn probe_python_env(python: &Path) -> PythonEnv {
             &String::from_utf8_lossy(&output.stdout),
             &String::from_utf8_lossy(&output.stderr),
         ),
-        Err(e) => PythonEnv::Unusable { why: format!("could not start {}: {e}", python.display()) },
+        Err(e) => PythonEnv::Unusable {
+            why: format!("could not start {}: {e}", python.display()),
+        },
     }
 }
 
@@ -839,7 +1011,13 @@ fn error_line(l: &str) -> bool {
 fn reason_from(lines: &[String]) -> String {
     match lines.iter().find(|l| error_line(l)) {
         Some(err) => err.clone(),
-        None => lines.iter().rev().take(2).cloned().collect::<Vec<_>>().join(" | "),
+        None => lines
+            .iter()
+            .rev()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | "),
     }
 }
 
@@ -879,7 +1057,11 @@ pub fn verify_log_text(text: &str) -> String {
         }
         None => out.push_str("\nno error line in this log: either it finished, or the step was stopped before it printed anything\n"),
     }
-    let all: Vec<String> = text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+    let all: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.to_string())
+        .collect();
     if !all.is_empty() {
         out.push_str(&format!("\nlast line: {}\n", all[all.len() - 1].trim()));
     }
@@ -930,7 +1112,9 @@ fn step_name(program: &str, args: &[&str]) -> String {
             return (*script).to_string();
         }
     }
-    args.first().map(|a| (*a).to_string()).unwrap_or_else(|| program.to_string())
+    args.first()
+        .map(|a| (*a).to_string())
+        .unwrap_or_else(|| program.to_string())
 }
 
 /// The program cmd says it could not find: "'git' is not recognized as an
@@ -970,14 +1154,18 @@ const CMD_BREAKERS: [char; 8] = ['&', '|', '<', '>', '^', '(', ')', '%'];
 
 /// The first character in `path` that cmd.exe cannot carry through a build, if any.
 pub fn cmd_breaker(path: &Path) -> Option<char> {
-    path.to_string_lossy().chars().find(|c| CMD_BREAKERS.contains(c))
+    path.to_string_lossy()
+        .chars()
+        .find(|c| CMD_BREAKERS.contains(c))
 }
 
 /// The folder the game is built from, refused when its path holds a character cmd.exe splits a command line at. Every later
 /// error in that case is about a truncated path (`CMakeFiles\G_\Games\PC_Ports_`), which reads like a missing build file and
 /// sends people looking in the wrong place, so the build stops here with the reason and the fix.
 fn build_root(root: &Path) -> Result<PathBuf, String> {
-    let Some(bad) = cmd_breaker(root) else { return Ok(root.to_path_buf()) };
+    let Some(bad) = cmd_breaker(root) else {
+        return Ok(root.to_path_buf());
+    };
     Err(format!(
         "the project is in a folder whose path contains '{bad}':\n\n{}\\n\ncmd.exe splits its command line at & | < > ^ ( ) %, even inside quotes, so the linker step CMake generates for the \
          lifted code is cut in half at that character and ninja reports a path that does not exist (\"CMakeFiles\\G_\\Games\\
@@ -988,7 +1176,13 @@ fn build_root(root: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<(), String> {
+fn run_env(
+    ctx: &Ctx,
+    cwd: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<(), String> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
@@ -1036,13 +1230,21 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
     // far above the tail, which is exactly how "Configuring incomplete, errors
     // occurred!" ends up being the only thing a report says.
     let first_error: FirstError = Default::default();
-    let mut child = cmd.spawn().map_err(|e| format!("starting {command}: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("starting {command}: {e}"))?;
     // Both streams are drained on their own threads, so the wait below can
     // notice a cancel while a long configure is still printing: reading stdout
     // inline would block until the process ends, which is how Cancel used to do
     // nothing until the step it was cancelling had finished.
     let mut readers = Vec::new();
-    for pipe in [child.stdout.take().map(Either::Out), child.stderr.take().map(Either::Err)].into_iter().flatten() {
+    for pipe in [
+        child.stdout.take().map(Either::Out),
+        child.stderr.take().map(Either::Err),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let ctx = ctx.clone();
         let tail = tail.clone();
         let first = first_error.clone();
@@ -1083,7 +1285,10 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
     }
     ctx.log(format!(
         "< exit {} in {:.1}s: {command}",
-        status.code().map(|c| c.to_string()).unwrap_or_else(|| "(no code)".into()),
+        status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "(no code)".into()),
         started.elapsed().as_secs_f32()
     ));
     if ctx.cancelled() {
@@ -1116,7 +1321,9 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
                 "`{command}` failed ({status}) and printed nothing at all. That is what a script looks like when machine \
                  policy or security software stops it before its first line; the log has the command and the lines around it"
             ))
-        } else if let Some(missing) = missing_program(&said).or_else(|| missing_program(&block.join(" "))) {
+        } else if let Some(missing) =
+            missing_program(&said).or_else(|| missing_program(&block.join(" ")))
+        {
             // The reason first: a step can print "'vswhere.exe' is not recognized" as a warning near the top and still
             // fail later for another reason, and naming vswhere as the cause sent a real build failure (the SDK's
             // rc.exe hanging) to an install instruction that changed nothing.
@@ -1127,7 +1334,10 @@ fn run_env(ctx: &Ctx, cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &
         } else if !block.is_empty() {
             // The error that was printed, wherever in the run it was printed,
             // under the command that printed it.
-            Err(format!("`{command}` failed ({status}): {}", block.join(" | ")))
+            Err(format!(
+                "`{command}` failed ({status}): {}",
+                block.join(" | ")
+            ))
         } else {
             Err(format!("`{command}` failed ({status}): {said}"))
         }
@@ -1153,7 +1363,9 @@ fn lock_build(root: &Path) -> Result<BuildLock, String> {
     let dir = root.join("work").join("build");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join(".build.lock");
-    let held = std::fs::read_to_string(&path).ok().and_then(|t| t.split_whitespace().next()?.parse::<u32>().ok());
+    let held = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| t.split_whitespace().next()?.parse::<u32>().ok());
     if let Some(pid) = held {
         if pid == std::process::id() {
             // A previous run of this same process that never released it.
@@ -1167,15 +1379,31 @@ fn lock_build(root: &Path) -> Result<BuildLock, String> {
             // The owner is gone: a killed launcher leaves its lock behind.
         }
     }
-    std::fs::write(&path, format!("{} {} {}\n", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()))
-        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    std::fs::write(
+        &path,
+        format!(
+            "{} {} {}\n",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ),
+    )
+    .map_err(|e| format!("writing {}: {e}", path.display()))?;
     Ok(BuildLock { path })
 }
 
 /// Whether a pid is alive, asked of Windows rather than guessed.
 fn process_running(pid: u32) -> bool {
     let mut cmd = Command::new("tasklist");
-    cmd.args(["/FI", &format!("PID eq {pid}"), "/NH"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1203,7 +1431,10 @@ fn kill_tree(pid: u32, log: &mut impl FnMut(String)) {
     }
     log(format!("cancelling: stopping the process tree of {pid}"));
     let mut cmd = Command::new("taskkill");
-    cmd.args(["/PID", &pid.to_string(), "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1337,7 +1568,10 @@ impl ShaderReport {
         if self.failed == 0 {
             String::new()
         } else {
-            format!("; {} blocks are beyond the translator (listed in results.tsv)", self.failed)
+            format!(
+                "; {} blocks are beyond the translator (listed in results.tsv)",
+                self.failed
+            )
         }
     }
 }
@@ -1365,8 +1599,14 @@ fn romfs_folder_for_play(root: &Path, romfs: &Path, ctx: &Ctx) -> Result<Option<
     let dest = root.join("work").join("romfs-overlay");
     let stamp = dest.join(".written");
     let key = format!("{}|{count} files|{bytes} bytes", romfs.display());
-    if std::fs::read_to_string(&stamp).map(|t| t.trim() == key.trim()).unwrap_or(false) {
-        ctx.log(format!("game files: {count} packed files; using the overlay already written in {}", dest.display()));
+    if std::fs::read_to_string(&stamp)
+        .map(|t| t.trim() == key.trim())
+        .unwrap_or(false)
+    {
+        ctx.log(format!(
+            "game files: {count} packed files; using the overlay already written in {}",
+            dest.display()
+        ));
         return Ok(Some(dest));
     }
     ctx.log(format!(
@@ -1375,7 +1615,9 @@ fn romfs_folder_for_play(root: &Path, romfs: &Path, ctx: &Ctx) -> Result<Option<
         dest.display()
     ));
     std::fs::create_dir_all(&dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
-    let (written, total) = crate::gamedata::unpack_packed_romfs(romfs, &dest, &mut |m| ctx.log(format!("game files: {m}")))?;
+    let (written, total) = crate::gamedata::unpack_packed_romfs(romfs, &dest, &mut |m| {
+        ctx.log(format!("game files: {m}"))
+    })?;
     std::fs::write(&stamp, &key).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
     ctx.log(format!(
         "game files: {written} packed files written ({:.1} GB) to {}; the package supplies the rest",
@@ -1392,14 +1634,29 @@ fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u6
     if ew_format::nx::is_nx(romfs) {
         return shader_romfs_nx(root, romfs);
     }
-    let nup = ew_format::nup::Nup::open(romfs).map_err(|e| format!("reading {} as a .nup: {e}", romfs.display()))?;
+    let nup = ew_format::nup::Nup::open(romfs)
+        .map_err(|e| format!("reading {} as a .nup: {e}", romfs.display()))?;
     let Some(pkg) = nup.program_package().cloned() else {
-        return Err(format!("{} holds no base game or update, so its shaders cannot be read", romfs.display()));
+        return Err(format!(
+            "{} holds no base game or update, so its shaders cannot be read",
+            romfs.display()
+        ));
     };
     let out = root.join("work").join("shaders").join("romfs");
     let stamp = out.join(".source");
-    let want = format!("{}|{} files|v{}", romfs.display(), nup.files.len(), pkg.version);
-    if stamp.is_file() && std::fs::read_to_string(&stamp).map(|t| t.trim().to_string()).ok().as_deref() == Some(want.as_str()) {
+    let want = format!(
+        "{}|{} files|v{}",
+        romfs.display(),
+        nup.files.len(),
+        pkg.version
+    );
+    if stamp.is_file()
+        && std::fs::read_to_string(&stamp)
+            .map(|t| t.trim().to_string())
+            .ok()
+            .as_deref()
+            == Some(want.as_str())
+    {
         return Ok((out, None));
     }
     // The extractor looks for these by name; every other romfs file is skipped, so
@@ -1416,18 +1673,27 @@ fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u6
         }
         // `read` decompresses, so the copy keeps the real name and the extractor sees
         // the archive instead of a .zst it would have to decompress again.
-        let rel = if low.ends_with(".zst") { rel[..rel.len() - 4].to_string() } else { rel };
+        let rel = if low.ends_with(".zst") {
+            rel[..rel.len() - 4].to_string()
+        } else {
+            rel
+        };
         let dst = out.join(&rel);
         if let Some(dir) = dst.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
-        let data = nup.read(index).map_err(|e| format!("reading {rel} from {}: {e}", romfs.display()))?;
+        let data = nup
+            .read(index)
+            .map_err(|e| format!("reading {rel} from {}: {e}", romfs.display()))?;
         bytes += data.len() as u64;
         std::fs::write(&dst, &data).map_err(|e| format!("writing {}: {e}", dst.display()))?;
         copied += 1;
     }
     if copied == 0 {
-        return Err(format!("{} holds no shader archive ({EXTS:?}), so no shaders can be translated", romfs.display()));
+        return Err(format!(
+            "{} holds no shader archive ({EXTS:?}), so no shaders can be translated",
+            romfs.display()
+        ));
     }
     std::fs::write(&stamp, &want).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
     Ok((out, Some((copied, bytes))))
@@ -1436,18 +1702,27 @@ fn shader_romfs(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u6
 /// The shader archives of an .nx RomFS: the same five extensions read straight out of the archive's blocks (zstd entries are
 /// decompressed as they are read), so the archive is never copied and the engine's own reader stays the only thing that parses it.
 fn shader_romfs_nx(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize, u64)>), String> {
-    let nx = ew_format::nx::Nx::open(romfs).map_err(|e| format!("reading {}: {e:#}", romfs.display()))?;
+    let nx = ew_format::nx::Nx::open(romfs)
+        .map_err(|e| format!("reading {}: {e:#}", romfs.display()))?;
     let app = crate::gamedata::known_program_id()
         .and_then(|id| nx.application(id))
         .or_else(|| (nx.applications().len() == 1).then_some(0))
         .ok_or_else(|| format!("{} holds no application for this game", romfs.display()))?;
-    let snap = nx.current(app).ok_or_else(|| format!("{} holds no snapshot for this game", romfs.display()))?;
+    let snap = nx
+        .current(app)
+        .ok_or_else(|| format!("{} holds no snapshot for this game", romfs.display()))?;
     let version = nx.snapshots()[snap].version;
     let tree = nx.tree(snap).map_err(|e| format!("{e:#}"))?;
     let out = root.join("work").join("shaders").join("romfs");
     let stamp = out.join(".source");
     let want = format!("{}|{} files|v{version}", romfs.display(), tree.len());
-    if stamp.is_file() && std::fs::read_to_string(&stamp).map(|t| t.trim().to_string()).ok().as_deref() == Some(want.as_str()) {
+    if stamp.is_file()
+        && std::fs::read_to_string(&stamp)
+            .map(|t| t.trim().to_string())
+            .ok()
+            .as_deref()
+            == Some(want.as_str())
+    {
         return Ok((out, None));
     }
     const EXTS: [&str; 5] = [".bfsha", ".ptcl", ".arc", ".sarc", ".bnsh"];
@@ -1455,24 +1730,35 @@ fn shader_romfs_nx(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize,
     let mut copied = 0usize;
     let mut bytes = 0u64;
     for (path, id, _) in &tree {
-        let Some(rel) = path.strip_prefix("romfs/") else { continue };
+        let Some(rel) = path.strip_prefix("romfs/") else {
+            continue;
+        };
         let low = rel.to_ascii_lowercase();
         let base = low.strip_suffix(".zst").unwrap_or(&low);
         if !EXTS.iter().any(|e| base.ends_with(e)) {
             continue;
         }
-        let rel = if low.ends_with(".zst") { rel[..rel.len() - 4].to_string() } else { rel.to_string() };
+        let rel = if low.ends_with(".zst") {
+            rel[..rel.len() - 4].to_string()
+        } else {
+            rel.to_string()
+        };
         let dst = out.join(&rel);
         if let Some(dir) = dst.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
-        let data = nx.read(*id).map_err(|e| format!("reading {rel} from {}: {e:#}", romfs.display()))?;
+        let data = nx
+            .read(*id)
+            .map_err(|e| format!("reading {rel} from {}: {e:#}", romfs.display()))?;
         bytes += data.len() as u64;
         std::fs::write(&dst, &data).map_err(|e| format!("writing {}: {e}", dst.display()))?;
         copied += 1;
     }
     if copied == 0 {
-        return Err(format!("{} holds no shader archive ({EXTS:?}), so no shaders can be translated", romfs.display()));
+        return Err(format!(
+            "{} holds no shader archive ({EXTS:?}), so no shaders can be translated",
+            romfs.display()
+        ));
     }
     std::fs::create_dir_all(&out).ok();
     std::fs::write(&stamp, &want).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
@@ -1481,7 +1767,8 @@ fn shader_romfs_nx(root: &Path, romfs: &Path) -> Result<(PathBuf, Option<(usize,
 
 fn shader_report(corpus: &Path, spirv: &Path) -> Result<ShaderReport, String> {
     let unique = corpus.join("unique.tsv");
-    let text = std::fs::read_to_string(&unique).map_err(|e| format!("reading {}: {e}", unique.display()))?;
+    let text = std::fs::read_to_string(&unique)
+        .map_err(|e| format!("reading {}: {e}", unique.display()))?;
     let expected: Vec<&str> = text
         .lines()
         .skip(1)
@@ -1493,7 +1780,9 @@ fn shader_report(corpus: &Path, spirv: &Path) -> Result<ShaderReport, String> {
     let mut status: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for line in results.lines().skip(1) {
         let mut f = line.split('\t');
-        if let (Some(h), Some(_group), Some(_stage), Some(_uses), Some(st)) = (f.next(), f.next(), f.next(), f.next(), f.next()) {
+        if let (Some(h), Some(_group), Some(_stage), Some(_uses), Some(st)) =
+            (f.next(), f.next(), f.next(), f.next(), f.next())
+        {
             status.insert(h, st);
         }
     }
@@ -1502,30 +1791,64 @@ fn shader_report(corpus: &Path, spirv: &Path) -> Result<ShaderReport, String> {
         // A report line saying ok with no .spv beside it is work to do again: the
         // file was deleted, or the run that wrote the line was cut short before it.
         match status.get(hash) {
-            Some(&st) if st == "ok" && spirv.join(format!("{hash}.spv")).is_file() => translated += 1,
+            Some(&st) if st == "ok" && spirv.join(format!("{hash}.spv")).is_file() => {
+                translated += 1
+            }
             Some(&st) if st == "ok" => missing.push((*hash).to_string()),
             Some(_) => failed += 1,
             None => missing.push((*hash).to_string()),
         }
     }
-    Ok(ShaderReport { expected: expected.len(), translated, failed, missing })
+    Ok(ShaderReport {
+        expected: expected.len(),
+        translated,
+        failed,
+        missing,
+    })
 }
 
 /// Run the translator over the corpus. The harness keeps a per-block journal and
 /// skips the blocks that already have a result, so a repair costs the missing
 /// blocks and not the whole corpus; its report is written from the journal, so the
 /// earlier lines survive a stopped run.
-fn run_translator(ctx: &Ctx, root: &Path, bundled: &Option<PathBuf>, harness: &Path) -> Result<(), String> {
+fn run_translator(
+    ctx: &Ctx,
+    root: &Path,
+    bundled: &Option<PathBuf>,
+    harness: &Path,
+) -> Result<(), String> {
     match bundled {
         Some(exe) => run(
             ctx,
             root,
             &exe.display().to_string(),
-            &["--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"],
+            &[
+                "--batch",
+                "work\\shaders\\corpus",
+                "--out",
+                "work\\shaders\\spirv",
+                "--jobs",
+                "4",
+                "--no-val",
+            ],
         ),
         None => {
             let h = harness.display().to_string();
-            run(ctx, root, "dotnet", &[&h, "--batch", "work\\shaders\\corpus", "--out", "work\\shaders\\spirv", "--jobs", "4", "--no-val"])
+            run(
+                ctx,
+                root,
+                "dotnet",
+                &[
+                    &h,
+                    "--batch",
+                    "work\\shaders\\corpus",
+                    "--out",
+                    "work\\shaders\\spirv",
+                    "--jobs",
+                    "4",
+                    "--no-val",
+                ],
+            )
         }
     }
 }
@@ -1537,7 +1860,10 @@ fn textures_fetched(root: &Path) -> bool {
     [
         tp.join("astc-encoder").join("CMakeLists.txt"),
         tp.join("bc7enc_rdo").join("CMakeLists.txt"),
-        tp.join("ispc").join("ispc-v1.32.0-windows").join("bin").join("ispc.exe"),
+        tp.join("ispc")
+            .join("ispc-v1.32.0-windows")
+            .join("bin")
+            .join("ispc.exe"),
     ]
     .iter()
     .all(|p| p.is_file())
@@ -1550,7 +1876,9 @@ fn textures_fetched(root: &Path) -> bool {
 /// the old "is it there" test accepted before failing much later in `dotnet`.
 fn ensure_translator_refs(ctx: &Ctx, root: &Path) -> Result<(), String> {
     let refs = root.join("work").join("refs").join("ryubing");
-    let project = Path::new("src").join("Ryujinx.Graphics.Shader").join("Ryujinx.Graphics.Shader.csproj");
+    let project = Path::new("src")
+        .join("Ryujinx.Graphics.Shader")
+        .join("Ryujinx.Graphics.Shader.csproj");
     if refs.join(&project).is_file() {
         return Ok(());
     }
@@ -1596,6 +1924,8 @@ fn ensure_translator_refs(ctx: &Ctx, root: &Path) -> Result<(), String> {
 pub struct RunConfig {
     pub exefs: PathBuf,
     pub romfs: PathBuf,
+    /// The dumped add-on content (`[aoc] dir`); None leaves the engine without DLC.
+    pub dlc: Option<PathBuf>,
     pub save_dir: PathBuf,
     /// The launcher's mods folder, written as an absolute path. The engine accepts a relative `mods`, but then it is
     /// resolved against whatever working directory the game was started from; a shortcut or a direct `fefw.exe` start
@@ -1609,11 +1939,18 @@ pub struct RunConfig {
 pub fn ini_text(root: &Path, run: &RunConfig) -> String {
     let fwd = |p: &Path| p.display().to_string().replace('\\', "/");
     // Only written when the package has files the engine cannot read in place: the folder the build wrote them into.
-    let overlay = run.romfs_overlay.as_ref().map(|p| format!("romfs_overlay = {}\n", fwd(p))).unwrap_or_default();
+    let overlay = run
+        .romfs_overlay
+        .as_ref()
+        .map(|p| format!("romfs_overlay = {}\n", fwd(p)))
+        .unwrap_or_default();
+    // An empty dir is what the engine reads as "no add-on content"; it never falls back to scanning the working folder.
+    let dlc = run.dlc.as_ref().map(|p| fwd(p)).unwrap_or_default();
     format!(
         "; Written by EmblemWeave. Every key is described in engine/fefw-recomp/runtime/docs/CONFIG.md.\n\
          [log]\npath = fefw.log\n\
          [fs]\nexefs = {}\nromfs = {}\n{}\nsave_dir = {}\nmods = {}\n\
+         [aoc]\ndir = {}\n\
          [nvn]\nshader_cache = {}\nbc7_cache = {}\n\
          [upscale]\nmode = off\n\
          [dlss]\nupscaler = auto\n\
@@ -1625,6 +1962,7 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
         overlay.trim_end(),
         fwd(&run.save_dir),
         fwd(&run.mods),
+        dlc,
         fwd(&root.join("work").join("shaders").join("spirv")),
         fwd(&root.join("work").join("bc7_cache")),
         env!("CARGO_PKG_VERSION"),
@@ -1636,7 +1974,9 @@ pub fn ini_text(root: &Path, run: &RunConfig) -> String {
 /// Overview names the version instead of leaving the player to guess why a fresh launcher behaves like the old one.
 pub fn built_by() -> Option<String> {
     let dir = run_dir()?;
-    ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned()
+    ini_map(&dir.join("fefw.ini"))
+        .get("engine.built_by")
+        .cloned()
 }
 
 /// Refresh the `[engine] built_by` stamp when the engine binary is newer than the ini that names it. A `fefw.exe` rebuilt
@@ -1648,7 +1988,12 @@ pub fn built_by() -> Option<String> {
 /// Returns the old and new stamp when it changed the file.
 pub fn refresh_build_stamp() -> Option<(String, String)> {
     let ini = run_dir()?.join("fefw.ini");
-    let exe = root()?.join("game-build").join("fefw").join("build").join("release").join("fefw.exe");
+    let exe = root()?
+        .join("game-build")
+        .join("fefw")
+        .join("build")
+        .join("release")
+        .join("fefw.exe");
     let ini_at = std::fs::metadata(&ini).ok()?.modified().ok()?;
     let exe_at = std::fs::metadata(&exe).ok()?.modified().ok()?;
     if exe_at <= ini_at {
@@ -1699,7 +2044,8 @@ pub fn clean_runtime_build() -> Result<(), String> {
     }
     let build = root.join("game-build").join("fefw").join("build");
     if build.is_dir() {
-        std::fs::remove_dir_all(&build).map_err(|e| format!("clearing {}: {e}", build.display()))?;
+        std::fs::remove_dir_all(&build)
+            .map_err(|e| format!("clearing {}: {e}", build.display()))?;
     }
     Ok(())
 }
@@ -1707,9 +2053,18 @@ pub fn clean_runtime_build() -> Result<(), String> {
 /// Whether `dir` was built by a release older than `major.minor.patch`. A folder with no `built_by` predates the key itself,
 /// which every build has written since 0.1.20, so it counts as old.
 fn build_is_older_than(dir: &Path, major: u32, minor: u32, patch: u32) -> bool {
-    let Some(text) = ini_map(&dir.join("fefw.ini")).get("engine.built_by").cloned() else { return true };
+    let Some(text) = ini_map(&dir.join("fefw.ini"))
+        .get("engine.built_by")
+        .cloned()
+    else {
+        return true;
+    };
     let mut parts = text.split('.').filter_map(|p| p.trim().parse::<u32>().ok());
-    let found = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    let found = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
     found < (major, minor, patch)
 }
 
@@ -1726,12 +2081,20 @@ fn play_blocker_in(dir: &Path) -> Option<String> {
     // Two ways an engine at or above 0.1.20 can play a packed package: the reader this release has, or the overlay the
     // launcher writes into `work\romfs-overlay` (0.1.20 and newer read `[fs] romfs_overlay`). A 0.1.31 build that rebuilt
     // properly has neither marker nor reason to be refused once Play has written that folder; only one with neither is.
-    let marker = ini.get("engine.packed_nup").is_some_and(|v| v.trim() == "1");
-    let overlay_ready = ini.get("fs.romfs_overlay").map(PathBuf::from).is_some_and(|p| p.is_dir());
+    let marker = ini
+        .get("engine.packed_nup")
+        .is_some_and(|v| v.trim() == "1");
+    let overlay_ready = ini
+        .get("fs.romfs_overlay")
+        .map(PathBuf::from)
+        .is_some_and(|p| p.is_dir());
     if !build_is_older_than(dir, 0, 1, 20) && (marker || overlay_ready) {
         return None;
     }
-    let by = ini.get("engine.built_by").cloned().unwrap_or_else(|| "0.1.19 or older".into());
+    let by = ini
+        .get("engine.built_by")
+        .cloned()
+        .unwrap_or_else(|| "0.1.19 or older".into());
     let why = if build_is_older_than(dir, 0, 1, 20) {
         format!("this game folder was built by EmblemWeave {by}, whose engine cannot read a package that keeps some files packed.")
     } else {
@@ -1740,7 +2103,9 @@ fn play_blocker_in(dir: &Path) -> Option<String> {
              some files packed (the rebuild reused an old fefw.exe)."
         )
     };
-    Some(format!("{why} Press Build the game to rebuild it with this release."))
+    Some(format!(
+        "{why} Press Build the game to rebuild it with this release."
+    ))
 }
 
 /// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
@@ -1750,7 +2115,11 @@ pub fn packed_package_without_overlay() -> Option<PathBuf> {
     let written = ini_map(&dir.join("fefw.ini"));
     // A key is not an overlay: an interrupted write, or a folder the player moved, leaves an ini that points at nothing.
     // Play then tries to write the files again instead of starting an engine that reports main.npdm is compressed.
-    if written.get("fs.romfs_overlay").map(PathBuf::from).is_some_and(|p| p.is_dir()) {
+    if written
+        .get("fs.romfs_overlay")
+        .map(PathBuf::from)
+        .is_some_and(|p| p.is_dir())
+    {
         return None;
     }
     let path = PathBuf::from(written.get("fs.romfs")?);
@@ -1760,7 +2129,11 @@ pub fn packed_package_without_overlay() -> Option<PathBuf> {
 /// Game Setup's "Check my game folder": what the build does for a package it cannot read in place, done on its own so a game folder that
 /// was built by an older release can be fixed without compiling anything. It reads the package, writes the files that are packed with
 /// zstd into `work/romfs-overlay`, and points the existing `fefw.ini` at that folder.
-pub const REPAIR_STAGES: &[&'static str] = &["Read the package", "Write the files it cannot serve", "Point the game at them"];
+pub const REPAIR_STAGES: &[&'static str] = &[
+    "Read the package",
+    "Write the files it cannot serve",
+    "Point the game at them",
+];
 
 pub fn repair(ctx: &Ctx, romfs: PathBuf) -> Result<JobResult, String> {
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
@@ -1776,19 +2149,43 @@ pub fn repair(ctx: &Ctx, romfs: PathBuf) -> Result<JobResult, String> {
         ctx.end(2, StageStatus::Skipped, "nothing to change");
         return Ok(JobResult::Repaired(None));
     };
-    ctx.end(0, StageStatus::Done, format!("{count} files are packed with zstd ({:.1} GB)", bytes as f64 / (1024.0 * 1024.0 * 1024.0)));
+    ctx.end(
+        0,
+        StageStatus::Done,
+        format!(
+            "{count} files are packed with zstd ({:.1} GB)",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ),
+    );
 
     ctx.start(1);
     let dest = root.join("work").join("romfs-overlay");
     let stamp = dest.join(".written");
     let key = format!("{}|{count} files|{bytes} bytes", romfs.display());
-    if std::fs::read_to_string(&stamp).map(|t| t.trim() == key.trim()).unwrap_or(false) {
-        ctx.end(1, StageStatus::Skipped, format!("already written in {}", dest.display()));
+    if std::fs::read_to_string(&stamp)
+        .map(|t| t.trim() == key.trim())
+        .unwrap_or(false)
+    {
+        ctx.end(
+            1,
+            StageStatus::Skipped,
+            format!("already written in {}", dest.display()),
+        );
     } else {
         std::fs::create_dir_all(&dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
-        let (written, total) = crate::gamedata::unpack_packed_romfs(&romfs, &dest, &mut |m| ctx.log(format!("game files: {m}")))?;
+        let (written, total) = crate::gamedata::unpack_packed_romfs(&romfs, &dest, &mut |m| {
+            ctx.log(format!("game files: {m}"))
+        })?;
         std::fs::write(&stamp, &key).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
-        ctx.end(1, StageStatus::Done, format!("{written} files, {:.1} GB in {}", total as f64 / (1024.0 * 1024.0 * 1024.0), dest.display()));
+        ctx.end(
+            1,
+            StageStatus::Done,
+            format!(
+                "{written} files, {:.1} GB in {}",
+                total as f64 / (1024.0 * 1024.0 * 1024.0),
+                dest.display()
+            ),
+        );
     }
 
     ctx.start(2);
@@ -1798,13 +2195,24 @@ pub fn repair(ctx: &Ctx, romfs: PathBuf) -> Result<JobResult, String> {
     };
     let ini_path = dir.join("fefw.ini");
     if !ini_path.is_file() {
-        ctx.end(2, StageStatus::Skipped, "the game has not been built yet: the next build writes it");
+        ctx.end(
+            2,
+            StageStatus::Skipped,
+            "the game has not been built yet: the next build writes it",
+        );
         return Ok(JobResult::Repaired(Some(dest)));
     }
-    let text = std::fs::read_to_string(&ini_path).map_err(|e| format!("reading {}: {e}", ini_path.display()))?;
-    let updated = set_ini_value(&text, "fs", "romfs_overlay", &dest.display().to_string().replace('\\', "/"));
+    let text = std::fs::read_to_string(&ini_path)
+        .map_err(|e| format!("reading {}: {e}", ini_path.display()))?;
+    let updated = set_ini_value(
+        &text,
+        "fs",
+        "romfs_overlay",
+        &dest.display().to_string().replace('\\', "/"),
+    );
     if updated != text {
-        std::fs::write(&ini_path, updated).map_err(|e| format!("writing {}: {e}", ini_path.display()))?;
+        std::fs::write(&ini_path, updated)
+            .map_err(|e| format!("writing {}: {e}", ini_path.display()))?;
     }
     ctx.end(2, StageStatus::Done, ini_path.display().to_string());
     Ok(JobResult::Repaired(Some(dest)))
@@ -1853,7 +2261,12 @@ fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
 }
 
 /// The build job's work: every step in order.
-pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, String> {
+pub fn build(
+    ctx: &Ctx,
+    exefs: PathBuf,
+    romfs: PathBuf,
+    dlc: Option<PathBuf>,
+) -> Result<JobResult, String> {
     // The engine is compiled by the Windows toolchain; a platform without it gets a sentence, not
     // ninety steps that fail at CMake configure.
     if !crate::platform::build_supported() {
@@ -1867,7 +2280,10 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // left by another shell are all named here, before anything is compiled.
     let resolved = crate::toolchain::init()?;
     ctx.log(format!("toolchain: {}", resolved.toolchain.summary()));
-    ctx.log(format!("toolchain fingerprint: {}", resolved.toolchain.fingerprint()));
+    ctx.log(format!(
+        "toolchain fingerprint: {}",
+        resolved.toolchain.fingerprint()
+    ));
     for (name, value) in crate::toolchain::stale_env() {
         ctx.log(format!("ignoring the inherited {name}={value}: it would point the build at a toolchain or Python environment that was not checked"));
     }
@@ -1878,10 +2294,16 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let probe_dir = root.join("work").join("build").join("toolchain-probe");
     crate::toolchain::probe_build(&resolved.compiler, &resolved.env, &probe_dir)
         .map_err(|e| format!("the build cannot start. {e}"))?;
-    ctx.log(format!("the toolchain compiles and links a test file ({} with its own headers, libraries and SDK)", resolved.compiler.display()));
+    ctx.log(format!(
+        "the toolchain compiles and links a test file ({} with its own headers, libraries and SDK)",
+        resolved.compiler.display()
+    ));
     let missing = missing_tools();
     if !missing.is_empty() {
-        let lines: Vec<String> = missing.iter().map(|m| format!("{m} (`{}`)", install_hint(m))).collect();
+        let lines: Vec<String> = missing
+            .iter()
+            .map(|m| format!("{m} (`{}`)", install_hint(m)))
+            .collect();
         return Err(format!("the game build needs tools this PC does not have: {}. Each one is a single install command; see docs/TROUBLESHOOTING.md", lines.join(", ")));
     }
     // CMake is present but may be too old for the engine's projects, which is
@@ -1903,23 +2325,52 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // import every lifter package. Its own pip is used, never a global Python's.
     ctx.start(0);
     match probe_python_env(&python) {
-        PythonEnv::Healthy { version, executable } => {
+        PythonEnv::Healthy {
+            version,
+            executable,
+        } => {
             ctx.log(format!("Python environment: {executable} (Python {version}) passed the interpreter and import probe"));
             ctx.end(0, StageStatus::Skipped, "already set up");
         }
         found => {
             let why = found.reason();
             if matches!(found, PythonEnv::Missing) {
-                ctx.log(format!("Python environment: {} is missing; creating it", venv.display()));
+                ctx.log(format!(
+                    "Python environment: {} is missing; creating it",
+                    venv.display()
+                ));
             } else {
-                ctx.log(format!("Python environment: {} failed the probe: {why}", python.display()));
-                ctx.log(format!("removing only the engine's generated {} and recreating it", venv.display()));
+                ctx.log(format!(
+                    "Python environment: {} failed the probe: {why}",
+                    python.display()
+                ));
+                ctx.log(format!(
+                    "removing only the engine's generated {} and recreating it",
+                    venv.display()
+                ));
             }
             remove_engine_venv(&root)?;
             let used_uv = which_tool("uv");
             if used_uv {
-                run(ctx, &root, "uv", &["venv", "tools\\.venv", "--python", "3.13"])?;
-                run(ctx, &root, "uv", &["pip", "install", "--python", "tools\\.venv", "-r", "recomp\\requirements.txt"])?;
+                run(
+                    ctx,
+                    &root,
+                    "uv",
+                    &["venv", "tools\\.venv", "--python", "3.13"],
+                )?;
+                run(
+                    ctx,
+                    &root,
+                    "uv",
+                    &[
+                        "pip",
+                        "install",
+                        "--python",
+                        "tools\\.venv",
+                        "-r",
+                        "recomp\\requirements.txt",
+                    ],
+                )?;
             } else {
                 ctx.log("uv is not installed: the Python environment is made with the interpreter on this PC and pip installs its packages");
                 if run(ctx, &root, "py", &["-3", "-m", "venv", "tools\\.venv"]).is_err() {
@@ -1927,12 +2378,32 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
                         format!("creating tools\\.venv needs a Python 3.9 or newer: {e}. Install Python with `winget install Python.Python.3.12`, restart the launcher, then press Build the game again")
                     })?;
                 }
-                run(ctx, &root, &py, &["-m", "pip", "install", "--disable-pip-version-check", "--no-input", "-r", "recomp\\requirements.txt"])?;
+                run(
+                    ctx,
+                    &root,
+                    &py,
+                    &[
+                        "-m",
+                        "pip",
+                        "install",
+                        "--disable-pip-version-check",
+                        "--no-input",
+                        "-r",
+                        "recomp\\requirements.txt",
+                    ],
+                )?;
             }
             match probe_python_env(&python) {
-                PythonEnv::Healthy { version, executable } => {
+                PythonEnv::Healthy {
+                    version,
+                    executable,
+                } => {
                     ctx.log(format!("Python environment verified: {executable} (Python {version}) imports every lifter package"));
-                    let detail = if used_uv { "tools\\.venv ready" } else { "tools\\.venv ready (pip)" };
+                    let detail = if used_uv {
+                        "tools\\.venv ready"
+                    } else {
+                        "tools\\.venv ready (pip)"
+                    };
                     ctx.end(0, StageStatus::Done, detail);
                 }
                 failed => {
@@ -1952,7 +2423,12 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // reads it; the user's dump and the built Windows exe are never touched.
     ctx.start(1);
     let ex = exefs.display().to_string();
-    run(ctx, &root, &py, &["-I", "tools\\nso\\prepare_exefs.py", "--exefs", &ex])?;
+    run(
+        ctx,
+        &root,
+        &py,
+        &["-I", "tools\\nso\\prepare_exefs.py", "--exefs", &ex],
+    )?;
     let mods_dir = run_dir().map(|d| d.join("mods")).unwrap_or_default();
     let main = exefs.join("main");
     let patch_plan = crate::patches::inspect(
@@ -1970,7 +2446,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     if patch_applied.count > 0 {
         ctx.log(format!(
             "exefs patches: {} active file(s), {} record(s), main {} -> {}",
-            patch_plan.patches.iter().filter(|p| p.error.is_none() && !p.records.is_empty()).count(),
+            patch_plan
+                .patches
+                .iter()
+                .filter(|p| p.error.is_none() && !p.records.is_empty())
+                .count(),
             patch_applied.count,
             &patch_applied.original_sha256[..12],
             &patch_applied.patched_sha256[..12]
@@ -1978,7 +2458,18 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     } else {
         ctx.log("exefs patches: none active");
     }
-    ctx.end(1, StageStatus::Done, format!("game\\dump\\exefs ready{}", if patch_applied.count > 0 { format!(" + {} patch record(s)", patch_applied.count) } else { String::new() }));
+    ctx.end(
+        1,
+        StageStatus::Done,
+        format!(
+            "game\\dump\\exefs ready{}",
+            if patch_applied.count > 0 {
+                format!(" + {} patch record(s)", patch_applied.count)
+            } else {
+                String::new()
+            }
+        ),
+    );
 
     // 3. Game code: ninja rebuilds only what changed.
     ctx.start(2);
@@ -1993,13 +2484,21 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // so compare that with what was validated here and clear it first.
     let game_build = root.join("work").join("build").join("fefw");
     let toolchain_file = root.join("recomp").join("cmake").join("clang-cl.cmake");
-    if let Some(why) =
-        crate::toolchain::cache_mismatch_in(&game_build, &resolved.compiler, "Ninja", &toolchain_file.display().to_string())
-    {
-        ctx.log(format!("the recompile build folder cannot be reused: {why}; clearing its CMake cache"));
+    if let Some(why) = crate::toolchain::cache_mismatch_in(
+        &game_build,
+        &resolved.compiler,
+        "Ninja",
+        &toolchain_file.display().to_string(),
+    ) {
+        ctx.log(format!(
+            "the recompile build folder cannot be reused: {why}; clearing its CMake cache"
+        ));
         crate::toolchain::clear_cache(&game_build);
     }
-    let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(8).to_string();
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(2).max(1))
+        .unwrap_or(8)
+        .to_string();
     // The engine's scripts look for `vcvars64.bat` through vswhere, and their
     // `%ProgramFiles(x86)%` path breaks inside cmd's `for /f` parentheses, so
     // every build logged "'vswhere.exe' is not recognized". The path is already
@@ -2018,8 +2517,13 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let cpu = crate::cpu::probe();
     let chosen = crate::cpu::choose(&cpu);
     ctx.log(format!("cpu: {}", crate::cpu::summary(&cpu, &chosen)));
-    let variant = chosen.map_err(|why| format!("{why}\n\nThe game cannot be built for this processor."))?;
-    ctx.log(format!("cpu build: {} ({})", variant.key(), variant.label()));
+    let variant =
+        chosen.map_err(|why| format!("{why}\n\nThe game cannot be built for this processor."))?;
+    ctx.log(format!(
+        "cpu build: {} ({})",
+        variant.key(),
+        variant.label()
+    ));
     let mut envs: Vec<(&str, &str)> = vec![("NX_JOBS", &jobs), ("FEFW_CPU_VARIANT", variant.key())];
     if let Some(vc) = &vc_env {
         envs.push(("NX_VCVARS", vc));
@@ -2030,15 +2534,28 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     if mod_sites.is_empty() {
         ctx.log("hook sites: main.sites (no installed mod adds any)");
     } else {
-        let from: std::collections::BTreeSet<&str> = mod_sites.iter().map(|s| s.from.split(':').next().unwrap_or("")).collect();
-        ctx.log(format!("hook sites: main.sites plus {} from mods ({})", mod_sites.len(), from.into_iter().collect::<Vec<_>>().join(", ")));
+        let from: std::collections::BTreeSet<&str> = mod_sites
+            .iter()
+            .map(|s| s.from.split(':').next().unwrap_or(""))
+            .collect();
+        ctx.log(format!(
+            "hook sites: main.sites plus {} from mods ({})",
+            mod_sites.len(),
+            from.into_iter().collect::<Vec<_>>().join(", ")
+        ));
     }
     // cmd.exe splits its command line at & | < > ^ ( ) % even when the line is quoted, which is how `G:\Games\PC Ports &
     // Recomps` became a command called `CMakeFiles\G_\Games\PC_Ports_`. Stop with that explanation instead of building.
     let root_here = build_root(&root)?;
     let site_list = site_list.display().to_string();
     envs.push(("FEFW_SITES", &site_list));
-    let built = run_env(ctx, &root_here, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs);
+    let built = run_env(
+        ctx,
+        &root_here,
+        "cmd",
+        &["/C", "recomp\\scripts\\build_game.cmd", "fefw"],
+        &envs,
+    );
     if let Err(e) = built {
         // The same old-toolset case, when it slips past the version check: the C++ library of an older Visual Studio has no
         // `<bit>`, and nothing in the message says that is what it means.
@@ -2056,10 +2573,18 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         if !stale {
             return Err(e);
         }
-        ctx.log("the build folder holds a cache CMake cannot reuse; clearing it and configuring again");
+        ctx.log(
+            "the build folder holds a cache CMake cannot reuse; clearing it and configuring again",
+        );
         let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
         let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
-        run_env(ctx, &root_here, "cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"], &envs)?;
+        run_env(
+            ctx,
+            &root_here,
+            "cmd",
+            &["/C", "recomp\\scripts\\build_game.cmd", "fefw"],
+            &envs,
+        )?;
     }
     // A step that reports success without writing its libraries leaves the
     // next one failing over a missing `fefw_main.lib`, which says nothing
@@ -2076,7 +2601,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             libs.display()
         ));
     }
-    ctx.end(2, StageStatus::Done, format!("six modules compiled ({jobs} jobs)"));
+    ctx.end(
+        2,
+        StageStatus::Done,
+        format!("six modules compiled ({jobs} jobs)"),
+    );
 
     // 4. Texture transcoders. `-ExecutionPolicy Bypass` is not optional: on a PC
     // whose policy is RemoteSigned or AllSigned, PowerShell refuses to load
@@ -2090,11 +2619,26 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         ctx.end(3, StageStatus::Skipped, "already fetched");
     } else {
         ctx.log("the texture sources are missing or incomplete; fetching the pinned versions");
-        run(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"])?;
+        run(
+            ctx,
+            &root,
+            shell(),
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "tools\\textures\\scripts\\fetch_third_party.ps1",
+            ],
+        )?;
         if !textures_fetched(&root) {
             return Err("the texture sources were fetched but are still incomplete. tools\\textures\\third_party needs astc-encoder, bc7enc_rdo and ispc; delete that folder and press Build the game again".into());
         }
-        ctx.end(3, StageStatus::Done, "astc-encoder, bc7enc_rdo and ispc fetched and checked");
+        ctx.end(
+            3,
+            StageStatus::Done,
+            "astc-encoder, bc7enc_rdo and ispc fetched and checked",
+        );
     }
 
     // 5. fefw.exe.
@@ -2103,7 +2647,21 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         Some(vc) => vec![("NX_VCVARS", vc)],
         None => Vec::new(),
     };
-    let fefw = || run_env(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1"], &fefw_envs);
+    let fefw = || {
+        run_env(
+            ctx,
+            &root,
+            shell(),
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "game-build\\scripts\\build_fefw.ps1",
+            ],
+            &fefw_envs,
+        )
+    };
     // Two failures the launcher can repair on its own, each once:
     //
     // - The runtime fetches its graphics dependencies into the build folder, and a
@@ -2118,8 +2676,13 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     //   cache goes. The downloads and the fetched sources stay.
     let builds = root.join("game-build").join("fefw").join("build");
     for dir in std::fs::read_dir(&builds).into_iter().flatten().flatten() {
-        if let Some(why) = crate::toolchain::cache_mismatch_in(&dir.path(), &resolved.compiler, "Ninja", "") {
-            ctx.log(format!("{} cannot be reused: {why}; clearing its CMake cache", dir.path().display()));
+        if let Some(why) =
+            crate::toolchain::cache_mismatch_in(&dir.path(), &resolved.compiler, "Ninja", "")
+        {
+            ctx.log(format!(
+                "{} cannot be reused: {why}; clearing its CMake cache",
+                dir.path().display()
+            ));
             crate::toolchain::clear_cache(&dir.path());
         }
     }
@@ -2129,16 +2692,24 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     // 1.2 GB. A successful link means they are dead weight, so take them with it.
     let swept = tidy_link_temps(&builds);
     if swept > 0 {
-        ctx.log(format!("removed {swept} leftover linker temp file(s) from the build folder"));
+        ctx.log(format!(
+            "removed {swept} leftover linker temp file(s) from the build folder"
+        ));
     }
     // The haptics backend is a vendored DLL the runtime loads from beside `fefw.exe` (gfx/haptic.cpp looks
     // nowhere else), so it is copied in after the build rather than linked. Without it the game still vibrates,
     // on the standard two-motor rumble.
-    let renhdrum = root.join("runtime").join("third_party").join("renhdrum").join("renhdrum.dll");
+    let renhdrum = root
+        .join("runtime")
+        .join("third_party")
+        .join("renhdrum")
+        .join("renhdrum.dll");
     if renhdrum.is_file() {
         let beside = builds.join("release").join("renhdrum.dll");
         if let Err(e) = std::fs::copy(&renhdrum, &beside) {
-            ctx.log(format!("copying renhdrum.dll beside fefw.exe: {e} (standard rumble will be used)"));
+            ctx.log(format!(
+                "copying renhdrum.dll beside fefw.exe: {e} (standard rumble will be used)"
+            ));
         }
     }
     // The build writes the engine's own icon into fefw.exe; Windows draws the
@@ -2148,10 +2719,21 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
 
     // 6. Shader translator.
     ctx.start(5);
-    let harness = root.join("tools").join("shaders").join("build").join("bin").join("Release").join("net10.0").join("spirv_harness.dll");
+    let harness = root
+        .join("tools")
+        .join("shaders")
+        .join("build")
+        .join("bin")
+        .join("Release")
+        .join("net10.0")
+        .join("spirv_harness.dll");
     let bundled = bundled_harness_in(&root);
     if let Some(exe) = &bundled {
-        ctx.end(5, StageStatus::Skipped, format!("using the one in the zip: {}", exe.display()));
+        ctx.end(
+            5,
+            StageStatus::Skipped,
+            format!("using the one in the zip: {}", exe.display()),
+        );
     } else if harness.is_file() {
         ctx.end(5, StageStatus::Skipped, "already built");
     } else {
@@ -2173,7 +2755,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         // path: it is built from a copy under the launcher's own work folder and the result is copied back, so a folder
         // named after the game, or after whoever unzipped it, builds like any other without being renamed.
         let shaders = root.join("tools").join("shaders");
-        let awkward_path = root.display().to_string().chars().any(|c| c == '\'' || !c.is_ascii());
+        let awkward_path = root
+            .display()
+            .to_string()
+            .chars()
+            .any(|c| c == '\'' || !c.is_ascii());
         let staged = if awkward_path {
             let to = crate::config::Config::work_dir()
                 .ok_or_else(|| "the launcher's work folder is not set, so the translator cannot be built outside this path".to_string())?
@@ -2198,7 +2784,11 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
         run(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &setup, "-Ryubing", &refs])?;
         // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
         // .NET runtime alone satisfies `dotnet.exe` but cannot build a net10.0 project.
-        let csproj = build_shaders.join("harness").join("SpirvHarness.csproj").display().to_string();
+        let csproj = build_shaders
+            .join("harness")
+            .join("SpirvHarness.csproj")
+            .display()
+            .to_string();
         run(ctx, &root, "dotnet", &["build", &csproj, "-c", "Release"]).map_err(|e| {
             let lower = e.to_lowercase();
             if lower.contains("sdk-not-found") || e.contains("0x8000809b") || lower.contains("sdk not found") {
@@ -2218,10 +2808,21 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
             }
         })?;
         if let Some(staged) = &staged {
-            let from = staged.join("build").join("bin").join("Release").join("net10.0");
-            let to = shaders.join("build").join("bin").join("Release").join("net10.0");
+            let from = staged
+                .join("build")
+                .join("bin")
+                .join("Release")
+                .join("net10.0");
+            let to = shaders
+                .join("build")
+                .join("bin")
+                .join("Release")
+                .join("net10.0");
             let files = crate::saves::copy_tree(&from, &to)?;
-            ctx.log(format!("copied {files} translator files back into {}", to.display()));
+            ctx.log(format!(
+                "copied {files} translator files back into {}",
+                to.display()
+            ));
         }
         ctx.end(5, StageStatus::Done, "spirv_harness built");
     }
@@ -2252,20 +2853,62 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
     let corpus_stamp = corpus.join(".romfs");
     let romfs_id = romfs_dir.display().to_string();
     let corpus_current = corpus.join("unique.tsv").is_file()
-        && std::fs::read_to_string(&corpus_stamp).map(|t| t.trim().to_string()).ok().as_deref() == Some(romfs_id.as_str());
+        && std::fs::read_to_string(&corpus_stamp)
+            .map(|t| t.trim().to_string())
+            .ok()
+            .as_deref()
+            == Some(romfs_id.as_str());
     if !corpus_current {
         let rom = romfs_id.clone();
-        let main = root.join("game").join("dump").join("exefs").join("main").display().to_string();
-        let dump = root.join("game").join("dump").join("exefs").display().to_string();
-        run(ctx, &root, &py, &["-I", "tools\\shaders\\ampere\\extract_corpus.py", "--romfs", &rom, "--main", &main, "--exefs", &dump, "--out", "work\\shaders\\corpus", "--jobs", "4"])?;
-        std::fs::write(&corpus_stamp, &romfs_id).map_err(|e| format!("writing {}: {e}", corpus_stamp.display()))?;
+        let main = root
+            .join("game")
+            .join("dump")
+            .join("exefs")
+            .join("main")
+            .display()
+            .to_string();
+        let dump = root
+            .join("game")
+            .join("dump")
+            .join("exefs")
+            .display()
+            .to_string();
+        run(
+            ctx,
+            &root,
+            &py,
+            &[
+                "-I",
+                "tools\\shaders\\ampere\\extract_corpus.py",
+                "--romfs",
+                &rom,
+                "--main",
+                &main,
+                "--exefs",
+                &dump,
+                "--out",
+                "work\\shaders\\corpus",
+                "--jobs",
+                "4",
+            ],
+        )?;
+        std::fs::write(&corpus_stamp, &romfs_id)
+            .map_err(|e| format!("writing {}: {e}", corpus_stamp.display()))?;
     }
     let mut report = shader_report(&corpus, &spirv)?;
     if report.expected == 0 {
         return Err(format!("{} lists no shader blocks, so the dump could not be read for shaders. Send a diagnostics report; the game cannot draw without them.", corpus.join("unique.tsv").display()));
     }
     if report.missing.is_empty() {
-        ctx.end(6, StageStatus::Skipped, format!("all {} shaders translated{}", report.expected, report.failed_summary()));
+        ctx.end(
+            6,
+            StageStatus::Skipped,
+            format!(
+                "all {} shaders translated{}",
+                report.expected,
+                report.failed_summary()
+            ),
+        );
     } else {
         ctx.log(format!(
             "{} of {} shaders have no SPIR-V ({} translated, {} the translator cannot handle); translating the missing ones",
@@ -2289,7 +2932,7 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
                 break;
             }
             if report.missing.len() >= last {
-                break;      // no progress: another run would fail the same way
+                break; // no progress: another run would fail the same way
             }
             last = report.missing.len();
         }
@@ -2304,30 +2947,46 @@ pub fn build(ctx: &Ctx, exefs: PathBuf, romfs: PathBuf) -> Result<JobResult, Str
                 spirv.join("results.tsv").display()
             ));
         }
-        ctx.end(6, StageStatus::Done, format!("{} shaders translated{}", report.expected, report.failed_summary()));
+        ctx.end(
+            6,
+            StageStatus::Done,
+            format!(
+                "{} shaders translated{}",
+                report.expected,
+                report.failed_summary()
+            ),
+        );
     }
 
     // 8. fefw.ini.
     ctx.start(7);
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let save_dir = Config::save_dir().ok_or(crate::platform::NO_DATA_DIR)?;
-    std::fs::create_dir_all(dir.join("mods")).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir.join("mods"))
+        .map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let ini = ini_text(
         &root,
         &RunConfig {
             exefs: root.join("game").join("dump").join("exefs"),
             romfs,
+            dlc,
             save_dir,
             mods: dir.join("mods"),
             romfs_overlay: overlay,
         },
     );
     std::fs::write(dir.join("fefw.ini"), ini).map_err(|e| format!("writing fefw.ini: {e}"))?;
-    ctx.end(7, StageStatus::Done, format!("{}", dir.join("fefw.ini").display()));
+    ctx.end(
+        7,
+        StageStatus::Done,
+        format!("{}", dir.join("fefw.ini").display()),
+    );
     // The executable is current only after the whole build succeeded. Recording
     // this identity here is what lets Play tell a fresh build from a stale one.
     if let Err(e) = crate::patches::record(&patch_plan, &patch_applied) {
-        ctx.log(format!("the patch state could not be recorded: {e}; Play will ask for a rebuild"));
+        ctx.log(format!(
+            "the patch state could not be recorded: {e}; Play will ask for a rebuild"
+        ));
     }
     Ok(JobResult::Engine(dir))
 }
@@ -2369,16 +3028,36 @@ pub fn harness_platform() -> (&'static str, &'static str) {
 
 fn bundled_harness_in(root: &Path) -> Option<PathBuf> {
     let (dir, file) = harness_platform();
-    let p = root.join("tools").join("shaders").join("prebuilt").join(dir).join(file);
+    let p = root
+        .join("tools")
+        .join("shaders")
+        .join("prebuilt")
+        .join(dir)
+        .join(file);
     p.is_file().then_some(p)
 }
 
 /// The files FSR 3.1 is built from, either layout: the SDK 2.x loader with its upscaler, or the single v1.1.4 DLL.
-pub const FSR_FILES: &[&str] = &["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll", "amd_fidelityfx_vk.dll"];
+pub const FSR_FILES: &[&str] = &[
+    "amd_fidelityfx_loader_vk.dll",
+    "amd_fidelityfx_upscaler_vk.dll",
+    "amd_fidelityfx_vk.dll",
+];
 /// The four DLLs DLSS needs.
-pub const DLSS_FILES: &[&str] = &["sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "nvngx_dlss.dll"];
+pub const DLSS_FILES: &[&str] = &[
+    "sl.interposer.dll",
+    "sl.common.dll",
+    "sl.dlss.dll",
+    "nvngx_dlss.dll",
+];
 /// The five more DLSS Frame Generation needs beside those four (`streamline_framegen_files` in the engine).
-pub const DLSS_FRAMEGEN_FILES: &[&str] = &["sl.dlss_g.dll", "sl.reflex.dll", "sl.pcl.dll", "nvngx_dlssg.dll", "NvLowLatencyVk.dll"];
+pub const DLSS_FRAMEGEN_FILES: &[&str] = &[
+    "sl.dlss_g.dll",
+    "sl.reflex.dll",
+    "sl.pcl.dll",
+    "nvngx_dlssg.dll",
+    "NvLowLatencyVk.dll",
+];
 /// Intel's XeSS is one DLL.
 pub const XESS_FILES: &[&str] = &["libxess.dll"];
 
@@ -2398,12 +3077,16 @@ pub struct Sdk {
 impl Sdk {
     /// FSR 3 frame generation goes through the v1.1.4 DLL, so the v2.4 loader pair alone cannot make frames.
     pub fn fsr_framegen(&self) -> bool {
-        self.fsr3.as_ref().is_some_and(|d| d.join("amd_fidelityfx_vk.dll").is_file())
+        self.fsr3
+            .as_ref()
+            .is_some_and(|d| d.join("amd_fidelityfx_vk.dll").is_file())
     }
 
     /// DLSS Frame Generation needs five more files beside the four DLSS ones, from the same Streamline release.
     pub fn dlss_framegen(&self) -> bool {
-        self.dlss.as_ref().is_some_and(|d| DLSS_FRAMEGEN_FILES.iter().all(|f| d.join(f).is_file()))
+        self.dlss
+            .as_ref()
+            .is_some_and(|d| DLSS_FRAMEGEN_FILES.iter().all(|f| d.join(f).is_file()))
     }
 }
 
@@ -2425,7 +3108,10 @@ pub fn sdk_dirs() -> Vec<PathBuf> {
             add(d.to_path_buf());
         }
     }
-    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         add(d);
     }
     dirs
@@ -2449,7 +3135,13 @@ fn sdk_folder(dir: &Path, needed: &[&str], every: bool, depth: usize) -> Option<
     if depth == 0 {
         return None;
     }
-    let mut sub: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let mut sub: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     sub.sort();
     for s in sub {
         if let Some(hit) = sdk_folder(&s, needed, every, depth - 1) {
@@ -2475,8 +3167,16 @@ fn sdk_in(dirs: &[PathBuf], folders: &[&str], needed: &[&str], every: bool) -> O
 /// A complete FSR layout: the SDK 2.x loader and upscaler, or the single v1.1.4 DLL. A lone loader is not enough.
 fn sdk_fsr(dirs: &[PathBuf]) -> Option<PathBuf> {
     let folders = ["fsr", "fsr3"];
-    sdk_in(dirs, &folders, &["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_upscaler_vk.dll"], true)
-        .or_else(|| sdk_in(dirs, &folders, &["amd_fidelityfx_vk.dll"], true))
+    sdk_in(
+        dirs,
+        &folders,
+        &[
+            "amd_fidelityfx_loader_vk.dll",
+            "amd_fidelityfx_upscaler_vk.dll",
+        ],
+        true,
+    )
+    .or_else(|| sdk_in(dirs, &folders, &["amd_fidelityfx_vk.dll"], true))
 }
 
 /// Where the engine will look, in the same order: `upscalers\fsr` (and the older `upscalers\fsr3`), `upscalers\streamline`,
@@ -2504,7 +3204,10 @@ fn find_in_tree(dir: &Path, wanted: &str, depth: usize) -> Option<PathBuf> {
     let mut sub: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
-        if p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(wanted)) {
+        if p.is_file()
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(wanted))
+        {
             return Some(p);
         }
         if p.is_dir() {
@@ -2512,7 +3215,8 @@ fn find_in_tree(dir: &Path, wanted: &str, depth: usize) -> Option<PathBuf> {
         }
     }
     sub.sort();
-    sub.into_iter().find_map(|s| find_in_tree(&s, wanted, depth - 1))
+    sub.into_iter()
+        .find_map(|s| find_in_tree(&s, wanted, depth - 1))
 }
 
 /// The vendor DLLs, wherever an extracted SDK left them. Only folders that name a vendor are walked deeply: searching all
@@ -2524,14 +3228,28 @@ fn find_upscaler_file(sources: &[PathBuf], name: &str) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    const HINTS: [&str; 10] = ["upscal", "fsr", "fidelity", "streamline", "dlss", "xess", "intel", "nvidia", "amd", "sdk"];
+    const HINTS: [&str; 10] = [
+        "upscal",
+        "fsr",
+        "fidelity",
+        "streamline",
+        "dlss",
+        "xess",
+        "intel",
+        "nvidia",
+        "amd",
+        "sdk",
+    ];
     for s in sources {
         for e in std::fs::read_dir(s).into_iter().flatten().flatten() {
             let p = e.path();
             if !p.is_dir() {
                 continue;
             }
-            let named = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let named = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
             if HINTS.iter().any(|h| named.contains(h)) {
                 if let Some(hit) = find_in_tree(&p, name, 4) {
                     return Some(hit);
@@ -2548,7 +3266,10 @@ fn find_upscaler_file(sources: &[PathBuf], name: &str) -> Option<PathBuf> {
 pub fn adopt_upscaler_files() -> Result<String, String> {
     let root_dir = upscalers_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let mut sources: Vec<PathBuf> = Vec::new();
-    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         sources.push(d);
     }
     if let Some(r) = root() {
@@ -2590,14 +3311,17 @@ pub fn adopt_upscaler_files() -> Result<String, String> {
             if dest.is_file() {
                 continue;
             }
-            let Some(src) = find_upscaler_file(&sources, name) else { continue };
+            let Some(src) = find_upscaler_file(&sources, name) else {
+                continue;
+            };
             if std::fs::create_dir_all(root_dir.join(folder)).is_err() {
                 continue;
             }
             // A running game holds its DLLs; a copy that fails leaves the folder as it was and the report says what is still missing.
             if std::fs::copy(&src, &dest).is_ok() {
                 copied += 1;
-                where_from.get_or_insert_with(|| src.parent().map(Path::to_path_buf).unwrap_or_default());
+                where_from
+                    .get_or_insert_with(|| src.parent().map(Path::to_path_buf).unwrap_or_default());
             }
         }
     }
@@ -2624,18 +3348,29 @@ pub fn adopt_upscaler_files() -> Result<String, String> {
     if sdk.xess.is_some() {
         have.push("XeSS");
     }
-    let from = where_from.map(|p| format!(" from {}", p.display())).unwrap_or_default();
+    let from = where_from
+        .map(|p| format!(" from {}", p.display()))
+        .unwrap_or_default();
     let found = if copied == 0 {
         "No new upscaler files were found".to_string()
     } else {
-        format!("{copied} upscaler file(s) copied{from} into {}", root_dir.display())
+        format!(
+            "{copied} upscaler file(s) copied{from} into {}",
+            root_dir.display()
+        )
     };
     let (ok, missing) = if have.is_empty() {
-        (String::new(), format!("; still missing: {}", lack.join(", ")))
+        (
+            String::new(),
+            format!("; still missing: {}", lack.join(", ")),
+        )
     } else if lack.is_empty() {
         (format!("; ready: {}", have.join(", ")), String::new())
     } else {
-        (format!("; found: {}", have.join(", ")), format!("; missing: {}", lack.join(", ")))
+        (
+            format!("; found: {}", have.join(", ")),
+            format!("; missing: {}", lack.join(", ")),
+        )
     };
     Ok(format!("{found}{ok}{missing}"))
 }
@@ -2665,7 +3400,10 @@ pub fn set_ini_key(text: &str, section: &str, key: &str, value: &str) -> String 
     }
     if !replaced {
         let header = format!("[{section}]");
-        match lines.iter().position(|l| l.trim().eq_ignore_ascii_case(&header)) {
+        match lines
+            .iter()
+            .position(|l| l.trim().eq_ignore_ascii_case(&header))
+        {
             Some(i) => lines.insert(i + 1, format!("{key} = {value}")),
             None => {
                 if lines.last().is_some_and(|l| !l.trim().is_empty()) {
@@ -2787,14 +3525,19 @@ fn ini_parse(text: &str) -> std::collections::HashMap<String, String> {
         if t.starts_with('[') && t.ends_with(']') {
             section = t[1..t.len() - 1].trim().to_ascii_lowercase();
         } else if let Some((k, v)) = t.split_once('=') {
-            out.insert(format!("{section}.{}", k.trim().to_ascii_lowercase()), v.trim().to_string());
+            out.insert(
+                format!("{section}.{}", k.trim().to_ascii_lowercase()),
+                v.trim().to_string(),
+            );
         }
     }
     out
 }
 
 fn ini_map(path: &Path) -> std::collections::HashMap<String, String> {
-    std::fs::read_to_string(path).map(|t| ini_parse(&t)).unwrap_or_default()
+    std::fs::read_to_string(path)
+        .map(|t| ini_parse(&t))
+        .unwrap_or_default()
 }
 
 /// Read the two files in `dir`; `None` when neither of them is there yet.
@@ -2806,27 +3549,46 @@ pub fn live_in(dir: &Path) -> Option<Live> {
     }
     let get = |k: &str| controls.get(k).or_else(|| game.get(k)).cloned();
     let num = |k: &str| get(k).and_then(|v| v.parse::<u32>().ok());
-    let window = (num("display.width").unwrap_or(0), num("display.height").unwrap_or(0));
+    let window = (
+        num("display.width").unwrap_or(0),
+        num("display.height").unwrap_or(0),
+    );
     // play_display.cpp's internal_size(): a fixed render size wins, else the
     // window at render_scale (100 = the window's own size).
     let scale = (num("display.render_scale").unwrap_or(100) as f32 / 100.0).clamp(0.25, 4.0);
     let picture = match (num("display.render_width"), num("display.render_height")) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
-        _ => ((window.0 as f32 * scale) as u32, (window.1 as f32 * scale) as u32),
+        _ => (
+            (window.0 as f32 * scale) as u32,
+            (window.1 as f32 * scale) as u32,
+        ),
     };
-    let mut values: std::collections::BTreeMap<String, String> = controls.clone().into_iter().collect();
+    let mut values: std::collections::BTreeMap<String, String> =
+        controls.clone().into_iter().collect();
     values.extend(game.clone());
     Some(Live {
-        output: game.get("fefw.output").cloned().unwrap_or_else(|| "console".into()),
+        output: game
+            .get("fefw.output")
+            .cloned()
+            .unwrap_or_else(|| "console".into()),
         // merge_env(): fefw.ini's [upscale] wins over the F1 menu's own copy.
-        upscaling: game.get("upscale.mode").or_else(|| controls.get("upscale.mode")).cloned().unwrap_or_else(|| "off".into()),
+        upscaling: game
+            .get("upscale.mode")
+            .or_else(|| controls.get("upscale.mode"))
+            .cloned()
+            .unwrap_or_else(|| "off".into()),
         window_mode: get("display.window_mode").unwrap_or_else(|| "windowed".into()),
-        vsync: matches!(get("display.vsync").as_deref(), Some("1") | Some("true") | Some("on")),
+        vsync: matches!(
+            get("display.vsync").as_deref(),
+            Some("1") | Some("true") | Some("on")
+        ),
         aspect: get("display.aspect").unwrap_or_else(|| "auto".into()),
         fps_limit: get("display.fps_limit").unwrap_or_else(|| "auto".into()),
         window,
         picture,
-        volume: get("audio.volume").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+        volume: get("audio.volume")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0),
         values,
     })
 }
@@ -2871,7 +3633,10 @@ pub fn brand_game() -> Result<bool, String> {
 /// The FSR 3.1 DLL the engine should load, whichever SDK layout is installed.
 fn fsr_dll(sdk: &Sdk) -> Option<PathBuf> {
     let d = sdk.fsr3.as_ref()?;
-    ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"].iter().map(|f| d.join(f)).find(|p| p.is_file())
+    ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"]
+        .iter()
+        .map(|f| d.join(f))
+        .find(|p| p.is_file())
 }
 
 type Values = std::collections::BTreeMap<String, String>;
@@ -2911,9 +3676,18 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
         other => other,
     };
     d.insert("upscale.mode".into(), mode.into());
-    d.insert("upscale.sharpness".into(), sharpen_value(&g.sharpening).into());
-    d.insert("display.window_mode".into(), window_mode(&g.display_mode).into());
-    d.insert("display.vsync".into(), if g.vsync { "1" } else { "0" }.into());
+    d.insert(
+        "upscale.sharpness".into(),
+        sharpen_value(&g.sharpening).into(),
+    );
+    d.insert(
+        "display.window_mode".into(),
+        window_mode(&g.display_mode).into(),
+    );
+    d.insert(
+        "display.vsync".into(),
+        if g.vsync { "1" } else { "0" }.into(),
+    );
     d.insert("display.aspect".into(), g.aspect.clone());
     d.insert("display.fps_limit".into(), g.frame_limit.to_string());
     let scale = g.render_scale.clamp(0.5, 2.0);
@@ -2930,7 +3704,10 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
         // sized picture, so no fixed size may pin it.
         d.insert("display.render_width".into(), "0".into());
         d.insert("display.render_height".into(), "0".into());
-        d.insert("display.render_scale".into(), (scale * 100.0).round().to_string());
+        d.insert(
+            "display.render_scale".into(),
+            (scale * 100.0).round().to_string(),
+        );
     }
     // Point the engine at the DLLs the Graphics page found. Its own defaults
     // only look beside the game and the launcher, so naming them keeps what the
@@ -2947,24 +3724,49 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     }
     // The rest of the Rendering page: the preset the temporal upscalers scale by, the scene buffer's
     // share of the output, and what makes the frames between two rendered ones.
-    d.insert("upscale.quality".into(), upscale_quality_word(&g.upscale_quality).into());
-    d.insert("upscale.scene_scale".into(), g.scene_scale.clamp(25, 100).to_string());
+    d.insert(
+        "upscale.quality".into(),
+        upscale_quality_word(&g.upscale_quality).into(),
+    );
+    d.insert(
+        "upscale.scene_scale".into(),
+        g.scene_scale.clamp(25, 100).to_string(),
+    );
     d.insert("dlss.frame_gen".into(), frame_gen_word(&g.frame_gen).into());
-    d.insert("dlss.upscaler".into(), dlss_upscaler_word(&g.dlss_upscaler).into());
-    d.insert("display.astc_quality".into(), g.astc_quality.to_ascii_lowercase());
+    d.insert(
+        "dlss.upscaler".into(),
+        dlss_upscaler_word(&g.dlss_upscaler).into(),
+    );
+    d.insert(
+        "display.astc_quality".into(),
+        g.astc_quality.to_ascii_lowercase(),
+    );
     d.insert("gfx.gpu".into(), gpu_word(&g.gpu).into());
     // Shader work while playing is three pools: whole pipelines built at a draw, recorded pipelines prewarmed at boot, and
     // shader parts compiled in the background. The page's one number caps all three; before this it only reached the parts
     // pool, so a player who chose 2 still had four prewarm workers and six preload readers fighting the game (#10).
     if g.compile_threads > 0 {
         let n = g.compile_threads.min(8).to_string();
-        for key in ["nvn.gpl_threads", "nvn.prewarm_threads", "nvn.shader_preload_threads"] {
+        for key in [
+            "nvn.gpl_threads",
+            "nvn.prewarm_threads",
+            "nvn.shader_preload_threads",
+        ] {
             d.insert(key.into(), n.clone());
         }
     }
-    d.insert("nvn.compile_priority".into(), compile_priority_word(&g.compile_priority).into());
-    d.insert("nvn.compile_eco".into(), if g.compile_eco { "1" } else { "0" }.into());
-    d.insert("audio.volume".into(), format!("{:.2}", a.master.clamp(0.0, 1.0)));
+    d.insert(
+        "nvn.compile_priority".into(),
+        compile_priority_word(&g.compile_priority).into(),
+    );
+    d.insert(
+        "nvn.compile_eco".into(),
+        if g.compile_eco { "1" } else { "0" }.into(),
+    );
+    d.insert(
+        "audio.volume".into(),
+        format!("{:.2}", a.master.clamp(0.0, 1.0)),
+    );
     d
 }
 
@@ -3075,7 +3877,12 @@ fn output_label(mode: &str) -> Option<&'static str> {
 pub fn aspect_label(value: &str) -> String {
     let t = value.trim();
     if let Ok(n) = t.parse::<f32>() {
-        for (label, ratio) in [("16:9", 16.0 / 9.0), ("16:10", 16.0 / 10.0), ("21:9", 21.0 / 9.0), ("32:9", 32.0 / 9.0)] {
+        for (label, ratio) in [
+            ("16:9", 16.0 / 9.0),
+            ("16:10", 16.0 / 10.0),
+            ("21:9", 21.0 / 9.0),
+            ("32:9", 32.0 / 9.0),
+        ] {
             if (n - ratio).abs() < 0.001 {
                 return label.to_string();
             }
@@ -3099,7 +3906,12 @@ fn window_mode_label(mode: &str) -> Option<&'static str> {
 /// What the game has changed in its own menus: the file's value for a key whose
 /// page still asks for the value the launcher last wrote. A setting changed on
 /// the page is the player's newer intent, and is left for the next start.
-fn take_back<'a>(desired: &Values, applied: &Values, on_file: &'a Values, id: &str) -> Option<&'a str> {
+fn take_back<'a>(
+    desired: &Values,
+    applied: &Values,
+    on_file: &'a Values,
+    id: &str,
+) -> Option<&'a str> {
     let want = desired.get(id)?;
     if applied.get(id) != Some(want) {
         return None;
@@ -3193,7 +4005,10 @@ fn adopt_from(
     // the console's own one. `render_scale` is the engine's percent for the case
     // where it sizes the picture from its window.
     let render_keys = ["display.render_width", "display.render_height"];
-    if !render_keys.iter().any(|id| applied.get(*id) != desired.get(*id)) {
+    if !render_keys
+        .iter()
+        .any(|id| applied.get(*id) != desired.get(*id))
+    {
         let number = |id: &str| on_file.get(id).and_then(|v| v.trim().parse::<f32>().ok());
         let scale_now = match (number("display.render_width"), number("display.width")) {
             (Some(render), Some(width)) if render > 0.0 && width > 0.0 => Some(render / width),
@@ -3256,11 +4071,13 @@ fn write_settings(
     applied: &mut Values,
 ) -> Result<bool, String> {
     let fefw_path = dir.join("fefw.ini");
-    let mut fefw = std::fs::read_to_string(&fefw_path).map_err(|e| format!("reading {}: {e}", fefw_path.display()))?;
+    let mut fefw = std::fs::read_to_string(&fefw_path)
+        .map_err(|e| format!("reading {}: {e}", fefw_path.display()))?;
     // The game writes controls.ini on its first start; a file made here is
     // filled with the factory settings by play mode, which keeps these keys.
     let ctl_path = dir.join("controls.ini");
-    let mut ctl = std::fs::read_to_string(&ctl_path).unwrap_or_else(|_| "[meta]\ndefaults_rev = 1\n".to_string());
+    let mut ctl = std::fs::read_to_string(&ctl_path)
+        .unwrap_or_else(|_| "[meta]\ndefaults_rev = 1\n".to_string());
     let on_disk = (ini_parse(&fefw), ini_parse(&ctl));
 
     let mut touched = false;
@@ -3279,7 +4096,11 @@ fn write_settings(
             "nvn" | "dlss" | "gfx" => (true, false),
             _ => (true, true),
         };
-        let current = if in_fefw { on_disk.0.get(&id) } else { on_disk.1.get(&id) };
+        let current = if in_fefw {
+            on_disk.0.get(&id)
+        } else {
+            on_disk.1.get(&id)
+        };
         if current.is_some_and(|v| v == &value) {
             // The file already says what the page wants.
             applied.insert(id, value);
@@ -3302,7 +4123,8 @@ fn write_settings(
     if !touched {
         return Ok(false);
     }
-    std::fs::write(&fefw_path, fefw).map_err(|e| format!("writing {}: {e}", fefw_path.display()))?;
+    std::fs::write(&fefw_path, fefw)
+        .map_err(|e| format!("writing {}: {e}", fefw_path.display()))?;
     std::fs::write(&ctl_path, ctl).map_err(|e| format!("writing {}: {e}", ctl_path.display()))?;
     Ok(true)
 }
@@ -3310,7 +4132,8 @@ fn write_settings(
 // One line the launcher shows after a launch that did not draw anything. The
 // engine's own log is written by another process, so a watcher thread fills
 // this and the app drains it once per frame.
-static PLAY_ALERT: std::sync::OnceLock<std::sync::Mutex<Vec<(String, bool)>>> = std::sync::OnceLock::new();
+static PLAY_ALERT: std::sync::OnceLock<std::sync::Mutex<Vec<(String, bool)>>> =
+    std::sync::OnceLock::new();
 
 fn alerts() -> &'static std::sync::Mutex<Vec<(String, bool)>> {
     PLAY_ALERT.get_or_init(|| std::sync::Mutex::new(Vec::new()))
@@ -3329,7 +4152,10 @@ pub fn take_play_alert() -> Option<(String, bool)> {
 }
 
 fn alert(text: String, good: bool) {
-    alerts().lock().unwrap_or_else(|e| e.into_inner()).push((text, good));
+    alerts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((text, good));
 }
 
 static WATCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -3351,17 +4177,25 @@ impl Drop for WatchGuard {
 /// What the engine logged after `from` bytes. A log that got shorter was
 /// started over, so it is read whole.
 fn new_log_text(path: &Path, from: &mut u64) -> String {
-    let Ok(meta) = std::fs::metadata(path) else { return String::new() };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return String::new();
+    };
     if meta.len() < *from {
         *from = 0;
     }
-    let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
     use std::io::{Read, Seek, SeekFrom};
     if file.seek(SeekFrom::Start(*from)).is_err() {
         return String::new();
     }
     let mut buf = Vec::new();
-    if file.take(meta.len().saturating_sub(*from).min(1 << 20)).read_to_end(&mut buf).is_err() {
+    if file
+        .take(meta.len().saturating_sub(*from).min(1 << 20))
+        .read_to_end(&mut buf)
+        .is_err()
+    {
         return String::new();
     }
     *from += buf.len() as u64;
@@ -3374,10 +4208,12 @@ fn presented_fps(text: &str) -> Option<f32> {
     // Only the renderer's per-second line carries "present pass": other lines
     // mention a frame rate too ("gameplay at 60 fps"), and a run that never
     // drew must not look like one that did.
-    text.lines().filter(|l| l.contains("present pass")).find_map(|l| {
-        let rest = l.split("fps ").nth(1)?;
-        rest.split(',').next()?.trim().parse::<f32>().ok()
-    })
+    text.lines()
+        .filter(|l| l.contains("present pass"))
+        .find_map(|l| {
+            let rest = l.split("fps ").nth(1)?;
+            rest.split(',').next()?.trim().parse::<f32>().ok()
+        })
 }
 
 fn gpu_name(text: &str) -> Option<String> {
@@ -3394,7 +4230,9 @@ fn gpu_name(text: &str) -> Option<String> {
 fn last_error(log: &Path) -> Option<String> {
     let text = std::fs::read_to_string(log).ok()?;
     text.lines()
-        .filter(|l| l.contains("error") || l.contains("ERR") || l.contains("failed") || l.contains("vulkan"))
+        .filter(|l| {
+            l.contains("error") || l.contains("ERR") || l.contains("failed") || l.contains("vulkan")
+        })
         .next_back()
         .map(|l| l.trim().to_string())
 }
@@ -3404,10 +4242,14 @@ fn last_error(log: &Path) -> Option<String> {
 /// build. Returns how many files went.
 fn tidy_link_temps(builds: &Path) -> usize {
     let mut gone = 0;
-    let Ok(dirs) = std::fs::read_dir(builds) else { return 0 };
+    let Ok(dirs) = std::fs::read_dir(builds) else {
+        return 0;
+    };
     for dir in dirs.flatten() {
         let release = dir.path().join("release");
-        let Ok(files) = std::fs::read_dir(&release) else { continue };
+        let Ok(files) = std::fs::read_dir(&release) else {
+            continue;
+        };
         for file in files.flatten() {
             let name = file.file_name().to_string_lossy().to_string();
             let temp = name.starts_with("RCX") && name.ends_with(".tmp");
@@ -3433,7 +4275,9 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
             std::thread::sleep(std::time::Duration::from_millis(500));
             if let Ok(Some(status)) = child.try_wait() {
                 if !status.success() {
-                    let why = last_error(&log).map(|e| format!(" Last line: {e}")).unwrap_or_default();
+                    let why = last_error(&log)
+                        .map(|e| format!(" Last line: {e}"))
+                        .unwrap_or_default();
                     alert(
                         format!(
                             "The game exited after {} s without finishing (code {:?}).{why} The Game Log has everything it printed.",
@@ -3448,13 +4292,17 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
             let text = new_log_text(&log, &mut offset);
             if let Some(fps) = presented_fps(&text) {
                 alert(
-                    format!("The game presented its first frame after {} s ({fps:.1} fps).", started.elapsed().as_secs()),
+                    format!(
+                        "The game presented its first frame after {} s ({fps:.1} fps).",
+                        started.elapsed().as_secs()
+                    ),
                     true,
                 );
                 return;
             }
             if started.elapsed().as_secs() >= 90 {
-                let gpu = gpu_name(&std::fs::read_to_string(&log).unwrap_or_default()).unwrap_or_else(|| "the graphics card it picked".into());
+                let gpu = gpu_name(&std::fs::read_to_string(&log).unwrap_or_default())
+                    .unwrap_or_else(|| "the graphics card it picked".into());
                 alert(
                     format!(
                         "The game has been running for 90 s and has not presented a single frame: the window looks black while the sound plays. \
@@ -3470,7 +4318,10 @@ It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card
 
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
-pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) -> Result<(), String> {
+pub fn play(
+    graphics: &crate::config::Graphics,
+    audio: &crate::config::Audio,
+) -> Result<(), String> {
     let root = root().ok_or("the engine was not found")?;
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let exe = game_exe(&root);
@@ -3511,7 +4362,11 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
     // release, so it is put there on the way in as well as after a build: updating the launcher should not quietly drop
     // rumble to the standard two motors (issue #10). A running game holds the file, and a copy that fails leaves the one
     // already in place.
-    let vendor = root.join("runtime").join("third_party").join("renhdrum").join("renhdrum.dll");
+    let vendor = root
+        .join("runtime")
+        .join("third_party")
+        .join("renhdrum")
+        .join("renhdrum.dll");
     if vendor.is_file() && !dir.join("renhdrum.dll").is_file() {
         let _ = std::fs::copy(&vendor, dir.join("renhdrum.dll"));
     }
@@ -3553,7 +4408,9 @@ pub fn play(graphics: &crate::config::Graphics, audio: &crate::config::Audio) ->
         // could catch it, still blocks the bare Home key. Every launch checks once.
         let _ = allow_plain_shortcuts(&dir.join("ReShade.ini"));
     }
-    let child = cmd.spawn().map_err(|e| format!("starting {}: {e}", exe.display()))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("starting {}: {e}", exe.display()))?;
     watch_first_frame(child, log, from);
     Ok(())
 }
@@ -3572,14 +4429,20 @@ mod tests {
 
         // The whole older copy is accepted and the checkout inside it is what gets remembered.
         assert_eq!(remember_in(&file, &install).unwrap(), checkout);
-        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), checkout.display().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap().trim(),
+            checkout.display().to_string()
+        );
         // The checkout itself works too, as the picker's own help text says.
         assert_eq!(remember_in(&file, &checkout).unwrap(), checkout);
 
         // A folder without an engine is refused and leaves the remembered one in place.
         std::fs::create_dir_all(dir.join("unrelated")).unwrap();
         assert!(remember_in(&file, &dir.join("unrelated")).is_err());
-        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), checkout.display().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap().trim(),
+            checkout.display().to_string()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3624,7 +4487,8 @@ mod tests {
         std::fs::create_dir_all(&settings).unwrap();
         std::fs::write(settings.join("engine.txt"), root.display().to_string()).unwrap();
 
-        let found = find_existing(&here, &[settings], None).expect("the remembered build is offered");
+        let found =
+            find_existing(&here, &[settings], None).expect("the remembered build is offered");
         assert_eq!(found.root, root);
 
         // An engine.txt pointing at this copy's own unbuilt checkout is not an offer. A copy with no siblings is used here, so
@@ -3646,15 +4510,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ew-reshade-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let apps = dir.join("ReShadeApps.ini");
-        std::fs::write(&apps, "[Apps]\nApps=C:\\Games\\fefw.exe, D:/Other/game.exe\n").unwrap();
+        std::fs::write(
+            &apps,
+            "[Apps]\nApps=C:\\Games\\fefw.exe, D:/Other/game.exe\n",
+        )
+        .unwrap();
 
-        assert!(reshade_apps_contains(&apps, Path::new(r"c:\games\FEFW.exe")));
-        assert!(reshade_apps_contains(&apps, Path::new(r"d:\other\GAME.exe")));
-        assert!(!reshade_apps_contains(&apps, Path::new(r"c:\games\other.exe")));
+        assert!(reshade_apps_contains(
+            &apps,
+            Path::new(r"c:\games\FEFW.exe")
+        ));
+        assert!(reshade_apps_contains(
+            &apps,
+            Path::new(r"d:\other\GAME.exe")
+        ));
+        assert!(!reshade_apps_contains(
+            &apps,
+            Path::new(r"c:\games\other.exe")
+        ));
 
         // The setup tool writes a byte order mark before `Apps` and CRLF line ends.
         std::fs::write(&apps, "\u{feff}Apps=C:\\Games\\fefw.exe\r\n\r\n").unwrap();
-        assert!(reshade_apps_contains(&apps, Path::new(r"c:\games\fefw.exe")));
+        assert!(reshade_apps_contains(
+            &apps,
+            Path::new(r"c:\games\fefw.exe")
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3673,9 +4553,19 @@ mod tests {
 
         assert!(allow_plain_shortcuts(&ini));
         let text = std::fs::read_to_string(&ini).unwrap();
-        assert!(text.contains("[GENERAL]\r\nForceShortcutModifiers=1\r\n"), "the other section is not touched: {text}");
-        assert!(text.contains("[INPUT]\r\nKeyOverlay=36,0,0,0\r\nForceShortcutModifiers=0\r\n"), "{text}");
-        assert_eq!(text.matches("ForceShortcutModifiers=0").count(), 1, "{text}");
+        assert!(
+            text.contains("[GENERAL]\r\nForceShortcutModifiers=1\r\n"),
+            "the other section is not touched: {text}"
+        );
+        assert!(
+            text.contains("[INPUT]\r\nKeyOverlay=36,0,0,0\r\nForceShortcutModifiers=0\r\n"),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("ForceShortcutModifiers=0").count(),
+            1,
+            "{text}"
+        );
         // Already right: nothing is rewritten, so the overlay keeps its state file.
         assert!(!allow_plain_shortcuts(&ini));
         assert!(!allow_plain_shortcuts(&dir.join("absent.ini")));
@@ -3683,7 +4573,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn probe_line(version: &str, executable: &str, venv: bool, identity: bool, imports: &[&str]) -> String {
+    fn probe_line(
+        version: &str,
+        executable: &str,
+        venv: bool,
+        identity: bool,
+        imports: &[&str],
+    ) -> String {
         format!(
             "EW_PY_PROBE {}",
             serde_json::json!({
@@ -3698,7 +4594,13 @@ mod tests {
 
     #[test]
     fn a_healthy_python_environment_is_reused() {
-        let line = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", true, true, &[]);
+        let line = probe_line(
+            "3.13.5",
+            r"C:\engine\tools\.venv\Scripts\python.exe",
+            true,
+            true,
+            &[],
+        );
         assert_eq!(
             super::parse_python_probe(&line, ""),
             PythonEnv::Healthy {
@@ -3717,9 +4619,19 @@ mod tests {
 
         // A global interpreter copied into the venv folder reports the same
         // executable but is not a virtual environment.
-        let global = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", false, true, &[]);
+        let global = probe_line(
+            "3.13.5",
+            r"C:\engine\tools\.venv\Scripts\python.exe",
+            false,
+            true,
+            &[],
+        );
         let said = super::parse_python_probe(&global, "");
-        assert!(said.reason().contains("not a virtual environment"), "{}", said.reason());
+        assert!(
+            said.reason().contains("not a virtual environment"),
+            "{}",
+            said.reason()
+        );
 
         // A launcher path that resolves to another executable is not the
         // interpreter that was probed.
@@ -3730,7 +4642,13 @@ mod tests {
 
     #[test]
     fn a_missing_lifter_import_is_unusable_and_names_the_module() {
-        let line = probe_line("3.13.5", r"C:\engine\tools\.venv\Scripts\python.exe", true, true, &["capstone: ImportError: no module named capstone"]);
+        let line = probe_line(
+            "3.13.5",
+            r"C:\engine\tools\.venv\Scripts\python.exe",
+            true,
+            true,
+            &["capstone: ImportError: no module named capstone"],
+        );
         let said = super::parse_python_probe(&line, "");
         assert!(matches!(said, PythonEnv::Unusable { .. }), "{said:?}");
         assert!(said.reason().contains("capstone"), "{}", said.reason());
@@ -3745,7 +4663,10 @@ mod tests {
         assert!(matches!(said, PythonEnv::Unusable { .. }), "{said:?}");
         assert!(said.reason().contains("python311.dll"), "{}", said.reason());
         // A report that is not the probe's own JSON is not reused either.
-        assert!(matches!(super::parse_python_probe("EW_PY_PROBE {oops", ""), PythonEnv::Unusable { .. }));
+        assert!(matches!(
+            super::parse_python_probe("EW_PY_PROBE {oops", ""),
+            PythonEnv::Unusable { .. }
+        ));
     }
 
     #[test]
@@ -3762,8 +4683,14 @@ mod tests {
 
         super::remove_engine_venv(&root).unwrap();
         assert!(!venv.exists(), "the generated environment is gone");
-        assert!(other.join("keep.txt").is_file(), "a sibling under tools is kept");
-        assert!(root.join("python.exe").is_file(), "an interpreter outside tools is kept");
+        assert!(
+            other.join("keep.txt").is_file(),
+            "a sibling under tools is kept"
+        );
+        assert!(
+            root.join("python.exe").is_file(),
+            "an interpreter outside tools is kept"
+        );
         // Removing it again is fine: a missing environment is the normal first build.
         super::remove_engine_venv(&root).unwrap();
         let _ = std::fs::remove_dir_all(&root);
@@ -3771,7 +4698,10 @@ mod tests {
 
     #[test]
     fn a_missing_venv_is_not_an_error() {
-        assert_eq!(super::probe_python_env(Path::new(r"C:\no\such\tools\.venv\Scripts\python.exe")), PythonEnv::Missing);
+        assert_eq!(
+            super::probe_python_env(Path::new(r"C:\no\such\tools\.venv\Scripts\python.exe")),
+            PythonEnv::Missing
+        );
     }
 
     #[test]
@@ -3781,7 +4711,10 @@ mod tests {
         // Anywhere inside [fs] is a key the engine reads; the file stays a flat list of lines.
         let fs = after.split("[nvn]").next().unwrap_or_default();
         assert!(fs.contains("romfs_overlay = C:/w/romfs-overlay"), "{after}");
-        assert!(after.starts_with("[log]\npath = fefw.log\n[fs]\n"), "{after}");
+        assert!(
+            after.starts_with("[log]\npath = fefw.log\n[fs]\n"),
+            "{after}"
+        );
         assert!(after.contains("[nvn]\nshader_cache = C:/c\n"), "{after}");
         // A second run replaces the line instead of adding another one.
         let again = set_ini_value(&after, "fs", "romfs_overlay", "D:/other");
@@ -3853,7 +4786,10 @@ mod tests {
         write_packed_nup(&nup);
         std::fs::write(
             dir.join("fefw.ini"),
-            format!("[engine]\nbuilt_by = 0.1.10\n[fs]\nromfs = {}\n", nup.display()),
+            format!(
+                "[engine]\nbuilt_by = 0.1.10\n[fs]\nromfs = {}\n",
+                nup.display()
+            ),
         )
         .unwrap();
         let note = play_blocker_in(&dir).expect("an old build with a packed package is refused");
@@ -3862,17 +4798,24 @@ mod tests {
         // The same folder, built by this release, is not refused by this guard.
         std::fs::write(
             dir.join("fefw.ini"),
-            format!("[engine]\nbuilt_by = 0.1.33\npacked_nup = 1\n[fs]\nromfs = {}\n", nup.display()),
+            format!(
+                "[engine]\nbuilt_by = 0.1.33\npacked_nup = 1\n[fs]\nromfs = {}\n",
+                nup.display()
+            ),
         )
         .unwrap();
         assert_eq!(play_blocker_in(&dir), None);
         // A newer built_by with no marker is a rebuild that reused the old engine; it is refused too (the #34 report).
         std::fs::write(
             dir.join("fefw.ini"),
-            format!("[engine]\nbuilt_by = 0.1.32\n[fs]\nromfs = {}\n", nup.display()),
+            format!(
+                "[engine]\nbuilt_by = 0.1.32\n[fs]\nromfs = {}\n",
+                nup.display()
+            ),
         )
         .unwrap();
-        let stale = play_blocker_in(&dir).expect("an engine without the packed reader is refused even when built_by is newer");
+        let stale = play_blocker_in(&dir)
+            .expect("an engine without the packed reader is refused even when built_by is newer");
         assert!(stale.contains("0.1.32"), "{stale}");
         assert!(stale.contains("old fefw.exe"), "{stale}");
         // Once Play has written the overlay (what 0.1.20 through 0.1.33 read), that same folder is allowed.
@@ -3880,7 +4823,11 @@ mod tests {
         std::fs::create_dir_all(&overlay).unwrap();
         std::fs::write(
             dir.join("fefw.ini"),
-            format!("[engine]\nbuilt_by = 0.1.32\n[fs]\nromfs = {}\nromfs_overlay = {}\n", nup.display(), overlay.display()),
+            format!(
+                "[engine]\nbuilt_by = 0.1.32\n[fs]\nromfs = {}\nromfs_overlay = {}\n",
+                nup.display(),
+                overlay.display()
+            ),
         )
         .unwrap();
         assert_eq!(play_blocker_in(&dir), None);
@@ -3891,8 +4838,12 @@ mod tests {
     fn the_clang_driver_failure_is_recognized_and_repaired() {
         // The first line is what the #9 report ends with; the second is the one clang prints for its missing /W3 flag.
         assert!(driver_flags_rejected("clang++: error: unknown argument: '-clang:-fmacro-prefix-map=F:/Games/EmblemWeave-windows-x64=.\'"));
-        assert!(driver_flags_rejected("clang: error: no such file or directory: '/W3'"));
-        assert!(!driver_flags_rejected("ninja: build stopped: subcommand failed."));
+        assert!(driver_flags_rejected(
+            "clang: error: no such file or directory: '/W3'"
+        ));
+        assert!(!driver_flags_rejected(
+            "ninja: build stopped: subcommand failed."
+        ));
     }
 
     #[test]
@@ -3901,26 +4852,41 @@ mod tests {
         // cache lets the next configure write a fresh manifest without the stale dependency.
         let log = "[0/2] Re-checking globbed directories...\n[1/2] Re-running CMake...\nninja: error: manifest 'build.ninja' still dirty after 100 tries, perhaps system time is not set";
         assert!(needs_cache_reset(log));
-        assert!(needs_cache_reset("CMake Generate step failed.  Build files cannot be regenerated correctly."));
+        assert!(needs_cache_reset(
+            "CMake Generate step failed.  Build files cannot be regenerated correctly."
+        ));
         assert!(needs_cache_reset("the cache was made by another compiler"));
-        assert!(needs_cache_reset("CMake Error: The current CMakeCache.txt directory is different"));
-        assert!(!needs_cache_reset("ninja: build stopped: subcommand failed."));
+        assert!(needs_cache_reset(
+            "CMake Error: The current CMakeCache.txt directory is different"
+        ));
+        assert!(!needs_cache_reset(
+            "ninja: build stopped: subcommand failed."
+        ));
         assert!(!needs_cache_reset("'bit' file not found"));
         // A shader or texture cache message is not a configure cache that needs deleting.
         assert!(!needs_cache_reset("nvn: shader cache: 12088 records"));
-        assert!(!needs_cache_reset("nvn.texdata: BC7 data from cache C:/cache/27/x.bc7"));
+        assert!(!needs_cache_reset(
+            "nvn.texdata: BC7 data from cache C:/cache/27/x.bc7"
+        ));
     }
 
     #[test]
     fn an_extracted_sdk_in_downloads_is_searched_for_its_dlls() {
         let root = std::env::temp_dir().join(format!("ew-adopt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let bin = root.join("Downloads").join("fsr-sdk").join("bin").join("x64");
+        let bin = root
+            .join("Downloads")
+            .join("fsr-sdk")
+            .join("bin")
+            .join("x64");
         std::fs::create_dir_all(&bin).unwrap();
         let dll = bin.join("amd_fidelityfx_vk.dll");
         std::fs::write(&dll, "").unwrap();
         let sources = vec![root.join("Downloads")];
-        assert_eq!(find_upscaler_file(&sources, "amd_fidelityfx_vk.dll"), Some(dll));
+        assert_eq!(
+            find_upscaler_file(&sources, "amd_fidelityfx_vk.dll"),
+            Some(dll)
+        );
         assert_eq!(find_upscaler_file(&sources, "libxess.dll"), None);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3937,8 +4903,14 @@ mod tests {
         std::fs::create_dir_all(&xess).unwrap();
         std::fs::write(xess.join("libxess.dll"), "").unwrap();
         assert_eq!(sdk_fsr(&[root.clone()]), Some(fsr));
-        assert_eq!(sdk_in(&[root.clone()], &["xess"], XESS_FILES, true), Some(xess));
-        assert_eq!(sdk_in(&[root.clone()], &["streamline"], DLSS_FILES, true), None);
+        assert_eq!(
+            sdk_in(&[root.clone()], &["xess"], XESS_FILES, true),
+            Some(xess)
+        );
+        assert_eq!(
+            sdk_in(&[root.clone()], &["streamline"], DLSS_FILES, true),
+            None
+        );
         // A half-copied SDK 2.x folder (loader only) must not count as a working FSR layout.
         let partial = root.join("partial").join("upscalers").join("fsr");
         std::fs::create_dir_all(&partial).unwrap();
@@ -3967,25 +4939,56 @@ mod tests {
     #[test]
     fn a_failed_step_is_named_by_the_script_it_ran() {
         assert_eq!(
-            super::step_name("pwsh", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\\textures\\scripts\\fetch_third_party.ps1"]),
+            super::step_name(
+                "pwsh",
+                &[
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "tools\\textures\\scripts\\fetch_third_party.ps1"
+                ]
+            ),
             "tools\\textures\\scripts\\fetch_third_party.ps1"
         );
-        assert_eq!(super::step_name("cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"]), "/C");
+        assert_eq!(
+            super::step_name("cmd", &["/C", "recomp\\scripts\\build_game.cmd", "fefw"]),
+            "/C"
+        );
     }
 
     #[test]
     fn a_project_path_cmd_would_split_is_refused_with_the_reason() {
         use std::path::Path;
-        assert_eq!(super::cmd_breaker(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")), Some('&'));
-        assert_eq!(super::cmd_breaker(Path::new(r"C:\Users\me\EmblemWeave")), None);
-        assert_eq!(super::cmd_breaker(Path::new(r"C:\Games (2)\EmblemWeave")), Some('('));
-        assert_eq!(super::cmd_breaker(Path::new(r"C:\Games\100%\EmblemWeave")), Some('%'));
+        assert_eq!(
+            super::cmd_breaker(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")),
+            Some('&')
+        );
+        assert_eq!(
+            super::cmd_breaker(Path::new(r"C:\Users\me\EmblemWeave")),
+            None
+        );
+        assert_eq!(
+            super::cmd_breaker(Path::new(r"C:\Games (2)\EmblemWeave")),
+            Some('(')
+        );
+        assert_eq!(
+            super::cmd_breaker(Path::new(r"C:\Games\100%\EmblemWeave")),
+            Some('%')
+        );
 
         assert!(super::build_root(Path::new(r"C:\Users\me\EmblemWeave")).is_ok());
-        let said = super::build_root(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")).unwrap_err();
+        let said =
+            super::build_root(Path::new(r"G:\Games\PC Ports & Recomps\emblemweave")).unwrap_err();
         assert!(said.contains("contains '&'"), "names the character: {said}");
-        assert!(said.contains("Move EmblemWeave to a folder"), "says what to do: {said}");
-        assert!(said.contains("PC Ports & Recomps"), "names the folder: {said}");
+        assert!(
+            said.contains("Move EmblemWeave to a folder"),
+            "says what to do: {said}"
+        );
+        assert!(
+            said.contains("PC Ports & Recomps"),
+            "names the folder: {said}"
+        );
     }
 
     #[test]
@@ -4008,11 +5011,17 @@ mod tests {
 
     #[test]
     fn a_run_without_the_word_error_keeps_its_last_lines() {
-        let lines: Vec<String> = ["ninja: build stopped: subcommand failed.", "Done building project"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(reason_from(&lines), "Done building project | ninja: build stopped: subcommand failed.");
+        let lines: Vec<String> = [
+            "ninja: build stopped: subcommand failed.",
+            "Done building project",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            reason_from(&lines),
+            "Done building project | ninja: build stopped: subcommand failed."
+        );
     }
 
     #[test]
@@ -4037,7 +5046,10 @@ mod tests {
         assert!(s.contains("--id Kitware.CMake"), "{s}");
         assert!(s.contains("--id Microsoft.PowerShell"), "{s}");
         // A dependency installed by a command rather than winget runs too.
-        assert!(lines.iter().any(|l| l == "py -m pip install zbic"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l == "py -m pip install zbic"),
+            "{lines:?}"
+        );
         assert!(s.trim_end().ends_with("pause"));
     }
 
@@ -4057,6 +5069,7 @@ mod tests {
             &RunConfig {
                 exefs: PathBuf::from(r"C:\e"),
                 romfs: PathBuf::from(r"E:\g.nup"),
+                dlc: None,
                 save_dir: PathBuf::from(r"C:\s"),
                 mods: PathBuf::from(r"C:\play\mods"),
                 romfs_overlay: None,
@@ -4071,6 +5084,24 @@ mod tests {
         assert!(ini.contains("watchdog_seconds = 30"));
         // The upscaler section is written up front; Play patches its mode.
         assert!(ini.contains("[upscale]\nmode = off"));
+        // A dump with no add-on content must not make the engine scan a default folder.
+        assert!(ini.contains("[aoc]\ndir = \n"));
+    }
+
+    #[test]
+    fn the_ini_points_at_dumped_add_on_content() {
+        let ini = ini_text(
+            Path::new(r"C:\x\engine\fefw-recomp"),
+            &RunConfig {
+                exefs: PathBuf::from(r"C:\e"),
+                romfs: PathBuf::from(r"E:\g.nup"),
+                dlc: Some(PathBuf::from(r"E:\FEFW\dlc")),
+                save_dir: PathBuf::from(r"C:\s"),
+                mods: PathBuf::from(r"C:\play\mods"),
+                romfs_overlay: None,
+            },
+        );
+        assert!(ini.contains("[aoc]\ndir = E:/FEFW/dlc"));
     }
 
     /// Issues #12 and #15: Setup accepts a `.nup`, the game reads its RomFS in place
@@ -4085,7 +5116,9 @@ mod tests {
         };
         // EW_TEST_ROOT keeps the copy, so the extractor can be run on it by hand.
         let keep = std::env::var_os("EW_TEST_ROOT").map(PathBuf::from);
-        let root = keep.clone().unwrap_or_else(|| std::env::temp_dir().join("ew-nup-shader-romfs"));
+        let root = keep
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("ew-nup-shader-romfs"));
         let _ = std::fs::remove_dir_all(&root);
         let (dir, copied) = shader_romfs(&root, &nup).expect("the .nup yields a folder");
         let (files, bytes) = copied.expect("a .nup is copied, not used as it is");
@@ -4097,7 +5130,10 @@ mod tests {
         assert!(copied_again.is_none(), "the copy was made twice");
         let count = std::fs::read_dir(&dir).expect("the folder").count();
         assert!(count > 0, "the folder is empty");
-        println!("{files} shader archives ({bytes} bytes) below {}", dir.display());
+        println!(
+            "{files} shader archives ({bytes} bytes) below {}",
+            dir.display()
+        );
         if keep.is_none() {
             let _ = std::fs::remove_dir_all(&root);
         }
@@ -4110,6 +5146,7 @@ mod tests {
             &RunConfig {
                 exefs: PathBuf::from(r"C:\e"),
                 romfs: PathBuf::from(r"E:\g.nup"),
+                dlc: None,
                 save_dir: PathBuf::from(r"C:\s"),
                 mods: PathBuf::from(r"C:\play\mods"),
                 romfs_overlay: None,
@@ -4127,7 +5164,12 @@ mod tests {
         assert!(bare.contains("[upscale]\nmode = fsr1"));
         assert!(bare.contains("path = fefw.log"));
         // A hand-edited ini keeps its shape: comments and other keys stay.
-        let edited = set_ini_key("; mine\n[upscale]\nsharpness = 0.5\n", "upscale", "mode", "nis");
+        let edited = set_ini_key(
+            "; mine\n[upscale]\nsharpness = 0.5\n",
+            "upscale",
+            "mode",
+            "nis",
+        );
         assert!(edited.contains("; mine"));
         assert!(edited.contains("sharpness = 0.5"));
         assert!(edited.contains("mode = nis"));
@@ -4158,10 +5200,15 @@ mod tests {
 I gfx: fps 59.9, present pass GPU 1.204 ms avg\n\
 I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 10 s\n";
         assert_eq!(super::presented_fps(text), Some(59.9));
-        assert_eq!(super::gpu_name(text).as_deref(), Some("NVIDIA GeForce RTX 4070"));
+        assert_eq!(
+            super::gpu_name(text).as_deref(),
+            Some("NVIDIA GeForce RTX 4070")
+        );
         // A start-up line that names a frame rate is not evidence of a frame.
         assert_eq!(
-            super::presented_fps("I gfx: using GPU 0: a card\nI fefw: gameplay at 60 fps ([fefw] fps60 = 1)\n"),
+            super::presented_fps(
+                "I gfx: using GPU 0: a card\nI fefw: gameplay at 60 fps ([fefw] fps60 = 1)\n"
+            ),
             None,
             "a run that never presented has no present line"
         );
@@ -4172,20 +5219,58 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let (dir_name, file_name) = super::harness_platform();
         assert!(dir_name == "win-x64" || dir_name == "linux-x64");
         assert!(file_name == "spirv_harness.exe" || file_name == "spirv_harness");
-        assert_eq!(dir_name.ends_with("win-x64"), cfg!(windows), "the platform folder matches the host");
+        assert_eq!(
+            dir_name.ends_with("win-x64"),
+            cfg!(windows),
+            "the platform folder matches the host"
+        );
 
         let dir = std::env::temp_dir().join(format!("ew-harness-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let slot = dir.join("tools").join("shaders").join("prebuilt").join(dir_name);
+        let slot = dir
+            .join("tools")
+            .join("shaders")
+            .join("prebuilt")
+            .join(dir_name);
         std::fs::create_dir_all(&slot).unwrap();
-        assert_eq!(super::bundled_harness_in(&dir), None, "an empty slot is not a translator");
+        assert_eq!(
+            super::bundled_harness_in(&dir),
+            None,
+            "an empty slot is not a translator"
+        );
 
         // Another platform's binary is not ours to run.
-        let other = if cfg!(windows) { "linux-x64" } else { "win-x64" };
-        let other_file = if cfg!(windows) { "spirv_harness" } else { "spirv_harness.exe" };
-        std::fs::create_dir_all(dir.join("tools").join("shaders").join("prebuilt").join(other)).unwrap();
-        std::fs::write(dir.join("tools").join("shaders").join("prebuilt").join(other).join(other_file), b"x").unwrap();
-        assert_eq!(super::bundled_harness_in(&dir), None, "the other platform's file is ignored");
+        let other = if cfg!(windows) {
+            "linux-x64"
+        } else {
+            "win-x64"
+        };
+        let other_file = if cfg!(windows) {
+            "spirv_harness"
+        } else {
+            "spirv_harness.exe"
+        };
+        std::fs::create_dir_all(
+            dir.join("tools")
+                .join("shaders")
+                .join("prebuilt")
+                .join(other),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("tools")
+                .join("shaders")
+                .join("prebuilt")
+                .join(other)
+                .join(other_file),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(
+            super::bundled_harness_in(&dir),
+            None,
+            "the other platform's file is ignored"
+        );
 
         std::fs::write(slot.join(file_name), b"x").unwrap();
         assert_eq!(super::bundled_harness_in(&dir), Some(slot.join(file_name)));
@@ -4198,15 +5283,27 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let mut g = crate::config::Graphics::default();
         let d = super::desired_values(&g, &audio);
         assert_eq!(d.get("upscale.quality").map(String::as_str), Some("native"));
-        assert_eq!(d.get("upscale.scene_scale").map(String::as_str), Some("100"));
+        assert_eq!(
+            d.get("upscale.scene_scale").map(String::as_str),
+            Some("100")
+        );
         assert_eq!(d.get("dlss.frame_gen").map(String::as_str), Some("0"));
         assert_eq!(d.get("dlss.upscaler").map(String::as_str), Some("auto"));
-        assert_eq!(d.get("display.astc_quality").map(String::as_str), Some("high"));
-        assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("idle"));
+        assert_eq!(
+            d.get("display.astc_quality").map(String::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            d.get("nvn.compile_priority").map(String::as_str),
+            Some("idle")
+        );
         assert_eq!(d.get("nvn.compile_eco").map(String::as_str), Some("1"));
         assert_eq!(d.get("nvn.gpl_threads").map(String::as_str), Some("2"));
         assert_eq!(d.get("nvn.prewarm_threads").map(String::as_str), Some("2"));
-        assert_eq!(d.get("nvn.shader_preload_threads").map(String::as_str), Some("2"));
+        assert_eq!(
+            d.get("nvn.shader_preload_threads").map(String::as_str),
+            Some("2")
+        );
 
         g.upscale_quality = "Performance".into();
         g.scene_scale = 70;
@@ -4218,20 +5315,37 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         g.compile_priority = "Idle".into();
         g.compile_eco = false;
         let d = super::desired_values(&g, &audio);
-        assert_eq!(d.get("upscale.quality").map(String::as_str), Some("performance"));
+        assert_eq!(
+            d.get("upscale.quality").map(String::as_str),
+            Some("performance")
+        );
         assert_eq!(d.get("upscale.scene_scale").map(String::as_str), Some("70"));
         assert_eq!(d.get("dlss.frame_gen").map(String::as_str), Some("fsr3"));
         assert_eq!(d.get("dlss.upscaler").map(String::as_str), Some("taau"));
-        assert_eq!(d.get("display.astc_quality").map(String::as_str), Some("fast"));
+        assert_eq!(
+            d.get("display.astc_quality").map(String::as_str),
+            Some("fast")
+        );
         assert_eq!(d.get("gfx.gpu").map(String::as_str), Some("integrated"));
         assert_eq!(d.get("nvn.gpl_threads").map(String::as_str), Some("2"));
         assert_eq!(d.get("nvn.prewarm_threads").map(String::as_str), Some("2"));
-        assert_eq!(d.get("nvn.shader_preload_threads").map(String::as_str), Some("2"));
-        assert_eq!(d.get("nvn.compile_priority").map(String::as_str), Some("idle"));
+        assert_eq!(
+            d.get("nvn.shader_preload_threads").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            d.get("nvn.compile_priority").map(String::as_str),
+            Some("idle")
+        );
         assert_eq!(d.get("nvn.compile_eco").map(String::as_str), Some("0"));
         // A scene scale outside the engine's 25..100 is clamped rather than passed on to be rejected.
         g.scene_scale = 5;
-        assert_eq!(super::desired_values(&g, &audio).get("upscale.scene_scale").map(String::as_str), Some("25"));
+        assert_eq!(
+            super::desired_values(&g, &audio)
+                .get("upscale.scene_scale")
+                .map(String::as_str),
+            Some("25")
+        );
     }
 
     #[test]
@@ -4239,7 +5353,10 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let text = "-- populating imgui\nCMake Error at _deps/imgui-src/CMakeLists.txt:12 (message):\n  the source is not there\n-- Configuring incomplete, errors occurred!\n";
         let report = super::verify_log_text(text);
         assert!(report.contains("first error:"), "{report}");
-        assert!(report.contains("CMake Error at _deps/imgui-src/CMakeLists.txt:12"), "{report}");
+        assert!(
+            report.contains("CMake Error at _deps/imgui-src/CMakeLists.txt:12"),
+            "{report}"
+        );
         assert!(report.contains("the source is not there"), "{report}");
         assert!(report.contains("half written"), "{report}");
         assert!(!report.contains("another toolchain"), "{report}");
@@ -4274,8 +5391,14 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         );
         assert!(out.is_ok(), "the retry succeeds: {out:?}");
         assert_eq!(calls, 2, "exactly one retry");
-        assert!(!dir.join("release").join("_deps").exists(), "the half-written sources are gone");
-        assert!(said.iter().any(|m| m.contains("dependency is incomplete")), "{said:?}");
+        assert!(
+            !dir.join("release").join("_deps").exists(),
+            "the half-written sources are gone"
+        );
+        assert!(
+            said.iter().any(|m| m.contains("dependency is incomplete")),
+            "{said:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4302,8 +5425,14 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         );
         assert!(out.is_err(), "the second failure is the real one");
         assert_eq!(calls, 2, "one retry, then give up");
-        assert!(!rel.join("CMakeCache.txt").exists() && !rel.join("CMakeFiles").exists(), "the cache is gone");
-        assert!(out.unwrap_err().contains("unknown argument"), "the message is the second failure");
+        assert!(
+            !rel.join("CMakeCache.txt").exists() && !rel.join("CMakeFiles").exists(),
+            "the cache is gone"
+        );
+        assert!(
+            out.unwrap_err().contains("unknown argument"),
+            "the message is the second failure"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4326,13 +5455,25 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
     #[test]
     fn the_two_repairs_recognise_their_own_failures() {
         // Half-written fetch: the CMake file that tripped, or the _deps folder.
-        assert!(super::half_written_deps("CMake Error at _deps/imgui-src/CMakeLists.txt:3"));
-        assert!(super::half_written_deps("ImGui Vulkan failure patch no longer matches pinned source"));
-        assert!(!super::half_written_deps("clang-cl: error: unknown argument '-fno-exceptions'"));
+        assert!(super::half_written_deps(
+            "CMake Error at _deps/imgui-src/CMakeLists.txt:3"
+        ));
+        assert!(super::half_written_deps(
+            "ImGui Vulkan failure patch no longer matches pinned source"
+        ));
+        assert!(!super::half_written_deps(
+            "clang-cl: error: unknown argument '-fno-exceptions'"
+        ));
         // A cache from another toolchain.
-        assert!(super::stale_build_cache("CMakeCache.txt is different than the one used previously"));
-        assert!(super::stale_build_cache("CMAKE_CXX_COMPILER points at a path that does not exist"));
-        assert!(!super::stale_build_cache("Configuring incomplete, errors occurred!"));
+        assert!(super::stale_build_cache(
+            "CMakeCache.txt is different than the one used previously"
+        ));
+        assert!(super::stale_build_cache(
+            "CMAKE_CXX_COMPILER points at a path that does not exist"
+        ));
+        assert!(!super::stale_build_cache(
+            "Configuring incomplete, errors occurred!"
+        ));
     }
 
     #[test]
@@ -4360,16 +5501,27 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         }
         text.push_str("-- Configuring incomplete, errors occurred!\n");
         let block = super::first_error_block(&text).expect("the error is in the log");
-        assert!(block.starts_with("CMake Error at cmake/gfx_deps.cmake:41"), "{block}");
+        assert!(
+            block.starts_with("CMake Error at cmake/gfx_deps.cmake:41"),
+            "{block}"
+        );
         assert!(block.contains("no ASTC transcoder"), "{block}");
-        assert!(!block.contains("Configuring incomplete"), "the summary is not the error: {block}");
+        assert!(
+            !block.contains("Configuring incomplete"),
+            "the summary is not the error: {block}"
+        );
     }
 
     #[test]
     fn a_run_remembers_the_first_error_and_not_a_later_one() {
         let tail: super::Tail = Default::default();
         let first: super::FirstError = Default::default();
-        for line in ["-- step", "error: first thing", "  detail", "error: second thing"] {
+        for line in [
+            "-- step",
+            "error: first thing",
+            "  detail",
+            "error: second thing",
+        ] {
             super::remember(&tail, &first, line);
         }
         let block = first.lock().unwrap().clone().expect("a block was recorded");
@@ -4435,9 +5587,17 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let dir = std::env::temp_dir().join(format!("ew-graphics-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let game = dir.join("fefw.ini");
-        std::fs::write(&game, "[log]\npath = fefw.log\n[fefw]\nfps60 = 1\n[upscale]\nmode = off\n").unwrap();
+        std::fs::write(
+            &game,
+            "[log]\npath = fefw.log\n[fefw]\nfps60 = 1\n[upscale]\nmode = off\n",
+        )
+        .unwrap();
         let controls = dir.join("controls.ini");
-        std::fs::write(&controls, "[meta]\ndefaults_rev = 1\n[display]\nwindow_mode = windowed\nfps_limit = 60\n").unwrap();
+        std::fs::write(
+            &controls,
+            "[meta]\ndefaults_rev = 1\n[display]\nwindow_mode = windowed\nfps_limit = 60\n",
+        )
+        .unwrap();
 
         let g = crate::config::Graphics {
             resolution: "2560 × 1440".into(),
@@ -4448,17 +5608,32 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
             upscaling: "FSR 1.0".into(),
             ..crate::config::Graphics::default()
         };
-        let a = crate::config::Audio { master: 0.4, ..crate::config::Audio::default() };
+        let a = crate::config::Audio {
+            master: 0.4,
+            ..crate::config::Audio::default()
+        };
         let mut applied = Values::new();
-        assert!(write_settings(&dir, &g, &a, &mut applied).unwrap(), "the first start writes");
+        assert!(
+            write_settings(&dir, &g, &a, &mut applied).unwrap(),
+            "the first start writes"
+        );
 
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = 1440p"));
         assert!(text.contains("mode = fsr1"));
-        assert!(text.contains("mods = "), "the run folder's mods are an absolute path after Play");
-        assert!(!text.contains("mods = mods"), "an old relative mods key is replaced");
+        assert!(
+            text.contains("mods = "),
+            "the run folder's mods are an absolute path after Play"
+        );
+        assert!(
+            !text.contains("mods = mods"),
+            "an old relative mods key is replaced"
+        );
         assert!(text.contains("fps60 = 1"), "the rest of the file stays");
-        assert!(text.contains("sharpness = 0.8"), "the sharpening the page shows");
+        assert!(
+            text.contains("sharpness = 0.8"),
+            "the sharpening the page shows"
+        );
 
         let text = std::fs::read_to_string(&controls).unwrap();
         assert!(text.contains("window_mode = borderless"));
@@ -4467,15 +5642,30 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert!(text.contains("aspect = 16:9"));
         assert!(text.contains("width = 2560"));
         assert!(text.contains("height = 1440"));
-        assert!(text.contains("render_width = 2560"), "at 1.00x the picture is that size");
+        assert!(
+            text.contains("render_width = 2560"),
+            "at 1.00x the picture is that size"
+        );
         assert!(text.contains("render_height = 1440"));
-        assert!(text.contains("[audio]\nvolume = 0.40"), "the master volume play mode mixes at");
-        assert!(text.contains("[meta]") && text.contains("defaults_rev = 1"), "the file's own sections stay");
+        assert!(
+            text.contains("[audio]\nvolume = 0.40"),
+            "the master volume play mode mixes at"
+        );
+        assert!(
+            text.contains("[meta]") && text.contains("defaults_rev = 1"),
+            "the file's own sections stay"
+        );
         // The sharpening sits in the same section, so look for the keys rather than for the section header followed by one of
         // them: either order in the section is fine, a missing key is not.
         let upscale = text.split("[upscale]").nth(1).unwrap_or_default();
-        assert!(upscale.lines().any(|l| l.trim() == "mode = fsr1"), "the F1 menu shows the same choice");
-        assert!(upscale.lines().any(|l| l.trim() == "sharpness = 0.8"), "and the same sharpening");
+        assert!(
+            upscale.lines().any(|l| l.trim() == "mode = fsr1"),
+            "the F1 menu shows the same choice"
+        );
+        assert!(
+            upscale.lines().any(|l| l.trim() == "sharpness = 0.8"),
+            "and the same sharpening"
+        );
 
         // Back to the defaults: the game's own console size again, and the keys
         // are replaced rather than repeated.
@@ -4494,17 +5684,29 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert!(text.contains("mode = off"));
         assert_eq!(text.matches("mode =").count(), 1);
         let text = std::fs::read_to_string(&controls).unwrap();
-        assert!(text.contains("render_width = 0"), "no fixed size pins the scaled picture");
+        assert!(
+            text.contains("render_width = 0"),
+            "no fixed size pins the scaled picture"
+        );
         assert!(text.contains("render_scale = 50"));
-        assert!(text.contains("window_mode = borderless"), "the default mode is still written");
+        assert!(
+            text.contains("window_mode = borderless"),
+            "the default mode is still written"
+        );
         assert!(text.contains("fps_limit = 60"));
-        assert!(text.contains("volume = 1.00"), "the volume goes back up too");
+        assert!(
+            text.contains("volume = 1.00"),
+            "the volume goes back up too"
+        );
 
         // The game's F1 menu is the other place these settings are changed: its
         // values come back onto the pages, but only where the page itself has
         // not moved on.
         let mut adopt_g = crate::config::Graphics::default();
-        let mut adopt_au = crate::config::Audio { master: 1.0, ..crate::config::Audio::default() };
+        let mut adopt_au = crate::config::Audio {
+            master: 1.0,
+            ..crate::config::Audio::default()
+        };
         let desired = desired_values(&adopt_g, &adopt_au);
         let mut file = desired.clone();
         file.insert("upscale.mode".into(), "fsr1".into());
@@ -4523,18 +5725,27 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(adopt_g.display_mode, "Exclusive fullscreen");
         assert!(!adopt_g.vsync);
         assert_eq!(adopt_g.frame_limit, 120);
-        assert_eq!(adopt_g.aspect, "16:9", "the engine's resolved float is shown as the ratio it is");
+        assert_eq!(
+            adopt_g.aspect, "16:9",
+            "the engine's resolved float is shown as the ratio it is"
+        );
         assert_eq!(aspect_label("1.600"), "16:10");
         assert_eq!(aspect_label("2.3333333"), "21:9");
         assert_eq!(aspect_label("1.5"), "1.500:1");
         assert_eq!(aspect_label("auto"), "auto");
         assert!((adopt_au.master - 0.35).abs() < 0.001);
         let second = desired_values(&adopt_g, &adopt_au);
-        assert!(!adopt_from(&mut adopt_g, &mut adopt_au, &second, &second, &file), "nothing left to take");
+        assert!(
+            !adopt_from(&mut adopt_g, &mut adopt_au, &second, &second, &file),
+            "nothing left to take"
+        );
 
         // The render size is pixels in the file: a window of 1920 wide rendering
         // 1440 comes back as 0.75x.
-        let mut rg = crate::config::Graphics { resolution: "1920 \u{00d7} 1080".into(), ..crate::config::Graphics::default() };
+        let mut rg = crate::config::Graphics {
+            resolution: "1920 \u{00d7} 1080".into(),
+            ..crate::config::Graphics::default()
+        };
         let mut ra = crate::config::Audio::default();
         let asked = desired_values(&rg, &ra);
         let mut file = asked.clone();
@@ -4542,7 +5753,11 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         file.insert("display.render_width".into(), "1440".into());
         file.insert("display.render_height".into(), "810".into());
         assert!(adopt_from(&mut rg, &mut ra, &asked, &asked, &file));
-        assert!((rg.render_scale - 0.75).abs() < 0.001, "{}", rg.render_scale);
+        assert!(
+            (rg.render_scale - 0.75).abs() < 0.001,
+            "{}",
+            rg.render_scale
+        );
 
         // A page setting changed here and not yet written outranks the file.
         let mut pending = crate::config::Graphics::default();
@@ -4550,8 +5765,17 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let written = desired_values(&pending, &pending_audio);
         pending.display_mode = "Exclusive fullscreen".into();
         let asked = desired_values(&pending, &pending_audio);
-        assert!(!adopt_from(&mut pending, &mut pending_audio, &asked, &written, &written));
-        assert_eq!(pending.display_mode, "Exclusive fullscreen", "the page keeps its own change");
+        assert!(!adopt_from(
+            &mut pending,
+            &mut pending_audio,
+            &asked,
+            &written,
+            &written
+        ));
+        assert_eq!(
+            pending.display_mode, "Exclusive fullscreen",
+            "the page keeps its own change"
+        );
         // A second start with nothing changed touches no file, so a setting the
         // game's own menu changed in between survives it.
         let original = std::fs::read_to_string(&controls).unwrap();
@@ -4570,7 +5794,11 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
     fn the_game_files_are_read_back_the_way_the_engine_reads_them() {
         let dir = std::env::temp_dir().join(format!("ew-live-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("fefw.ini"), "[fefw]\nfps60 = 1\noutput = 1080p\n[upscale]\nmode = fsr3\n").unwrap();
+        std::fs::write(
+            dir.join("fefw.ini"),
+            "[fefw]\nfps60 = 1\noutput = 1080p\n[upscale]\nmode = fsr3\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.join("controls.ini"),
             "# the game's file\n[meta]\ndefaults_rev = 1\n[display]\nwindow_mode = borderless\nvsync = 0\nfps_limit = 90\n\
@@ -4616,8 +5844,12 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join(".build.lock");
         // A process that cannot exist: the lock is stale, so a new build takes it.
-        std::fs::write(&lock, "9999990 1 emblemweave.exe
-").unwrap();
+        std::fs::write(
+            &lock,
+            "9999990 1 emblemweave.exe
+",
+        )
+        .unwrap();
         let first = lock_build(&root);
         assert!(first.is_ok(), "{:?}", first.err());
         // The lock is released when it is dropped.
@@ -4636,11 +5868,17 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let root = std::env::temp_dir().join(format!("ew-textures-{}", std::process::id()));
         let tp = root.join("tools").join("textures").join("third_party");
         std::fs::create_dir_all(tp.join("astc-encoder")).unwrap();
-        assert!(!textures_fetched(&root), "an empty folder must not count as fetched");
+        assert!(
+            !textures_fetched(&root),
+            "an empty folder must not count as fetched"
+        );
         std::fs::write(tp.join("astc-encoder").join("CMakeLists.txt"), "").unwrap();
         std::fs::create_dir_all(tp.join("bc7enc_rdo")).unwrap();
         std::fs::write(tp.join("bc7enc_rdo").join("CMakeLists.txt"), "").unwrap();
-        assert!(!textures_fetched(&root), "one missing piece is still missing");
+        assert!(
+            !textures_fetched(&root),
+            "one missing piece is still missing"
+        );
         let ispc = tp.join("ispc").join("ispc-v1.32.0-windows").join("bin");
         std::fs::create_dir_all(&ispc).unwrap();
         std::fs::write(ispc.join("ispc.exe"), "").unwrap();
@@ -4652,10 +5890,15 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
     fn a_cache_on_disk_is_read_and_cleared() {
         let dir = std::env::temp_dir().join(format!("ew-cache-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("CMakeFiles")).unwrap();
-        std::fs::write(dir.join("CMakeCache.txt"), "CMAKE_C_COMPILER:FILEPATH=C:/old/clang-cl.exe
-").unwrap();
+        std::fs::write(
+            dir.join("CMakeCache.txt"),
+            "CMAKE_C_COMPILER:FILEPATH=C:/old/clang-cl.exe
+",
+        )
+        .unwrap();
         let compiler = Path::new("C:/Program Files/LLVM/bin/clang-cl.exe");
-        let why = crate::toolchain::cache_mismatch_in(&dir, compiler, "Ninja", "").expect("a mismatch");
+        let why =
+            crate::toolchain::cache_mismatch_in(&dir, compiler, "Ninja", "").expect("a mismatch");
         assert!(why.contains("C:/old/clang-cl.exe"), "{why}");
         crate::toolchain::clear_cache(&dir);
         assert!(!dir.join("CMakeCache.txt").exists());

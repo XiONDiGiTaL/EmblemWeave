@@ -48,7 +48,8 @@ if(NOT EXISTS "${NXRT_RECOMP_INCLUDE}/nxrecomp/ctx.h" AND EXISTS "${CMAKE_CURREN
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    add_compile_options(/W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
+    # /EHsc: host C++ (ipc.cpp's service call, crash.cpp's terminate path) uses try/throw. Guest exceptions have their own layer in src/eh.
+    add_compile_options(/EHsc /W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
                         -Wno-cast-function-type-strict -Wno-language-extension-token)
 endif()
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)

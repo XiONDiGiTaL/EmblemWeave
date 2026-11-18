@@ -58,13 +58,17 @@ pub fn find(appdata: &Path, title_id: u64) -> Vec<Found> {
     let mut out = Vec::new();
     for emu in EMULATOR_DIRS {
         let save_root = appdata.join(emu).join("nand").join("user").join("save");
-        let Ok(ids) = std::fs::read_dir(&save_root) else { continue };
+        let Ok(ids) = std::fs::read_dir(&save_root) else {
+            continue;
+        };
         for id in ids.flatten() {
             if !id.path().is_dir() {
                 continue;
             }
             push_found(&mut out, emu, &id.path().join(&name));
-            let Ok(profiles) = std::fs::read_dir(id.path()) else { continue };
+            let Ok(profiles) = std::fs::read_dir(id.path()) else {
+                continue;
+            };
             for profile in profiles.flatten() {
                 if profile.path().is_dir() {
                     push_found(&mut out, emu, &profile.path().join(&name));
@@ -83,7 +87,12 @@ fn push_found(out: &mut Vec<Found>, source: &str, path: &Path) {
     }
     let (files, modified) = summary(path);
     if files > 0 {
-        out.push(Found { source: source.to_string(), path: path.to_path_buf(), files, modified });
+        out.push(Found {
+            source: source.to_string(),
+            path: path.to_path_buf(),
+            files,
+            modified,
+        });
     }
 }
 
@@ -107,7 +116,9 @@ pub fn summary(dir: &Path) -> (usize, Option<std::time::SystemTime>) {
     let mut newest = None;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -126,14 +137,40 @@ pub fn summary(dir: &Path) -> (usize, Option<std::time::SystemTime>) {
 pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<usize, String> {
     std::fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
     let mut copied = 0;
-    for e in std::fs::read_dir(from).map_err(|e| format!("reading {}: {e}", from.display()))?.flatten() {
+    for e in std::fs::read_dir(from)
+        .map_err(|e| format!("reading {}: {e}", from.display()))?
+        .flatten()
+    {
         let (src, dst) = (e.path(), to.join(e.file_name()));
         if src.is_dir() {
             copied += copy_tree(&src, &dst)?;
         } else {
-            std::fs::copy(&src, &dst).map_err(|e| format!("copying {} to {}: {e}", src.display(), dst.display()))?;
+            std::fs::copy(&src, &dst)
+                .map_err(|e| format!("copying {} to {}: {e}", src.display(), dst.display()))?;
             copied += 1;
         }
+    }
+    Ok(copied)
+}
+
+/// Copy the files of a flat save (the contents of `000`) into `to`, without taking a `.meta` or profile marker with them.
+/// The account's own `.meta` is written by [`import`] when the target does not have one, and a `.meta` from an older account
+/// would name the wrong user.
+fn copy_flat(from: &Path, to: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
+    let mut copied = 0;
+    for e in std::fs::read_dir(from)
+        .map_err(|e| format!("reading {}: {e}", from.display()))?
+        .flatten()
+    {
+        let src = e.path();
+        if src.is_dir() || e.file_name().to_str().is_some_and(is_metadata_file) {
+            continue;
+        }
+        let dst = to.join(e.file_name());
+        std::fs::copy(&src, &dst)
+            .map_err(|e| format!("copying {} to {}: {e}", src.display(), dst.display()))?;
+        copied += 1;
     }
     Ok(copied)
 }
@@ -182,47 +219,153 @@ fn meta_text(title_id: u64, user_hex: &str) -> Option<String> {
     }
     attr[32] = 1; // SaveDataType::Account
     let hex: String = attr.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("size={SAVE_SIZE}\njournal={SAVE_SIZE}\nowner={title_id:x}\nattr={hex}\n"))
+    Some(format!(
+        "size={SAVE_SIZE}\njournal={SAVE_SIZE}\nowner={title_id:x}\nattr={hex}\n"
+    ))
+}
+
+/// What the picked folder turned out to hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveSource {
+    /// A folder to copy beside the game's `000`: it already holds `000` (and maybe the account's `.meta`).
+    Folder(PathBuf),
+    /// The contents of a `000` folder without their parent: the files go directly inside the account save's `000`.
+    Flat(PathBuf),
+}
+
+/// Whether `dir` is an account save folder the game can read: it holds `000` with files.
+fn is_account_save(dir: &Path) -> bool {
+    dir.join("000").is_dir() && summary(&dir.join("000")).0 > 0
+}
+
+/// `dir` itself when it holds `000`, or the only folder directly below it that does.
+///
+/// The second case is an import left one level too deep by an older build: the player picked the folder above the save, so the
+/// save ended up as `account/<user>/<user>/000`. The files the game reads are still in that `000`, so the folder holding it is
+/// the save to use.
+fn save_below(dir: &Path) -> Option<PathBuf> {
+    if is_account_save(dir) {
+        return Some(dir.to_path_buf());
+    }
+    let saves: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && is_account_save(p))
+        .collect();
+    (saves.len() == 1).then(|| saves[0].clone())
+}
+
+/// The account save in an `account` folder, preferring the engine's fixed user id.
+fn account_save(account: &Path) -> Option<PathBuf> {
+    let preferred = account.join(DEFAULT_USER);
+    if let Some(found) = save_below(&preferred) {
+        return Some(found);
+    }
+    let mut found: Vec<(Option<SystemTime>, String, PathBuf)> = std::fs::read_dir(account)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            let save = save_below(&p)?;
+            let modified = summary(&save.join("000")).1;
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            Some((modified, name, save))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().next().map(|(_, _, p)| p)
+}
+
+/// The account save in a picked save folder, or in an install folder above one.
+///
+/// **Import from folder…** is the fallback for a portable install, so the player can point it at the save folder
+/// (`data\save`), the `data` folder, the install folder, or the `account` folder itself. All of them describe the same save.
+fn account_below(source: &Path) -> Option<PathBuf> {
+    if has_name(source, "account") {
+        if let Some(found) = account_save(source) {
+            return Some(found);
+        }
+    }
+    let candidates = [
+        source.to_path_buf(),
+        source.join("save"),
+        source.join("data"),
+        source.join("data").join("save"),
+    ];
+    for save in candidates {
+        if let Some(found) = account_save(&save.join("account")) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Whether `dir` holds the contents of a `000` folder directly: save slots and `Global`, with no `000` level of their own.
+fn flat_save(dir: &Path) -> bool {
+    let mut has_slot = false;
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            return false;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if is_metadata_file(&name) {
+            continue;
+        }
+        if is_slot_candidate(&path) || is_global_save_file(&name) {
+            has_slot = true;
+        }
+    }
+    has_slot
 }
 
 /// Where an import should read from, when the picked folder may sit above the save's own files.
 ///
-/// The game opens `<account>/<user>/000`, so the files have to end up exactly there. Four folder shapes are common and only the
-/// first is already at the right level: the save's data folder, an EmblemWeave save folder (`account/<user>` beside
-/// `<user>.meta`), a console user folder holding `<title id>/000`, and a whole NAND save tree. Copying any of the other three
+/// The game opens `<account>/<user>/000`, so the files have to end up exactly there. A player can point the folder picker at
+/// many shapes of the same save: the save folder itself, an `account` folder, an install folder above either, a console user
+/// folder holding `<title id>/000`, a whole NAND save tree, or a folder holding the contents of `000`. Copying any of them
 /// wholesale nested everything one level deeper, under a folder the game never opens: the import reported success and the game
-/// still showed no save (issue #43).
-pub fn resolve_source(source: &Path, title_id: u64) -> PathBuf {
+/// still showed no save (issue #43). Every shape is resolved here; a folder that holds no save at all returns `None`, so the
+/// import can refuse before it touches the current save.
+pub fn resolve_source(source: &Path, title_id: u64) -> Option<SaveSource> {
     let title = format!("{title_id:016X}");
-    // An EmblemWeave save folder: use its account save rather than copying `account/` inside one.
-    let account = source.join("account");
-    if account.is_dir() {
-        let preferred = account.join(DEFAULT_USER);
-        if summary(&preferred).0 > 0 {
-            return preferred;
-        }
-        let found = std::fs::read_dir(&account)
-            .ok()
-            .and_then(|entries| entries.flatten().map(|e| e.path()).find(|p| p.is_dir() && summary(p).0 > 0));
-        if let Some(dir) = found {
-            return dir;
-        }
+    // An EmblemWeave save folder, an account folder, or an install folder above them.
+    if let Some(dir) = account_below(source) {
+        return Some(SaveSource::Folder(dir));
     }
     // Already the title's own save folder.
-    if source.join("000").is_dir() {
-        return source.to_path_buf();
+    if is_account_save(source) {
+        return Some(SaveSource::Folder(source.to_path_buf()));
     }
     // The title folder, at the documented levels only: directly in a picked user folder, one level below it, or under a NAND
     // save tree (`nand/user/save/<id>/[<profile>/]<title>`). A picked folder can be a whole drive; walking it depth-first for
     // the name took as long as the drive had folders, so the search looks at these levels and nowhere else.
-    if let Some(dir) = child_named(source, &title).or_else(|| nested_named(source, &title)).or_else(|| nand_named(source, &title)) {
-        return dir;
+    if let Some(dir) = child_named(source, &title)
+        .or_else(|| nested_named(source, &title))
+        .or_else(|| nand_named(source, &title))
+    {
+        return Some(if is_account_save(&dir) {
+            SaveSource::Folder(dir)
+        } else {
+            SaveSource::Flat(dir)
+        });
     }
-    source.to_path_buf()
+    // The contents of `000` without their parent.
+    if flat_save(source) {
+        return Some(SaveSource::Flat(source.to_path_buf()));
+    }
+    None
 }
 
 fn has_name(p: &Path, name: &str) -> bool {
-    p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
+    p.file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
 }
 
 /// A child folder of `dir` called `name` that holds files.
@@ -250,8 +393,13 @@ fn nested_named(root: &Path, name: &str) -> Option<PathBuf> {
 /// The title folder in a NAND save tree, `nand/user/save/<save id>/[<profile>/]<title>`, from a picked emulator root, the
 /// `save` folder, or the `nand` folder.
 fn nand_named(root: &Path, name: &str) -> Option<PathBuf> {
-    for save in [root.join("nand").join("user").join("save"), root.to_path_buf()] {
-        let Ok(ids) = std::fs::read_dir(&save) else { continue };
+    for save in [
+        root.join("nand").join("user").join("save"),
+        root.to_path_buf(),
+    ] {
+        let Ok(ids) = std::fs::read_dir(&save) else {
+            continue;
+        };
         for id in ids.flatten() {
             let p = id.path();
             if p.is_dir() {
@@ -266,34 +414,61 @@ fn nand_named(root: &Path, name: &str) -> Option<PathBuf> {
 
 /// Copy `source` into the game's account save, moving any existing save to
 /// `<save folder>/backups/<stamp>/` first.
-pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Result<Imported, String> {
+pub fn import(
+    source: &Path,
+    save_dir: &Path,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
     if !source.is_dir() {
         return Err(format!("{} is not a folder", source.display()));
     }
     if summary(source).0 == 0 {
         return Err(format!("{} holds no save files", source.display()));
     }
-    // The picked folder can be a whole save folder or a NAND root; read the title's files out of it instead of copying the
-    // nesting into the account save.
-    let resolved = resolve_source(source, title_id);
-    let source = resolved.as_path();
+    // The picked folder can be a whole save folder, an account folder, an install folder above either, or a NAND root; read
+    // the title's files out of it instead of copying the nesting into the account save.
+    let resolved = resolve_source(source, title_id).ok_or_else(|| {
+        format!(
+            "{} does not hold a save this game can read: pick the folder that contains its 000 save folder, its account folder, or the save folder an older install used",
+            source.display()
+        )
+    })?;
+    let (from, flat) = match &resolved {
+        SaveSource::Folder(dir) => (dir.as_path(), false),
+        SaveSource::Flat(dir) => (dir.as_path(), true),
+    };
     let target = account_dir(save_dir);
-    // A profile under the save folder is fine; the current save, or a folder
-    // holding the save folder, is not.
-    if source.starts_with(&target) || target.starts_with(source) || save_dir.starts_with(source) {
+    // A profile or a backup under the save folder is fine; the current save, its account folder, or a folder holding the save
+    // folder, is not.
+    if from.starts_with(&target)
+        || target.starts_with(from)
+        || save_dir.starts_with(source)
+        || source.starts_with(save_dir.join("account"))
+    {
         return Err("the source and the save folder overlap".into());
     }
     let backup = if target.is_dir() && summary(&target).0 > 0 {
         let to = save_dir.join("backups").join(stamp);
-        std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
-        std::fs::rename(&target, &to).map_err(|e| format!("moving the current save to {}: {e}", to.display()))?;
+        std::fs::create_dir_all(save_dir.join("backups"))
+            .map_err(|e| format!("creating the backups folder: {e}"))?;
+        std::fs::rename(&target, &to)
+            .map_err(|e| format!("moving the current save to {}: {e}", to.display()))?;
         Some(to)
     } else {
         None
     };
-    match copy_tree(source, &target) {
+    let copied = if flat {
+        copy_flat(from, &target.join("000"))
+    } else {
+        copy_tree(from, &target)
+    };
+    match copied {
         Ok(files) => {
-            let user = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let user = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let meta = target.with_extension("meta");
             if !meta.is_file() {
                 if let Some(text) = meta_text(title_id, &user) {
@@ -309,7 +484,25 @@ pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Res
                 }
             }
             let readable = summary(&target.join("000")).0 > 0;
-            Ok(Imported { files, backup, from: Some(source.to_path_buf()), readable })
+            if !readable {
+                // Never call an import that landed outside `000` a success: the game would open an empty save. Put the
+                // previous save back instead of leaving the wrong tree in place.
+                let _ = std::fs::remove_dir_all(&target);
+                if let Some(b) = &backup {
+                    let _ = std::fs::rename(b, &target);
+                }
+                return Err(format!(
+                    "{} did not leave the save in {}; the previous save was put back",
+                    from.display(),
+                    target.join("000").display()
+                ));
+            }
+            Ok(Imported {
+                files,
+                backup,
+                from: Some(from.to_path_buf()),
+                readable,
+            })
         }
         Err(e) => {
             // Put the previous save back rather than leave a partial copy.
@@ -330,7 +523,11 @@ pub fn import(source: &Path, save_dir: &Path, title_id: u64, stamp: &str) -> Res
 pub fn import_message(r: Result<Imported, String>) -> (String, bool) {
     match r {
         Ok(i) => {
-            let from = i.from.as_ref().map(|p| format!(" from {}", p.display())).unwrap_or_default();
+            let from = i
+                .from
+                .as_ref()
+                .map(|p| format!(" from {}", p.display()))
+                .unwrap_or_default();
             let mut text = format!("Imported {} save files{from}", i.files);
             if let Some(b) = &i.backup {
                 text.push_str(&format!("; the previous save is in {}", b.display()));
@@ -357,7 +554,10 @@ pub fn export(save_dir: &Path, dest: &Path, title_id: u64) -> Result<(PathBuf, u
     }
     let to = dest.join(format!("{title_id:016X}"));
     if to.exists() {
-        return Err(format!("{} already exists; choose an empty folder", to.display()));
+        return Err(format!(
+            "{} already exists; choose an empty folder",
+            to.display()
+        ));
     }
     copy_tree(&from, &to).map(|n| (to, n))
 }
@@ -439,7 +639,9 @@ pub fn checked_profile_name(raw: &str) -> Result<String, String> {
     }
     let clean = crate::mods::clean_name(trimmed);
     if clean != trimmed || clean.is_empty() {
-        return Err("use a name without path separators, control characters or a trailing dot".into());
+        return Err(
+            "use a name without path separators, control characters or a trailing dot".into(),
+        );
     }
     Ok(clean)
 }
@@ -457,7 +659,10 @@ fn is_global_save_file(name: &str) -> bool {
 
 fn is_slot_candidate(path: &Path) -> bool {
     path.extension().is_none()
-        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| !is_metadata_file(n) && !is_global_save_file(n))
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| !is_metadata_file(n) && !is_global_save_file(n))
 }
 
 fn kind_of(name: &str) -> SlotKind {
@@ -475,7 +680,9 @@ fn file_paths(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -495,7 +702,11 @@ fn file_paths(root: &Path) -> Vec<PathBuf> {
 pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
     let mut out = Vec::new();
     for path in file_paths(&p.path) {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
         if is_metadata_file(&name)
             || is_global_save_file(&name)
             || name.ends_with(".tmp")
@@ -509,24 +720,66 @@ pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
         {
             continue;
         }
-        let rel = path.strip_prefix(&p.path).unwrap_or(&path).display().to_string();
+        let rel = path
+            .strip_prefix(&p.path)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
         let metadata = std::fs::metadata(&path).ok();
         let modified = metadata.as_ref().and_then(|m| m.modified().ok());
         let size = metadata.as_ref().map_or(0, |m| m.len());
-        let (gold, renown, units, leader, valid, problems, summary) = match crate::savefile::Slot::open(&path) {
-            Ok(slot) => {
-                let player = slot.player();
-                let roster = slot.units(ids);
-                let leader = roster.iter().find_map(|u| crate::portraits::key_for_name(&u.name)).map(str::to_string);
-                let problems = slot.verify();
-                let summary = slot.summary();
-                (player.map(|p| p.gold), player.map(|p| p.renown), roster.len(), leader, problems.is_empty(), problems, summary)
-            }
-            Err(e) => (None, None, 0, None, false, vec![e], crate::savefile::Summary::default()),
-        };
-        out.push(SlotInfo { path, relative: rel, name: name.clone(), kind: kind_of(&name), modified, size, gold, renown, units, leader, valid, problems, summary });
+        let (gold, renown, units, leader, valid, problems, summary) =
+            match crate::savefile::Slot::open(&path) {
+                Ok(slot) => {
+                    let player = slot.player();
+                    let roster = slot.units(ids);
+                    let leader = roster
+                        .iter()
+                        .find_map(|u| crate::portraits::key_for_name(&u.name))
+                        .map(str::to_string);
+                    let problems = slot.verify();
+                    let summary = slot.summary();
+                    (
+                        player.map(|p| p.gold),
+                        player.map(|p| p.renown),
+                        roster.len(),
+                        leader,
+                        problems.is_empty(),
+                        problems,
+                        summary,
+                    )
+                }
+                Err(e) => (
+                    None,
+                    None,
+                    0,
+                    None,
+                    false,
+                    vec![e],
+                    crate::savefile::Summary::default(),
+                ),
+            };
+        out.push(SlotInfo {
+            path,
+            relative: rel,
+            name: name.clone(),
+            kind: kind_of(&name),
+            modified,
+            size,
+            gold,
+            renown,
+            units,
+            leader,
+            valid,
+            problems,
+            summary,
+        });
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.relative.cmp(&b.relative)));
+    out.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.relative.cmp(&b.relative))
+    });
     out
 }
 
@@ -547,7 +800,9 @@ pub fn profile_meta(p: &Profile, ids: &crate::savefile::Ids) -> ProfileMeta {
 
 pub fn is_empty_profile(p: &Profile) -> bool {
     p.path.join(EMPTY_PROFILE_MARKER).is_file()
-        && file_paths(&p.path).iter().all(|f| f.file_name().and_then(|n| n.to_str()) == Some(EMPTY_PROFILE_MARKER))
+        && file_paths(&p.path)
+            .iter()
+            .all(|f| f.file_name().and_then(|n| n.to_str()) == Some(EMPTY_PROFILE_MARKER))
 }
 
 /// Whether every file in `profile` is byte-for-byte present in the current
@@ -558,13 +813,19 @@ fn profile_is_installed(p: &Profile, save_dir: &Path) -> bool {
     let files = file_paths(&p.path);
     let mut compared = 0;
     for from in files {
-        let Some(name) = from.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = from.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if is_metadata_file(name) {
             continue;
         }
-        let Ok(rel) = from.strip_prefix(&p.path) else { continue };
+        let Ok(rel) = from.strip_prefix(&p.path) else {
+            continue;
+        };
         let to = target.join(rel);
-        let (Ok(a), Ok(b)) = (std::fs::read(&from), std::fs::read(&to)) else { return false };
+        let (Ok(a), Ok(b)) = (std::fs::read(&from), std::fs::read(&to)) else {
+            return false;
+        };
         if a != b {
             return false;
         }
@@ -577,7 +838,10 @@ fn profile_is_installed(p: &Profile, save_dir: &Path) -> bool {
 /// actual files. This is what makes the active badge correct after a restart,
 /// not only in the session that loaded the profile.
 pub fn installed_profile(save_dir: &Path, profiles: &[Profile]) -> Option<String> {
-    profiles.iter().find(|p| profile_is_installed(p, save_dir)).map(|p| p.name.clone())
+    profiles
+        .iter()
+        .find(|p| profile_is_installed(p, save_dir))
+        .map(|p| p.name.clone())
 }
 
 pub fn create_empty_profile(save_dir: &Path, name: &str) -> Result<Profile, String> {
@@ -587,17 +851,35 @@ pub fn create_empty_profile(save_dir: &Path, name: &str) -> Result<Profile, Stri
         return Err(format!("there is already a profile called {name}"));
     }
     std::fs::create_dir_all(&path).map_err(|e| format!("creating {}: {e}", path.display()))?;
-    if let Err(e) = std::fs::write(path.join(EMPTY_PROFILE_MARKER), "EmblemWeave empty profile\n") {
+    if let Err(e) = std::fs::write(
+        path.join(EMPTY_PROFILE_MARKER),
+        "EmblemWeave empty profile\n",
+    ) {
         let _ = std::fs::remove_dir_all(&path);
         return Err(format!("writing the profile marker: {e}"));
     }
     let (files, modified) = summary(&path);
-    Ok(Profile { name, path, files, modified })
+    Ok(Profile {
+        name,
+        path,
+        files,
+        modified,
+    })
 }
 
 /// Copy an external folder into a new profile and refuse to keep it unless its
 /// slot files can be read. The source is never modified.
-pub fn import_profile(save_dir: &Path, name: &str, source: &Path) -> Result<Profile, String> {
+///
+/// The picker is the same kind of file dialog as **Import from folder…** on Game Setup, so the same shapes are accepted: an
+/// old save folder, its `account` folder, a title folder, a NAND tree, or a flat folder holding the contents of `000`. A flat
+/// profile that kept its slots at the top level used to pass validation and then fail when it was loaded; resolving first puts
+/// every shape into the `000` layout the loader compares against.
+pub fn import_profile(
+    save_dir: &Path,
+    name: &str,
+    source: &Path,
+    title_id: u64,
+) -> Result<Profile, String> {
     let name = checked_profile_name(name)?;
     if !source.is_dir() {
         return Err(format!("{} is not a folder", source.display()));
@@ -609,13 +891,39 @@ pub fn import_profile(save_dir: &Path, name: &str, source: &Path) -> Result<Prof
     if source == path || source.starts_with(&path) {
         return Err("the import source overlaps the profile folder".into());
     }
-    copy_tree(source, &path)?;
+    let resolved = resolve_source(source, title_id).ok_or_else(|| {
+        format!(
+            "{} does not hold a save this game can read: pick the folder that contains its 000 save folder, its account folder, or an exported profile",
+            source.display()
+        )
+    })?;
+    let (from, flat) = match &resolved {
+        SaveSource::Folder(dir) => (dir.as_path(), false),
+        SaveSource::Flat(dir) => (dir.as_path(), true),
+    };
+    if from == path || from.starts_with(&path) {
+        return Err("the import source overlaps the profile folder".into());
+    }
+    if flat {
+        copy_flat(from, &path.join("000"))?
+    } else {
+        copy_tree(from, &path)?
+    };
     let (files, modified) = summary(&path);
-    let p = Profile { name: name.clone(), path, files, modified };
+    let p = Profile {
+        name: name.clone(),
+        path,
+        files,
+        modified,
+    };
     let check = check_profile(&p);
     if !check.ok() {
         let _ = std::fs::remove_dir_all(&p.path);
-        return Err(check.problems.first().cloned().unwrap_or_else(|| "the backup has no readable save slots".into()));
+        return Err(check
+            .problems
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "the backup has no readable save slots".into()));
     }
     Ok(p)
 }
@@ -625,20 +933,32 @@ pub fn import_profile(save_dir: &Path, name: &str, source: &Path) -> Result<Prof
 pub fn export_profile(p: &Profile, dest: &Path, title_id: u64) -> Result<(PathBuf, usize), String> {
     let to = dest.join(format!("{title_id:016X}"));
     if to.exists() {
-        return Err(format!("{} already exists; choose an empty folder", to.display()));
+        return Err(format!(
+            "{} already exists; choose an empty folder",
+            to.display()
+        ));
     }
     copy_tree(&p.path, &to).map(|n| (to, n))
 }
 
 /// Load a profile and verify the installed tree before reporting success. If
 /// the copy differs, put the previous save back and return an error.
-pub fn load_profile_verified(save_dir: &Path, p: &Profile, title_id: u64, stamp: &str) -> Result<Imported, String> {
+pub fn load_profile_verified(
+    save_dir: &Path,
+    p: &Profile,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
     if is_empty_profile(p) {
         return load_empty_profile(save_dir, p, title_id, stamp);
     }
     let check = check_profile(p);
     if !check.ok() {
-        return Err(check.problems.first().cloned().unwrap_or_else(|| "the profile has no readable save slots".into()));
+        return Err(check
+            .problems
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "the profile has no readable save slots".into()));
     }
     let imported = load_profile(save_dir, p, title_id, stamp)?;
     if profile_is_installed(p, save_dir) {
@@ -654,27 +974,43 @@ pub fn load_profile_verified(save_dir: &Path, p: &Profile, title_id: u64, stamp:
 
 /// Install a fresh, empty account save. The previous save is kept in backups,
 /// so starting a new playthrough never destroys the old one.
-pub fn load_empty_profile(save_dir: &Path, p: &Profile, title_id: u64, stamp: &str) -> Result<Imported, String> {
+pub fn load_empty_profile(
+    save_dir: &Path,
+    p: &Profile,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
     if !is_empty_profile(p) {
         return Err("this profile is not empty".into());
     }
     let target = account_dir(save_dir);
     let backup = if target.is_dir() && summary(&target).0 > 0 {
         let to = save_dir.join("backups").join(stamp);
-        std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
-        std::fs::rename(&target, &to).map_err(|e| format!("moving the current save to {}: {e}", to.display()))?;
+        std::fs::create_dir_all(save_dir.join("backups"))
+            .map_err(|e| format!("creating the backups folder: {e}"))?;
+        std::fs::rename(&target, &to)
+            .map_err(|e| format!("moving the current save to {}: {e}", to.display()))?;
         Some(to)
     } else {
         None
     };
     let result = (|| {
-        std::fs::create_dir_all(&target).map_err(|e| format!("creating {}: {e}", target.display()))?;
-        let user = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        std::fs::create_dir_all(&target)
+            .map_err(|e| format!("creating {}: {e}", target.display()))?;
+        let user = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let meta = target.with_extension("meta");
         if let Some(text) = meta_text(title_id, &user) {
             std::fs::write(&meta, text).map_err(|e| format!("writing {}: {e}", meta.display()))?;
         }
-        Ok(Imported { files: 0, backup: backup.clone(), from: None, readable: true })
+        Ok(Imported {
+            files: 0,
+            backup: backup.clone(),
+            from: None,
+            readable: true,
+        })
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&target);
@@ -693,7 +1029,16 @@ pub fn profiles(save_dir: &Path) -> Vec<Profile> {
                 .filter(|p| p.is_dir())
                 .map(|path| {
                     let (files, modified) = summary(&path);
-                    Profile { name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path, files, modified }
+                    Profile {
+                        name: path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        path,
+                        files,
+                        modified,
+                    }
                 })
                 .collect()
         })
@@ -712,7 +1057,9 @@ pub fn store_profile(save_dir: &Path, name: &str, stamp: &str) -> Result<usize, 
     }
     let to = save_dir.join("profiles").join(&name);
     if to.exists() {
-        let b = save_dir.join("backups").join(format!("{stamp}-profile-{name}"));
+        let b = save_dir
+            .join("backups")
+            .join(format!("{stamp}-profile-{name}"));
         std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| e.to_string())?;
         std::fs::rename(&to, &b).map_err(|e| format!("moving the old profile aside: {e}"))?;
     }
@@ -720,7 +1067,12 @@ pub fn store_profile(save_dir: &Path, name: &str, stamp: &str) -> Result<usize, 
 }
 
 /// Make profile `p` the current save. The current save goes to the backups.
-pub fn load_profile(save_dir: &Path, p: &Profile, title_id: u64, stamp: &str) -> Result<Imported, String> {
+pub fn load_profile(
+    save_dir: &Path,
+    p: &Profile,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
     import(&p.path, save_dir, title_id, stamp)
 }
 
@@ -746,7 +1098,9 @@ pub fn check_profile(p: &Profile) -> ProfileCheck {
     let mut problems = Vec::new();
     let mut stack = vec![p.path.clone()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let path = e.path();
             if path.is_dir() {
@@ -759,14 +1113,21 @@ pub fn check_profile(p: &Profile) -> ProfileCheck {
             slots += 1;
             match crate::savefile::Slot::open(&path) {
                 Ok(_) => readable += 1,
-                Err(err) => problems.push(format!("{}: {err}", path.file_name().unwrap_or_default().to_string_lossy())),
+                Err(err) => problems.push(format!(
+                    "{}: {err}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                )),
             }
         }
     }
     if slots == 0 {
         problems.push("the profile holds no slot files".into());
     }
-    ProfileCheck { slots, readable, problems }
+    ProfileCheck {
+        slots,
+        readable,
+        problems,
+    }
 }
 
 /// A whole save kept by an import or a profile removal.
@@ -789,26 +1150,54 @@ pub fn backups(save_dir: &Path) -> Vec<Backup> {
                 .filter(|p| p.is_dir())
                 .map(|path| {
                     let (files, modified) = summary(&path);
-                    Backup { name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path, files, modified }
+                    Backup {
+                        name: path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        path,
+                        files,
+                        modified,
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default();
-    out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.name.cmp(&a.name)));
+    out.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| b.name.cmp(&a.name))
+    });
     out
 }
 
 /// Put a whole backup folder back as the current save. The save it replaces is
 /// moved to the backups first, so a restore can be undone.
-pub fn restore_backup(save_dir: &Path, b: &Backup, title_id: u64, stamp: &str) -> Result<Imported, String> {
+pub fn restore_backup(
+    save_dir: &Path,
+    b: &Backup,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
     import(&b.path, save_dir, title_id, stamp)
 }
 
 /// Restore a whole backup and verify the installed tree. If the copy differs,
 /// the save that was replaced is put back before the error is returned.
-pub fn restore_backup_verified(save_dir: &Path, b: &Backup, title_id: u64, stamp: &str) -> Result<Imported, String> {
+pub fn restore_backup_verified(
+    save_dir: &Path,
+    b: &Backup,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
     let imported = restore_backup(save_dir, b, title_id, stamp)?;
-    let p = Profile { name: b.name.clone(), path: b.path.clone(), files: b.files, modified: b.modified };
+    let p = Profile {
+        name: b.name.clone(),
+        path: b.path.clone(),
+        files: b.files,
+        modified: b.modified,
+    };
     if profile_is_installed(&p, save_dir) {
         return Ok(imported);
     }
@@ -822,11 +1211,23 @@ pub fn restore_backup_verified(save_dir: &Path, b: &Backup, title_id: u64, stamp
 
 /// Keep a copy of one slot beside the other whole-save backups. The slot stays
 /// where it is, so this is safe for a profile that is currently selected.
-pub fn backup_slot(save_dir: &Path, profile: &Profile, slot: &Path, stamp: &str) -> Result<PathBuf, String> {
-    let name = slot.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "slot".into());
-    let to = save_dir.join("backups").join(format!("{stamp}-{}-{name}", profile.name));
-    std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
-    std::fs::copy(slot, &to).map_err(|e| format!("copying {} to {}: {e}", slot.display(), to.display()))?;
+pub fn backup_slot(
+    save_dir: &Path,
+    profile: &Profile,
+    slot: &Path,
+    stamp: &str,
+) -> Result<PathBuf, String> {
+    let name = slot
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "slot".into());
+    let to = save_dir
+        .join("backups")
+        .join(format!("{stamp}-{}-{name}", profile.name));
+    std::fs::create_dir_all(save_dir.join("backups"))
+        .map_err(|e| format!("creating the backups folder: {e}"))?;
+    std::fs::copy(slot, &to)
+        .map_err(|e| format!("copying {} to {}: {e}", slot.display(), to.display()))?;
     Ok(to)
 }
 
@@ -849,12 +1250,16 @@ fn slot_backup_names(slot: &Path) -> Option<(std::path::PathBuf, String)> {
 /// Every backup beside a slot, oldest first: the original, then the numbered copies by ascending number. A folder that
 /// still has the older `<slot>.orig` is read as having that original. Nothing is renamed or removed to build the list.
 pub fn slot_backups(slot: &Path) -> Vec<PathBuf> {
-    let Some((dir, name)) = slot_backup_names(slot) else { return Vec::new() };
+    let Some((dir, name)) = slot_backup_names(slot) else {
+        return Vec::new();
+    };
     let mut original: Option<PathBuf> = None;
     let mut numbered: Vec<(u32, PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
-        let Some(tail) = file.strip_prefix(&format!("{name}.bak")) else { continue };
+        let Some(tail) = file.strip_prefix(&format!("{name}.bak")) else {
+            continue;
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -882,7 +1287,9 @@ pub fn slot_backups(slot: &Path) -> Vec<PathBuf> {
 /// Keep the file a save is about to replace: the first save takes `<slot>.bak`, so the untouched original survives, and
 /// every save after that takes the next number. Nothing already on disk is renamed, overwritten or deleted.
 pub fn keep_slot_backup(slot: &Path) -> Result<PathBuf, String> {
-    let Some((dir, name)) = slot_backup_names(slot) else { return Err("that slot has no file name".into()) };
+    let Some((dir, name)) = slot_backup_names(slot) else {
+        return Err("that slot has no file name".into());
+    };
     if !slot.is_file() {
         return Err(format!("{} is not there to back up", slot.display()));
     }
@@ -900,7 +1307,8 @@ pub fn keep_slot_backup(slot: &Path) -> Result<PathBuf, String> {
             n += 1;
         }
     };
-    std::fs::copy(slot, &to).map_err(|e| format!("copying {} to {}: {e}", slot.display(), to.display()))?;
+    std::fs::copy(slot, &to)
+        .map_err(|e| format!("copying {} to {}: {e}", slot.display(), to.display()))?;
     Ok(to)
 }
 
@@ -917,7 +1325,9 @@ pub fn restore_slot_backup(slot: &Path) -> Result<(PathBuf, PathBuf), String> {
 
 /// Move a profile to the backups folder.
 pub fn remove_profile(save_dir: &Path, p: &Profile, stamp: &str) -> Result<PathBuf, String> {
-    let b = save_dir.join("backups").join(format!("{stamp}-profile-{}", p.name));
+    let b = save_dir
+        .join("backups")
+        .join(format!("{stamp}-profile-{}", p.name));
     std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| e.to_string())?;
     std::fs::rename(&p.path, &b).map_err(|e| e.to_string())?;
     Ok(b)
@@ -937,7 +1347,10 @@ pub fn slots_with_sizes(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::Syst
 /// Move one slot file into `<save folder>/backups/<stamp>-<file>`: the game offers a new game there
 /// again, and the old slot is still on disk if it was the wrong one.
 pub fn archive_slot(save_dir: &Path, slot: &Path, stamp: &str) -> Result<PathBuf, String> {
-    let name = slot.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = slot
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if name.is_empty() {
         return Err(format!("{} is not a save slot", slot.display()));
     }
@@ -945,8 +1358,10 @@ pub fn archive_slot(save_dir: &Path, slot: &Path, stamp: &str) -> Result<PathBuf
         return Err(format!("{} is not there any more", slot.display()));
     }
     let to = save_dir.join("backups").join(format!("{stamp}-{name}"));
-    std::fs::create_dir_all(save_dir.join("backups")).map_err(|e| format!("creating the backups folder: {e}"))?;
-    std::fs::rename(slot, &to).map_err(|e| format!("moving {} to {}: {e}", slot.display(), to.display()))?;
+    std::fs::create_dir_all(save_dir.join("backups"))
+        .map_err(|e| format!("creating the backups folder: {e}"))?;
+    std::fs::rename(slot, &to)
+        .map_err(|e| format!("moving {} to {}: {e}", slot.display(), to.display()))?;
     Ok(to)
 }
 
@@ -965,7 +1380,12 @@ pub fn rename_profile(save_dir: &Path, p: &Profile, new_name: &str) -> Result<Pr
     }
     std::fs::rename(&p.path, &to).map_err(|e| format!("renaming the profile: {e}"))?;
     let (files, modified) = summary(&to);
-    Ok(Profile { name, path: to, files, modified })
+    Ok(Profile {
+        name,
+        path: to,
+        files,
+        modified,
+    })
 }
 
 /// Keep a second copy of a profile under another name, for a branch in the story.
@@ -980,7 +1400,12 @@ pub fn duplicate_profile(save_dir: &Path, p: &Profile, new_name: &str) -> Result
     }
     copy_tree(&p.path, &to)?;
     let (files, modified) = summary(&to);
-    Ok(Profile { name, path: to, files, modified })
+    Ok(Profile {
+        name,
+        path: to,
+        files,
+        modified,
+    })
 }
 
 /// The save slots in the current save: files directly in its folders, newest first.
@@ -988,7 +1413,9 @@ pub fn slots(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>)> {
     let mut out = Vec::new();
     let mut stack = vec![account_dir(save_dir)];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -1036,7 +1463,10 @@ mod tests {
         let root = temp("find");
         let title = root.join("yuzu/nand/user/save/0000000000000000/5A3C/04007EF01F8AE000");
         write(&title.join("000/Auto"), "a");
-        write(&root.join("yuzu/nand/user/save/0000000000000000/5A3C/0100000000000000/x"), "other game");
+        write(
+            &root.join("yuzu/nand/user/save/0000000000000000/5A3C/0100000000000000/x"),
+            "other game",
+        );
         let found = find(&root, FALLBACK_TITLE_ID);
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].source.as_str(), found[0].files), ("yuzu", 1));
@@ -1073,10 +1503,19 @@ mod tests {
         write(&user.join("000/Auto"), "old");
         let r = import(&src, &save, FALLBACK_TITLE_ID, "1").unwrap();
         assert_eq!(r.files, 2);
-        assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "new"
+        );
         let backup = r.backup.unwrap();
-        assert_eq!(std::fs::read_to_string(backup.join("000/Auto")).unwrap(), "old");
-        assert_eq!(std::fs::read_to_string(src.join("000/Auto")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("000/Auto")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(src.join("000/Auto")).unwrap(),
+            "new"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1085,9 +1524,15 @@ mod tests {
         let root = temp("unwrap");
         let (src, save) = (root.join("src"), root.join("save"));
         // A whole EmblemWeave save folder: the account save belongs inside `account/`, not `account/account/`.
-        write(&src.join("account").join(DEFAULT_USER).join("000/Auto"), "a");
+        write(
+            &src.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "a",
+        );
         let r = import(&src, &save, FALLBACK_TITLE_ID, "1").unwrap();
-        assert_eq!(r.from.as_deref(), Some(src.join("account").join(DEFAULT_USER).as_path()));
+        assert_eq!(
+            r.from.as_deref(),
+            Some(src.join("account").join(DEFAULT_USER).as_path())
+        );
         assert!(r.readable, "the files landed in the folder the game reads");
         let user = save.join("account").join(DEFAULT_USER);
         assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "a");
@@ -1101,7 +1546,10 @@ mod tests {
 
         // A whole NAND save tree: the title folder is below nand/user/save/<id>/<profile>/.
         let nand = root.join("nand-root");
-        write(&nand.join("nand/user/save/0000000000000000/5A3C/04007EF01F8AE000/000/Auto"), "c");
+        write(
+            &nand.join("nand/user/save/0000000000000000/5A3C/04007EF01F8AE000/000/Auto"),
+            "c",
+        );
         let r = import(&nand, &save, FALLBACK_TITLE_ID, "3").unwrap();
         assert!(r.readable, "the NAND tree was walked to the title folder");
         assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "c");
@@ -1111,22 +1559,52 @@ mod tests {
     #[test]
     fn the_title_search_stops_at_the_documented_levels() {
         // The title folder four levels down is not where a console or a NAND tree puts it, and a picked drive must not be walked
-        // to find it: the walk is over, the folder is used as picked.
+        // to find it: there is no save to import, rather than a guess made by reading the whole folder.
         let root = temp("levels");
         write(&root.join("a/b/c/04007EF01F8AE000/000/Auto"), "x");
-        assert_eq!(resolve_source(&root, FALLBACK_TITLE_ID), root);
+        assert_eq!(resolve_source(&root, FALLBACK_TITLE_ID), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn an_import_the_game_would_not_read_says_so() {
+    fn a_folder_with_no_save_is_refused_before_the_current_save_is_touched() {
         let root = temp("unreadable");
         let (src, save) = (root.join("src"), root.join("save"));
-        // Files at the top of the picked folder are outside `<account>/000`, which is all the game opens.
+        // A file with an extension is not a slot and there is no `000` anywhere, so this is not a save the game can open.
         write(&src.join("save.dat"), "x");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "keep me",
+        );
+        assert!(import(&src, &save, FALLBACK_TITLE_ID, "1").is_err());
+        assert_eq!(
+            std::fs::read_to_string(account_dir(&save).join("000/Auto")).unwrap(),
+            "keep me"
+        );
+        assert!(!save.join("backups").join("1").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_flat_save_folder_is_placed_under_000() {
+        // A player can pick the contents of `000` without the folder itself. Those files belong inside `000`; copying them
+        // one level above it is the import that reported success and showed nothing in game (issue #43).
+        let root = temp("flat");
+        let (src, save) = (root.join("src"), root.join("save"));
+        write(&src.join("Auto"), "a");
+        write(&src.join("Global"), "g");
         let r = import(&src, &save, FALLBACK_TITLE_ID, "1").unwrap();
-        assert_eq!(r.files, 1);
-        assert!(!r.readable);
+        assert!(r.readable, "the files landed in the folder the game reads");
+        assert_eq!(r.files, 2);
+        let user = account_dir(&save);
+        assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "a");
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Global")).unwrap(),
+            "g"
+        );
+        assert!(!user.join("Auto").exists(), "nothing was left beside 000");
+        let (text, ok) = import_message(Ok(r));
+        assert!(ok, "{text}");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1147,10 +1625,14 @@ mod tests {
         let (src, save) = (root.join("src"), root.join("save"));
         write(&src.join("000/Auto"), "a");
         import(&src, &save, FALLBACK_TITLE_ID, "1").unwrap();
-        let meta = std::fs::read_to_string(save.join("account").join(format!("{DEFAULT_USER}.meta"))).unwrap();
+        let meta =
+            std::fs::read_to_string(save.join("account").join(format!("{DEFAULT_USER}.meta")))
+                .unwrap();
         // The same attribute the engine wrote for this game's save.
         assert!(meta.starts_with("size=67108864\njournal=67108864\nowner=4007ef01f8ae000\n"));
-        assert!(meta.contains("attr=00e08a1ff07e00040100000000000000706d6352574645460000000000000000010000"));
+        assert!(meta.contains(
+            "attr=00e08a1ff07e00040100000000000000706d6352574645460000000000000000010000"
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1167,8 +1649,14 @@ mod tests {
         assert_eq!(ps.len(), 1);
         assert_eq!(ps[0].name, "Run A");
         let r = load_profile(&save, &ps[0], FALLBACK_TITLE_ID, "2").unwrap();
-        assert_eq!(std::fs::read_to_string(user.join("000/Auto")).unwrap(), "first");
-        assert_eq!(std::fs::read_to_string(r.backup.unwrap().join("000/Auto")).unwrap(), "second");
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(r.backup.unwrap().join("000/Auto")).unwrap(),
+            "second"
+        );
         assert_eq!(slots(&save).len(), 1);
         remove_profile(&save, &ps[0], "3").unwrap();
         assert!(profiles(&save).is_empty());
@@ -1180,11 +1668,21 @@ mod tests {
         let root = temp("account");
         let save = root.join("save");
         // A newer folder for another user must not win: the game always opens the title's fixed user id.
-        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "old");
-        let newer = save.join("account").join("0A3C5F00000000000000000000000001");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "old",
+        );
+        let newer = save
+            .join("account")
+            .join("0A3C5F00000000000000000000000001");
         write(&newer.join("000/Auto"), "new");
         let now = std::time::SystemTime::now();
-        std::fs::File::options().write(true).open(newer.join("000/Auto")).unwrap().set_modified(now).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(newer.join("000/Auto"))
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
         assert_eq!(account_dir(&save), save.join("account").join(DEFAULT_USER));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1194,13 +1692,26 @@ mod tests {
         let root = temp("account-fixed");
         let save = root.join("save");
         // An import once left a newer folder for another user: the game still reads DEFAULT_USER.
-        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "mine");
-        let other = save.join("account").join("0A3C5F00000000000000000000000001");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "mine",
+        );
+        let other = save
+            .join("account")
+            .join("0A3C5F00000000000000000000000001");
         write(&other.join("000/Auto"), "theirs");
         let now = std::time::SystemTime::now();
-        std::fs::File::options().write(true).open(other.join("000/Auto")).unwrap().set_modified(now).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(other.join("000/Auto"))
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
         assert_eq!(account_dir(&save), save.join("account").join(DEFAULT_USER));
-        assert_eq!(crate::saves::account_dir(&save).join("000/Auto"), save.join("account").join(DEFAULT_USER).join("000/Auto"));
+        assert_eq!(
+            crate::saves::account_dir(&save).join("000/Auto"),
+            save.join("account").join(DEFAULT_USER).join("000/Auto")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1224,7 +1735,10 @@ mod tests {
     fn profiles_rename_and_duplicate() {
         let root = temp("profiles2");
         let save = root.join("save");
-        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "a");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "a",
+        );
         store_profile(&save, "Run A", "1").unwrap();
         let p = profiles(&save).into_iter().next().unwrap();
         let renamed = rename_profile(&save, &p, "Run B").unwrap();
@@ -1241,7 +1755,10 @@ mod tests {
     fn export_writes_the_emulator_layout() {
         let root = temp("export");
         let save = root.join("save");
-        write(&save.join("account").join(DEFAULT_USER).join("000/Auto"), "x");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "x",
+        );
         let (to, n) = export(&save, &root.join("out"), FALLBACK_TITLE_ID).unwrap();
         assert_eq!(n, 1);
         assert!(to.ends_with("04007EF01F8AE000"));
@@ -1279,10 +1796,16 @@ mod tests {
         let loaded = load_empty_profile(&save, &p, FALLBACK_TITLE_ID, "9").unwrap();
         assert_eq!(loaded.files, 0);
         let backup = loaded.backup.expect("the previous save is kept");
-        assert_eq!(std::fs::read_to_string(backup.join("000/Auto")).unwrap(), "old save");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("000/Auto")).unwrap(),
+            "old save"
+        );
         assert!(account_dir(&save).is_dir());
         assert!(!account_dir(&save).join("000/Auto").exists());
-        assert!(save.join("account").join(format!("{DEFAULT_USER}.meta")).is_file());
+        assert!(save
+            .join("account")
+            .join(format!("{DEFAULT_USER}.meta"))
+            .is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1309,7 +1832,10 @@ mod tests {
         let save = root.join("save");
         let p = create_empty_profile(&save, "Run A").unwrap();
         for i in 0..8 {
-            write_bytes(&p.path.join(format!("Chapter_{i}")), &valid_slot(b"payload"));
+            write_bytes(
+                &p.path.join(format!("Chapter_{i}")),
+                &valid_slot(b"payload"),
+            );
         }
         // The game's own backups have an extension, so the current-save list
         // never counted them. A profile copied from that save did.
@@ -1317,8 +1843,14 @@ mod tests {
         write_bytes(&p.path.join("Chapter_0.bak"), &valid_slot(b"backup"));
 
         let listed = profile_slots(&p, &crate::savefile::Ids::default());
-        assert_eq!(listed.len(), 8, "the eight slots, not the eight plus two .bak files");
-        assert!(listed.iter().all(|s| !s.name.to_ascii_lowercase().ends_with(".bak")));
+        assert_eq!(
+            listed.len(),
+            8,
+            "the eight slots, not the eight plus two .bak files"
+        );
+        assert!(listed
+            .iter()
+            .all(|s| !s.name.to_ascii_lowercase().ends_with(".bak")));
         let check = check_profile(&p);
         assert_eq!((check.slots, check.readable), (8, 8));
         let _ = std::fs::remove_dir_all(root);
@@ -1341,12 +1873,25 @@ mod tests {
 
         write(&account_dir(&save).join("000/Auto"), "old save");
         let loaded = load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "7").unwrap();
-        assert_eq!(std::fs::read(account_dir(&save).join("000/Auto")).unwrap(), valid_slot(b"payload"));
-        assert_eq!(std::fs::read(account_dir(&save).join("000/Global")).unwrap(), b"global data");
+        assert_eq!(
+            std::fs::read(account_dir(&save).join("000/Auto")).unwrap(),
+            valid_slot(b"payload")
+        );
+        assert_eq!(
+            std::fs::read(account_dir(&save).join("000/Global")).unwrap(),
+            b"global data"
+        );
         assert!(loaded.backup.is_some());
         let current = slots(&save);
-        assert_eq!(current.len(), 1, "the marker and Global are data, not slots in the current save either");
-        assert_eq!(current[0].0.file_name().and_then(|n| n.to_str()), Some("Auto"));
+        assert_eq!(
+            current.len(),
+            1,
+            "the marker and Global are data, not slots in the current save either"
+        );
+        assert_eq!(
+            current[0].0.file_name().and_then(|n| n.to_str()),
+            Some("Auto")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1358,13 +1903,22 @@ mod tests {
         write_bytes(&account.join("000/Auto"), &valid_slot(b"same"));
         store_profile(&save, "Run A", "1").unwrap();
         let p = profiles(&save).into_iter().next().unwrap();
-        assert_eq!(installed_profile(&save, &profiles(&save)).as_deref(), Some("Run A"));
+        assert_eq!(
+            installed_profile(&save, &profiles(&save)).as_deref(),
+            Some("Run A")
+        );
         write_bytes(&account.join("000/Auto"), &valid_slot(b"changed"));
         assert_eq!(installed_profile(&save, &profiles(&save)), None);
         let loaded = load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "2").unwrap();
-        assert_eq!(std::fs::read(account.join("000/Auto")).unwrap(), valid_slot(b"same"));
+        assert_eq!(
+            std::fs::read(account.join("000/Auto")).unwrap(),
+            valid_slot(b"same")
+        );
         assert!(loaded.backup.is_some());
-        assert_eq!(installed_profile(&save, &profiles(&save)).as_deref(), Some("Run A"));
+        assert_eq!(
+            installed_profile(&save, &profiles(&save)).as_deref(),
+            Some("Run A")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1374,15 +1928,61 @@ mod tests {
         let save = root.join("save");
         let source = root.join("backup");
         write_bytes(&source.join("000/Auto"), &valid_slot(b"source"));
-        let imported = import_profile(&save, "Imported", &source).unwrap();
+        let imported = import_profile(&save, "Imported", &source, FALLBACK_TITLE_ID).unwrap();
         let duplicate = duplicate_profile(&save, &imported, "Copy").unwrap();
         std::fs::write(duplicate.path.join("000/Auto"), valid_slot(b"copy")).unwrap();
-        assert_eq!(std::fs::read(imported.path.join("000/Auto")).unwrap(), valid_slot(b"source"));
-        assert_ne!(std::fs::read(imported.path.join("000/Auto")).unwrap(), std::fs::read(duplicate.path.join("000/Auto")).unwrap());
+        assert_eq!(
+            std::fs::read(imported.path.join("000/Auto")).unwrap(),
+            valid_slot(b"source")
+        );
+        assert_ne!(
+            std::fs::read(imported.path.join("000/Auto")).unwrap(),
+            std::fs::read(duplicate.path.join("000/Auto")).unwrap()
+        );
         let (to, n) = export_profile(&imported, &root.join("out"), FALLBACK_TITLE_ID).unwrap();
         assert_eq!(n, 1);
         assert!(to.join("000/Auto").is_file());
         assert!(to.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn import_profile_adapts_an_old_save_folder_and_a_flat_000_folder() {
+        // The profile picker is the other way a save gets in, so it has to unwrap the same shapes before it validates. An old
+        // `data/save` used to be copied with its `account/<user>` nesting, which passed validation and failed on load.
+        let root = temp("profile-adapt");
+        let save = root.join("save");
+        let old = root.join("old-install");
+        let account = old.join("data/save/account").join(DEFAULT_USER);
+        write_bytes(&account.join("000/Auto"), &valid_slot(b"old"));
+        let p = import_profile(&save, "Old", &old.join("data/save"), FALLBACK_TITLE_ID).unwrap();
+        assert!(p.path.join("000/Auto").is_file());
+        assert!(
+            !p.path.join("account").exists(),
+            "the profile holds the save, not the old folder's nesting"
+        );
+        load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "1").unwrap();
+        assert_eq!(
+            std::fs::read(account_dir(&save).join("000/Auto")).unwrap(),
+            valid_slot(b"old")
+        );
+
+        // A flat folder holding the contents of `000` belongs under `000` in the profile too, or loading compares files that are
+        // not in the loaded save and puts the previous save back.
+        let flat = root.join("flat");
+        write_bytes(&flat.join("Auto"), &valid_slot(b"flat"));
+        write(&flat.join("Global"), "global");
+        let p = import_profile(&save, "Flat", &flat, FALLBACK_TITLE_ID).unwrap();
+        assert_eq!(
+            std::fs::read(p.path.join("000/Auto")).unwrap(),
+            valid_slot(b"flat")
+        );
+        assert!(p.path.join("000/Global").is_file());
+        load_profile_verified(&save, &p, FALLBACK_TITLE_ID, "2").unwrap();
+        assert_eq!(
+            std::fs::read(account_dir(&save).join("000/Auto")).unwrap(),
+            valid_slot(b"flat")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1392,7 +1992,7 @@ mod tests {
         let save = root.join("save");
         let source = root.join("bad");
         write(&source.join("Auto"), "not a slot");
-        assert!(import_profile(&save, "Bad", &source).is_err());
+        assert!(import_profile(&save, "Bad", &source, FALLBACK_TITLE_ID).is_err());
         assert!(profiles(&save).is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1431,7 +2031,10 @@ mod tests {
         write(&slot, "new");
         write(&original_slot_path(&slot), "old");
         let (from, replaced) = restore_slot_backup(&slot).unwrap();
-        assert!(from.to_string_lossy().ends_with("Auto.orig"), "an old folder restores its .orig: {from:?}");
+        assert!(
+            from.to_string_lossy().ends_with("Auto.orig"),
+            "an old folder restores its .orig: {from:?}"
+        );
         assert_eq!(std::fs::read_to_string(&slot).unwrap(), "old");
         assert_eq!(std::fs::read_to_string(replaced).unwrap(), "new");
         let _ = std::fs::remove_dir_all(root);
@@ -1445,22 +2048,47 @@ mod tests {
         let slot = root.join("Chapter_0");
         write(&slot, "original");
         let first = keep_slot_backup(&slot).unwrap();
-        assert!(first.to_string_lossy().ends_with("Chapter_0.bak"), "first keep is the bare .bak: {first:?}");
+        assert!(
+            first.to_string_lossy().ends_with("Chapter_0.bak"),
+            "first keep is the bare .bak: {first:?}"
+        );
         write(&slot, "second");
         let second = keep_slot_backup(&slot).unwrap();
-        assert!(second.to_string_lossy().ends_with("Chapter_0.bak1"), "then .bak1: {second:?}");
+        assert!(
+            second.to_string_lossy().ends_with("Chapter_0.bak1"),
+            "then .bak1: {second:?}"
+        );
         write(&slot, "third");
         let third = keep_slot_backup(&slot).unwrap();
-        assert!(third.to_string_lossy().ends_with("Chapter_0.bak2"), "then .bak2: {third:?}");
+        assert!(
+            third.to_string_lossy().ends_with("Chapter_0.bak2"),
+            "then .bak2: {third:?}"
+        );
         let listed = slot_backups(&slot);
-        let names: Vec<String> = listed.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, vec!["Chapter_0.bak", "Chapter_0.bak1", "Chapter_0.bak2"]);
-        assert_eq!(std::fs::read_to_string(&listed[0]).unwrap(), "original", "the original is never overwritten");
+        let names: Vec<String> = listed
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Chapter_0.bak", "Chapter_0.bak1", "Chapter_0.bak2"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&listed[0]).unwrap(),
+            "original",
+            "the original is never overwritten"
+        );
 
         // Restoring takes the newest, keeps the file it replaces as the next number, and says where it read from.
         let (from, kept) = restore_slot_backup(&slot).unwrap();
-        assert!(from.to_string_lossy().ends_with("Chapter_0.bak2"), "newest first: {from:?}");
-        assert!(kept.to_string_lossy().ends_with("Chapter_0.bak3"), "the replaced copy takes the next number: {kept:?}");
+        assert!(
+            from.to_string_lossy().ends_with("Chapter_0.bak2"),
+            "newest first: {from:?}"
+        );
+        assert!(
+            kept.to_string_lossy().ends_with("Chapter_0.bak3"),
+            "the replaced copy takes the next number: {kept:?}"
+        );
         assert_eq!(std::fs::read_to_string(&slot).unwrap(), "third");
         assert_eq!(std::fs::read_to_string(&kept).unwrap(), "third");
         assert_eq!(slot_backups(&slot).len(), 4, "nothing was dropped");
@@ -1468,18 +2096,50 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_import_warns_instead_of_reporting_success() {
-        // Files at the top of the picked folder land outside `<account>/000`, the only folder the game opens. The message has
-        // to say that: "Imported 1 save files" with an empty game is what sent the reporter looking for a bug.
-        let root = std::env::temp_dir().join(format!("ew-import-msg-{}", std::process::id()));
-        let (picked, save) = (root.join("picked"), root.join("save"));
-        std::fs::create_dir_all(&picked).unwrap();
-        std::fs::write(picked.join("Auto"), "x").unwrap();
-        let result = import(&picked, &save, FALLBACK_TITLE_ID, "1");
-        let (text, ok) = import_message(result);
-        println!("import message: {text}");
-        assert!(!ok, "{text}");
-        assert!(text.contains("the game reads only <save>/000"), "{text}");
+    fn import_unwraps_an_account_folder_and_the_install_above_it() {
+        // The old install's `account` folder and the install folder itself are both common picks. Both describe the same save:
+        // `<install>/data/save/account/<user>/000`.
+        let root = temp("install");
+        let old = root.join("old-install");
+        let user = old.join("data/save/account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "old save");
+        let save = root.join("new-install/save");
+
+        let r = import(
+            &old.join("data/save/account"),
+            &save,
+            FALLBACK_TITLE_ID,
+            "1",
+        )
+        .unwrap();
+        assert_eq!(r.from.as_deref(), Some(user.as_path()));
+        assert!(r.readable);
+        assert_eq!(
+            std::fs::read_to_string(account_dir(&save).join("000/Auto")).unwrap(),
+            "old save"
+        );
+
+        let r = import(&old, &save, FALLBACK_TITLE_ID, "2").unwrap();
+        assert_eq!(r.from.as_deref(), Some(user.as_path()));
+        assert!(r.readable);
+        assert_eq!(
+            std::fs::read_to_string(account_dir(&save).join("000/Auto")).unwrap(),
+            "old save"
+        );
+
+        // An account folder that an older import left nested is still found: the folder holding `000` is the save.
+        let nested = root.join("nested-install/data/save/account");
+        let inner = nested
+            .join(DEFAULT_USER)
+            .join("0A3C5F00000000000000000000000001");
+        write(&inner.join("000/Auto"), "nested save");
+        let r = import(&nested, &save, FALLBACK_TITLE_ID, "3").unwrap();
+        assert_eq!(r.from.as_deref(), Some(inner.as_path()));
+        assert!(r.readable);
+        assert_eq!(
+            std::fs::read_to_string(account_dir(&save).join("000/Auto")).unwrap(),
+            "nested save"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

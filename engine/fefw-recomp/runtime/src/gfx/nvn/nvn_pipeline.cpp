@@ -759,6 +759,13 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
     pl.layout = sh->second.layout;
     pl.push_stages = pcr.stageFlags;
     pl.push_bytes = pcr.size;
+    // Per-program invariant (ProgLayout::writes_storage): begin_draw used to walk every binding of the program for this on each draw.
+    static const bool ssbo_ro_pass = config_get_bool("nvn", "gfx_ssbo_readonly", true);
+    for (const BindingDesc& d : pl.bindings) {
+        const bool storage_image = d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        const bool written_ssbo = d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && !(ssbo_ro_pass && !d.shader->refl.bindings[d.index].written);
+        pl.writes_storage = pl.writes_storage || storage_image || written_ssbo;
+    }
     return &g_layouts.emplace(key, std::move(pl)).first->second;
 }
 
@@ -842,6 +849,20 @@ const ProgLayout* alpha_layout(const ProgLayout& base) {
     a.layout = layout;
     a.alpha_push = true;
     return &g_alpha_layouts.emplace(&base, std::move(a)).first->second;
+}
+
+const ProgLayout* alpha_layout_cached(const ProgLayout& base) {
+    if (base.push_bytes || base.alpha_push) return &base;
+    static const bool on = config_get_bool("nvn", "alpha_cache", true);
+    if (!on) return alpha_layout(base);
+    struct Slot { const ProgLayout* base = nullptr; const ProgLayout* alpha = nullptr; };
+    static thread_local Slot cache[64];
+    Slot& s = cache[(reinterpret_cast<uintptr_t>(&base) >> 4) & 63];
+    if (s.base == &base) return s.alpha;
+    const ProgLayout* a = alpha_layout(base);
+    s.base = &base;
+    s.alpha = a;
+    return a;
 }
 
 const VkPipelineDynamicStateCreateInfo* pipeline_dynamic_state() {

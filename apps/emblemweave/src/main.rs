@@ -9,38 +9,38 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cheats;
 mod config;
 mod cpu;
+mod crash;
+mod deps;
+mod discord;
 mod engine;
 #[cfg(windows)]
 mod exe_icon;
 mod gamedata;
+mod ingame;
 mod jobs;
 mod logo;
 mod memory;
-mod pages;
-mod cheats;
-mod platform;
-mod ingame;
-mod crash;
-mod deps;
-mod discord;
 mod mods;
 mod onboarding;
 mod pad;
+mod pages;
 mod patches;
 mod perf;
+mod platform;
+mod portable;
 mod portraits;
 mod report;
-mod snapshots;
-mod shell;
-mod portable;
-mod updater;
-mod saves;
-mod sites;
 mod savefile;
+mod saves;
+mod shell;
+mod sites;
+mod snapshots;
 mod theme;
 mod toolchain;
+mod updater;
 mod widgets;
 
 use config::Config;
@@ -71,6 +71,8 @@ pub enum UpdateState {
     Ready(updater::Release),
     UpToDate(String),
     Failed(String),
+    /// The check worked but writing or swapping the release did not.
+    InstallFailed(String),
     Downloading,
 }
 
@@ -94,12 +96,14 @@ pub struct Toast {
 #[derive(Debug, Clone, Copy)]
 pub enum ToastAction {
     BuildAgain,
+    InstallUpdate,
 }
 
 impl ToastAction {
     fn label(self) -> &'static str {
         match self {
             ToastAction::BuildAgain => "Build again",
+            ToastAction::InstallUpdate => "Update now",
         }
     }
 }
@@ -162,6 +166,8 @@ pub struct App {
     tour_step: usize,
     /// The expandable background-task panel in the status strip.
     pub show_activity: bool,
+    /// The one Overview panel open from the header or a status button.
+    pub overview_popup: Option<crate::pages::overview::Popup>,
     /// Keep the hover preview open while the pointer crosses the gap between
     /// the status-bar hub and the panel. This is transient UI state, never
     /// written to config.
@@ -171,7 +177,10 @@ pub struct App {
 }
 
 fn clock() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let s = secs % 86_400;
     format!("{:02}:{:02}:{:02} UTC", s / 3600, s % 3600 / 60, s % 60)
 }
@@ -196,6 +205,14 @@ impl App {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .map(|_| ());
+        // An older updater moved only the executable out of its download. Finish that release before any background
+        // thread reads the engine; a release this version downloaded still has its executable and was already overlaid.
+        let repaired = crate::updater::current_exe().and_then(|exe| {
+            let install = exe.parent()?.to_path_buf();
+            let engine =
+                crate::engine::root().unwrap_or_else(|| install.join("engine").join("fefw-recomp"));
+            Some(crate::updater::finish_interrupted_update(&install, &engine))
+        });
         // The game's taskbar icon comes from fefw.exe, which a build or the
         // engine can replace: make it ours again at every start, off the render
         // thread because the executable is rewritten on disk.
@@ -209,13 +226,20 @@ impl App {
         // A failed or interrupted update used to leave its download behind in
         // %TEMP%. It is never needed by the running launcher, so clear it at
         // startup; saves, profiles, mods and the engine build live elsewhere.
-        std::thread::spawn(|| {
-            let _ = crate::updater::clean_cache();
+        // If finishing it above failed, keep the release so the next start can retry.
+        let keep_cache = matches!(&repaired, Some(Err(_)));
+        std::thread::spawn(move || {
+            if !keep_cache {
+                let _ = crate::updater::clean_cache();
+            }
         });
         // A fresh copy has no build of its own. Find one already on the PC — an older copy beside this one, or a checkout an
         // earlier copy's `engine.txt` names — and offer it before the player is asked to compile the engine again.
-        let reuse = crate::engine::existing_build()
-            .filter(|e| !config.reuse_dismissed.contains(&e.root.display().to_string()));
+        let reuse = crate::engine::existing_build().filter(|e| {
+            !config
+                .reuse_dismissed
+                .contains(&e.root.display().to_string())
+        });
         let mut app = App {
             applied: config.theme,
             config,
@@ -254,9 +278,21 @@ impl App {
             tour: None,
             tour_step: 0,
             show_activity: false,
+            overview_popup: None,
             activity_hover_until: None,
             nav_last: None,
         };
+        match repaired {
+            Some(Ok(n)) if n > 0 => app.note(
+                format!("Finished the previous update: {n} release files written"),
+                Tone::Accent,
+            ),
+            Some(Err(e)) => app.notify(
+                format!("The previous update could not finish: {e}"),
+                Tone::Warn,
+            ),
+            _ => {}
+        }
         // Command line: `--page <name>` opens a page, `--boot-test` runs the
         // boot test as soon as the game data is detected.
         // A `fefw.exe` rebuilt outside the launcher leaves the old `built_by` stamp behind, which reads as a stale folder and
@@ -268,10 +304,15 @@ impl App {
                 "--boot-test" => app.boot_on_start = true,
                 "--build-engine" => app.build_on_start = true,
                 "--tour" => app.tour = Some(Instant::now()),
-                "--screenshot" => app.screenshot = args.get(i + 1).map(|p| (std::path::PathBuf::from(p), 0)),
+                "--screenshot" => {
+                    app.screenshot = args.get(i + 1).map(|p| (std::path::PathBuf::from(p), 0))
+                }
                 "--page" => {
                     if let Some(name) = args.get(i + 1) {
-                        if let Some(p) = Page::ALL.iter().find(|p| p.label().eq_ignore_ascii_case(name.replace('-', " ").as_str())) {
+                        if let Some(p) = Page::ALL.iter().find(|p| {
+                            p.label()
+                                .eq_ignore_ascii_case(name.replace('-', " ").as_str())
+                        }) {
                             app.page = *p;
                         }
                     }
@@ -282,6 +323,11 @@ impl App {
         let _ = last_boot;
         if let Some(w) = warning {
             app.notify(w, Tone::Warn);
+        }
+        // A swap script that could not replace the running launcher starts the old one and leaves a note instead of
+        // disappearing. Say what happened once, then clear it so a successful start is not followed by it every time.
+        if let Some(e) = crate::updater::take_failure() {
+            app.notify(e, Tone::Bad);
         }
         app.note("Launcher started", Tone::Neutral);
         // Say this at startup, while the player is still on Overview: a folder from an older release is fixed there, before Play.
@@ -300,7 +346,11 @@ impl App {
         let text = text.into();
         // The crash report carries the last few of these.
         crate::crash::note(&text);
-        self.activity.push(Activity { at: clock(), text, tone });
+        self.activity.push(Activity {
+            at: clock(),
+            text,
+            tone,
+        });
         if self.activity.len() > 200 {
             self.activity.remove(0);
         }
@@ -309,12 +359,22 @@ impl App {
     pub fn notify(&mut self, text: impl Into<String>, tone: Tone) {
         let text = text.into();
         self.note(text.clone(), tone);
-        self.toasts.push(Toast { text, tone, until: Instant::now() + Duration::from_secs(5), action: None });
+        self.toasts.push(Toast {
+            text,
+            tone,
+            until: Instant::now() + Duration::from_secs(5),
+            action: None,
+        });
     }
 
     /// A toast that carries the action that answers it, and stays long enough to be used.
     pub fn notify_action(&mut self, text: String, tone: Tone, action: ToastAction) {
-        self.toasts.push(Toast { text, tone, until: Instant::now() + Duration::from_secs(60), action: Some(action) });
+        self.toasts.push(Toast {
+            text,
+            tone,
+            until: Instant::now() + Duration::from_secs(60),
+            action: Some(action),
+        });
     }
 
     pub fn running(&self, kind: JobKind) -> Option<&Job> {
@@ -322,12 +382,23 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        self.jobs.iter().any(|j| !j.finished() && j.kind != JobKind::Detect)
+        self.jobs
+            .iter()
+            .any(|j| !j.finished() && j.kind != JobKind::Detect)
     }
 
     /// Start a job of `kind` unless one is already running.
     pub fn start(&mut self, kind: JobKind) {
         if self.running(kind).is_some() {
+            return;
+        }
+        // The updater is writing the engine sources; a build started now would read a half-updated tree. The update
+        // closes and restarts the launcher, after which the usual build action is available again.
+        if self.update.state == UpdateState::Downloading {
+            self.notify(
+                "The launcher is installing an update; it restarts when that finishes",
+                Tone::Warn,
+            );
             return;
         }
         let job = match kind {
@@ -338,13 +409,33 @@ impl App {
             },
             JobKind::Pipeline => jobs::pipeline(self.game.clone(), self.lift_limit),
             JobKind::Boot => jobs::boot(&self.config, &self.game),
-            JobKind::Engine => match (self.game.exefs.clone(), self.game.nup.clone().or_else(|| self.game.romfs.clone())) {
-                (Some(exefs), Some(romfs)) => jobs::spawn(JobKind::Engine, &engine::STAGES, move |ctx| engine::build(ctx, exefs, romfs)),
-                _ => return self.notify("Choose the game data on Game Setup before building", Tone::Warn),
+            JobKind::Engine => match (
+                self.game.exefs.clone(),
+                self.game.nup.clone().or_else(|| self.game.romfs.clone()),
+            ) {
+                (Some(exefs), Some(romfs)) => {
+                    let dlc = self.game.dlc.clone();
+                    jobs::spawn(JobKind::Engine, &engine::STAGES, move |ctx| {
+                        engine::build(ctx, exefs, romfs, dlc)
+                    })
+                }
+                _ => {
+                    return self.notify(
+                        "Choose the game data on Game Setup before building",
+                        Tone::Warn,
+                    )
+                }
             },
             JobKind::Repair => match self.game.nup.clone().or_else(|| self.game.romfs.clone()) {
-                Some(romfs) => jobs::spawn(JobKind::Repair, engine::REPAIR_STAGES, move |ctx| engine::repair(ctx, romfs)),
-                None => return self.notify("Choose the game data on Game Setup before checking it", Tone::Warn),
+                Some(romfs) => jobs::spawn(JobKind::Repair, engine::REPAIR_STAGES, move |ctx| {
+                    engine::repair(ctx, romfs)
+                }),
+                None => {
+                    return self.notify(
+                        "Choose the game data on Game Setup before checking it",
+                        Tone::Warn,
+                    )
+                }
             },
         };
         if kind != JobKind::Detect {
@@ -359,7 +450,10 @@ impl App {
         // A check already on its way (from Game Setup, or an earlier press of Play) is the same work: wait for it rather than starting twice.
         if self.running(JobKind::Repair).is_some() {
             self.play_after_repair = true;
-            self.notify("Writing the files this package keeps packed: the game starts when that finishes", Tone::Accent);
+            self.notify(
+                "Writing the files this package keeps packed: the game starts when that finishes",
+                Tone::Accent,
+            );
             return;
         }
         if let Some(romfs) = engine::packed_package_without_overlay() {
@@ -431,10 +525,20 @@ impl App {
                 }
                 Some(JobResult::Pipeline(s)) => {
                     drop(p);
-                    let tone = if s.verified.is_some_and(|(ok, n)| ok == n) { Tone::Ok } else { Tone::Warn };
+                    let tone = if s.verified.is_some_and(|(ok, n)| ok == n) {
+                        Tone::Ok
+                    } else {
+                        Tone::Warn
+                    };
                     let text = match (&s.report, s.verified) {
-                        (Some(r), Some((ok, n))) => format!("Pipeline finished: {} functions, {ok}/{n} verified", r.lifted_functions),
-                        (Some(r), None) => format!("Pipeline finished: {} functions (native build not verified)", r.lifted_functions),
+                        (Some(r), Some((ok, n))) => format!(
+                            "Pipeline finished: {} functions, {ok}/{n} verified",
+                            r.lifted_functions
+                        ),
+                        (Some(r), None) => format!(
+                            "Pipeline finished: {} functions (native build not verified)",
+                            r.lifted_functions
+                        ),
                         _ => "Pipeline finished".to_string(),
                     };
                     self.last_pipeline = Some(*s);
@@ -442,7 +546,10 @@ impl App {
                 }
                 Some(JobResult::Engine(dir)) => {
                     drop(p);
-                    self.notify(format!("The game is built and ready to play ({})", dir.display()), Tone::Ok);
+                    self.notify(
+                        format!("The game is built and ready to play ({})", dir.display()),
+                        Tone::Ok,
+                    );
                 }
                 Some(JobResult::Repaired(overlay)) => {
                     drop(p);
@@ -472,13 +579,16 @@ impl App {
         let Some(start) = self.tour else { return };
         ctx.request_repaint_after(Duration::from_millis(30));
         let t = start.elapsed().as_secs_f32();
-        let steps: [f32; 13] = [0.0, 3.5, 5.0, 9.0, 10.0, 14.0, 17.5, 21.0, 22.0, 23.5, 25.0, 26.5, 29.0];
+        let steps: [f32; 13] = [
+            0.0, 3.5, 5.0, 9.0, 10.0, 14.0, 17.5, 21.0, 22.0, 23.5, 25.0, 26.5, 29.0,
+        ];
         while self.tour_step < steps.len() && t >= steps[self.tour_step] {
             match self.tour_step {
                 0 => self.page = Page::Overview,
                 1 => self.page = Page::Saves,
                 2 => {
-                    let auto = Config::save_dir().map(|d| crate::saves::account_dir(&d).join("000").join("Auto"));
+                    let auto = Config::save_dir()
+                        .map(|d| crate::saves::account_dir(&d).join("000").join("Auto"));
                     if let Some(a) = auto {
                         let _ = pages::saves::open_slot(self, &a);
                         self.saves_ui.scroll_to_editor = true;
@@ -513,15 +623,38 @@ impl App {
         self.update.slot = Some(slot);
     }
 
-    /// Download the release found and swap this build for it.
+    /// Download the release found, write the launcher, docs and engine sources over this install, and swap the launcher.
+    ///
+    /// A running build or repair is reading the same engine folder the update would replace, so the update waits for it
+    /// rather than changing files underneath it. `data`, the built game, the fetched tools and the portable-storage choice
+    /// are not part of the release and are preserved by [`updater::install`].
     pub fn install_update(&mut self) {
-        let UpdateState::Ready(release) = self.update.state.clone() else { return };
+        let UpdateState::Ready(release) = self.update.state.clone() else {
+            return;
+        };
+        if self
+            .jobs
+            .iter()
+            .any(|j| !j.finished() && j.kind != JobKind::Detect)
+        {
+            self.notify(
+                "Finish the current build or task before updating",
+                Tone::Warn,
+            );
+            return;
+        }
         self.update.state = UpdateState::Downloading;
+        self.notify(
+            format!("Downloading EmblemWeave {}…", release.tag),
+            Tone::Accent,
+        );
+        let engine = crate::engine::root();
         let slot: Slot<std::path::PathBuf> = std::sync::Arc::new(std::sync::Mutex::new(None));
         let handle = slot.clone();
         std::thread::spawn(move || {
             let dir = std::env::temp_dir().join("emblemweave-update");
-            let r = updater::download(&release, &dir).and_then(|exe| updater::install(&exe, true).map(|()| exe));
+            let r = updater::download(&release, &dir)
+                .and_then(|exe| updater::install(&exe, engine.as_deref(), true).map(|()| exe));
             *handle.lock().unwrap() = Some(r);
         });
         self.update.install = Some(slot);
@@ -537,7 +670,22 @@ impl App {
                         if rel.tag == self.config.updates.skipped {
                             UpdateState::Idle
                         } else {
-                            self.notify(format!("EmblemWeave {} is available", rel.tag), Tone::Accent);
+                            // A release without the Windows zip cannot be installed from here; the card offers its page instead.
+                            if rel.asset.is_some() {
+                                self.notify_action(
+                                    format!("EmblemWeave {} is available", rel.tag),
+                                    Tone::Accent,
+                                    ToastAction::InstallUpdate,
+                                );
+                            } else {
+                                self.notify(
+                                    format!(
+                                        "EmblemWeave {} is available from its release page",
+                                        rel.tag
+                                    ),
+                                    Tone::Accent,
+                                );
+                            }
                             UpdateState::Ready(rel)
                         }
                     }
@@ -553,15 +701,23 @@ impl App {
                 match r {
                     Ok(_) => {
                         self.update.restart = true;
-                        self.notify("Installing the new version: the launcher restarts", Tone::Ok);
+                        self.notify(
+                            "Installing the new version: the launcher restarts",
+                            Tone::Ok,
+                        );
                     }
-                    Err(e) => self.update.state = UpdateState::Failed(e),
+                    Err(e) => {
+                        self.notify(format!("The update failed: {e}"), Tone::Bad);
+                        self.update.state = UpdateState::InstallFailed(e);
+                    }
                 }
             }
         }
         if self.update.restart {
             ctx.request_repaint();
-        } else if self.update.state == UpdateState::Checking || self.update.state == UpdateState::Downloading {
+        } else if self.update.state == UpdateState::Checking
+            || self.update.state == UpdateState::Downloading
+        {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
@@ -577,7 +733,9 @@ impl App {
         let now = serde_json::to_string(&self.config).unwrap_or_default();
         if now != self.saved {
             let paths_changed = serde_json::to_string(&self.config.paths).ok()
-                != serde_json::from_str::<Config>(&self.saved).ok().and_then(|c| serde_json::to_string(&c.paths).ok());
+                != serde_json::from_str::<Config>(&self.saved)
+                    .ok()
+                    .and_then(|c| serde_json::to_string(&c.paths).ok());
             match self.config.save() {
                 Ok(()) => self.saved = now,
                 Err(e) => {
@@ -598,9 +756,19 @@ impl App {
         let pages = Page::ALL;
         ctx.input(|i| {
             if i.modifiers.ctrl {
-                for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9]
-                    .into_iter()
-                    .enumerate()
+                for (n, key) in [
+                    egui::Key::Num1,
+                    egui::Key::Num2,
+                    egui::Key::Num3,
+                    egui::Key::Num4,
+                    egui::Key::Num5,
+                    egui::Key::Num6,
+                    egui::Key::Num7,
+                    egui::Key::Num8,
+                    egui::Key::Num9,
+                ]
+                .into_iter()
+                .enumerate()
                 {
                     if i.key_pressed(key) {
                         if let Some(p) = pages.get(n) {
@@ -625,7 +793,10 @@ impl App {
                     for t in &self.toasts {
                         egui::Frame::new()
                             .fill(p.surface)
-                            .stroke(egui::Stroke::new(1.0_f32, theme::alpha(t.tone.colour(&p), 160)))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                theme::alpha(t.tone.colour(&p), 160),
+                            ))
                             .corner_radius(egui::CornerRadius::same(theme::RADIUS_M))
                             .inner_margin(egui::Margin::symmetric(14, 10))
                             .show(ui, |ui| {
@@ -647,8 +818,14 @@ impl App {
             match action {
                 ToastAction::BuildAgain => {
                     // One press answers the message that is still on screen.
-                    self.toasts.retain(|t| !matches!(t.action, Some(ToastAction::BuildAgain)));
+                    self.toasts
+                        .retain(|t| !matches!(t.action, Some(ToastAction::BuildAgain)));
                     self.start(JobKind::Engine);
+                }
+                ToastAction::InstallUpdate => {
+                    self.toasts
+                        .retain(|t| !matches!(t.action, Some(ToastAction::InstallUpdate)));
+                    self.install_update();
                 }
             }
         }
@@ -670,9 +847,17 @@ impl App {
                 Confirm::CancelJob(k) => ("Stop this task?", k.title(), "Stop"),
             };
             let decision = std::cell::Cell::new(None::<bool>);
-            let shown = widgets::modal(ctx, &p, "confirm-action", title, "This action is applied to the current configuration.", 480.0, |ui| {
+            let shown = widgets::modal(
+                ctx,
+                &p,
+                "confirm-action",
+                title,
+                "This action is applied to the current configuration.",
+                480.0,
+                |ui| {
                     ui.label(RichText::new(body).color(p.body));
-                }, |ui| {
+                },
+                |ui| {
                     ui.horizontal(|ui| {
                         if widgets::button(ui, &p, action, true).clicked() {
                             decision.set(Some(true));
@@ -681,7 +866,8 @@ impl App {
                             decision.set(Some(false));
                         }
                     });
-                });
+                },
+            );
             if shown.close {
                 decision.set(Some(false));
             }
@@ -705,7 +891,9 @@ impl App {
                             }
                         }
                         Some(Confirm::CancelJob(kind)) => {
-                            if let Some(j) = self.jobs.iter().find(|j| j.kind == kind && !j.finished()) {
+                            if let Some(j) =
+                                self.jobs.iter().find(|j| j.kind == kind && !j.finished())
+                            {
                                 j.request_cancel();
                             }
                         }
@@ -750,10 +938,16 @@ impl App {
         // that happens to be up hides the controls it is drawn over. Clear the
         // transient messages well before the frame is requested; persistent
         // cards and warnings stay in the picture.
-        if self.screenshot.as_ref().is_some_and(|(_, frames)| *frames == 80) {
+        if self
+            .screenshot
+            .as_ref()
+            .is_some_and(|(_, frames)| *frames == 80)
+        {
             self.toasts.clear();
         }
-        let Some((path, frames)) = &mut self.screenshot else { return };
+        let Some((path, frames)) = &mut self.screenshot else {
+            return;
+        };
         *frames += 1;
         ctx.request_repaint();
         if *frames == 90 {
@@ -804,11 +998,17 @@ impl eframe::App for App {
         if crate::engine::adopt(&mut self.config.graphics, &mut self.config.audio) {
             ctx.request_repaint();
         }
-        if self.boot_on_start && self.running(JobKind::Detect).is_none() && self.game.bootable_inputs() {
+        if self.boot_on_start
+            && self.running(JobKind::Detect).is_none()
+            && self.game.bootable_inputs()
+        {
             self.boot_on_start = false;
             self.start(JobKind::Boot);
         }
-        if self.build_on_start && self.running(JobKind::Detect).is_none() && self.game.exefs.is_some() {
+        if self.build_on_start
+            && self.running(JobKind::Detect).is_none()
+            && self.game.exefs.is_some()
+        {
             self.build_on_start = false;
             self.start(JobKind::Engine);
         }
@@ -833,13 +1033,25 @@ impl eframe::App for App {
         let p = self.config.theme.palette();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin {
-                left: if ctx.screen_rect().width() < 1240.0 { 16 } else { 24 },
-                right: if ctx.screen_rect().width() < 1240.0 { 16 } else { 24 },
+                left: if ctx.screen_rect().width() < 1240.0 {
+                    16
+                } else {
+                    24
+                },
+                right: if ctx.screen_rect().width() < 1240.0 {
+                    16
+                } else {
+                    24
+                },
                 top: 0,
                 bottom: 0,
             }))
             .show(ctx, |ui| {
-                crate::widgets::backdrop(ui.painter(), ui.max_rect().expand2(egui::vec2(28.0, 0.0)), &p);
+                crate::widgets::backdrop(
+                    ui.painter(),
+                    ui.max_rect().expand2(egui::vec2(28.0, 0.0)),
+                    &p,
+                );
                 let fresh_page = self.page_seen != Some(self.page);
                 self.page_seen = Some(self.page);
                 let mut page_area = egui::ScrollArea::vertical()
@@ -866,6 +1078,7 @@ impl eframe::App for App {
                 });
             });
         shell::activity_window(self, ctx);
+        crate::pages::overview::popups(self, ctx);
         self.overlays(ctx);
         self.tour_frame(ctx);
         ingame::frame(self, ctx);
@@ -892,7 +1105,9 @@ impl eframe::App for App {
 /// A borderless window has no native resize handles, so the thin edge of the
 /// client area starts the same drag winit would start on a decorated window.
 fn shell_resize(ctx: &egui::Context) {
-    let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+    let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
     let r = ctx.screen_rect();
     const EDGE: f32 = 7.0;
     let left = pos.x <= r.left() + EDGE;
@@ -914,10 +1129,18 @@ fn shell_resize(ctx: &egui::Context) {
         _ => return,
     };
     ctx.set_cursor_icon(match dir {
-        egui::ResizeDirection::North | egui::ResizeDirection::South => egui::CursorIcon::ResizeVertical,
-        egui::ResizeDirection::East | egui::ResizeDirection::West => egui::CursorIcon::ResizeHorizontal,
-        egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => egui::CursorIcon::ResizeNwSe,
-        egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => egui::CursorIcon::ResizeNeSw,
+        egui::ResizeDirection::North | egui::ResizeDirection::South => {
+            egui::CursorIcon::ResizeVertical
+        }
+        egui::ResizeDirection::East | egui::ResizeDirection::West => {
+            egui::CursorIcon::ResizeHorizontal
+        }
+        egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => {
+            egui::CursorIcon::ResizeNwSe
+        }
+        egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => {
+            egui::CursorIcon::ResizeNeSw
+        }
     });
     if ctx.input(|i| i.pointer.primary_pressed()) {
         ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
@@ -942,9 +1165,19 @@ enum ShellControl {
 /// taken from a fallback font, so the three icons share one stroke weight and
 /// optical box at every DPI. Hover fades in, the face sinks on press, and close
 /// is the one control that turns red instead of merely brightening.
-fn shell_control(ui: &mut egui::Ui, p: &theme::Palette, kind: ShellControl, tip: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(SHELL_BUTTON_W, SHELL_BUTTON_H), egui::Sense::click());
-    let hover = ui.ctx().animate_bool_with_time(response.id.with("shell-hover"), response.hovered(), 0.12);
+fn shell_control(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    kind: ShellControl,
+    tip: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(SHELL_BUTTON_W, SHELL_BUTTON_H),
+        egui::Sense::click(),
+    );
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("shell-hover"), response.hovered(), 0.12);
     let pressed = response.is_pointer_button_down_on();
     let close = matches!(kind, ShellControl::Close);
     let bg = if close {
@@ -960,14 +1193,31 @@ fn shell_control(ui: &mut egui::Ui, p: &theme::Palette, kind: ShellControl, tip:
     let painter = ui.painter();
     painter.rect_filled(face, radius, bg);
     if !close && hover > 0.0 {
-        painter.rect_stroke(face, radius, egui::Stroke::new(1.0_f32, theme::alpha(egui::Color32::WHITE, (14.0 * hover) as u8)), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            face,
+            radius,
+            egui::Stroke::new(
+                1.0_f32,
+                theme::alpha(egui::Color32::WHITE, (14.0 * hover) as u8),
+            ),
+            egui::StrokeKind::Inside,
+        );
     }
     if response.has_focus() {
-        painter.rect_stroke(face, radius, egui::Stroke::new(1.0_f32, p.electric), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            face,
+            radius,
+            egui::Stroke::new(1.0_f32, p.electric),
+            egui::StrokeKind::Inside,
+        );
     }
 
     let ink = if close {
-        mix_colour(p.body, egui::Color32::WHITE, if pressed { 1.0 } else { hover })
+        mix_colour(
+            p.body,
+            egui::Color32::WHITE,
+            if pressed { 1.0 } else { hover },
+        )
     } else {
         mix_colour(p.body, p.ink, hover)
     };
@@ -975,10 +1225,22 @@ fn shell_control(ui: &mut egui::Ui, p: &theme::Palette, kind: ShellControl, tip:
     let c = rect.center();
     match kind {
         ShellControl::Minimize => {
-            shell_line(painter, &[egui::pos2(c.x - 5.0, c.y + 0.5), egui::pos2(c.x + 5.0, c.y + 0.5)], stroke);
+            shell_line(
+                painter,
+                &[
+                    egui::pos2(c.x - 5.0, c.y + 0.5),
+                    egui::pos2(c.x + 5.0, c.y + 0.5),
+                ],
+                stroke,
+            );
         }
         ShellControl::Maximize { restore: false } => {
-            painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)), egui::CornerRadius::same(1), stroke, egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)),
+                egui::CornerRadius::same(1),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
         }
         ShellControl::Maximize { restore: true } => {
             // The back window's top and right edges remain visible; its covered
@@ -993,7 +1255,10 @@ fn shell_control(ui: &mut egui::Ui, p: &theme::Palette, kind: ShellControl, tip:
                 stroke,
             );
             painter.rect_stroke(
-                egui::Rect::from_min_max(egui::pos2(c.x - 4.5, c.y - 1.5), egui::pos2(c.x + 1.5, c.y + 4.5)),
+                egui::Rect::from_min_max(
+                    egui::pos2(c.x - 4.5, c.y - 1.5),
+                    egui::pos2(c.x + 1.5, c.y + 4.5),
+                ),
                 egui::CornerRadius::same(1),
                 stroke,
                 egui::StrokeKind::Inside,
@@ -1001,11 +1266,21 @@ fn shell_control(ui: &mut egui::Ui, p: &theme::Palette, kind: ShellControl, tip:
         }
         ShellControl::Close => {
             let r = 4.25;
-            shell_line(painter, &[egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)], stroke);
-            shell_line(painter, &[egui::pos2(c.x + r, c.y - r), egui::pos2(c.x - r, c.y + r)], stroke);
+            shell_line(
+                painter,
+                &[egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)],
+                stroke,
+            );
+            shell_line(
+                painter,
+                &[egui::pos2(c.x + r, c.y - r), egui::pos2(c.x - r, c.y + r)],
+                stroke,
+            );
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip)
 }
 
 /// A line with round caps, matching the softened corners of the painted box.
@@ -1023,7 +1298,11 @@ fn shell_line(painter: &egui::Painter, points: &[egui::Pos2], stroke: egui::Stro
 fn mix_colour(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let channel = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    egui::Color32::from_rgb(channel(a.r(), b.r()), channel(a.g(), b.g()), channel(a.b(), b.b()))
+    egui::Color32::from_rgb(
+        channel(a.r(), b.r()),
+        channel(a.g(), b.g()),
+        channel(a.b(), b.b()),
+    )
 }
 
 pub(crate) fn window_icon() -> Option<egui::IconData> {
@@ -1037,10 +1316,19 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
         eprintln!("APPDATA is not set");
         return std::process::ExitCode::FAILURE;
     };
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string();
     // The same message the page shows: a console import that lands where the game will not read it has to say so rather than
     // print a success line.
-    match saves::import(std::path::Path::new(source), &save_dir, saves::FALLBACK_TITLE_ID, &stamp) {
+    match saves::import(
+        std::path::Path::new(source),
+        &save_dir,
+        saves::FALLBACK_TITLE_ID,
+        &stamp,
+    ) {
         Ok(i) => {
             let (text, ok) = saves::import_message(Ok(i));
             println!("{text}");
@@ -1142,21 +1430,28 @@ missing: {} (needs {})
     }
     if !tc.problems.is_empty() {
         for p in &tc.problems {
-            println!("
-problem: {p}");
+            println!(
+                "
+problem: {p}"
+            );
         }
         return 1;
     }
     let resolved = match crate::toolchain::init() {
         Ok(r) => r,
         Err(e) => {
-            println!("
-problem: {e}");
+            println!(
+                "
+problem: {e}"
+            );
             return 1;
         }
     };
-    println!("
-toolchain: {}", resolved.toolchain.summary());
+    println!(
+        "
+toolchain: {}",
+        resolved.toolchain.summary()
+    );
     println!("fingerprint: {}", resolved.toolchain.fingerprint());
     let dir = std::env::temp_dir().join("emblemweave-toolchain-probe");
     match crate::toolchain::probe_build(&resolved.compiler, &resolved.env, &dir) {
@@ -1166,8 +1461,10 @@ the toolchain compiled and linked its test file with its own headers, libraries 
             0
         }
         Err(e) => {
-            println!("
-problem: {e}");
+            println!(
+                "
+problem: {e}"
+            );
             2
         }
     }
@@ -1193,7 +1490,12 @@ fn main() -> eframe::Result<()> {
         });
         match r {
             Ok(()) => {
-                println!("every piece is carried in {}", portable::bin_dir().map(|d| d.display().to_string()).unwrap_or_default());
+                println!(
+                    "every piece is carried in {}",
+                    portable::bin_dir()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default()
+                );
                 std::process::exit(0);
             }
             Err(e) => {
@@ -1229,11 +1531,21 @@ fn main() -> eframe::Result<()> {
     // Unpack a package whose RomFS is packed with zstd, the step the build does on its own, so it can be run by hand on a package.
     if let Some(i) = args.iter().position(|a| a == "--unpack-romfs") {
         let src = args.get(i + 1).cloned().unwrap_or_default();
-        let dest = args.get(i + 2).cloned().unwrap_or_else(|| "romfs-unpacked".to_string());
-        let r = gamedata::unpack_packed_romfs(std::path::Path::new(&src), std::path::Path::new(&dest), &mut |m| println!("{m}"));
+        let dest = args
+            .get(i + 2)
+            .cloned()
+            .unwrap_or_else(|| "romfs-unpacked".to_string());
+        let r = gamedata::unpack_packed_romfs(
+            std::path::Path::new(&src),
+            std::path::Path::new(&dest),
+            &mut |m| println!("{m}"),
+        );
         match r {
             Ok((files, bytes)) => {
-                println!("{files} files, {:.1} GB written to {dest}", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+                println!(
+                    "{files} files, {:.1} GB written to {dest}",
+                    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                );
                 std::process::exit(0);
             }
             Err(e) => {
@@ -1253,7 +1565,10 @@ fn main() -> eframe::Result<()> {
             Ok(copied) => {
                 let where_to = dir.join("data");
                 if on {
-                    println!("portable mode is on: {} (restart to use it)", where_to.display());
+                    println!(
+                        "portable mode is on: {} (restart to use it)",
+                        where_to.display()
+                    );
                     if let Some(save) = copied {
                         println!("saves copied to {}", save.display());
                     }
@@ -1282,8 +1597,15 @@ fn main() -> eframe::Result<()> {
         }
     }
     if let Some(i) = args.iter().position(|a| a == "--import-save") {
-        let code = args.get(i + 1).map(|s| import_save_cli(s)).unwrap_or(std::process::ExitCode::FAILURE);
-        std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
+        let code = args
+            .get(i + 1)
+            .map(|s| import_save_cli(s))
+            .unwrap_or(std::process::ExitCode::FAILURE);
+        std::process::exit(if code == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        });
     }
     if let Some(i) = args.iter().position(|a| a == "--verify-log") {
         let path = args.get(i + 1).map(|s| s.as_str());
@@ -1312,7 +1634,10 @@ fn main() -> eframe::Result<()> {
     }
     eframe::run_native(
         "EmblemWeave",
-        eframe::NativeOptions { viewport, ..Default::default() },
+        eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
 }

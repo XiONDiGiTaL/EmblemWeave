@@ -32,6 +32,9 @@ These are in `engine/fefw-recomp/runtime` and are on by default; `runtime/docs/C
   cores from the game (`compile_priority`, `compile_eco`).
 - **Pool mirrors** for buffers on a discrete GPU: the log's `nvn.pool: pool mirrors` line reports how much is mirrored
   and how many binds were served from the copy.
+- **Per-program derived state.** The stage-set to pipeline-layout lookup has a direct-mapped cache, and each layout's
+  alpha-test/HDR variant and whether its shaders write storage are worked out once, not on every draw (`layout_cache`,
+  `alpha_cache`, `ProgLayout::writes_storage`).
 
 ## Read from NX2navi, and what happened to it
 

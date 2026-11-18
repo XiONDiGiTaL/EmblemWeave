@@ -80,13 +80,15 @@ version it maps to; Game Setup accepts that dump or refuses it before a build
 with the supported IDs named; one full build boots, loads a 1.1.1 save, reaches
 the hub and exits cleanly; the 1.1.0 path still passes.
 
-**Checked 17 November 2026.** A decrypted tree presented as 1.1.1 was hashed
-against the manifest: all seven ExeFS modules agree (`main` `616e7d90…`, build
-`db93b012…`), so its executable is the update 131072 build the engine was tested
-with. What remains is data and save compatibility, not a different `main`. The
-status stays *unverified* until a full build of that tree boots and loads a save;
-the tree held no AddOnContent, and DLC is a separate title the launcher does not
-read.
+**Checked 17 November 2026, launcher updated 18 November.** A decrypted tree
+presented as 1.1.1 was hashed against the manifest: all seven ExeFS modules agree
+(`main` `616e7d90…`, build `db93b012…`), so its executable is the update 131072
+build the engine was tested with. What remains is data and save compatibility,
+not a different `main`. The status stays *unverified* until a full build of that
+tree boots and loads a save. The checked tree held no AddOnContent. The launcher
+now finds dumped DLC in `dlc/<title id>/romfs` and writes `[aoc] dir`; add-on
+packages still inside a `.nup` (or unextracted NCA) are not unpacked by it, and
+no DLC payload was available to boot here.
 
 ## C. Controller trigger verification and diagnostics (P1)
 

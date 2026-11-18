@@ -28,7 +28,7 @@ carries the measurement and ENGINE.md carries the detail.
 
 ## Current status
 
-> **Current status: 0.1.38, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes. The 0.1.38 download includes the FSR 3.1 upscaler code path; the AMD FidelityFX DLLs are still yours to obtain (see Graphics page). Later releases are checked by building and by headless runs of the real game — see [Development status](DEVELOPMENT.md) and the [changelog](changelog/README.md).
+> **Current status: 0.1.39, playable.** Build the game once from your dump, press **Play**. The 0.1.17 play test on an AMD Radeon RX 7900 XT ran at about 60 fps with sound, the opening movie and cutscenes. The 0.1.39 download includes the FSR 3.1 upscaler code path; the AMD FidelityFX DLLs are still yours to obtain (see Graphics page). The built-in updater keeps `data`, the built game and the fetched tools, so an update does not require rebuilding. Later releases are checked by building and by headless runs of the real game — see [Development status](DEVELOPMENT.md) and the [changelog](changelog/README.md).
 
 ## How to read the states
 
@@ -84,7 +84,7 @@ carries the measurement and ENGINE.md carries the detail.
 | `nn::mem::StandardAllocator`, `NumberLineAllocator` | Implemented | one heap per allocator object with a coalescing free list (the title creates three); number lines for pool offsets |
 | `nn::lmem` frame heaps | Implemented | head and tail allocation, `ZeroClear` |
 | `nn::fs` | Implemented | RomFS read-only, save data in `%APPDATA%\EmblemWeave\save`, real result codes |
-| `nn::fs` add-on content | Blocked | no DLC mount is offered |
+| `nn::fs` add-on content | Implemented in fefw-recomp; blocked in this Rust path | `[aoc] dir` serves `<title id>/romfs` packs through `aoc:u` and `OpenDataStorageByDataId`; the Rust research runtime still has no DLC mount. |
 | `nn::oe`, `nn::account`, `nn::time`, `nn::aoc` | Implemented | language and profile from the launcher, version from `control.nacp`, time in UTC |
 | musl C runtime | Implemented | printf/scanf family, `strto*`, stdio, pthreads, `rand`, `errno`, fenv (round to nearest, with the flush-to-zero mode bits the game asks for) |
 | Math library | Verified | musl's libm through the `libm` crate; arguments now read from `s`/`d` registers |

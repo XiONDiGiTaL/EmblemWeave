@@ -22,6 +22,9 @@ pub struct Paths {
     pub game_root: String,
     pub exefs: String,
     pub romfs: String,
+    /// The player's dumped add-on content: a folder with one `<title id>/romfs`
+    /// (or `<title id>/<n>/romfs`) per pack. Empty: detect `dlc` beside the dump.
+    pub dlc: String,
     pub nacp: String,
     /// Decompressed `main` segments (`text.bin`, `rodata.bin`, `data.bin`).
     pub decoded: String,
@@ -38,7 +41,10 @@ pub struct System {
 
 impl Default for System {
     fn default() -> Self {
-        System { language: "en-US".into(), user_name: "Player".into() }
+        System {
+            language: "en-US".into(),
+            user_name: "Player".into(),
+        }
     }
 }
 
@@ -54,7 +60,10 @@ pub struct Runtime {
 
 impl Default for Runtime {
     fn default() -> Self {
-        Runtime { max_steps: 50_000_000, heap_mib: 4096 }
+        Runtime {
+            max_steps: 50_000_000,
+            heap_mib: 4096,
+        }
     }
 }
 
@@ -140,7 +149,14 @@ pub struct Audio {
 
 impl Default for Audio {
     fn default() -> Self {
-        Audio { device: "System default".into(), master: 1.0, music: 0.85, effects: 1.0, voice: 1.0, buffer_ms: 40 }
+        Audio {
+            device: "System default".into(),
+            master: 1.0,
+            music: 0.85,
+            effects: 1.0,
+            voice: 1.0,
+            buffer_ms: 40,
+        }
     }
 }
 
@@ -162,7 +178,11 @@ pub struct Input {
 }
 
 pub fn default_bindings() -> Vec<Binding> {
-    let b = |action: &str, key: &str, pad: &str| Binding { action: action.into(), key: key.into(), pad: pad.into() };
+    let b = |action: &str, key: &str, pad: &str| Binding {
+        action: action.into(),
+        key: key.into(),
+        pad: pad.into(),
+    };
     vec![
         b("Confirm", "Enter", "A / Cross"),
         b("Cancel", "Escape", "B / Circle"),
@@ -184,7 +204,12 @@ pub fn default_bindings() -> Vec<Binding> {
 
 impl Default for Input {
     fn default() -> Self {
-        Input { profile: "Default".into(), deadzone: 0.15, vibration: 0.8, bindings: default_bindings() }
+        Input {
+            profile: "Default".into(),
+            deadzone: 0.15,
+            vibration: 0.8,
+            bindings: default_bindings(),
+        }
     }
 }
 
@@ -201,7 +226,10 @@ pub struct Updates {
 
 impl Default for Updates {
     fn default() -> Self {
-        Updates { check: true, skipped: String::new() }
+        Updates {
+            check: true,
+            skipped: String::new(),
+        }
     }
 }
 
@@ -217,7 +245,10 @@ pub struct Discord {
 
 impl Default for Discord {
     fn default() -> Self {
-        Discord { enabled: false, client_id: String::new() }
+        Discord {
+            enabled: false,
+            client_id: String::new(),
+        }
     }
 }
 
@@ -233,7 +264,10 @@ pub struct Hud {
 
 impl Default for Hud {
     fn default() -> Self {
-        Hud { fps: false, graph: true }
+        Hud {
+            fps: false,
+            graph: true,
+        }
     }
 }
 
@@ -251,7 +285,10 @@ pub struct NavState {
 
 impl Default for NavState {
     fn default() -> Self {
-        NavState { rail: false, collapsed: vec!["system".into(), "settings".into()] }
+        NavState {
+            rail: false,
+            collapsed: vec!["system".into(), "settings".into()],
+        }
     }
 }
 
@@ -297,7 +334,12 @@ pub struct Onboarding {
 
 impl Default for Onboarding {
     fn default() -> Self {
-        Onboarding { completed: false, dismissed: false, step: 0, introduced: false }
+        Onboarding {
+            completed: false,
+            dismissed: false,
+            step: 0,
+            introduced: false,
+        }
     }
 }
 
@@ -351,18 +393,26 @@ impl Config {
     /// by defaults so the launcher still starts.
     pub fn load() -> (Config, Option<String>) {
         let Some(path) = Self::path() else {
-            return (Config::default(), Some("the launcher's data folder is not set; settings will not persist".into()));
+            return (
+                Config::default(),
+                Some("the launcher's data folder is not set; settings will not persist".into()),
+            );
         };
         match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(cfg) => (cfg, None),
-                Err(e) => {
-                    let _ = std::fs::rename(&path, path.with_extension("json.bad"));
-                    (Config::default(), Some(format!("config.json could not be read ({e}); it was kept as config.json.bad")))
+            Ok(text) => {
+                match serde_json::from_str(&text) {
+                    Ok(cfg) => (cfg, None),
+                    Err(e) => {
+                        let _ = std::fs::rename(&path, path.with_extension("json.bad"));
+                        (Config::default(), Some(format!("config.json could not be read ({e}); it was kept as config.json.bad")))
+                    }
                 }
-            },
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
-            Err(e) => (Config::default(), Some(format!("config.json could not be opened: {e}"))),
+            Err(e) => (
+                Config::default(),
+                Some(format!("config.json could not be opened: {e}")),
+            ),
         }
     }
 
@@ -410,7 +460,9 @@ impl Config {
 
     /// Put back every graphics setting from before the first Low Memory apply.
     pub fn restore_low_memory(&mut self) -> bool {
-        let Some(previous) = self.graphics_preset.previous.take() else { return false };
+        let Some(previous) = self.graphics_preset.previous.take() else {
+            return false;
+        };
         self.graphics = previous;
         self.graphics_preset.low_memory = false;
         self.graphics_preset.applied = None;
@@ -420,7 +472,12 @@ impl Config {
     /// Whether a setting changed after the profile was applied, which a restore
     /// would overwrite. The page asks before it does that.
     pub fn low_memory_drifted(&self) -> bool {
-        self.graphics_preset.low_memory && self.graphics_preset.applied.as_ref().is_some_and(|a| *a != self.graphics)
+        self.graphics_preset.low_memory
+            && self
+                .graphics_preset
+                .applied
+                .as_ref()
+                .is_some_and(|a| *a != self.graphics)
     }
 }
 

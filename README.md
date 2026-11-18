@@ -33,6 +33,11 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
+> **Current release: 0.1.39.** The built-in updater installs the new release over
+your folder while keeping `data`, the built game and the fetched tools. Updating
+does not require rebuilding; if Overview shows the optional "built by an older
+release" notice, **Play** still uses the existing build.
+
 ## Documentation
 
 | | |

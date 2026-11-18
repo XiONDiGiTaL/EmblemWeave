@@ -4,10 +4,12 @@
 //! Downloads go through Windows' own `curl.exe` and `tar.exe`, as the mods page
 //! does, so the launcher carries no HTTP client of its own.
 //!
-//! A running executable cannot be overwritten on Windows, but it can be
-//! renamed. The new build is unpacked beside this one, the current binary is
-//! kept as `EmblemWeave.exe.old`, and a short script replaces the file and
-//! starts it again once this process has exited.
+//! An update is the whole release, not just the executable: the launcher, its
+//! docs and the engine sources are written over the install, while the player's
+//! data, built game and fetched tools stay where they are. A running executable
+//! cannot be overwritten on Windows, but it can be replaced after exit: the new
+//! binary is staged as `EmblemWeave.exe.new`, the current one is kept as
+//! `EmblemWeave.exe.old`, and a short script swaps them and starts the new one.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,7 +49,9 @@ pub fn is_newer(tag: &str, now: (u32, u32, u32)) -> bool {
 }
 
 fn system_tool(name: &str) -> PathBuf {
-    let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let sys = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let p = sys.join("System32").join(name);
     if p.is_file() {
         p
@@ -81,42 +85,61 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
     .map_err(|e| format!("running curl: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if err.contains("404") { "no release was found for this repository".into() } else { format!("GitHub answered: {err}") });
+        return Err(if err.contains("404") {
+            "no release was found for this repository".into()
+        } else {
+            format!("GitHub answered: {err}")
+        });
     }
     Ok(out.stdout)
 }
 
 /// The newest published release.
 pub fn latest() -> Result<Release, String> {
-    let body = fetch(&format!("https://api.github.com/repos/{REPO}/releases/latest"))?;
+    let body = fetch(&format!(
+        "https://api.github.com/repos/{REPO}/releases/latest"
+    ))?;
     release_from_json(&body)
 }
 
 /// Reads a GitHub release object. Separated from the request so it can be
 /// tested against recorded responses.
 pub fn release_from_json(body: &[u8]) -> Result<Release, String> {
-    let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| format!("GitHub answered with something unexpected: {e}"))?;
-    let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+    let v: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("GitHub answered with something unexpected: {e}"))?;
+    let tag = v
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
     if tag.is_empty() {
         return Err("the release has no tag".into());
     }
-    let asset = v
-        .get("assets")
-        .and_then(|a| a.as_array())
-        .and_then(|a| {
-            a.iter().find_map(|a| {
-                let name = a.get("name")?.as_str()?;
-                if name.ends_with(ASSET_SUFFIX) {
-                    Some((name.to_string(), a.get("browser_download_url")?.as_str()?.to_string()))
-                } else {
-                    None
-                }
-            })
-        });
+    let asset = v.get("assets").and_then(|a| a.as_array()).and_then(|a| {
+        a.iter().find_map(|a| {
+            let name = a.get("name")?.as_str()?;
+            if name.ends_with(ASSET_SUFFIX) {
+                Some((
+                    name.to_string(),
+                    a.get("browser_download_url")?.as_str()?.to_string(),
+                ))
+            } else {
+                None
+            }
+        })
+    });
     Ok(Release {
         version: parse_version(&tag),
-        notes: v.get("body").and_then(|b| b.as_str()).unwrap_or_default().to_string(),
-        page: v.get("html_url").and_then(|p| p.as_str()).unwrap_or_default().to_string(),
+        notes: v
+            .get("body")
+            .and_then(|b| b.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        page: v
+            .get("html_url")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default()
+            .to_string(),
         asset,
         tag,
     })
@@ -132,7 +155,9 @@ fn tree_bytes(dir: &Path) -> u64 {
     let mut total = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -184,7 +209,10 @@ pub fn has_backup() -> bool {
 /// Download a release's zip and unpack its executable into `dir`, returning
 /// the unpacked `EmblemWeave.exe`.
 pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
-    let (name, url) = release.asset.clone().ok_or("that release has no Windows download")?;
+    let (name, url) = release
+        .asset
+        .clone()
+        .ok_or("that release has no Windows download")?;
     if !url.starts_with("https://") {
         return Err("the download address is not https".into());
     }
@@ -205,18 +233,66 @@ pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
     .output()
     .map_err(|e| format!("running curl: {e}"))?;
     if !out.status.success() {
-        return Err(format!("the download failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "the download failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     let unpacked = dir.join("unpacked");
     let _ = std::fs::remove_dir_all(&unpacked);
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
-    let out = hidden(Command::new(system_tool("tar.exe")).arg("-xf").arg(&zip).arg("-C").arg(&unpacked))
-        .output()
-        .map_err(|e| format!("running tar: {e}"))?;
+    let out = hidden(
+        Command::new(system_tool("tar.exe"))
+            .arg("-xf")
+            .arg(&zip)
+            .arg("-C")
+            .arg(&unpacked),
+    )
+    .output()
+    .map_err(|e| format!("running tar: {e}"))?;
     if !out.status.success() {
-        return Err(format!("the download could not be unpacked: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "the download could not be unpacked: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     find_exe(&unpacked, 3).ok_or_else(|| "the download has no EmblemWeave.exe in it".to_string())
+}
+
+/// Finish an update that an older launcher started but could not complete.
+///
+/// Before this release the updater moved only `EmblemWeave.exe` out of the download cache and left the rest of the
+/// unpacked release there. The new executable starts, sees a matching release with no executable of its own, and writes
+/// the docs and engine sources from it before [`clean_cache`] removes the folder. A release downloaded by this version
+/// still has its executable (it is copied, not moved), so it is skipped: its overlay already ran.
+pub fn finish_interrupted_update(install: &Path, engine: &Path) -> Result<usize, String> {
+    let Some(release) = incomplete_release(&cache_dir().join("unpacked")) else {
+        return Ok(0);
+    };
+    overlay_release(&release, install, engine)
+}
+
+fn incomplete_release(cache: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(cache).ok()?.flatten() {
+        let root = entry.path();
+        if !root.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let tag = name.split_once('-').map(|(_, tag)| tag).unwrap_or(&name);
+        if parse_version(tag) != Some(version_now()) {
+            continue;
+        }
+        // The old updater's signature: the executable was moved out, but the release and its manifest remain.
+        if root.join("EmblemWeave.exe").is_file() || !root.join("docs").join("PACKAGE.md").is_file()
+        {
+            continue;
+        }
+        if root.join("engine").join("fefw-recomp").is_dir() {
+            return Some(root);
+        }
+    }
+    None
 }
 
 fn find_exe(dir: &Path, depth: usize) -> Option<PathBuf> {
@@ -228,58 +304,419 @@ fn find_exe(dir: &Path, depth: usize) -> Option<PathBuf> {
                     return Some(f);
                 }
             }
-        } else if p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("EmblemWeave.exe")) {
+        } else if p
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("EmblemWeave.exe"))
+        {
             return Some(p);
         }
     }
     None
 }
 
-/// Replace the running launcher with `new_exe` and start it again. The caller
-/// closes the window afterwards; the script waits for the file to be free.
-pub fn install(new_exe: &Path, keep_previous: bool) -> Result<(), String> {
+/// Replace the release in this install with the downloaded one, then start the new launcher.
+///
+/// The launcher, its docs and the engine sources are the release; `data`, the built game, the Python environment and the
+/// fetched third-party sources are not in the zip and are left exactly where they are. The engine is written where this
+/// copy actually reads it (`engine_root`), so an install that reuses an older checkout updates that checkout rather than
+/// creating a second, stale copy beside it. `portable.txt` is never copied: an update must not switch a profile install to
+/// portable storage behind the player's back. The caller closes the window afterwards; the script waits for the running
+/// executable to be free and starts the new one.
+pub fn install(
+    new_exe: &Path,
+    engine_root: Option<&Path>,
+    keep_previous: bool,
+) -> Result<(), String> {
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
     let backup = backup_exe().ok_or("the launcher's own path is unknown")?;
-    if keep_previous {
-        // Copying a running executable is allowed; replacing it is not.
-        std::fs::copy(&target, &backup).map_err(|e| format!("keeping the current version: {e}"))?;
+    let install = target.parent().ok_or("the launcher's folder is unknown")?;
+    let release = new_exe
+        .parent()
+        .ok_or("the download has no release folder")?;
+    let engine = engine_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| install.join("engine").join("fefw-recomp"));
+    // The executable is the one file that cannot be written while it runs. Stage it beside the old one and let the
+    // script move it once this process has exited. Stage it before the sources: if the overlay then fails, there is no
+    // half-written new launcher waiting to be started and the previous version's backup is still intact.
+    let staged = PathBuf::from(format!("{}.new", target.display()));
+    std::fs::copy(new_exe, &staged).map_err(|e| format!("staging the new launcher: {e}"))?;
+    if let Err(e) = overlay_release(release, install, &engine) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
     }
-    swap_script(new_exe, &target)
+    if keep_previous {
+        // Copying a running executable is allowed; replacing it is not. Do it only once the release is known to be
+        // complete, so a failed update does not overwrite the version Restore would go back to.
+        if let Err(e) = std::fs::copy(&target, &backup) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("keeping the current version: {e}"));
+        }
+    }
+    swap_script(&staged, &target, &update_log(), failure_marker().as_deref())
 }
 
 /// Put the build kept from the last update back.
 pub fn restore_previous() -> Result<(), String> {
-    let backup = backup_exe().filter(|p| p.is_file()).ok_or("there is no previous version to go back to")?;
+    let backup = backup_exe()
+        .filter(|p| p.is_file())
+        .ok_or("there is no previous version to go back to")?;
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
     let tmp = std::env::temp_dir().join(format!("emblemweave-rollback-{}.exe", std::process::id()));
     std::fs::copy(&backup, &tmp).map_err(|e| format!("reading the previous version: {e}"))?;
-    swap_script(&tmp, &target)
+    swap_script(&tmp, &target, &update_log(), failure_marker().as_deref())
 }
 
-fn swap_script(new_exe: &Path, target: &Path) -> Result<(), String> {
-    let script = std::env::temp_dir().join(format!("emblemweave-update-{}.cmd", std::process::id()));
+/// The release's files that are not generated on this PC. The build folder, the engine's work folder, the Python
+/// environment and the fetched third-party trees are outputs, not release files: a new zip never contains them, and an
+/// update that replaced them would throw away the expensive parts of the install.
+const KEEP_ENGINE: [&str; 7] = [
+    "game-build/fefw/build",
+    "work",
+    "tools/.venv",
+    "tools/bin",
+    "tools/textures/third_party",
+    "tools/shaders/third_party",
+    "tools/shaders/build",
+];
+
+/// Copy one directory over another, skipping the generated paths in `keep`. Files are replaced, never deleted: a stale
+/// file the new release no longer ships is harmless, while deleting the wrong folder would take a build with it.
+fn overlay_tree(from: &Path, to: &Path, rel: &Path, keep: &[&str]) -> Result<usize, String> {
+    if keep
+        .iter()
+        .any(|k| rel == Path::new(k) || rel.starts_with(k))
+    {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
+    let mut copied = 0;
+    for entry in std::fs::read_dir(from)
+        .map_err(|e| format!("reading {}: {e}", from.display()))?
+        .flatten()
+    {
+        let src = entry.path();
+        let name = entry.file_name();
+        let dst = to.join(&name);
+        if src.is_dir() {
+            copied += overlay_tree(&src, &dst, &rel.join(&name), keep)?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .map_err(|e| format!("copying {} to {}: {e}", src.display(), dst.display()))?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+/// Write the release's launcher-side files into `install` and its engine sources into `engine`.
+///
+/// The release folder is the one `EmblemWeave.exe` sits in. `data` and `portable.txt` are deliberately not copied. The
+/// engine is handled separately so it can live outside this install: `engine_root` is where this copy reads it, which is
+/// the folder a reused build is in.
+fn overlay_release(release: &Path, install: &Path, engine: &Path) -> Result<usize, String> {
+    let from_engine = release.join("engine").join("fefw-recomp");
+    if !from_engine.is_dir() {
+        // A release without engine sources would leave a new launcher beside old sources: the exact mixed install this
+        // updater exists to prevent. Refuse before changing the install.
+        return Err("the release has no engine/fefw-recomp folder".into());
+    }
+    std::fs::create_dir_all(install).map_err(|e| format!("creating {}: {e}", install.display()))?;
+    let mut copied = 0;
+    for entry in std::fs::read_dir(release)
+        .map_err(|e| format!("reading {}: {e}", release.display()))?
+        .flatten()
+    {
+        let name = entry.file_name();
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "emblemweave.exe" | "portable.txt" | "data" | "engine"
+        ) {
+            continue;
+        }
+        let src = entry.path();
+        let dst = install.join(&name);
+        if src.is_dir() {
+            copied += overlay_tree(&src, &dst, Path::new(""), &[])?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .map_err(|e| format!("copying {} to {}: {e}", src.display(), dst.display()))?;
+            copied += 1;
+        }
+    }
+    copied += overlay_tree(&from_engine, engine, Path::new(""), &KEEP_ENGINE)?;
+    Ok(copied)
+}
+
+/// The update script's output. It lives with the other launcher logs, so a failed swap can be diagnosed without asking the
+/// player to find a hidden temporary file.
+fn update_log() -> PathBuf {
+    if let Some(dir) = crate::config::Config::dir().map(|d| d.join("logs")) {
+        if std::fs::create_dir_all(&dir).is_ok() {
+            return dir.join("update.log");
+        }
+    }
+    // The script redirects into this path; a directory that was not created would turn a working move into a failure.
+    std::env::temp_dir().join("emblemweave-update.log")
+}
+
+/// A note the swap script leaves when it cannot replace the launcher; the next start shows it instead of failing silently.
+fn failure_marker() -> Option<PathBuf> {
+    crate::config::Config::dir().map(|d| d.join("update-failed.txt"))
+}
+
+/// Read and clear the note a failed swap left behind.
+pub fn take_failure() -> Option<String> {
+    let path = failure_marker()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn swap_script(
+    new_exe: &Path,
+    target: &Path,
+    log: &Path,
+    failed: Option<&Path>,
+) -> Result<(), String> {
+    let script =
+        std::env::temp_dir().join(format!("emblemweave-update-{}.cmd", std::process::id()));
+    let marker = failed.map(|p| p.display().to_string()).unwrap_or_default();
     let text = format!(
         "@echo off\r\n\
+         setlocal\r\n\
+         set \"NEW={new}\"\r\n\
+         set \"TARGET={target}\"\r\n\
+         set \"LOG={log}\"\r\n\
+         set \"FAIL={marker}\"\r\n\
          ping -n 3 127.0.0.1 >nul\r\n\
+         set tries=0\r\n\
          :again\r\n\
-         move /y \"{new}\" \"{target}\" >nul 2>&1\r\n\
-         if errorlevel 1 (\r\n\
-         \x20 ping -n 2 127.0.0.1 >nul\r\n\
-         \x20 goto again\r\n\
-         )\r\n\
-         start \"\" \"{target}\"\r\n\
+         move /y \"%NEW%\" \"%TARGET%\" >> \"%LOG%\" 2>&1\r\n\
+         if not errorlevel 1 goto installed\r\n\
+         set /a tries+=1\r\n\
+         if %tries% geq 30 goto failed\r\n\
+         ping -n 2 127.0.0.1 >nul\r\n\
+         goto again\r\n\
+         :installed\r\n\
+         if not \"%FAIL%\"==\"\" if exist \"%FAIL%\" del \"%FAIL%\" >nul 2>&1\r\n\
+         start \"\" \"%TARGET%\"\r\n\
+         goto done\r\n\
+         :failed\r\n\
+         if not \"%FAIL%\"==\"\" echo The update could not replace EmblemWeave.exe. The previous launcher was started. See \"%LOG%\". > \"%FAIL%\"\r\n\
+         start \"\" \"%TARGET%\"\r\n\
+         :done\r\n\
          del \"%~f0\"\r\n",
         new = new_exe.display(),
-        target = target.display()
+        target = target.display(),
+        log = log.display(),
     );
     std::fs::write(&script, text).map_err(|e| format!("writing the update script: {e}"))?;
-    hidden(Command::new("cmd").arg("/c").arg(&script)).spawn().map_err(|e| format!("starting the update: {e}"))?;
+    hidden(Command::new("cmd").arg("/c").arg(&script))
+        .spawn()
+        .map_err(|e| format!("starting the update: {e}"))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn an_update_replaces_the_release_and_keeps_the_build_and_data() {
+        let root = std::env::temp_dir().join(format!("ew-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = root.join("EmblemWeave-v0.9.0");
+        let install = root.join("EmblemWeave-v0.1.39");
+        let engine = install.join("engine/fefw-recomp");
+
+        write(&release.join("EmblemWeave.exe"), "new launcher");
+        write(&release.join("portable.txt"), "release marker");
+        write(&release.join("data/save/Other"), "release save");
+        write(&release.join("README.md"), "new readme");
+        write(&release.join("docs/USAGE.md"), "new docs");
+        write(
+            &release.join("engine/fefw-recomp/README.md"),
+            "new engine readme",
+        );
+        write(
+            &release.join("engine/fefw-recomp/recomp/new.txt"),
+            "new engine source",
+        );
+        // Generated folders must never be taken from the release, even if a malformed zip carries them.
+        write(
+            &release.join("engine/fefw-recomp/game-build/fefw/build/release/fefw.exe"),
+            "release build",
+        );
+        write(
+            &release.join("engine/fefw-recomp/tools/.venv/pyvenv.cfg"),
+            "release venv",
+        );
+        write(
+            &release.join("engine/fefw-recomp/work/cache"),
+            "release work",
+        );
+        write(
+            &release.join("engine/fefw-recomp/tools/textures/third_party/lib.txt"),
+            "release fetched",
+        );
+
+        write(&install.join("EmblemWeave.exe"), "old launcher");
+        write(&install.join("data/save/Auto"), "save");
+        write(
+            &install.join("engine/fefw-recomp/game-build/fefw/build/release/fefw.exe"),
+            "built game",
+        );
+        write(
+            &install.join("engine/fefw-recomp/tools/.venv/pyvenv.cfg"),
+            "keep venv",
+        );
+        write(
+            &install.join("engine/fefw-recomp/tools/textures/third_party/lib.txt"),
+            "keep fetched",
+        );
+
+        overlay_release(&release, &install, &engine).unwrap();
+
+        // The release's launcher-side files are written over the install.
+        assert_eq!(read(&install.join("README.md")), "new readme");
+        assert_eq!(read(&install.join("docs/USAGE.md")), "new docs");
+        assert_eq!(
+            read(&install.join("engine/fefw-recomp/README.md")),
+            "new engine readme"
+        );
+        assert_eq!(
+            read(&install.join("engine/fefw-recomp/recomp/new.txt")),
+            "new engine source"
+        );
+
+        // The executable is swapped by the script after the process exits, not by the overlay; the storage marker is
+        // never added by an update.
+        assert_eq!(read(&install.join("EmblemWeave.exe")), "old launcher");
+        assert!(!install.join("portable.txt").exists());
+
+        // Everything generated on this PC survives.
+        assert_eq!(read(&install.join("data/save/Auto")), "save");
+        assert!(!install.join("data/save/Other").exists());
+        assert_eq!(
+            read(&install.join("engine/fefw-recomp/game-build/fefw/build/release/fefw.exe")),
+            "built game"
+        );
+        assert_eq!(
+            read(&install.join("engine/fefw-recomp/tools/.venv/pyvenv.cfg")),
+            "keep venv"
+        );
+        assert_eq!(
+            read(&install.join("engine/fefw-recomp/tools/textures/third_party/lib.txt")),
+            "keep fetched"
+        );
+        assert!(!install.join("engine/fefw-recomp/work/cache").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_update_keeps_an_existing_portable_marker() {
+        let root = std::env::temp_dir().join(format!("ew-update-portable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = root.join("EmblemWeave-v0.9.0");
+        let install = root.join("EmblemWeave");
+        write(&release.join("EmblemWeave.exe"), "new");
+        write(&release.join("portable.txt"), "release marker");
+        write(
+            &release.join("engine/fefw-recomp/README.md"),
+            "new engine readme",
+        );
+        write(&install.join("portable.txt"), "this install is portable");
+
+        overlay_release(&release, &install, &install.join("engine/fefw-recomp")).unwrap();
+        assert_eq!(
+            read(&install.join("portable.txt")),
+            "this install is portable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_update_writes_the_engine_where_this_copy_reads_it() {
+        // A launcher that reused a build elsewhere must update that checkout, not just the unused copy beside the exe.
+        let root = std::env::temp_dir().join(format!("ew-update-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = root.join("EmblemWeave-v0.9.0");
+        let install = root.join("EmblemWeave");
+        let shared = root.join("old-install/engine/fefw-recomp");
+        write(&release.join("EmblemWeave.exe"), "new");
+        write(
+            &release.join("engine/fefw-recomp/README.md"),
+            "new engine readme",
+        );
+        write(
+            &release.join("engine/fefw-recomp/recomp/new.txt"),
+            "new source",
+        );
+        write(
+            &shared.join("game-build/fefw/build/release/fefw.exe"),
+            "existing build",
+        );
+        write(&shared.join("recomp/old.txt"), "old source");
+
+        overlay_release(&release, &install, &shared).unwrap();
+        assert_eq!(read(&shared.join("README.md")), "new engine readme");
+        assert_eq!(read(&shared.join("recomp/new.txt")), "new source");
+        assert_eq!(
+            read(&shared.join("game-build/fefw/build/release/fefw.exe")),
+            "existing build"
+        );
+        assert!(!install.join("engine/fefw-recomp/README.md").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_release_without_engine_sources_is_refused_before_anything_is_written() {
+        let root = std::env::temp_dir().join(format!("ew-update-no-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = root.join("EmblemWeave-v0.9.0");
+        let install = root.join("EmblemWeave");
+        write(&release.join("README.md"), "new readme");
+        write(&install.join("README.md"), "old readme");
+
+        assert!(overlay_release(&release, &install, &install.join("engine/fefw-recomp")).is_err());
+        assert_eq!(read(&install.join("README.md")), "old readme");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_old_updaters_cache_is_finished_once() {
+        // Releases before this one moved the executable out and left the rest of the zip behind. That release is the
+        // only one an interrupted update should finish; a release this version downloaded keeps its executable.
+        let cache = std::env::temp_dir().join(format!("ew-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let root = cache.join(format!("EmblemWeave-v{}", env!("CARGO_PKG_VERSION")));
+        write(&root.join("docs/PACKAGE.md"), "release manifest");
+        write(&root.join("engine/fefw-recomp/README.md"), "engine");
+        assert_eq!(incomplete_release(&cache), Some(root.clone()));
+
+        write(&root.join("EmblemWeave.exe"), "new launcher");
+        assert_eq!(incomplete_release(&cache), None);
+
+        // A newer release left in the cache is not this build's unfinished update.
+        let other = cache.join("EmblemWeave-v9.9.9");
+        write(&other.join("docs/PACKAGE.md"), "release manifest");
+        write(&other.join("engine/fefw-recomp/README.md"), "engine");
+        assert_eq!(incomplete_release(&cache), None);
+        let _ = std::fs::remove_dir_all(cache);
+    }
 
     #[test]
     fn tags_compare_like_versions() {

@@ -255,32 +255,28 @@ pub fn large_action(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str,
     }
 }
 
-/// A quick-access tile. The same component is used for every shortcut, so the
-/// Overview's grid stays one visual rhythm instead of a row of mini pages.
-pub fn quick_tile(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, detail: &str, tone: Tone) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 68.0), Sense::click());
+/// A one-line shortcut for the Overview. Unlike the old page tiles this keeps
+/// the whole Quick Access row to the height of a single control, with the
+/// detail moved into the hover text.
+pub fn shortcut_pill(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, detail: &str, tone: Tone) -> egui::Response {
+    let font = theme::semibold(10.5);
+    let label = page.label();
+    let tw = ui.painter().layout_no_wrap(label.to_string(), font.clone(), p.ink).size().x;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new((tw + 43.0).ceil(), 29.0), Sense::click());
     if ui.is_rect_visible(rect) {
         let hover = ui.ctx().animate_bool(response.id.with("h"), response.hovered());
         let painter = ui.painter();
-        let face = rect.shrink2(Vec2::new(0.0, 1.0));
-        painter.rect_filled(face, CornerRadius::same(12), lerp(p.surface, p.panel_hi, hover * 0.75));
-        painter.rect_stroke(face, CornerRadius::same(12), Stroke::new(1.0_f32, lerp(p.line, alpha(p.accent_hi, 110), hover)), StrokeKind::Inside);
-        let icon = Rect::from_min_size(Pos2::new(face.left() + 13.0, face.center().y - 11.0), Vec2::splat(22.0));
-        painter.rect_filled(icon, CornerRadius::same(6), alpha(p.accent, 20));
-        page.paint_icon(painter, icon.shrink(3.0), lerp(p.accent_hi, Color32::WHITE, hover * 0.4));
-        painter.text(Pos2::new(face.left() + 44.0, face.center().y - 9.0), egui::Align2::LEFT_CENTER, page.label(), theme::semibold(12.5), p.ink);
-        painter.text(Pos2::new(face.left() + 44.0, face.center().y + 10.0), egui::Align2::LEFT_CENTER, detail, theme::semibold(9.5), tone.colour(p));
-        let arrow = Pos2::new(face.right() - 14.0, face.center().y);
-        let ink = lerp(p.muted, p.accent_hi, hover);
-        painter.line_segment([arrow + Vec2::new(-3.0, -3.0), arrow + Vec2::new(0.0, 0.0)], Stroke::new(1.2_f32, ink));
-        painter.line_segment([arrow + Vec2::new(0.0, 0.0), arrow + Vec2::new(-3.0, 3.0)], Stroke::new(1.2_f32, ink));
+        painter.rect_filled(rect, CornerRadius::same(14), lerp(p.panel, p.panel_hi, hover));
+        painter.rect_stroke(rect, CornerRadius::same(14), Stroke::new(1.0_f32, lerp(p.line, alpha(p.accent_hi, 110), hover)), StrokeKind::Inside);
+        let icon = Rect::from_center_size(Pos2::new(rect.left() + 16.0, rect.center().y), Vec2::splat(15.0));
+        page.paint_icon(painter, icon, lerp(p.accent_hi, Color32::WHITE, hover * 0.35));
+        painter.text(Pos2::new(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, label, font, p.ink);
+        painter.circle_filled(Pos2::new(rect.right() - 10.0, rect.center().y), 2.4, tone.colour(p));
         if response.has_focus() {
-            painter.rect_stroke(face.expand(1.0), CornerRadius::same(13), Stroke::new(1.0_f32, p.electric), StrokeKind::Outside);
+            painter.rect_stroke(rect.expand(1.0), CornerRadius::same(15), Stroke::new(1.0_f32, p.electric), StrokeKind::Outside);
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Open {}", page.label()))
-
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} · {}", page.label(), detail))
 }
 
 /// A clickable parent section in the navigation rail.

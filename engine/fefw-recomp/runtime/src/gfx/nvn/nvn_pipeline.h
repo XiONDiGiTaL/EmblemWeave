@@ -51,6 +51,9 @@ struct ProgLayout {
     // Set 0 is pushed and nothing outside it depends on the uniform buffers (no texture handle read from a uniform block): a draw whose
     // only change is a uniform buffer binding pushes set 0 again and keeps the other sets it has bound ([nvn] ubo_only_rebind).
     bool ubo_only = false;
+    // A per-program invariant of the replay: a storage buffer the program's shaders write (one that [nvn] gfx_ssbo_readonly proves read-only
+    // does not count) or a storage image. A draw of this program then writes memory; worked out once here instead of over every binding a draw.
+    bool writes_storage = false;
 };
 
 // [nvn] push_uniforms (default true): programs whose set 0 fits the device's push descriptor limit push it (ProgLayout::push_set0). False when the
@@ -61,6 +64,9 @@ bool push_uniforms_on();
 const ProgLayout* prog_layout(const ShaderInfo* const stages[6]);
 // The layout of `base` with the alpha-test push constant (cached per base; `base` itself when it has push constants of its own).
 const ProgLayout* alpha_layout(const ProgLayout& base);
+// The same answer for the render thread's per-draw calls, through a thread-local direct-mapped cache ([nvn] alpha_cache): alpha_layout's
+// mutex and map were taken for every alpha-tested draw. Layouts live until pipeline_shutdown.
+const ProgLayout* alpha_layout_cached(const ProgLayout& base);
 // [hdr] ui_nits, for the replay (render thread; each answer is worked out once per shader while the HDR scene runs, and not kept before):
 // hdr_tonemap_shader: fs is the HDR tone-map shader. hdr_gain_shader: the scene-gain variant of fs fits (colour output 0's rgb times the
 // push constant at offset 0, spirv_scale_output0; GraphicsKey::scene_gain selects it) and its words are ready for the pipeline.

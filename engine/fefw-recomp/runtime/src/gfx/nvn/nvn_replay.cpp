@@ -3282,10 +3282,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         }
     }
     if (alpha_test_wanted()) {
-        const ProgLayout* ap = alpha_layout(*pl);
+        const ProgLayout* ap = alpha_layout_cached(*pl);
         if (ap != pl) { pl = ap; g_alpha_draw = true; }
     } else if (g_sharp_on && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && sharpen_shader(S.stage[kFragment])) {
-        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range: the replacement also carries the scene gain
+        const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range: the replacement also carries the scene gain
         if (ap != pl) {
             pl = ap;
             g_sharp_draw = true;
@@ -3293,20 +3293,20 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             if (gain_wanted) g_gain_frame = true;
         }
     } else if (gain_wanted && hdr_gain_shader(S.stage[kFragment])) {
-        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the scene gain
+        const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range carries the scene gain
         if (ap != pl) { pl = ap; g_gain_draw = g_gain_frame = true; }
     } else if (g_grade_on && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && extras::hdr_scene_active() &&
                hdr_gt_shader(S.stage[kFragment])) {
-        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range, 32 bytes
+        const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range, 32 bytes
         if (ap != pl) { pl = ap; g_grade_draw = true; }
     } else if (g_bloom_gain != 1.0f && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && bloom_shader(S.stage[kFragment])) {
-        const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the bloom factor
+        const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range carries the bloom factor
         if (ap != pl) { pl = ap; g_bloom_draw = true; }
     } else if ((g_post_strength[1] != 1.0f || g_post_strength[2] != 1.0f || g_post_strength[3] != 1.0f) && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active &&
                S.ncolor > 0) {
         const int kind = post_scale_shader(S.stage[kFragment]);
         if (kind && g_post_strength[kind] != 1.0f) {
-            const ProgLayout* ap = alpha_layout(*pl);   // the same push constant range carries the strength
+            const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range carries the strength
             if (ap != pl) { pl = ap; g_post_draw = true; g_post_val = g_post_strength[kind]; }
         }
     }
@@ -3337,10 +3337,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     rs_mark(kRsHead);
     if (g_dirty & (kDesc | kPipe)) {
         ++g_rs.draws_desc;
-        g_prog_writes = false;
-        static const bool ssbo_ro_pass = nxrt::config_get_bool("nvn", "gfx_ssbo_readonly", true);
-        for (const BindingDesc& d : pl->bindings)
-            g_prog_writes |= (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && !(ssbo_ro_pass && !d.shader->refl.bindings[d.index].written)) || d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        g_prog_writes = pl->writes_storage;   // worked out once per layout (prog_layout), not over every binding per draw
         attach_targets(false);
         g_want_depth_ro = samples_depth_target(*pl);
         prepare_textures(*pl);

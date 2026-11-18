@@ -115,7 +115,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 | --- | --- | --- |
 | `the game build needs tools this PC does not have: …` | One or more build tools are absent. The list now includes Visual Studio's C++ tools, which the engine's scripts call through `vcvars64.bat` | Each tool is followed by its install command; install them and press Build the game again. All of them are in the README's prerequisites. **Overview** has an **Install the missing build tools** button that runs those winget lines for you, Visual Studio included; restart the launcher when it finishes |
 | `the engine folder engine/fefw-recomp is missing beside the launcher` | The launcher was moved out of the repository, or the folder was deleted | Unpack the repository whole, or set `EW_ENGINE` to a folder that holds `game-build/` |
-| `the game is not built yet: run Build the game on Game Setup` (the button is on **Overview**) | `fefw.exe` is absent | Build the game |
+| `the game is not built yet: run Build the game on Game Setup` (the button is on **Overview**) | `fefw.exe` is absent | Build the game. If you have just updated, see [Updating without rebuilding the game](#updating-without-rebuilding-the-game-56) first. |
 | `pwsh … failed (exit code: 1): <error line>` | A build step failed. The message carries the line that explains it, picked out of the run rather than the summary at the end, so `CMake Generate step failed. Build files cannot be regenerated correctly.` arrives together with the `CMake Error` that caused it | The `engine` log holds the whole output. Send it together with the exported report, which now ends with the tail of the newest log |
 | `CMake 3.x is too old: the engine's projects need 3.25 or newer` | CMake is installed but older than the engine's projects ask for. CMake reports that as a generate failure, not as a version problem | `winget upgrade Kitware.CMake` (or `winget install Kitware.CMake`), restart the launcher, press Build the game again |
 | `Python environment: … failed the probe: …` / `tools\.venv was created but does not pass the Python probe` | A `tools\.venv` left by an older release or another Python install still has a `python.exe`, but that interpreter cannot start (for example `Module use of python311.dll conflicts with this version of Python`), is not the interpreter the launcher started, or its packages are incomplete. The log names the interpreter path, version, the probe result and the recovery | Nothing: the launcher removes **only** the generated engine `tools\.venv` and creates it again before the next step. Do not uninstall other Python versions; they are not used by that environment. If recreation itself fails, install Python 3.12+ and press Build the game again |
@@ -142,7 +142,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 | Message | Meaning | Fix |
 | --- | --- | --- |
 | The build fails on a path containing `&`, or on spaces, parentheses or a long folder name | Ninja put an object path on the command line, and `cmd.exe` split an unescaped `&` (issue #38, for example `G:\\Games\\PC Ports & Recomps\\emblemweave`) | Update the engine to a release whose `build_game.cmd` and `build_fefw.ps1` configure with `CMAKE_NINJA_FORCE_RESPONSE_FILE=ON`. You do not need to move the installation; if you build the engine yourself, add that flag rather than renaming the folder |
-| `this engine folder has no translator at …\\prebuilt\\win-x64\\spirv_harness.exe; building one from source` | Every release zip carries that file. An engine folder without it is not from this release, usually because a new `EmblemWeave.exe` was dropped into an older unzipped folder | Unzip the release into a folder of its own and point the launcher at that. Mixing a launcher from one release with another release's engine folder is what produced the `dav1d` and `control.nacp` messages in #17 |
+| `this engine folder has no translator at …\\prebuilt\\win-x64\\spirv_harness.exe; building one from source` | Every release zip carries that file. An engine folder without it is not from this release, usually because a new `EmblemWeave.exe` was dropped into an older unzipped folder | Press **Update now** on Overview so the launcher and engine sources move together. If updating by hand, unzip the release into a folder of its own and point the launcher at that. Mixing a launcher from one release with another release's engine folder is what produced the `dav1d` and `control.nacp` messages in #17 |
 | `this folder's path cannot be handed to MSBuild (an apostrophe or non-ASCII character in it), so the shader translator is built from … instead` | The path has a `'` (as in "Fortune's Weave") or a non-ASCII character, and MSBuild ends its `@(Item->'…')` quoting there, printing the transform as a file name (`MSB3191`, `MSB3021`) | Nothing to fix: the translator is built from a copy under the launcher's work folder and copied back. The message is there so a slow first build is not mistaken for a hang |
 | `apply_patch: source file not found` / the patch step fails | The translator's patch step could not find its input, or a patch did not apply | The input is under `tools\shaders\third_party\ryubing`; the build stages it with `setup_ryujinx.ps1`. Delete `tools\shaders\build` and build again |
 | `add_subdirectory given source "…/third_party/dav1d" which is not an existing directory` | The engine folder is from 0.1.15 or older, which did not ship that tree (#17) | Use 0.1.16 or newer. Every release since carries `runtime/third_party/dav1d` |
@@ -150,6 +150,52 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `Title metadata: control.nacp not found` | The dump has no `control.nacp`, so the title name and display version are unknown. The build and the game do not need it | Nothing to fix unless you want the version line: extracted `.nsp` dumps keep it at `data\control\control.nacp` |
 
 | `main.npdm is compressed in the .nup`, `... is compressed in the .nup; the game reads RomFS files in place`, or the game exits two seconds after Play | 0.1.19 and older refused any `.nup` that packs some of its files with zstd (#24) | 0.1.20 and newer write those files into `engine\fefw-recomp\work\romfs-overlay` and the engine reads them from there: press Play, which writes them first and then starts the game, or **Check my game folder** on Game Setup if you would rather not start it yet. Neither compiles anything. A compressed ExeFS no longer matters at all |
+
+## Updating without rebuilding the game (#56)
+
+A release zip carries a new launcher, docs and engine sources; the built game in `engine\fefw-recomp\game-build` is not in it.
+A freshly unzipped copy therefore opens with **Build the game**, which reads as though the old build is gone. It is not, and it
+does not have to be compiled again.
+
+**The short way: use the launcher's updater.** When a newer release exists, Overview shows **Update available** with **Update
+now**; **About > Updates** has the same button. It downloads the release and writes the new launcher, docs and engine sources
+over this install, then restarts once. `data\`, the built game, the fetched tools and third-party sources are kept, and
+`portable.txt` is left as it is. If the running executable cannot be replaced, the old launcher starts and the reason is in
+`logs\update.log`. No release zip has to be downloaded or unpacked by hand.
+
+**If you update by hand: unzip over the old folder.** Close the launcher, unpack the new release into the same folder, and
+start it. The zip replaces `EmblemWeave.exe`, the docs and the engine sources; `data\` stays where it is, so settings, saves,
+the decoded modules and the build are all still there.
+
+**A fresh folder** needs these two moved or pointed at:
+
+| Keep | Why |
+| --- | --- |
+| `data\` | Saves, settings, logs and the decoded modules (portable installs; a profile install keeps them in `%APPDATA%\EmblemWeave`) |
+| `engine\` | The engine checkout, its fetched tools and `game-build\fefw\build\release\fefw.exe` |
+
+For the engine specifically, nothing has to be moved: **Game Setup > Engine folder > Use another engine folder…** takes the
+old copy's `engine\fefw-recomp` (or the old copy itself), records it, and uses the build already there. The choice is written
+to `engine.txt` in this copy's settings folder (`data\engine.txt` portably, otherwise `%APPDATA%\EmblemWeave\engine.txt`), and
+every later start uses it. Only the engine is shared: if you did not copy `data\`, choose your game data on Game Setup again,
+and the old copy keeps its own saves.
+
+**The offer on first start.** A copy with no build of its own looks for one before it asks for a compile: `engine.txt` in its
+own settings, in the profile settings folder, and in the `data` folder of every EmblemWeave copy beside it, plus an
+`engine\fefw-recomp` under any sibling folder. When it finds one, Overview opens with **A build is already on this PC**, the
+folder, and when it was built. **Use this build** points this copy at it and says so in a toast; **Not now** remembers that
+folder as declined and stops offering it, without changing anything. Nothing is compiled before you answer. If the new copy
+is somewhere else entirely, the Game Setup route above does the same thing.
+
+**What is not touched.** No save, profile, mod, setting or game dump is moved, copied or deleted by any of this. The dump is
+only read.
+
+**When a rebuild is needed.** When the engine itself has changed: Overview then says **This game folder came from another
+release** and names both versions. Press **Rebuild** beside Play once; the build folder is reused, so only what changed is
+compiled, and saves and mods are untouched. The card's **Repair now** does the same after clearing the old runtime build,
+which is the right choice if a mixed build is suspected. If that notice is absent, there is nothing to rebuild. Do not copy a
+lone `fefw.exe` into a different engine folder: the executable, the engine sources and the fetched tools go together, and a
+mixed folder is what the Repair card exists to fix.
 
 ## `PYTHONPATH` and `PYTHONHOME` on Windows
 

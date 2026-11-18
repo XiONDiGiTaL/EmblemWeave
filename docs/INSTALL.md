@@ -26,13 +26,27 @@ removed, uses `%APPDATA%\EmblemWeave` (Windows) or `$XDG_CONFIG_HOME/EmblemWeave
 The zip and what it deliberately leaves out are listed in [PACKAGE.md](PACKAGE.md), and
 `tools/package_release.ps1` builds it reproducibly.
 
-## Updating: what to keep
+## Updating
+
+**Use the launcher's updater.** When a newer release is published, Overview shows **Update available** with an **Update now**
+button; **About > Updates** has the same action. The launcher downloads the release, writes the new launcher, docs and engine
+sources over this install, and restarts once. `data\` (saves, settings, decoded modules and logs), the built game in
+`engine\fefw-recomp\game-build`, the fetched build tools and the third-party sources are kept. It never adds or removes
+`portable.txt`, so a portable install stays portable and a profile install stays a profile install. An update started by a
+launcher older than this one leaves the rest of the release in the download cache; the new launcher writes it on first
+start, so those engine sources catch up without another download.
+
+The launcher checks at startup; **About > Updates** can turn that off or check by hand. If a release has no Windows download,
+the update card links to its release page instead of trying to install it. A failed executable swap starts the old launcher
+and writes the reason to `logs\update.log`.
 
 The launcher is the small part; the engine build and the fetched build tools are the expensive part, and a new release zip is
-really just a new launcher. So there is no need to delete the old folder and start again.
+mostly a new launcher and engine sources. There is no need to delete the old folder and start again.
 
-- **Unzip the new release into the same folder.** It replaces the launcher and the docs, and leaves `data\` and `engine\`
-  alone — your saves, settings, decoded modules, build output and the game itself keep working, and nothing is rebuilt.
+**Updating by hand.** This is the fallback when the launcher cannot update itself, for example on a read-only folder:
+
+- **Unzip the new release into the same folder.** It replaces the launcher, docs and engine sources, and leaves `data\` and
+  the built game alone — your saves, settings, decoded modules, build output and the game itself keep working.
 - **If you would rather unpack into a fresh folder**, keep these two from the old one and move them across:
   - `data\` — in a portable install this is where your saves (`data\save`), settings and build output live;
   - `engine\` — the engine checkout and the built `fefw.exe`, plus the tools fetched into `engine\fefw-recomp\tools`.

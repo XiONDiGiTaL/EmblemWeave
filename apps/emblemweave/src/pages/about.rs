@@ -13,10 +13,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_L);
     ui.vertical_centered(|ui| {
         logo::show_lockup(ui, &p, 460.0_f32.min(ui.available_width()));
-        ui.label(RichText::new("A native PC recompilation of Fire Emblem: Fortune's Weave").size(15.0).color(p.body));
+        ui.label(
+            RichText::new("A native PC recompilation of Fire Emblem: Fortune's Weave")
+                .size(15.0)
+                .color(p.body),
+        );
         ui.horizontal(|ui| {
             ui.label(RichText::new("by").color(p.muted));
-            ui.hyperlink_to(RichText::new("XiØN").font(theme::semibold(15.0)).color(p.accent_hi), "https://github.com/XiONDiGiTaL");
+            ui.hyperlink_to(
+                RichText::new("XiØN")
+                    .font(theme::semibold(15.0))
+                    .color(p.accent_hi),
+                "https://github.com/XiONDiGiTaL",
+            );
         });
     });
     ui.add_space(theme::SPACE_L);
@@ -150,13 +159,22 @@ fn link_tile(
     tint: egui::Color32,
 ) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(112.0, 88.0), egui::Sense::click());
-    let hover = ui.ctx().animate_bool(response.id.with("hover"), response.hovered());
-    let tile = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 25.0), egui::vec2(50.0, 50.0));
+    let hover = ui
+        .ctx()
+        .animate_bool(response.id.with("hover"), response.hovered());
+    let tile = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 25.0),
+        egui::vec2(50.0, 50.0),
+    );
     let radius = egui::CornerRadius::same(13);
     let painter = ui.painter();
 
     if hover > 0.04 {
-        painter.rect_filled(tile.expand(4.0), egui::CornerRadius::same(17), theme::alpha(tint, (22.0 * hover) as u8));
+        painter.rect_filled(
+            tile.expand(4.0),
+            egui::CornerRadius::same(17),
+            theme::alpha(tint, (22.0 * hover) as u8),
+        );
     }
     painter.rect_filled(tile, radius, p.bg_deep);
     widgets::gradient_fill(
@@ -206,9 +224,11 @@ fn link_tile(
 fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
     widgets::section(ui, p, "Credits", |ui| {
         ui.label(
-            RichText::new("A project is never one person. This is everyone whose work EmblemWeave stands on.")
-                .size(13.0)
-                .color(p.body),
+            RichText::new(
+                "A project is never one person. This is everyone whose work EmblemWeave stands on.",
+            )
+            .size(13.0)
+            .color(p.body),
         );
         ui.add_space(theme::SPACE_S);
 
@@ -272,7 +292,8 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
         let galley = ui.fonts(|f| f.layout_job(job));
         let span = galley.size().x.max(1.0) + 48.0;
         let width = ui.available_width().max(240.0);
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, 54.0), egui::Sense::hover());
         let id = ui.id().with("credits-scroll");
         let mut offset = ui.ctx().data(|d| d.get_temp::<f32>(id).unwrap_or(0.0));
         if !response.hovered() {
@@ -285,7 +306,12 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
         let painter = ui.painter();
         let radius = egui::CornerRadius::same(10);
         painter.rect_filled(rect, radius, p.bg_deep);
-        painter.rect_stroke(rect, radius, egui::Stroke::new(1.0_f32, p.line), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.0_f32, p.line),
+            egui::StrokeKind::Inside,
+        );
         let strip = painter.with_clip_rect(rect);
         let y = rect.center().y - galley.size().y * 0.5;
         for k in -1..=2 {
@@ -300,18 +326,28 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
             let left = rect.left() + i as f32;
             let right = rect.right() - i as f32 - 1.0;
             painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(left, rect.top() + 1.0), egui::pos2(left + 1.0, rect.bottom() - 1.0)),
+                egui::Rect::from_min_max(
+                    egui::pos2(left, rect.top() + 1.0),
+                    egui::pos2(left + 1.0, rect.bottom() - 1.0),
+                ),
                 0.0,
                 theme::alpha(p.bg_deep, a),
             );
             painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(right, rect.top() + 1.0), egui::pos2(right + 1.0, rect.bottom() - 1.0)),
+                egui::Rect::from_min_max(
+                    egui::pos2(right, rect.top() + 1.0),
+                    egui::pos2(right + 1.0, rect.bottom() - 1.0),
+                ),
                 0.0,
                 theme::alpha(p.bg_deep, a),
             );
         }
         ui.add_space(theme::SPACE_XS);
-        ui.label(RichText::new("Hover over the credit line to pause it.").size(11.5).color(p.muted));
+        ui.label(
+            RichText::new("Hover over the credit line to pause it.")
+                .size(11.5)
+                .color(p.muted),
+        );
         response.on_hover_text("Pause the credits");
     });
 }
@@ -321,23 +357,39 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
 fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     widgets::section(ui, p, "Storage", |ui| {
         let exe = crate::platform::exe_dir();
-        let portable = exe.as_ref().and_then(|d| crate::platform::portable_root(d)).is_some();
+        let portable = exe
+            .as_ref()
+            .and_then(|d| crate::platform::portable_root(d))
+            .is_some();
         let folder = crate::config::Config::dir();
         widgets::kv(
             ui,
             p,
             "Folder",
-            &folder.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| crate::platform::NO_DATA_DIR.to_string()),
+            &folder
+                .as_ref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| crate::platform::NO_DATA_DIR.to_string()),
         );
         widgets::kv(
             ui,
             p,
             "Portable",
-            if portable { "yes, everything is in this folder" } else { "no, in your profile folder" },
+            if portable {
+                "yes, everything is in this folder"
+            } else {
+                "no, in your profile folder"
+            },
         );
         if portable {
             ui.add_space(theme::SPACE_S);
-            ui.label(RichText::new("Move or copy this whole folder to take the saves and the game with it.").size(13.0).color(p.muted));
+            ui.label(
+                RichText::new(
+                    "Move or copy this whole folder to take the saves and the game with it.",
+                )
+                .size(13.0)
+                .color(p.muted),
+            );
             return;
         }
         ui.add_space(theme::SPACE_S);
@@ -378,7 +430,12 @@ fn discord(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             if widgets::toggle(ui, p, &mut enabled).changed() {
                 app.config.discord.enabled = enabled;
             }
-            ui.label(RichText::new("Show \"Playing Fire Emblem: Fortune's Weave\" in Discord while the game runs").color(p.body));
+            ui.label(
+                RichText::new(
+                    "Show \"Playing Fire Emblem: Fortune's Weave\" in Discord while the game runs",
+                )
+                .color(p.body),
+            );
         });
         ui.add_space(theme::SPACE_S);
         ui.horizontal(|ui| {
@@ -397,7 +454,13 @@ fn discord(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         } else {
             "The ID comes from your own Discord application; Rich Presence is not a bot and needs no token. The game's name is shown only while it runs."
         };
-        ui.label(RichText::new(note).size(11.5).color(if enabled && app.config.discord.client_id.trim().is_empty() { p.warn } else { p.muted }));
+        ui.label(RichText::new(note).size(11.5).color(
+            if enabled && app.config.discord.client_id.trim().is_empty() {
+                p.warn
+            } else {
+                p.muted
+            },
+        ));
     });
 }
 
@@ -412,16 +475,31 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             }
             ui.label(RichText::new("Check for updates when the launcher starts").color(p.body));
         });
+        let busy = matches!(
+            app.update.state,
+            UpdateState::Checking | UpdateState::Downloading
+        );
+        if !app.config.updates.skipped.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{} is skipped.", app.config.updates.skipped))
+                        .size(12.0)
+                        .color(p.muted),
+                );
+                if widgets::button(ui, p, "Stop skipping it", !busy).clicked() {
+                    app.config.updates.skipped.clear();
+                    app.check_updates();
+                }
+            });
+        }
         ui.add_space(theme::SPACE_S);
-
-        let busy = matches!(app.update.state, UpdateState::Checking | UpdateState::Downloading);
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, p, "Check for updates", !busy).clicked() {
                 app.check_updates();
             }
             if updater::has_backup()
-                && widgets::button(ui, p, "Restore the previous version", !busy)
-                    .on_hover_text("Puts back the build the last update replaced, and restarts")
+                && widgets::button(ui, p, "Restore the previous launcher", !busy)
+                    .on_hover_text("Puts back the launcher file the last update replaced, and restarts. Engine sources are not rolled back; the built game and your data are unchanged")
                     .clicked()
             {
                 match updater::restore_previous() {
@@ -435,16 +513,50 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
 
         match app.update.state.clone() {
             UpdateState::Idle => {
-                ui.label(RichText::new("The launcher checks GitHub for a newer release and installs it itself.").size(12.5).color(p.muted));
+                ui.label(
+                    RichText::new(
+                        "The launcher checks GitHub for a newer release and installs it in place. It replaces the launcher, the docs and the \
+                         engine sources; your data, saves, built game, fetched tools and portable-storage choice are kept.",
+                    )
+                    .size(12.5)
+                    .color(p.muted),
+                );
             }
             UpdateState::Checking => {
-                widgets::status_line(ui, p, Tone::Neutral, "Checking GitHub…", "The newest published release is looked up; nothing is downloaded yet.");
+                widgets::status_line(
+                    ui,
+                    p,
+                    Tone::Neutral,
+                    "Checking GitHub…",
+                    "The newest published release is looked up; nothing is downloaded yet.",
+                );
             }
             UpdateState::UpToDate(tag) => {
-                widgets::status_line(ui, p, Tone::Ok, "You are on the newest release", &format!("{tag} is the newest published release."));
+                widgets::status_line(
+                    ui,
+                    p,
+                    Tone::Ok,
+                    "You are on the newest release",
+                    &format!("{tag} is the newest published release."),
+                );
             }
             UpdateState::Failed(e) => {
-                widgets::status_line(ui, p, Tone::Bad, "The update check failed", &format!("{e}. Nothing was changed."));
+                widgets::status_line(
+                    ui,
+                    p,
+                    Tone::Bad,
+                    "The update check failed",
+                    &format!("{e}. Nothing was changed."),
+                );
+            }
+            UpdateState::InstallFailed(e) => {
+                widgets::status_line(
+                    ui,
+                    p,
+                    Tone::Bad,
+                    "The update did not finish",
+                    &format!("{e}. This launcher is still running; your data and built game were not touched. If the swap itself failed, logs\\update.log has the details."),
+                );
             }
             UpdateState::Downloading => {
                 widgets::status_line(
@@ -452,7 +564,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                     p,
                     Tone::Accent,
                     "Downloading the new version…",
-                    "It is unpacked beside this one; the launcher then closes, replaces itself and starts again.",
+                    "It is written over this install; the launcher then closes, starts the new build and keeps your data and built game.",
                 );
                 ui.add_space(4.0);
                 ui.spinner();
@@ -464,13 +576,16 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                     Tone::Accent,
                     &format!("{} is available", rel.tag),
                     &format!(
-                        "This build is {}. Downloading installs it in place: the launcher closes, replaces itself and starts again.",
+                        "This build is {}. Updating replaces the launcher, docs and engine sources, then restarts. Your data, saves, \
+                         built game, fetched tools and portable-storage choice are kept.",
                         env!("CARGO_PKG_VERSION")
                     ),
                 );
                 ui.add_space(theme::SPACE_S);
                 ui.horizontal_wrapped(|ui| {
-                    if widgets::primary_button(ui, p, "Download and install", rel.asset.is_some()).clicked() {
+                    if widgets::primary_button(ui, p, "Download and install", rel.asset.is_some())
+                        .clicked()
+                    {
                         app.install_update();
                     }
                     if !rel.page.is_empty() {
@@ -479,16 +594,26 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                     if widgets::button(ui, p, "Skip this version", true).clicked() {
                         app.config.updates.skipped = rel.tag.clone();
                         app.update.state = UpdateState::Idle;
+                        app.notify(format!("Skipped {}; undo it above", rel.tag), Tone::Neutral);
                     }
                 });
                 if rel.asset.is_none() {
-                    ui.label(RichText::new("That release has no Windows download; use the release page.").size(12.0).color(p.warn));
+                    ui.label(
+                        RichText::new(
+                            "That release has no Windows download; use the release page.",
+                        )
+                        .size(12.0)
+                        .color(p.warn),
+                    );
                 }
                 if !rel.notes.is_empty() {
                     ui.add_space(theme::SPACE_S);
-                    egui::ScrollArea::vertical().id_salt("release-notes").max_height(crate::widgets::list_height(ui, 0.22)).show(ui, |ui| {
-                        ui.label(RichText::new(&rel.notes).size(12.5).color(p.body));
-                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("release-notes")
+                        .max_height(crate::widgets::list_height(ui, 0.22))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&rel.notes).size(12.5).color(p.body));
+                        });
                 }
             }
         }

@@ -33,22 +33,49 @@ enum Pick {
     Dump,
 }
 
-fn path_row(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &mut String, hint: &str, pick: Pick) -> bool {
+fn path_row(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    label: &str,
+    value: &mut String,
+    hint: &str,
+    pick: Pick,
+) -> bool {
     let mut changed = false;
-    ui.label(RichText::new(label).font(theme::semibold(13.5)).color(p.ink));
+    ui.label(
+        RichText::new(label)
+            .font(theme::semibold(13.5))
+            .color(p.ink),
+    );
     ui.horizontal(|ui| {
         let w = ui.available_width() - if pick == Pick::Dump { 236.0 } else { 110.0 };
-        changed |= ui.add(egui::TextEdit::singleline(value).desired_width(w).hint_text(hint).font(theme::mono(12.5))).lost_focus();
+        changed |= ui
+            .add(
+                egui::TextEdit::singleline(value)
+                    .desired_width(w)
+                    .hint_text(hint)
+                    .font(theme::mono(12.5)),
+            )
+            .lost_focus();
         let mut picked = None;
         if pick == Pick::Dump && widgets::button(ui, p, "Choose package…", true).clicked() {
             picked = rfd::FileDialog::new()
-                .add_filter("Game package (.nx, .nup, .nsp, .xci)", &["nx", "nup", "nsp", "xci"])
+                .add_filter(
+                    "Game package (.nx, .nup, .nsp, .xci)",
+                    &["nx", "nup", "nsp", "xci"],
+                )
                 .pick_file();
         }
-        let browse = if pick == Pick::Dump { "Folder…" } else { "Browse…" };
+        let browse = if pick == Pick::Dump {
+            "Folder…"
+        } else {
+            "Browse…"
+        };
         if widgets::button(ui, p, browse, true).clicked() {
             picked = match pick {
-                Pick::Nacp => rfd::FileDialog::new().add_filter("control.nacp", &["nacp"]).pick_file(),
+                Pick::Nacp => rfd::FileDialog::new()
+                    .add_filter("control.nacp", &["nacp"])
+                    .pick_file(),
                 _ => rfd::FileDialog::new().pick_folder(),
             };
         }
@@ -76,10 +103,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Pick::Dump,
         );
         ui.horizontal(|ui| {
-            if widgets::button(ui, &p, "Detect again", app.running(JobKind::Detect).is_none()).clicked() {
+            if widgets::button(
+                ui,
+                &p,
+                "Detect again",
+                app.running(JobKind::Detect).is_none(),
+            )
+            .clicked()
+            {
                 rescan = true;
             }
-            if app.running(JobKind::Detect).is_some() && widgets::button(ui, &p, "Cancel", true).clicked() {
+            if app.running(JobKind::Detect).is_some()
+                && widgets::button(ui, &p, "Cancel", true).clicked()
+            {
                 app.confirm = Some(crate::Confirm::CancelJob(JobKind::Detect));
             }
             if let Some(job) = app.running(JobKind::Detect) {
@@ -88,9 +124,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.spinner();
                 } else {
                     ui.label(
-                        RichText::new(format!("{} of {}", crate::fmt_size(copied), crate::fmt_size(total)))
-                            .size(12.5)
-                            .color(p.body),
+                        RichText::new(format!(
+                            "{} of {}",
+                            crate::fmt_size(copied),
+                            crate::fmt_size(total)
+                        ))
+                        .size(12.5)
+                        .color(p.body),
                     );
                 }
             }
@@ -98,7 +138,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // A package is unpacked before anything else can be checked: show how
         // far that has got and how much of it is left.
         if let Some(job) = app.running(JobKind::Detect) {
-            let (copied, total, message) = job.snapshot(|pr| (pr.copied, pr.total, pr.message.clone()));
+            let (copied, total, message) =
+                job.snapshot(|pr| (pr.copied, pr.total, pr.message.clone()));
             if total > 0 {
                 ui.add_space(theme::SPACE_XS);
                 widgets::progress_bar(ui, &p, Some(copied as f32 / total.max(1) as f32));
@@ -106,13 +147,56 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.add_space(theme::SPACE_XS);
             }
         }
-        egui::CollapsingHeader::new(RichText::new("Individual locations").color(p.body)).show(ui, |ui| {
-            ui.label(RichText::new("Leave empty to detect from the game folder.").size(12.5).color(p.muted));
-            rescan |= path_row(ui, &p, "ExeFS", &mut app.config.paths.exefs, "folder containing main, sdk, main.npdm", Pick::Folder);
-            rescan |= path_row(ui, &p, "RomFS", &mut app.config.paths.romfs, "folder containing Fs.bin.zst and the asset folders", Pick::Folder);
-            rescan |= path_row(ui, &p, "control.nacp", &mut app.config.paths.nacp, "the title metadata file", Pick::Nacp);
-            rescan |= path_row(ui, &p, "Decoded module", &mut app.config.paths.decoded, "folder with text.bin, rodata.bin, data.bin", Pick::Folder);
-        });
+        egui::CollapsingHeader::new(RichText::new("Individual locations").color(p.body)).show(
+            ui,
+            |ui| {
+                ui.label(
+                    RichText::new("Leave empty to detect from the game folder.")
+                        .size(12.5)
+                        .color(p.muted),
+                );
+                rescan |= path_row(
+                    ui,
+                    &p,
+                    "ExeFS",
+                    &mut app.config.paths.exefs,
+                    "folder containing main, sdk, main.npdm",
+                    Pick::Folder,
+                );
+                rescan |= path_row(
+                    ui,
+                    &p,
+                    "RomFS",
+                    &mut app.config.paths.romfs,
+                    "folder containing Fs.bin.zst and the asset folders",
+                    Pick::Folder,
+                );
+                rescan |= path_row(
+                    ui,
+                    &p,
+                    "Add-on content",
+                    &mut app.config.paths.dlc,
+                    "folder with <title id>/romfs packs (optional)",
+                    Pick::Folder,
+                );
+                rescan |= path_row(
+                    ui,
+                    &p,
+                    "control.nacp",
+                    &mut app.config.paths.nacp,
+                    "the title metadata file",
+                    Pick::Nacp,
+                );
+                rescan |= path_row(
+                    ui,
+                    &p,
+                    "Decoded module",
+                    &mut app.config.paths.decoded,
+                    "folder with text.bin, rodata.bin, data.bin",
+                    Pick::Folder,
+                );
+            },
+        );
     });
     if rescan {
         app.start(JobKind::Detect);
@@ -168,6 +252,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 if let Some(dir) = &app.game.romfs {
                     widgets::kv(ui, &p, "RomFS", &dir.display().to_string());
                 }
+                if let Some(dir) = &app.game.dlc {
+                    widgets::kv(ui, &p, "Add-on content", &format!("{} pack(s) — {}", app.game.dlc_ids.len(), dir.display()));
+                }
             });
             widgets::section(&mut cols[1], &p, "Decoded module", |ui| {
                 if app.game.segments.is_empty() {
@@ -198,47 +285,92 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     if let Some(exefs) = &app.game.modules {
         widgets::section(ui, &p, "Executable modules", |ui| {
-            egui::Grid::new("modules").num_columns(5).spacing([18.0, 6.0]).striped(true).show(ui, |ui| {
-                for h in ["File", "Module", "Compression", "Image size", "Status"] {
-                    ui.label(RichText::new(h).font(theme::semibold(12.0)).color(p.muted));
-                }
-                ui.end_row();
-                for m in &exefs.modules {
-                    ui.label(RichText::new(&m.file_name).font(theme::mono(12.5)).color(p.ink));
-                    ui.label(RichText::new(&m.module_name).color(p.body));
-                    ui.label(RichText::new(m.compressions.join(" + ")).color(p.body));
-                    ui.label(RichText::new(format!("{:.1} MiB", m.image_size() as f64 / 1048576.0)).font(theme::mono(12.5)));
-                    let (t, tone) = if m.file_name == "main" {
-                        ("game code", Tone::Accent)
-                    } else if m.is_zbic() {
-                        ("ZBIC", Tone::Warn)
-                    } else {
-                        ("SDK / library", Tone::Neutral)
-                    };
-                    widgets::pill(ui, &p, t, tone);
+            egui::Grid::new("modules")
+                .num_columns(5)
+                .spacing([18.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for h in ["File", "Module", "Compression", "Image size", "Status"] {
+                        ui.label(RichText::new(h).font(theme::semibold(12.0)).color(p.muted));
+                    }
                     ui.end_row();
-                }
-            });
+                    for m in &exefs.modules {
+                        ui.label(
+                            RichText::new(&m.file_name)
+                                .font(theme::mono(12.5))
+                                .color(p.ink),
+                        );
+                        ui.label(RichText::new(&m.module_name).color(p.body));
+                        ui.label(RichText::new(m.compressions.join(" + ")).color(p.body));
+                        ui.label(
+                            RichText::new(format!("{:.1} MiB", m.image_size() as f64 / 1048576.0))
+                                .font(theme::mono(12.5)),
+                        );
+                        let (t, tone) = if m.file_name == "main" {
+                            ("game code", Tone::Accent)
+                        } else if m.is_zbic() {
+                            ("ZBIC", Tone::Warn)
+                        } else {
+                            ("SDK / library", Tone::Neutral)
+                        };
+                        widgets::pill(ui, &p, t, tone);
+                        ui.end_row();
+                    }
+                });
         });
     }
 
     widgets::section(ui, &p, "Profile and region", |ui| {
-        widgets::setting_row(ui, &p, "Language", "Reported to the game through nn::oe; selects the game's text and voice language.", |ui| {
-            let current = LANGUAGES.iter().find(|(c, _)| *c == app.config.system.language).map(|(_, n)| *n).unwrap_or("Custom");
-            egui::ComboBox::from_id_salt("language").selected_text(current).width(220.0).show_ui(ui, |ui| {
-                for (code, name) in LANGUAGES {
-                    ui.selectable_value(&mut app.config.system.language, code.to_string(), format!("{name}  ({code})"));
-                }
-            });
-        });
-        widgets::setting_row(ui, &p, "Profile name", "The local user. Its account identifier, and so the save data, derive from it.", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut app.config.system.user_name).desired_width(220.0));
-        });
+        widgets::setting_row(
+            ui,
+            &p,
+            "Language",
+            "Reported to the game through nn::oe; selects the game's text and voice language.",
+            |ui| {
+                let current = LANGUAGES
+                    .iter()
+                    .find(|(c, _)| *c == app.config.system.language)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("Custom");
+                egui::ComboBox::from_id_salt("language")
+                    .selected_text(current)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (code, name) in LANGUAGES {
+                            ui.selectable_value(
+                                &mut app.config.system.language,
+                                code.to_string(),
+                                format!("{name}  ({code})"),
+                            );
+                        }
+                    });
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Profile name",
+            "The local user. Its account identifier, and so the save data, derive from it.",
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.config.system.user_name)
+                        .desired_width(220.0),
+                );
+            },
+        );
     });
 
     widgets::section(ui, &p, "Engine folder", |ui| {
         let current = crate::engine::root();
-        widgets::kv(ui, &p, "Engine", &current.as_ref().map(|r| r.display().to_string()).unwrap_or_else(|| "not found".into()));
+        widgets::kv(
+            ui,
+            &p,
+            "Engine",
+            &current
+                .as_ref()
+                .map(|r| r.display().to_string())
+                .unwrap_or_else(|| "not found".into()),
+        );
         ui.label(RichText::new("The engine folder holds the built game and its build cache. Keeping one anywhere on disk is what spares a full rebuild when a new launcher version arrives: point the new copy here instead of unzipping a whole engine beside it.").size(12.5).color(p.muted));
         ui.horizontal(|ui| {
             if widgets::button(ui, &p, "Use another engine folder…", true)
@@ -270,12 +402,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         |ui| {
             // Issue #56 asked for the steps in one place: which folders to keep, and why a new launcher does not need a new build.
             let steps = [
-                "1. Unzip the new release over this folder. It replaces the launcher; data\\ and engine\\ stay as they are, so \
-                 the game is not rebuilt.",
-                "2. Unpacking into a new folder instead? Copy data\\ and engine\\ across, or keep the old folder and press \
-                 Use another engine folder… above. Nothing is moved or deleted.",
-                "3. A copy with no build finds one already on this PC by itself: Overview opens with A build is already on \
+                "1. Press Update now on Overview, or Download and install on About > Updates. It writes the new launcher, docs \
+                 and engine sources over this install and restarts once. data\\, the built game, the fetched tools and the \
+                 third-party sources are kept, and portable storage stays as it is.",
+                "2. Updating by hand instead? Unzip the new release over this folder, or copy data\\ and engine\\ into a new one. \
+                 Nothing is moved or deleted.",
+                "3. A fresh copy with no build finds one already on this PC by itself: Overview opens with A build is already on \
                  this PC and a Use this build button. Not now declines it until you say otherwise.",
+                "4. If a swap cannot replace the running launcher, the old one starts and the reason is written to logs\\update.log.",
             ];
             for step in steps {
                 ui.label(RichText::new(step).size(12.5).color(p.body));
@@ -283,10 +417,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.add_space(theme::SPACE_XS);
             if let Some(dir) = crate::config::Config::dir() {
-                widgets::kv(ui, &p, "This copy keeps settings and saves in", &dir.display().to_string());
+                widgets::kv(
+                    ui,
+                    &p,
+                    "This copy keeps settings and saves in",
+                    &dir.display().to_string(),
+                );
             }
             if let Some(root) = crate::engine::root() {
-                widgets::kv(ui, &p, "The engine and its build", &root.display().to_string());
+                widgets::kv(
+                    ui,
+                    &p,
+                    "The engine and its build",
+                    &root.display().to_string(),
+                );
             }
         },
     );
@@ -296,38 +440,80 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 
     widgets::section(ui, &p, "Runtime", |ui| {
-        widgets::setting_row(ui, &p, "Instruction budget", "A boot test stops after this many guest instructions.", |ui| {
-            let mut millions = (app.config.runtime.max_steps / 1_000_000) as f32;
-            if widgets::Slider::new(&mut millions, 1.0..=2000.0).suffix(" M").logarithmic(true).show(ui, &p).changed() {
-                app.config.runtime.max_steps = millions.round() as u64 * 1_000_000;
-            }
-        });
-        widgets::setting_row(ui, &p, "Guest heap", "Memory reserved for the game's heap. Committed by the OS only as used.", |ui| {
-            let mut heap = app.config.runtime.heap_mib as f32;
-            if widgets::Slider::new(&mut heap, 256.0..=8192.0).suffix(" MiB").logarithmic(true).show(ui, &p).changed() {
-                app.config.runtime.heap_mib = heap.round() as u64;
-            }
-        });
+        widgets::setting_row(
+            ui,
+            &p,
+            "Instruction budget",
+            "A boot test stops after this many guest instructions.",
+            |ui| {
+                let mut millions = (app.config.runtime.max_steps / 1_000_000) as f32;
+                if widgets::Slider::new(&mut millions, 1.0..=2000.0)
+                    .suffix(" M")
+                    .logarithmic(true)
+                    .show(ui, &p)
+                    .changed()
+                {
+                    app.config.runtime.max_steps = millions.round() as u64 * 1_000_000;
+                }
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Guest heap",
+            "Memory reserved for the game's heap. Committed by the OS only as used.",
+            |ui| {
+                let mut heap = app.config.runtime.heap_mib as f32;
+                if widgets::Slider::new(&mut heap, 256.0..=8192.0)
+                    .suffix(" MiB")
+                    .logarithmic(true)
+                    .show(ui, &p)
+                    .changed()
+                {
+                    app.config.runtime.heap_mib = heap.round() as u64;
+                }
+            },
+        );
     });
 }
 
 /// Save data: where EmblemWeave keeps it, saves found from emulators, and
 /// import and export.
 pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
-    let Some(save_dir) = crate::config::Config::save_dir() else { return };
+    let Some(save_dir) = crate::config::Config::save_dir() else {
+        return;
+    };
     let title = app
         .game
         .title_id
-        .or_else(|| app.game.nacp.as_deref().and_then(crate::saves::nacp_save_owner))
+        .or_else(|| {
+            app.game
+                .nacp
+                .as_deref()
+                .and_then(crate::saves::nacp_save_owner)
+        })
         .unwrap_or(crate::saves::FALLBACK_TITLE_ID);
     let stamp = || {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .to_string()
     };
     let mut message: Option<(String, Tone)> = None;
     widgets::section(ui, p, "Save data", |ui| {
         let (files, _) = crate::saves::summary(&crate::saves::account_dir(&save_dir));
         widgets::kv(ui, p, "Save folder", &save_dir.display().to_string());
-        widgets::kv(ui, p, "Files", &if files == 0 { "none yet".to_string() } else { files.to_string() });
+        widgets::kv(
+            ui,
+            p,
+            "Files",
+            &if files == 0 {
+                "none yet".to_string()
+            } else {
+                files.to_string()
+            },
+        );
         widgets::kv(ui, p, "Title", &format!("{title:016X}"));
         ui.add_space(6.0);
 
@@ -379,16 +565,22 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
                         secs => format!("{} days ago", secs / 86_400),
                     })
                     .unwrap_or_default();
-                ui.label(format!("{}: {} files, {}", label, f.files, when)).on_hover_text(f.path.display().to_string());
+                ui.label(format!("{}: {} files, {}", label, f.files, when))
+                    .on_hover_text(f.path.display().to_string());
                 if widgets::button(ui, p, "Import", true).clicked() {
-                    message = Some(import_notice(crate::saves::import(&f.path, &save_dir, title, &stamp())));
+                    message = Some(import_notice(crate::saves::import(
+                        &f.path,
+                        &save_dir,
+                        title,
+                        &stamp(),
+                    )));
                 }
             });
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if widgets::button(ui, p, "Import from folder…", true).clicked() {
-                if let Some(dir) = rfd::FileDialog::new().set_title("Choose the game's save folder (the one named by its title id)").pick_folder() {
+                if let Some(dir) = rfd::FileDialog::new().set_title("Choose a save folder: the title's folder, its account folder, or the old install's data\\save").pick_folder() {
                     message = Some(import_notice(crate::saves::import(&dir, &save_dir, title, &stamp())));
                 }
             }

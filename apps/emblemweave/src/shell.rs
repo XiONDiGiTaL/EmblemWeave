@@ -3,6 +3,7 @@
 //! own chrome.
 
 use crate::pages::{NavGroup, Page};
+use crate::pages::overview::Popup;
 use crate::widgets::{self, Tone};
 use crate::{logo, theme, App};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
@@ -200,6 +201,12 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                     }
                     if width >= 900.0 && header_action(ui, &p, "SETTINGS", "Appearance and interface options").clicked() {
                         goto = Some(Page::Appearance);
+                    }
+                    if width >= 950.0 && header_action(ui, &p, "HELP", "Quick help, logs and troubleshooting").clicked() {
+                        app.overview_popup = if app.overview_popup == Some(Popup::QuickHelp) { None } else { Some(Popup::QuickHelp) };
+                    }
+                    if width >= 1080.0 && header_action(ui, &p, "WHAT'S NEW", "What changed in this build").clicked() {
+                        app.overview_popup = if app.overview_popup == Some(Popup::WhatsNew) { None } else { Some(Popup::WhatsNew) };
                     }
                     if width >= 1400.0 && header_action(ui, &p, "REQUIREMENTS", "Build tools and dependency checks").clicked() {
                         goto = Some(Page::Requirements);
