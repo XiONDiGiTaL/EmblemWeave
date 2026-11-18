@@ -352,6 +352,31 @@ pub fn install(
 ) -> Result<(), String> {
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
     let backup = backup_exe().ok_or("the launcher's own path is unknown")?;
+    let staged = install_into(
+        new_exe,
+        &target,
+        &backup,
+        crate::engine::run_dir().as_deref(),
+        engine_root,
+        keep_previous,
+        release_tag,
+    )?;
+    swap_script(&staged, &target, &update_log(), failure_marker().as_deref())
+}
+
+/// The part of [`install`] that runs before the restart, with the running launcher's paths passed in so a test can drive
+/// the same sequence against a temporary install. `play` is the folder holding the kept build's `fefw.ini`; when there is
+/// none, the release is still written but no carry is recorded. Returns the staged launcher the swap script replaces
+/// `target` with.
+fn install_into(
+    new_exe: &Path,
+    target: &Path,
+    backup: &Path,
+    play: Option<&Path>,
+    engine_root: Option<&Path>,
+    keep_previous: bool,
+    release_tag: &str,
+) -> Result<PathBuf, String> {
     let install = target.parent().ok_or("the launcher's folder is unknown")?;
     let release = new_exe
         .parent()
@@ -370,7 +395,9 @@ pub fn install(
     }
     // The compiled game was deliberately kept: say so before the restart, so Overview opens ready to play instead of
     // treating the carried build as one from another release (issue #56).
-    crate::engine::mark_build_carried(&engine, &version_text(release_tag));
+    if let Some(play) = play {
+        crate::engine::mark_build_carried_in(&engine, play, &version_text(release_tag));
+    }
     if keep_previous {
         // Copying a running executable is allowed; replacing it is not. Do it only once the release is known to be
         // complete, so a failed update does not overwrite the version Restore would go back to.
@@ -379,7 +406,7 @@ pub fn install(
             return Err(format!("keeping the current version: {e}"));
         }
     }
-    swap_script(&staged, &target, &update_log(), failure_marker().as_deref())
+    Ok(staged)
 }
 
 /// Put the build kept from the last update back.
@@ -648,6 +675,68 @@ mod tests {
             "keep fetched"
         );
         assert!(!install.join("engine/fefw-recomp/work/cache").exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An in-place update keeps the compiled game, so the restarted launcher must not treat it as a build from another
+    /// release: the install path records `carried_by` in `fefw.ini` while never writing the build folder (issue #56).
+    #[test]
+    fn an_in_place_update_records_the_carried_build_and_keeps_the_compiled_game() {
+        let root = std::env::temp_dir().join(format!("ew-update-carried-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = root.join("EmblemWeave-v0.1.40");
+        let install = root.join("EmblemWeave");
+        let engine = install.join("engine/fefw-recomp");
+        let play = root.join("data/play");
+
+        write(&release.join("EmblemWeave.exe"), "new launcher");
+        write(&release.join("docs/PACKAGE.md"), "release manifest");
+        // A malformed zip's generated folder must never replace the player's build.
+        write(
+            &release.join("engine/fefw-recomp/game-build/fefw/build/release/fefw.exe"),
+            "release build",
+        );
+
+        write(&install.join("EmblemWeave.exe"), "old launcher");
+        write(&install.join("data/config.json"), "player settings");
+        let built = engine.join("game-build/fefw/build/release/fefw.exe");
+        write(&built, "compiled game");
+        write(
+            &play.join("fefw.ini"),
+            "[engine]\nbuilt_by = 0.1.39\npacked_nup = 1\n[fs]\nromfs = game.nup\n",
+        );
+
+        let staged = install_into(
+            &release.join("EmblemWeave.exe"),
+            &install.join("EmblemWeave.exe"),
+            &install.join("EmblemWeave.exe.old"),
+            Some(&play),
+            Some(&engine),
+            true,
+            "v0.1.40",
+        )
+        .unwrap();
+
+        // The build was deliberately carried: its own stamp stays and the update is recorded.
+        let ini = read(&play.join("fefw.ini"));
+        assert!(
+            ini.contains("built_by = 0.1.39"),
+            "the build's own stamp is kept: {ini}"
+        );
+        assert!(
+            ini.contains("carried_by = 0.1.40"),
+            "the carry is recorded: {ini}"
+        );
+        // The compiled game is exactly the file that was already there.
+        assert_eq!(read(&built), "compiled game");
+        // The release is written, while the running launcher waits for the swap script and is kept as the backup.
+        assert_eq!(read(&install.join("docs/PACKAGE.md")), "release manifest");
+        assert_eq!(read(&staged), "new launcher");
+        assert_eq!(read(&install.join("EmblemWeave.exe")), "old launcher");
+        assert_eq!(read(&install.join("EmblemWeave.exe.old")), "old launcher");
+        // The player's data is not part of the release overlay.
+        assert_eq!(read(&install.join("data/config.json")), "player settings");
 
         let _ = std::fs::remove_dir_all(root);
     }

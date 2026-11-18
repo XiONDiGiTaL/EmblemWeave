@@ -2131,13 +2131,19 @@ fn stale_build_in(dir: &Path, now: &'static str) -> Option<(Option<String>, &'st
 /// has written the release, so the restarted launcher opens ready to play instead of offering Repair/Rebuild for a build
 /// that was intentionally kept (issue #56). Does nothing when there is no built game or no run folder.
 pub fn mark_build_carried(engine: &Path, release: &str) {
-    if !game_exe(engine).is_file() {
-        return;
-    }
     let Some(dir) = run_dir() else {
         return;
     };
-    let _ = carry_build_forward(&dir, release);
+    mark_build_carried_in(engine, &dir, release);
+}
+
+/// The write behind [`mark_build_carried`] for an explicit play folder, so the updater's install path can be tested
+/// against a temporary install instead of the running launcher's data.
+pub(crate) fn mark_build_carried_in(engine: &Path, dir: &Path, release: &str) {
+    if !game_exe(engine).is_file() {
+        return;
+    }
+    let _ = carry_build_forward(dir, release);
 }
 
 /// The write behind [`mark_build_carried`]: replaces `carried_by` in `dir`'s `fefw.ini`, preserving every other key.
