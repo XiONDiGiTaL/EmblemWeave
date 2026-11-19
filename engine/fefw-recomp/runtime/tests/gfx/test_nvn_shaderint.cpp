@@ -21,6 +21,7 @@
 
 #include "nvn_app.h"
 #include "nvn_cmd.h"
+#include "nvn_gpu_internal.h"
 #include "nvn_impl.h"
 #include "nvn_shaders.h"
 #include "nxrt/config.h"
@@ -140,6 +141,11 @@ Block& imgtex_cs_block() {
     static Block b = make_block(5, 5, spv(kSpvImageTexCs), "sb[c0+0x20]=s1b0 texTexture2D[c0:36]=s2b0", 28, 1, 1);
     return b;
 }
+// a storage image at image slot 0 (word 36, as above), read and written (float16_scene_promotes_at_the_first_store)
+Block& storeimg_cs_block() {
+    static Block b = make_block(6, 5, spv(kSpvStoreImageCs), "sb[c0+0x20]=s1b0 imgTexture2D[c0:36]=s3b0", 28, 1, 1);
+    return b;
+}
 
 // The shader cache of these scenes, written once, made [nvn] shader_cache and opened as the back end's cache.
 bool cache_ready() {
@@ -151,7 +157,7 @@ bool cache_ready() {
     fs::remove_all(dir.parent_path(), ec);
     fs::create_directories(dir, ec);
     std::string tsv = "hash\tstage\tstatus\tresources\n";
-    for (Block* b : {&vs_block(), &push_fs_block(), &pool_fs_block(), &push_cs_block(), &imgtex_cs_block()}) {
+    for (Block* b : {&vs_block(), &push_fs_block(), &pool_fs_block(), &push_cs_block(), &imgtex_cs_block(), &storeimg_cs_block()}) {
         const std::string h = shader_hash(b->code.data(), static_cast<uint32_t>(b->code.size()));
         std::ofstream(dir / (h + ".spv"), std::ios::binary).write(reinterpret_cast<const char*>(b->spirv.data()), static_cast<std::streamsize>(b->spirv.size() * 4));
         tsv += h + "\t-\tok\t" + b->resources + "\n";
@@ -619,4 +625,119 @@ NXTEST(pool_arrays_sample_by_handle) {
     CHECK_EQ(s1.draws - s0.draws, 8ull);
     CHECK_EQ(s1.draws_skipped - s0.draws_skipped, 0ull);
     CHECK_EQ(app.validation().errors, 0ull);
+}
+
+// [gfx] float16_scene: an R11G11B10F texture with the image flag is made R11G11B10F (one that is only ever sampled keeps 4 bytes a texel),
+// and remade as RGBA16F when a shader first stores to it, its CPU-filled content copied over exactly. Run in a fresh process: the setting
+// is read once per process.
+namespace {
+VkFormat backend_format(const nvnapp::Tex& t) {
+    VkFormat f = VK_FORMAT_UNDEFINED;
+    be::gpu::run_on_render_thread([&] { f = be::gpu::tex_vk_format(be::host_of<be::Texture>(t.obj.get())); });
+    return f;
+}
+float word_float(uint32_t w) {
+    float f;
+    std::memcpy(&f, &w, 4);
+    return f;
+}
+}  // namespace
+
+NXTEST_CHILD(float16_scene_store_child) {
+    nxrt::config_set("gfx", "float16_scene", "on");
+    if (!cache_ready()) return 2;
+    App app;
+    App::Opts o;
+    o.width = kW;
+    o.height = kH;
+    if (!app.init(o)) { std::printf("    init: %s\n", app.error.c_str()); return 3; }
+    App::ShaderBlob cs = blob(storeimg_cs_block(), "compute");
+    auto prog = app.make_program({&cs});
+    if (!prog) return 4;
+    // every texel (0.7578125, 0.25, 2): red 0.5 * (1 + 33/64) (exponent 14, mantissa 33), green exponent 13, blue exponent 16
+    constexpr uint32_t kTexel = (0x380u | 33u) | (0x340u << 11) | (0x200u << 22);
+    auto img = app.make_texture_2d(NVN_FORMAT_R11G11B10F, 4, 4, NVN_TEXTURE_FLAGS_IMAGE, 1, false);
+    auto sampled = app.make_texture_2d(NVN_FORMAT_R11G11B10F, 4, 4, NVN_TEXTURE_FLAGS_IMAGE, 1, false);
+    if (!img || !sampled) return 5;
+    for (size_t i = 0; i + 4 <= img->size; i += 4) std::memcpy(img->memory() + i, &kTexel, 4);
+    app.api.nvnTexturePoolRegisterImage(app.tex_pool.get(), 7, img->obj.get(), nullptr);
+    const App::Buf sb = app.make_buffer(256);
+    uint32_t* w = reinterpret_cast<uint32_t*>(sb.ptr);
+    int bad = 0;
+    const auto expect = [&](const char* what, bool ok) {
+        std::printf("    %s: %s\n", what, ok ? "ok" : "WRONG");
+        bad += ok ? 0 : 1;
+    };
+    expect("an image-flag R11G11B10F texture is made R11G11B10F", backend_format(*sampled) == VK_FORMAT_B10G11R11_UFLOAT_PACK32);
+    for (int run = 0; run < 2; ++run) {
+        for (int i = 0; i < 64; ++i) w[i] = 0xFFFFFFFFu;
+        auto cb = app.make_cmdbuf();
+        if (!cb) return 6;
+        NVNcommandBuffer* c = cb->obj.get();
+        app.api.nvnCommandBufferBeginRecording(c);
+        app.api.nvnCommandBufferSetTexturePool(c, app.tex_pool.get());
+        app.api.nvnCommandBufferSetSamplerPool(c, app.smp_pool.get());
+        app.api.nvnCommandBufferBindProgram(c, prog.get(), NVN_SHADER_STAGE_COMPUTE_BIT);
+        app.api.nvnCommandBufferBindStorageBuffer(c, NVN_SHADER_STAGE_COMPUTE, 0, sb.address, 256);
+        app.api.nvnCommandBufferBindImage(c, NVN_SHADER_STAGE_COMPUTE, 0, app.api.nvnDeviceGetImageHandle(app.device.get(), 7));
+        app.api.nvnCommandBufferDispatchCompute(c, 1, 1, 1);
+        app.end_and_submit(*cb);
+        app.finish();
+        const float r = word_float(w[0]), g = word_float(w[1]), b = word_float(w[2]), r10 = word_float(w[3]);
+        std::printf("    run %d: texel (0, 0) %.9g %.9g %.9g, texel (1, 0) red %.9g\n", run, r, g, b, r10);
+        expect("texel (0, 0) is the CPU's, exactly", r == 0.7578125f && g == 0.25f && b == 2.0f);
+        if (run == 0) expect("texel (1, 0) is the CPU's before the store", r10 == 0.7578125f);
+        else expect("texel (1, 0) keeps the store's 1 + 2^-9 (float16, not R11G11B10F's 1)", r10 == 1.001953125f);
+    }
+    expect("the stored-to texture is RGBA16F", backend_format(*img) == VK_FORMAT_R16G16B16A16_SFLOAT);
+    expect("the sampled-only texture is still R11G11B10F", backend_format(*sampled) == VK_FORMAT_B10G11R11_UFLOAT_PACK32);
+    // Buffer copies of the RGBA16F image use the NVN texel size (4 bytes): out of the image, texel (1, 0) is the store rounded back to
+    // R11G11B10F (1, 0.25, 0.5), and the 16 words after the 64 bytes asked for stay untouched; into it, a buffer of other texels lands whole.
+    constexpr uint32_t kStored = 0x3c0u | (0x340u << 11) | (0x1c0u << 22);
+    constexpr uint32_t kOther = (0x3c0u | 5u) | (0x380u << 11) | (0x1e0u << 22);   // (1 + 5/64, 0.5, 1)
+    const App::Buf cb_buf = app.make_buffer(256);
+    uint32_t* cw = reinterpret_cast<uint32_t*>(cb_buf.ptr);
+    const auto copy = [&](bool to_texture) {
+        auto cb = app.make_cmdbuf();
+        if (!cb) return false;
+        NVNcommandBuffer* c = cb->obj.get();
+        app.api.nvnCommandBufferBeginRecording(c);
+        app.api.nvnCommandBufferSetCopyRowStride(c, 16);
+        NVNcopyRegion reg{0, 0, 0, 4, 4, 1};
+        if (to_texture) app.api.nvnCommandBufferCopyBufferToTexture(c, cb_buf.address, img->obj.get(), nullptr, &reg, NVN_COPY_FLAGS_NONE);
+        else app.api.nvnCommandBufferCopyTextureToBuffer(c, img->obj.get(), nullptr, &reg, cb_buf.address, NVN_COPY_FLAGS_NONE);
+        app.end_and_submit(*cb);
+        app.finish();
+        return true;
+    };
+    for (int i = 0; i < 64; ++i) cw[i] = 0xEEEEEEEEu;
+    if (!copy(false)) return 7;
+    std::printf("    copied out: texel (0, 0) 0x%08x, (1, 0) 0x%08x, word 16 0x%08x\n", cw[0], cw[1], cw[16]);
+    bool rest = true;
+    for (int i = 2; i < 16; ++i) rest = rest && cw[i] == (i == 5 ? cw[i] : kTexel);   // texel (1, 1) is word 5: untouched by the shader too
+    expect("a copy out of it gives NVN texels", cw[0] == kTexel && cw[1] == kStored && rest);
+    bool guard = true;
+    for (int i = 16; i < 64; ++i) guard = guard && cw[i] == 0xEEEEEEEEu;
+    expect("a copy out of it writes only the bytes asked for", guard);
+    for (int i = 0; i < 16; ++i) cw[i] = kOther;
+    if (!copy(true)) return 8;
+    for (int i = 0; i < 64; ++i) cw[i] = 0xEEEEEEEEu;
+    if (!copy(false)) return 9;
+    bool all = true;
+    for (int i = 0; i < 16; ++i) all = all && cw[i] == kOther;
+    std::printf("    after a copy in: texel (0, 0) 0x%08x, (3, 3) 0x%08x\n", cw[0], cw[15]);
+    expect("a copy into it lands exactly", all && cw[16] == 0xEEEEEEEEu);
+    const uint64_t errors = app.validation().errors;
+    std::printf("    validation errors: %llu\n", static_cast<unsigned long long>(errors));
+    bad += errors ? 1 : 0;
+    return bad;
+}
+
+NXTEST(float16_scene_promotes_at_the_first_store) {
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    // cmd /c strips the outer pair of quotes, so the whole command is wrapped in one more pair.
+    const std::string cmd = std::string("\"\"") + exe + "\" --child float16_scene_store_child\"";
+    const int rc = std::system(cmd.c_str());
+    CHECK_MSG(rc == 0, "child returned " + std::to_string(rc));
 }

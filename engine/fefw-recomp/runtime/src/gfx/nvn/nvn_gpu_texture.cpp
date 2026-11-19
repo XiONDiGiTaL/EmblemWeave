@@ -69,7 +69,14 @@ uint32_t resid_ms() {
 }
 
 struct TexGpu {
-    bool promoted = false;                              // HDR scene pipeline: an 8-bit sRGB render target kept as RGBA16F (src/gfx/extras/hdr_nvn.h)
+    bool promoted = false;                              // kept at a higher precision than its NVN format, as RGBA16F: an 8-bit sRGB render target of
+                                                        // the HDR scene (src/gfx/extras/hdr_nvn.h) or an R11G11B10F texture ([gfx] float16_scene)
+    bool starts_cleared = false;                        // a promoted render target: its bytes in memory are never the image's, so it is never uploaded
+                                                        // (it starts cleared). Not a promoted shader-written image (float16_scene, image flag only): the
+                                                        // game may fill it from the CPU, and its upload is converted (r11g11b10f_to_f16). Either kind of
+                                                        // promoted image is kept out of demotion and deferred first uploads.
+    bool f16_on_store = false;                          // [gfx] float16_scene: an R11G11B10F image (image flag only) remade as RGBA16F when a shader
+                                                        // first stores to it (tex_f16_promote): one that is only ever sampled keeps 4 bytes a texel
     gfx::Image img;                                     // the image; created without a view (views are cached below)
     const FormatInfo* fmt = nullptr;
     VkFormat format = VK_FORMAT_UNDEFINED;              // the image format: the NVN one, its fallback, or BC7 for ASTC
@@ -814,26 +821,49 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
             NXLOG_I(kTag, "texture %u: %s %ux%u (flags 0x%x) kept as float16 for the HDR scene", t->id, g->fmt->name, s.base.width, s.base.height, static_cast<unsigned>(t->b.flags));
             chosen = hf;
             g->promoted = true;
+            g->starts_cleared = true;
         }
     }
 
-    // [gfx] float16_scene (auto: with the HDR scene): an R11G11B10F render target (the GPU's B10G11R11: 6-bit mantissas for red and green,
-    // 5 for blue) is kept as RGBA16F (10-bit mantissas). Fortune's Weave renders its whole scene, DLSS input and output, and the tone map's
-    // output in R11G11B10F; the console's 8-bit SDR output hides the steps, the HDR output's wider range shows them as banding in the sky
-    // (blue first). Render targets only (compressible or display flags, as the HDR promotion): their bytes in memory are never the image's
-    // (the promotion's rule: they start cleared), and a view of the NVN format reads the image's own (promoted_view_format, the fallback rule).
-    // Shader-written images too (NVN's image flag 0x4): Fortune's Weave's compute passes write its sky panorama (2048x1024) and its reflection and
-    // ambient probes (64x64 and 16x16 cubes) in R11G11B10F through storage images declared without a format, so the shaders take RGBA16F as is.
-    if (g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && (t->b.flags & 0xd) && float16_scene_on() &&
-        device().image_supported(make_desc(s, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                                            base_flags(s, VK_FORMAT_R16G16B16A16_SFLOAT)))) {
-        static std::atomic<int> said{0};
-        if (said.fetch_add(1) < 64)
-            NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x, %u levels) kept as float16 ([gfx] float16_scene)", t->id, s.base.width,
-                    s.base.height, static_cast<unsigned>(t->b.flags), s.levels);
-        chosen = VK_FORMAT_R16G16B16A16_SFLOAT;
-        g->promoted = true;
-    } else if (g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && float16_scene_on()) {
+    // [gfx] float16_scene (auto: with the HDR scene): an R11G11B10F texture (the GPU's B10G11R11: 6-bit mantissas for red and green, 5 for
+    // blue) is kept as RGBA16F (10-bit mantissas). Fortune's Weave renders its whole scene, DLSS input and output, and the tone map's output in
+    // R11G11B10F; the console's 8-bit SDR output hides the steps, the HDR output's wider range shows them as banding in the sky (blue first).
+    // - Render targets (compressible or display flags, as the HDR promotion): their bytes in memory are never the image's (they start cleared).
+    // - Shader-written images (image flag): Fortune's Weave's compute passes write its sky panorama (2048x1024) and its reflection and ambient
+    //   probes (64x64 and 16x16 cubes) through storage images declared without a format, so the shaders take RGBA16F as is. The game also sets
+    //   the flag on textures it never stores to: these are made R11G11B10F and only remade as RGBA16F, their content copied over, when a shader
+    //   first stores to them (tex_f16_promote, from the replay's prepare_textures), and not if that shader declares r11f_g11f_b10f. A CPU write
+    //   after that is uploaded converted to float16 (exactly: same exponent bias). Only when the GPU can store to RGBA16F of this shape: else
+    //   the compute pass would get a dummy storage image.
+    // A view of the NVN format reads the image's own (promoted_view_format, the fallback rule).
+    constexpr uint32_t kTargetFlags = NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+    const bool r11_scene = g->fmt->nvn == NVN_FORMAT_R11G11B10F && chosen == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && float16_scene_on();
+    const bool r11_target = r11_scene && (t->b.flags & kTargetFlags);
+    // not sparse: its tile updates (sparse_update) copy the NVN bytes as they are
+    const bool r11_image = r11_scene && !r11_target && (t->b.flags & NVN_TEXTURE_FLAGS_IMAGE) && !(t->b.flags & NVN_TEXTURE_FLAGS_SPARSE);
+    if (r11_target || r11_image) {
+        const VkImageUsageFlags need = VK_IMAGE_USAGE_SAMPLED_BIT | (r11_target ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_STORAGE_BIT);
+        std::string why_not;
+        if (device().image_supported(make_desc(s, VK_FORMAT_R16G16B16A16_SFLOAT, need, base_flags(s, VK_FORMAT_R16G16B16A16_SFLOAT)), &why_not)) {
+            static std::atomic<int> said{0};
+            if (said.fetch_add(1) < 64)
+                NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x, %u levels, %u layers) %s ([gfx] float16_scene, %s)", t->id,
+                        s.base.width, s.base.height, static_cast<unsigned>(t->b.flags), s.levels, s.layers,
+                        r11_target ? "kept as float16" : "made float16 at its first store", r11_target ? "render target" : "image");
+            if (r11_target) {
+                chosen = VK_FORMAT_R16G16B16A16_SFLOAT;
+                g->promoted = true;
+                g->starts_cleared = true;
+            } else {
+                g->f16_on_store = true;
+            }
+        } else {
+            static std::atomic<int> said{0};
+            if (said.fetch_add(1) < 16)
+                NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x) left as R11G11B10F ([gfx] float16_scene: the GPU has no RGBA16F %s of this shape: %s)",
+                        t->id, s.base.width, s.base.height, static_cast<unsigned>(t->b.flags), r11_target ? "render target" : "storage image", why_not.c_str());
+        }
+    } else if (r11_scene) {
         static std::atomic<int> said{0};   // the ones left at 6/5-bit mantissas, to find what the rule misses
         if (said.fetch_add(1) < 32)
             NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (flags 0x%x, %u levels, %u layers) left as R11G11B10F ([gfx] float16_scene: not a render target or image)",
@@ -1247,6 +1277,34 @@ void sparse_update(Texture* t, TexGpu& g, Frame& f) {
     }
 }
 
+
+// R11G11B10F texels (B10G11R11_UFLOAT_PACK32) as RGBA16F, in place, for a [gfx] float16_scene image the CPU fills. Exact: the 11- and
+// 10-bit floats have half's exponent (5 bits, bias 15) and a shorter mantissa, so each one is its half with the low mantissa bits zero
+// (infinities and NaNs included); alpha is 1. Every level and layer doubles in size, at twice its offset (rows in texels are unchanged).
+bool r11g11b10f_to_f16(PreparedTexture& p) {
+    if (p.format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || p.block_bytes != 4 || p.compact || p.gpu_astc || p.data.size() % 4) return false;
+    const size_t n = p.data.size() / 4;
+    std::vector<uint8_t> out(n * 8);
+    const uint8_t* src = p.data.data();
+    uint16_t* dst = reinterpret_cast<uint16_t*>(out.data());
+    for (size_t i = 0; i < n; ++i) {
+        uint32_t v;
+        std::memcpy(&v, src + i * 4, 4);
+        const uint32_t r = v & 0x7ff, gr = (v >> 11) & 0x7ff, b = (v >> 22) & 0x3ff;
+        dst[i * 4 + 0] = static_cast<uint16_t>(((r >> 6) << 10) | ((r & 0x3f) << 4));
+        dst[i * 4 + 1] = static_cast<uint16_t>(((gr >> 6) << 10) | ((gr & 0x3f) << 4));
+        dst[i * 4 + 2] = static_cast<uint16_t>(((b >> 5) << 10) | ((b & 0x1f) << 5));
+        dst[i * 4 + 3] = 0x3c00;
+    }
+    p.data = std::move(out);
+    for (PreparedLevel& l : p.level) {
+        l.offset *= 2;
+        l.size *= 2;
+    }
+    p.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    p.block_bytes = 8;
+    return true;
+}
 
 // The image gets zeros (transparent black). Block formats are filled from a zeroed staging buffer; uncompressed ones are cleared.
 void fill_zero(Frame& f, TexGpu& g) {
@@ -1822,6 +1880,164 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     return true;
 }
 
+// [gfx] float16_scene: an R11G11B10F image (image flag only, TexGpu::f16_on_store) remade as RGBA16F before a shader first stores to it.
+// Its content (uploaded from the CPU or written by the GPU) is blitted over: the conversion is exact (the 11- and 10-bit floats have half's
+// exponent). Once per image: a texture that cannot be remade stays R11G11B10F. The old image and its views go after the frames that use them.
+bool tex_f16_promote(Texture* t, Frame& f) {
+    TexGpu* g = t && t->gpu && !t->gpu->failed ? t->gpu : nullptr;
+    if (!g || !g->f16_on_store) return false;
+    g->f16_on_store = false;
+    // not one demoted, scaled or sparse since it was made (their images are not the whole texture at its NVN size)
+    if (g->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || g->drop || g->demoted_ms || g->sparse || g->scale != 1.0f) return false;
+    constexpr VkFormat hf = VK_FORMAT_R16G16B16A16_SFLOAT;
+    Shape s = shape_of(*t);
+    s.base = g->base;
+    s.levels = g->levels;
+    s.layers = g->layers;
+    const bool keep = g->layout != VK_IMAGE_LAYOUT_UNDEFINED && (g->uploaded || g->gpu_written);
+    if (keep) {
+        VkFormatProperties src = {}, dst = {};
+        vkGetPhysicalDeviceFormatProperties(device().physical(), g->format, &src);
+        vkGetPhysicalDeviceFormatProperties(device().physical(), hf, &dst);
+        if (!(src.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !(dst.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
+            !(g->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(g->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) || s.samples > 1) {
+            static int logged = 0;
+            if (logged++ < 4) NXLOG_W(kTag, "texture %u: its content cannot be blitted to RGBA16F: it stays R11G11B10F ([gfx] float16_scene)", t->id);
+            return false;
+        }
+    }
+    gfx::Image ni;
+    std::string err;
+    if (device().create_image(make_desc(s, hf, g->usage, base_flags(s, hf)), &ni, &err) != VK_SUCCESS) {
+        static int logged = 0;
+        if (logged++ < 16) NXLOG_W(kTag, "texture %u: cannot remake it as RGBA16F (%s): it stays R11G11B10F ([gfx] float16_scene)", t->id, err.c_str());
+        return false;
+    }
+    static std::atomic<int> said{0};
+    if (said.fetch_add(1) < 64)
+        NXLOG_I(kTag, "texture %u: R11G11B10F %ux%u (%u levels, %u layers) made float16 at its first store ([gfx] float16_scene%s)", t->id,
+                s.base.width, s.base.height, s.levels, s.layers, keep ? ", content copied" : "");
+    VkImageLayout nl = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (keep) {
+        move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        image_barrier(f.cb, ni.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, g->aspect, 0, s.levels, 0, s.layers);
+        std::vector<VkImageBlit> regions;
+        for (uint32_t l = 0; l < s.levels; ++l) {
+            const VkExtent3D e = level_extent(g->base, l);
+            const VkOffset3D end = {static_cast<int32_t>(e.width), static_cast<int32_t>(e.height), static_cast<int32_t>(std::max(1u, e.depth))};
+            VkImageBlit r = {};
+            r.srcSubresource = {g->aspect, l, 0, s.layers};
+            r.dstSubresource = {g->aspect, l, 0, s.layers};
+            r.srcOffsets[1] = end;
+            r.dstOffsets[1] = end;
+            regions.push_back(r);
+        }
+        vkCmdBlitImage(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ni.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       static_cast<uint32_t>(regions.size()), regions.data(), VK_FILTER_NEAREST);
+        nl = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    }
+    gfx::Image old = g->img;
+    if (g->presented) device().wait_idle();
+    g->presented = false;
+    std::vector<VkImageView> views;
+    for (auto& kv : g->views) views.push_back(kv.second);
+    g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->last_key = {};
+    g->sampled_formats.clear();
+    g->last_sampled_fmt = VK_FORMAT_MAX_ENUM;
+    defer_destroy([old, views]() mutable {
+        for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
+        device().destroy_image(old);
+    });
+    g->img = ni;
+    g->layout = nl;
+    g->format = hf;
+    g->promoted = true;
+    g->mutable_fmt = srgb_partner(hf) != VK_FORMAT_UNDEFINED || bit_alias_class(hf);
+    g->est_bytes *= 2;
+    pool_texture_remade(t);
+    return true;
+}
+
+bool tex_f16_on_store(Texture* t) { return t && t->gpu && !t->gpu->failed && t->gpu->f16_on_store; }
+
+void tex_f16_keep(Texture* t) {
+    if (!t || !t->gpu || !t->gpu->f16_on_store) return;
+    t->gpu->f16_on_store = false;
+    static int logged = 0;
+    if (logged++ < 16) NXLOG_I(kTag, "texture %u: stays R11G11B10F: a shader stores to it as r11f_g11f_b10f ([gfx] float16_scene)", t->id);
+}
+
+// A buffer copy into or out of a promoted image (RGBA16F for an R11G11B10F texture or an 8-bit sRGB HDR scene target): the buffer holds
+// texels of the NVN format, which are half the size of the image's. A direct copy would read the packed texels as halves and, out of the
+// image, write twice the bytes the game asked for. The copy goes through a temporary image of the NVN format and a blit (an exact
+// conversion for R11G11B10F; the sRGB decode or encode for the HDR targets). False: not such an image, the caller copies directly. True:
+// copied, or skipped (logged) when the GPU cannot blit between the two formats.
+bool tex_copy_buffer_promoted(Texture* t, Frame& f, VkBuffer buf, const VkBufferImageCopy& c, bool to_texture) {
+    TexGpu* g = tex_or_null(t);
+    if (!g || !g->promoted || !g->fmt || g->fmt->vk == VK_FORMAT_UNDEFINED || g->fmt->vk == g->format) return false;
+    const VkFormat nf = g->fmt->vk;
+    VkFormatProperties np = {}, ip = {};
+    vkGetPhysicalDeviceFormatProperties(device().physical(), nf, &np);
+    vkGetPhysicalDeviceFormatProperties(device().physical(), g->format, &ip);
+    const VkFormatFeatureFlags src_need = VK_FORMAT_FEATURE_BLIT_SRC_BIT, dst_need = VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    const bool can = to_texture ? (np.optimalTilingFeatures & src_need) && (ip.optimalTilingFeatures & dst_need)
+                                : (ip.optimalTilingFeatures & src_need) && (np.optimalTilingFeatures & dst_need);
+    Shape s;
+    s.type = c.imageExtent.depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    s.base = {std::max(1u, c.imageExtent.width), std::max(1u, c.imageExtent.height), std::max(1u, c.imageExtent.depth)};
+    s.layers = std::max(1u, c.imageSubresource.layerCount);
+    gfx::Image tmp;
+    std::string err;
+    if (!can || device().create_image(make_desc(s, nf, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0), &tmp, &err) != VK_SUCCESS) {
+        static int logged = 0;
+        if (logged++ < 8)
+            NXLOG_W(kTag, "texture %u: a buffer copy %s its image (VkFormat %d, kept at a higher precision than %s) is skipped: %s", t->id,
+                    to_texture ? "into" : "out of", static_cast<int>(g->format), g->fmt->name, can ? err.c_str() : "the GPU cannot blit between the two formats");
+        return true;
+    }
+    VkBufferImageCopy tc = c;
+    tc.imageSubresource.mipLevel = 0;
+    tc.imageSubresource.baseArrayLayer = 0;
+    tc.imageOffset = {0, 0, 0};
+    VkImageBlit bl = {};
+    VkImageSubresourceLayers tsub = tc.imageSubresource, isub = c.imageSubresource;
+    tsub.aspectMask = isub.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    const VkOffset3D ext = {static_cast<int32_t>(s.base.width), static_cast<int32_t>(s.base.height), static_cast<int32_t>(s.base.depth)};
+    const VkOffset3D o = c.imageOffset;
+    const VkOffset3D o_end = {o.x + ext.x, o.y + ext.y, o.z + ext.z};
+    if (to_texture) {
+        bl.srcSubresource = tsub;
+        bl.srcOffsets[1] = ext;
+        bl.dstSubresource = isub;
+        bl.dstOffsets[0] = o;
+        bl.dstOffsets[1] = o_end;
+        image_barrier(f.cb, tmp.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, s.layers);
+        vkCmdCopyBufferToImage(f.cb, buf, tmp.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &tc);
+        image_barrier(f.cb, tmp.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, s.layers);
+        move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdBlitImage(f.cb, tmp.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_NEAREST);
+    } else {
+        bl.srcSubresource = isub;
+        bl.srcOffsets[0] = o;
+        bl.srcOffsets[1] = o_end;
+        bl.dstSubresource = tsub;
+        bl.dstOffsets[1] = ext;
+        move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        image_barrier(f.cb, tmp.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, s.layers);
+        vkCmdBlitImage(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tmp.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_NEAREST);
+        image_barrier(f.cb, tmp.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, s.layers);
+        vkCmdCopyImageToBuffer(f.cb, tmp.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &tc);
+    }
+    defer_destroy([tmp]() mutable { device().destroy_image(tmp); });
+    static std::atomic<int> said{0};
+    if (said.fetch_add(1) < 16)
+        NXLOG_I(kTag, "texture %u: buffer copy %s its image (VkFormat %d) through %s (%ux%ux%u)", t->id, to_texture ? "into" : "out of", static_cast<int>(g->format),
+                g->fmt->name, s.base.width, s.base.height, s.base.depth);
+    return true;
+}
+
 // ---- [gfx] residency: demotion and promotion (nvn_residency.h) ---------------------------------------------------------------------
 namespace {
 nxrt::GaugeCounter g_gauge_demoted("nvn.resid.demoted");          // textures held demoted now
@@ -2378,8 +2594,9 @@ void tex_ensure_current(Texture* t, Frame& f) {
         static int logged = 0;
         if (logged++ < 20) NXLOG_W(kTag, "texture %u: the CPU wrote a scaled render target: the write is not uploaded", t->id);
     }
-    // A float16 render target of the HDR scene, or a scaled one: the NVN bytes in memory do not fit the image. It starts cleared.
-    if (g->promoted || g->scale != 1.0f) {
+    // A float16 render target of the HDR scene or of float16_scene, or a scaled one: the NVN bytes in memory do not fit the image. It starts
+    // cleared. (A promoted shader-written image is uploaded below, converted.)
+    if (g->starts_cleared || g->scale != 1.0f) {
         t->cpu_dirty.exchange(false);
         if (!g->uploaded) fill_zero(f, *g);
         g->uploaded = true;
@@ -2446,11 +2663,15 @@ void tex_ensure_current(Texture* t, Frame& f) {
     gfx::Buffer staged;                        // a big background result comes with its upload buffer already filled
     uint64_t take_hash = 0;
     bool took = false;
+    // a float16_scene image (promoted, not a render target): its texels are converted to RGBA16F here, so a big result is taken as data, not
+    // staged (a staged result in the NVN format would be thrown away and prepared again on the render thread)
+    const bool to_f16 = g->promoted && !g->starts_cleared;
     {
         nxrt::HitchTimer ht_take(nxrt::kHpRenderTexTake);
-        took = texprep::take(t, prep, &staged, &take_hash);
+        took = texprep::take(t, prep, to_f16 ? nullptr : &staged, &take_hash);
     }
     if (took) {     // prepared in the background from the current storage content (nvn_texprep.h)
+        if (to_f16) r11g11b10f_to_f16(prep);
         if (prep.format == g->format) {
             content_hash = take_hash;
             have_hash = true;
@@ -2521,6 +2742,7 @@ void tex_ensure_current(Texture* t, Frame& f) {
         caps.provisional = gpu_queued || texprep::wants_provisional(t);
         ok = prepare_texture(*t, caps, prep);
     }
+    if (ok && to_f16 && prep.format != g->format) r11g11b10f_to_f16(prep);   // a float16_scene image
     be::tx_mark("tx.use", t);
     {
         static const bool log_uploads = nxrt::config_get_bool("nvn", "tex_prep_log", false);      // [nvn] tex_prep_log = 1: one line per upload with where the data came from

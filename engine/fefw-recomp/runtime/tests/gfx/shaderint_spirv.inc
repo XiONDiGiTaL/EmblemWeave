@@ -462,3 +462,109 @@ static const uint32_t kSpvImageTexCs[] = {
     0x00060041, 0x0000000e, 0x0000001e, 0x00000002, 0x00000012, 0x00000013, 0x0003003e, 0x0000001e,
     0x0000001c, 0x000100fd, 0x00010038,
 };
+/*
+; d[0..2] = texel (0, 0) red, green, blue and d[3] = texel (1, 0) red (float bits) of the storage image at image slot 0 (c[0] word 0x24:
+; 28 push words and one storage buffer), declared without a format; then texel (1, 0) = (1 + 2^-9, 0.25, 0.5, 1), which float16 keeps and
+; R11G11B10F (6-bit mantissa) rounds to 1
+               OpCapability Shader
+               OpCapability StorageImageReadWithoutFormat
+               OpCapability StorageImageWriteWithoutFormat
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %cp_s0 %cp_i
+               OpExecutionMode %main LocalSize 1 1 1
+               OpName %cp_s0 "cp_s0"
+               OpName %cp_i "cp_i_cb0_24"
+               OpDecorate %rarr ArrayStride 4
+               OpMemberDecorate %sblk 0 Offset 0
+               OpDecorate %sblk Block
+               OpDecorate %cp_s0 DescriptorSet 1
+               OpDecorate %cp_s0 Binding 0
+               OpDecorate %cp_i DescriptorSet 3
+               OpDecorate %cp_i Binding 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+      %v2int = OpTypeVector %int 2
+    %v4float = OpTypeVector %float 4
+       %rarr = OpTypeRuntimeArray %uint
+       %sblk = OpTypeStruct %rarr
+     %sb_blk = OpTypePointer StorageBuffer %sblk
+    %sb_uint = OpTypePointer StorageBuffer %uint
+        %img = OpTypeImage %float 2D 0 0 0 2 Unknown
+     %uc_img = OpTypePointer UniformConstant %img
+      %cp_s0 = OpVariable %sb_blk StorageBuffer
+       %cp_i = OpVariable %uc_img UniformConstant
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+      %int_2 = OpConstant %int 2
+      %int_3 = OpConstant %int 3
+        %p00 = OpConstantComposite %v2int %int_0 %int_0
+        %p10 = OpConstantComposite %v2int %int_1 %int_0
+     %f_fine = OpConstant %float 1.001953125
+     %f_qtr = OpConstant %float 0.25
+     %f_half = OpConstant %float 0.5
+        %f_1 = OpConstant %float 1
+        %val = OpConstantComposite %v4float %f_fine %f_qtr %f_half %f_1
+       %main = OpFunction %void None %fn
+          %l = OpLabel
+         %im = OpLoad %img %cp_i
+          %a = OpImageRead %v4float %im %p00
+          %b = OpImageRead %v4float %im %p10
+         %ar = OpCompositeExtract %float %a 0
+         %ag = OpCompositeExtract %float %a 1
+         %ab = OpCompositeExtract %float %a 2
+         %br = OpCompositeExtract %float %b 0
+        %aru = OpBitcast %uint %ar
+        %agu = OpBitcast %uint %ag
+        %abu = OpBitcast %uint %ab
+        %bru = OpBitcast %uint %br
+         %q0 = OpAccessChain %sb_uint %cp_s0 %int_0 %int_0
+               OpStore %q0 %aru
+         %q1 = OpAccessChain %sb_uint %cp_s0 %int_0 %int_1
+               OpStore %q1 %agu
+         %q2 = OpAccessChain %sb_uint %cp_s0 %int_0 %int_2
+               OpStore %q2 %abu
+         %q3 = OpAccessChain %sb_uint %cp_s0 %int_0 %int_3
+               OpStore %q3 %bru
+               OpImageWrite %im %p10 %val
+               OpReturn
+               OpFunctionEnd
+*/
+static const uint32_t kSpvStoreImageCs[] = {
+    0x07230203, 0x00010600, 0x00070000, 0x0000002c, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
+    0x00000037, 0x00020011, 0x00000038, 0x0003000e, 0x00000000, 0x00000001, 0x0007000f, 0x00000005,
+    0x00000001, 0x6e69616d, 0x00000000, 0x00000002, 0x00000003, 0x00060010, 0x00000001, 0x00000011,
+    0x00000001, 0x00000001, 0x00000001, 0x00040005, 0x00000002, 0x735f7063, 0x00000030, 0x00050005,
+    0x00000003, 0x695f7063, 0x3062635f, 0x0034325f, 0x00040047, 0x00000004, 0x00000006, 0x00000004,
+    0x00050048, 0x00000005, 0x00000000, 0x00000023, 0x00000000, 0x00030047, 0x00000005, 0x00000002,
+    0x00040047, 0x00000002, 0x00000022, 0x00000001, 0x00040047, 0x00000002, 0x00000021, 0x00000000,
+    0x00040047, 0x00000003, 0x00000022, 0x00000003, 0x00040047, 0x00000003, 0x00000021, 0x00000000,
+    0x00020013, 0x00000006, 0x00030021, 0x00000007, 0x00000006, 0x00040015, 0x00000008, 0x00000020,
+    0x00000001, 0x00040015, 0x00000009, 0x00000020, 0x00000000, 0x00030016, 0x0000000a, 0x00000020,
+    0x00040017, 0x0000000b, 0x00000008, 0x00000002, 0x00040017, 0x0000000c, 0x0000000a, 0x00000004,
+    0x0003001d, 0x00000004, 0x00000009, 0x0003001e, 0x00000005, 0x00000004, 0x00040020, 0x0000000d,
+    0x0000000c, 0x00000005, 0x00040020, 0x0000000e, 0x0000000c, 0x00000009, 0x00090019, 0x0000000f,
+    0x0000000a, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000002, 0x00000000, 0x00040020,
+    0x00000010, 0x00000000, 0x0000000f, 0x0004003b, 0x0000000d, 0x00000002, 0x0000000c, 0x0004003b,
+    0x00000010, 0x00000003, 0x00000000, 0x0004002b, 0x00000008, 0x00000011, 0x00000000, 0x0004002b,
+    0x00000008, 0x00000012, 0x00000001, 0x0004002b, 0x00000008, 0x00000013, 0x00000002, 0x0004002b,
+    0x00000008, 0x00000014, 0x00000003, 0x0005002c, 0x0000000b, 0x00000015, 0x00000011, 0x00000011,
+    0x0005002c, 0x0000000b, 0x00000016, 0x00000012, 0x00000011, 0x0004002b, 0x0000000a, 0x00000017,
+    0x3f804000, 0x0004002b, 0x0000000a, 0x00000018, 0x3e800000, 0x0004002b, 0x0000000a, 0x00000019,
+    0x3f000000, 0x0004002b, 0x0000000a, 0x0000001a, 0x3f800000, 0x0007002c, 0x0000000c, 0x0000001b,
+    0x00000017, 0x00000018, 0x00000019, 0x0000001a, 0x00050036, 0x00000006, 0x00000001, 0x00000000,
+    0x00000007, 0x000200f8, 0x0000001c, 0x0004003d, 0x0000000f, 0x0000001d, 0x00000003, 0x00050062,
+    0x0000000c, 0x0000001e, 0x0000001d, 0x00000015, 0x00050062, 0x0000000c, 0x0000001f, 0x0000001d,
+    0x00000016, 0x00050051, 0x0000000a, 0x00000020, 0x0000001e, 0x00000000, 0x00050051, 0x0000000a,
+    0x00000021, 0x0000001e, 0x00000001, 0x00050051, 0x0000000a, 0x00000022, 0x0000001e, 0x00000002,
+    0x00050051, 0x0000000a, 0x00000023, 0x0000001f, 0x00000000, 0x0004007c, 0x00000009, 0x00000024,
+    0x00000020, 0x0004007c, 0x00000009, 0x00000025, 0x00000021, 0x0004007c, 0x00000009, 0x00000026,
+    0x00000022, 0x0004007c, 0x00000009, 0x00000027, 0x00000023, 0x00060041, 0x0000000e, 0x00000028,
+    0x00000002, 0x00000011, 0x00000011, 0x0003003e, 0x00000028, 0x00000024, 0x00060041, 0x0000000e,
+    0x00000029, 0x00000002, 0x00000011, 0x00000012, 0x0003003e, 0x00000029, 0x00000025, 0x00060041,
+    0x0000000e, 0x0000002a, 0x00000002, 0x00000011, 0x00000013, 0x0003003e, 0x0000002a, 0x00000026,
+    0x00060041, 0x0000000e, 0x0000002b, 0x00000002, 0x00000011, 0x00000014, 0x0003003e, 0x0000002b,
+    0x00000027, 0x00040063, 0x0000001d, 0x00000016, 0x0000001b, 0x000100fd, 0x00010038,
+};

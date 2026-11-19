@@ -1442,6 +1442,8 @@ std::atomic<uint64_t> g_pool_uploads_deferred{0};
 std::atomic<uint64_t> g_pacing_on_present{0};   // the present at which pacing last came back on after a load (note_frame_for_pacing)
 const bool g_pool_deferred_hitch = (nxrt::hitch_add_counter("pool_uploads_deferred", []() -> uint64_t { return g_pool_uploads_deferred.load(std::memory_order_relaxed); }), true);
 
+VkFormat image_format_vk(uint32_t f);   // below
+
 // Makes the textures a draw samples current (uploaded, in their sampled layout) and the storage images it binds writable (GENERAL).
 // Ends the pass when it has to touch images. The depth attachment itself is left to the pass.
 void prepare_textures(const ProgLayout& pl) {
@@ -1457,7 +1459,14 @@ void prepare_textures(const ProgLayout& pl) {
             const TexResolved& r = resolve_image_ref(d, tmp);
             if (!r.tex || !tex_gpu(r.tex) || !tex_has_storage(r.tex)) continue;
             storage_bound.push_back(r.tex);
-            if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != VK_IMAGE_LAYOUT_GENERAL || tex_scale(r.tex) != 1.0f) need_storage.push_back(r.tex);
+            // [gfx] float16_scene: an R11G11B10F image becomes RGBA16F at its first store, unless the shader declares its format (a view of
+            // another format than the declared one is not allowed)
+            bool f16 = tex_f16_on_store(r.tex);
+            if (f16 && image_format_vk(d.shader->refl.bindings[d.index].image.format) == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+                tex_f16_keep(r.tex);
+                f16 = false;
+            }
+            if (f16 || r.tex->cpu_dirty.load() || tex_layout(r.tex) != VK_IMAGE_LAYOUT_GENERAL || tex_scale(r.tex) != 1.0f) need_storage.push_back(r.tex);
             continue;
         }
         if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
@@ -1611,6 +1620,7 @@ void prepare_textures(const ProgLayout& pl) {
     for (Texture* t : need_storage) {
         if (tex_scale(t) != 1.0f) tex_rescale(t, *F, 1.0f, "bound as a storage image");   // imageStore coordinates are not scaled (Ryujinx: ResScaleUnsupported)
         tex_ensure_current(t, *F);
+        tex_f16_promote(t, *F);   // after the upload: the content is copied over
         tex_transition(t, *F, VK_IMAGE_LAYOUT_GENERAL);
         tex_mark_gpu_written(t);
     }
@@ -2527,6 +2537,13 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                 if (shader_fmt != VK_FORMAT_UNDEFINED) q.format = shader_fmt;
                 q.format = tex_storage_format(r.tex, q.format);   // an sRGB image is stored to through its UNORM view (raw bits, as on the console)
                 ii.imageView = tex_sampled_view(r.tex, q);
+                // A storage image declared r11f_g11f_b10f over an R11G11B10F image kept as RGBA16F (the format's fallback, or [gfx] float16_scene):
+                // the view is RGBA16F, which Vulkan does not allow for a declared format other than its own. Fortune's Weave declares none.
+                if (ii.imageView && shader_fmt == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && tex_vk_format(r.tex) == VK_FORMAT_R16G16B16A16_SFLOAT &&
+                    first_time_id(4, d.shader, static_cast<uint64_t>(d.index), r.tex->id))
+                    NXLOG_W(kTag, "storage image: %s binding %s declares r11f_g11f_b10f, texture %u is RGBA16F (float16_scene or the format's fallback): "
+                                  "the store's results are undefined; set [gfx] float16_scene = off if this shader's output looks wrong",
+                            d.shader->hash.c_str(), b.name.c_str(), r.tex->id);
             }
             if (!ii.imageView) {
                 if (r.tex) NXLOG_W(kTag, "storage image: texture %u (%s %dx%dx%d) has no storage view (gpu %d, storage usage %d)", r.tex->id, r.tex->fmt ? r.tex->fmt->name : "?",
@@ -4660,11 +4677,11 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
         tev(t, "copy_buffer_to_texture", p.address, p.has_view ? 1 : 0);
         for (uint32_t i = 0; i < c.imageSubresource.layerCount; ++i) tex_sparse_before_copy(t, c.imageSubresource.baseArrayLayer + i, s.level);
         tex_mark_gpu_written(t);
-        vkCmdCopyBufferToImage(F->cb, br.buffer, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+        if (!tex_copy_buffer_promoted(t, *F, br.buffer, c, true)) vkCmdCopyBufferToImage(F->cb, br.buffer, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     } else {
         tex_ensure_exact(t, *F);
         tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        vkCmdCopyImageToBuffer(F->cb, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, br.buffer, 1, &c);
+        if (!tex_copy_buffer_promoted(t, *F, br.buffer, c, false)) vkCmdCopyImageToBuffer(F->cb, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, br.buffer, 1, &c);
         gpu_wrote(p.address, stride * ((rh + bh - 1) / bh) * rd, kWriteImageCopy);
     }
     memory_barrier(F->cb);
