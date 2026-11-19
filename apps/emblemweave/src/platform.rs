@@ -207,14 +207,21 @@ mod native_drag {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
     use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsZoomed, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_WNDPROC, HTCAPTION, SWP_NOACTIVATE, SWP_NOSIZE,
-        SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+        GetWindowThreadProcessId, IsZoomed, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+        HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, WINDOWPLACEMENT,
+        WM_NCHITTEST, WM_NCLBUTTONDOWN, WS_MAXIMIZE,
     };
+
+    /// Per-window DWM transitions. Windows animates a maximize/restore over
+    /// about 50 ms; that animation, not the app, is the slide a grabbed
+    /// maximized launcher still showed after the press was handled natively.
+    const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
 
     type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 
@@ -239,19 +246,71 @@ mod native_drag {
         }
         let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-        let normal = if GetWindowPlacement(hwnd, &mut placement) != 0 { placement.rcNormalPosition } else { maximized };
+        if GetWindowPlacement(hwnd, &mut placement) == 0 {
+            return;
+        }
+        let normal = placement.rcNormalPosition;
         let mw = (maximized.right - maximized.left).max(1) as f32;
         let mh = (maximized.bottom - maximized.top).max(1) as f32;
-        let nw = (normal.right - normal.left).max(1) as f32;
-        let nh = (normal.bottom - normal.top).max(1) as f32;
+        let nw = (normal.right - normal.left).max(1);
+        let nh = (normal.bottom - normal.top).max(1);
         // The pointer keeps the same fraction of the window, so the caption does
         // not jump out from under it.
         let fx = ((cx - maximized.left) as f32 / mw).clamp(0.0, 1.0);
         let fy = ((cy - maximized.top) as f32 / mh).clamp(0.0, 1.0);
-        let x = cx - (fx * nw).round() as i32;
-        let y = cy - (fy * nh).round() as i32;
-        ShowWindow(hwnd, SW_RESTORE);
-        SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let x = cx - (fx * nw as f32).round() as i32;
+        let y = cy - (fy * nh as f32).round() as i32;
+        // Clear the maximized style and set the rect directly. Both
+        // `ShowWindow(SW_RESTORE)` and `SetWindowPlacement` run a window-manager
+        // restore transition; the move loop then anchors on an intermediate
+        // frame and the first pointer movement makes the window jump. Clearing
+        // `WS_MAXIMIZE` has no transition, so the position the loop starts from
+        // is the position under the pointer.
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if style != 0 {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !(WS_MAXIMIZE as isize)) as isize);
+        }
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            nw,
+            nh,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+
+    /// How wide the resize band is, in logical pixels. It is scaled by the
+    /// window's DPI, so the grab area is the same size on every monitor.
+    const RESIZE_EDGE: f32 = 7.0;
+
+    /// The non-client code for a point in one of the window's four edge bands.
+    /// Windows' own hit-test turns these into the resize cursors and starts the
+    /// sizing loop on the press, so the edge follows the pointer from the first
+    /// movement; the old `shell_resize` only sent `BeginResize` after the frame
+    /// that saw the press, which left the edge a frame behind.
+    fn edge_at(x: i32, y: i32, width: i32, height: i32, edge: i32) -> Option<isize> {
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let edge_x = edge.min(width / 2).max(1);
+        let edge_y = edge.min(height / 2).max(1);
+        let left = x >= 0 && x < edge_x;
+        let right = x < width && x >= width - edge_x;
+        let top = y >= 0 && y < edge_y;
+        let bottom = y < height && y >= height - edge_y;
+        Some(match (left, right, top, bottom) {
+            (true, _, true, _) => HTTOPLEFT as isize,
+            (_, true, true, _) => HTTOPRIGHT as isize,
+            (true, _, _, true) => HTBOTTOMLEFT as isize,
+            (_, true, _, true) => HTBOTTOMRIGHT as isize,
+            (true, ..) => HTLEFT as isize,
+            (_, true, ..) => HTRIGHT as isize,
+            (_, _, true, _) => HTTOP as isize,
+            (_, _, _, true) => HTBOTTOM as isize,
+            _ => return None,
+        })
     }
 
     unsafe extern "system" fn hit_test(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -267,6 +326,15 @@ mod native_drag {
             if ScreenToClient(hwnd, &mut point) != 0 && GetClientRect(hwnd, &mut client) != 0 {
                 let dpi = GetDpiForWindow(hwnd);
                 let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+                // The edges win over the caption at the four corners: a press
+                // on the band resizes, exactly as a decorated window's frame
+                // does, while the centre of the title bar still moves.
+                if IsZoomed(hwnd) == 0 {
+                    let edge = (RESIZE_EDGE * scale).round() as i32;
+                    if let Some(ht) = edge_at(point.x, point.y, client.right, client.bottom, edge) {
+                        return ht as LRESULT;
+                    }
+                }
                 let top = (crate::theme::TOPBAR_HEIGHT * scale).round() as i32;
                 let left = (crate::theme::TOPBAR_DRAG_LEFT * scale).round() as i32;
                 let right = client.right - (crate::theme::TOPBAR_DRAG_RIGHT * scale).round() as i32;
@@ -317,7 +385,45 @@ mod native_drag {
                 ORIGINAL.store(0, Ordering::Relaxed);
                 return;
             }
+            // The launcher is not an animated window: the transitions Windows
+            // adds to a maximize/restore are exactly the delayed slide the
+            // caption fix is meant to remove. The attribute is per window, so
+            // no other application is affected.
+            let disabled: i32 = 1;
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &disabled as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
             INSTALLED.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn every_window_edge_and_corner_has_a_resize_band() {
+            let (w, h, e) = (1440, 900, 7);
+            assert_eq!(edge_at(3, 450, w, h, e), Some(HTLEFT as isize));
+            assert_eq!(edge_at(w - 3, 450, w, h, e), Some(HTRIGHT as isize));
+            assert_eq!(edge_at(700, 3, w, h, e), Some(HTTOP as isize));
+            assert_eq!(edge_at(700, h - 3, w, h, e), Some(HTBOTTOM as isize));
+            assert_eq!(edge_at(3, 3, w, h, e), Some(HTTOPLEFT as isize));
+            assert_eq!(edge_at(w - 3, 3, w, h, e), Some(HTTOPRIGHT as isize));
+            assert_eq!(edge_at(3, h - 3, w, h, e), Some(HTBOTTOMLEFT as isize));
+            assert_eq!(edge_at(w - 3, h - 3, w, h, e), Some(HTBOTTOMRIGHT as isize));
+        }
+
+        #[test]
+        fn the_middle_of_the_window_is_not_an_edge() {
+            let (w, h, e) = (1440, 900, 7);
+            assert_eq!(edge_at(700, 450, w, h, e), None);
+            assert_eq!(edge_at(700, 22, w, h, e), None, "the caption band is not a resize edge");
+            assert_eq!(edge_at(-10, 450, w, h, e), None, "a point outside the client is not claimed");
+            assert_eq!(edge_at(700, h + 10, w, h, e), None);
         }
     }
 }

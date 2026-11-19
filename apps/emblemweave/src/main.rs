@@ -996,7 +996,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        shell_resize(ctx);
+        // The native caption is installed by title rather than by a viewport
+        // command: a command runs after egui's frame, which is the one-frame
+        // catch-up slide the title bar used to have.
+        platform::install_native_drag();
         if self.config.theme != self.applied {
             self.applied = self.config.theme;
             theme::apply(ctx, self.config.theme);
@@ -1124,51 +1127,6 @@ impl eframe::App for App {
             j.request_cancel();
         }
         let _ = self.config.save();
-    }
-}
-
-/// A borderless window has no native resize handles, so the thin edge of the
-/// client area starts the same drag winit would start on a decorated window.
-fn shell_resize(ctx: &egui::Context) {
-    let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
-        return;
-    };
-    let r = ctx.screen_rect();
-    const EDGE: f32 = 7.0;
-    let left = pos.x <= r.left() + EDGE;
-    let right = pos.x >= r.right() - EDGE;
-    let top = pos.y <= r.top() + EDGE;
-    let bottom = pos.y >= r.bottom() - EDGE;
-    if !(left || right || top || bottom) {
-        return;
-    }
-    let dir = match (left, right, top, bottom) {
-        (true, _, true, _) => egui::ResizeDirection::NorthWest,
-        (_, true, true, _) => egui::ResizeDirection::NorthEast,
-        (true, _, _, true) => egui::ResizeDirection::SouthWest,
-        (_, true, _, true) => egui::ResizeDirection::SouthEast,
-        (true, ..) => egui::ResizeDirection::West,
-        (_, true, ..) => egui::ResizeDirection::East,
-        (_, _, true, _) => egui::ResizeDirection::North,
-        (_, _, _, true) => egui::ResizeDirection::South,
-        _ => return,
-    };
-    ctx.set_cursor_icon(match dir {
-        egui::ResizeDirection::North | egui::ResizeDirection::South => {
-            egui::CursorIcon::ResizeVertical
-        }
-        egui::ResizeDirection::East | egui::ResizeDirection::West => {
-            egui::CursorIcon::ResizeHorizontal
-        }
-        egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => {
-            egui::CursorIcon::ResizeNwSe
-        }
-        egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => {
-            egui::CursorIcon::ResizeNeSw
-        }
-    });
-    if ctx.input(|i| i.pointer.primary_pressed()) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
     }
 }
 

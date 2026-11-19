@@ -28,6 +28,33 @@ eight of them, 1.2 GB in total, none of them ever read again.
 
 No gameplay FPS number is claimed for this pass: none of these changes was measured on the game with a capture.
 
+## This pass: borderless edges and the last caption slide
+
+The previous caption fix stopped a maximized launcher sitting still, but the restore itself was still a window-manager
+transition. `ShowWindow(SW_RESTORE)`, and later `SetWindowPlacement`, both animate the restore; the move loop
+anchors on an intermediate frame, so the first pointer movement jumped the window (14 px with the intermediate
+`SetWindowPlacement` build). The launcher now clears `WS_MAXIMIZE` and sets the rect with `SetWindowPos`
+directly, which has no transition, and asks DWM to disable its transitions for the window. The borderless edges
+start in `WM_NCHITTEST`, the same pass as the caption, instead of waiting for `ViewportCommand::BeginResize`
+after the frame; Windows owns the sizing loop and the resize cursors.
+
+| Change | Before | After | How it was measured |
+| --- | --- | --- | --- |
+| Maximized caption press | 182,182 -> 307,0 -> 321,0 -> 328,0 over ~50 ms with no pointer movement (the OS restore animation) | 301,0 1440x900 as the drag starts, with no transition frame | scripted Win32 probe, `GetWindowRect` with the launcher forced to the foreground |
+| Dragging on from that same press | 14 px jump when the move loop anchored on an intermediate `SetWindowPlacement` frame | 0 px settled lag over 80 one-pixel steps | the same probe, 1 px steps with a 20 ms settle |
+| Restored caption drag | an injected event of catch-up in the old probe | 0 px settled lag over 80 one-pixel steps | the same probe, 1 px steps with a 20 ms settle |
+| Left and right borderless edges | `BeginResize` was sent after the frame that saw the press | 0-1 px settled lag; the left edge 300->200 grew the window 1440->1540 and stayed there; a second run 340->280 grew it 1440->1500; the right edge tracked to 1620 | the same probe, 1 px steps with a 20 ms settle |
+| Resize cursors | egui set its own icon | Windows' hit-test cursors: WE on left/right, NS on top/bottom, NWSE/NESW on the corners | `GetCursorInfo` after moving the real pointer to each band |
+| Hit-test codes | caption only | caption 2; left 10, right 11, top 12, bottom 15, top-left 13, bottom-right 17 | `WM_NCHITTEST` sent at each band |
+
+A minimize/restore after a dragged restore came back at the same rect with the placement at normal (`showCmd` 1),
+so clearing `WS_MAXIMIZE` did not leave a maximized placement behind.
+
+The probe uses synthetic Win32 input, so it measures the window manager's response, not a physical mouse.
+Snapped and half-screen window states were not exercised.
+
+No gameplay FPS number is claimed: this pass changes the launcher frame, not the engine.
+
 ## What the engine already does
 
 These are in `engine/fefw-recomp/runtime` and are on by default; `runtime/docs/CONFIG.md` has every key.
