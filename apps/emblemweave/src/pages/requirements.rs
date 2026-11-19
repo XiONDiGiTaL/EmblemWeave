@@ -127,7 +127,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         if deps::row(&rows, "sdk").is_some_and(|r| r.blocking()) {
             ui.add_space(2.0);
-            ui.hyperlink_to("Open the Windows SDK download page", deps::WINDOWS_SDK_URL);
+            ui.horizontal_wrapped(|ui| {
+                let installer_available = crate::toolchain::visual_studio_installer().is_file();
+                if widgets::button(ui, &p, "Open Visual Studio Installer", installer_available)
+                    .on_hover_text(if installer_available {
+                        "Opens the Visual Studio Installer. Choose Build Tools 2022 → Modify → Individual components → Windows 11 SDK."
+                    } else {
+                        "Visual Studio Installer was not found; use the Windows SDK download page."
+                    })
+                    .clicked()
+                {
+                    match crate::toolchain::open_visual_studio_installer() {
+                        Ok(()) => app.notify(
+                            "Visual Studio Installer opened. Add the Windows 11 SDK under Individual components, then press Check again.",
+                            Tone::Ok,
+                        ),
+                        Err(e) => app.notify(e, Tone::Warn),
+                    }
+                }
+                ui.hyperlink_to("Open the Windows SDK download page", deps::WINDOWS_SDK_URL);
+            });
         }
     });
 

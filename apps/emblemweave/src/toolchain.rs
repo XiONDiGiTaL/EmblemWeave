@@ -271,6 +271,27 @@ pub fn vswhere() -> PathBuf {
     program_files_x86().join("Microsoft Visual Studio").join("Installer").join("vswhere.exe")
 }
 
+/// The Visual Studio Installer that manages an existing Build Tools install.
+pub fn visual_studio_installer() -> PathBuf {
+    program_files_x86().join("Microsoft Visual Studio").join("Installer").join("vs_installer.exe")
+}
+
+/// Open Visual Studio Installer so the Windows SDK can be added under Individual
+/// components. The caller keeps the download-page link for PCs without it.
+pub fn open_visual_studio_installer() -> Result<(), String> {
+    let exe = visual_studio_installer();
+    if !exe.is_file() {
+        return Err(format!(
+            "Visual Studio Installer was not found at {}. Use the Windows SDK download page instead.",
+            exe.display()
+        ));
+    }
+    Command::new(&exe)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open the Visual Studio Installer ({}): {e}", exe.display()))
+}
+
 const VC_COMPONENT: &str = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";
 
 fn run(args: &[&str]) -> Option<(String, String)> {
