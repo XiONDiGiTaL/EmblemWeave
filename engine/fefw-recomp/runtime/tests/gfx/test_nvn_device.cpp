@@ -122,11 +122,12 @@ NXTEST(device_get_integer_known_and_unknown_values) {
     CHECK(v == 256);
     get(&dev, NVN_DEVICE_INFO_MAX_TEXTURE_SIZE, &v);
     CHECK(v == 16384);
-    const bool nvn2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;   // NVN2 (Switch 2 SDK 20.5) is 231.30, NVN1 55.15
+    // NVN2 is 231.<the game's driver minor> (game::Info nvn_api_minor: 30 for SDK 20.5, 40 for SDK 22.2), NVN1 55.15
+    const bool nvn2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;
     get(&dev, NVN_DEVICE_INFO_API_MAJOR_VERSION, &v);
     CHECK(v == (nvn2 ? 231 : 55));
     get(&dev, NVN_DEVICE_INFO_API_MINOR_VERSION, &v);
-    CHECK(v == (nvn2 ? 30 : 15));
+    CHECK(v == (nvn2 ? nxrt::game::info().nvn_api_minor : 15));
     get(&dev, NVN_DEVICE_INFO_TEXTURE_BINDINGS_PER_STAGE, &v);
     CHECK(v == 32);
     get(&dev, NVN_DEVICE_INFO_MAX_TEXTURE_LAYERS, &v);

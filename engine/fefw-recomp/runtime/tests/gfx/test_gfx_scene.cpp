@@ -4,7 +4,22 @@
 #include <SDL3/SDL.h>
 
 #include "gfx_test_util.h"
+#include "nxrt/extras.h"
 NXTEST_GROUP(gfx_scene)
+
+namespace {
+// [hdr] mode = off while it lives. With mode = auto and Windows HDR on for the display, the window's swapchain is HDR and its capture is
+// not the SDR picture of the reference image.
+struct SdrOutput {
+    nxrt::extras::Settings before = nxrt::extras::settings();
+    SdrOutput() {
+        nxrt::extras::Settings s = before;
+        s.hdr.mode = nxrt::extras::HdrMode::Off;
+        nxrt::extras::set_settings(s);
+    }
+    ~SdrOutput() { nxrt::extras::set_settings(before); }
+};
+}  // namespace
 
 using namespace gfxtest;
 
@@ -95,6 +110,7 @@ NXTEST(headless_screenshot_matches_the_reference) {
 
 NXTEST(windowed_screenshot_matches_the_same_reference) {
     // The swapchain path (B8G8R8A8 swapchain image, window size) gives the same picture as the offscreen path.
+    const SdrOutput sdr;
     SceneRunDesc d = base_desc();
     d.headless = false;
     d.width = 640;
@@ -166,7 +182,9 @@ NXTEST(overlay_shows_through_the_key_and_changes_the_picture) {
     CHECK_EQ(r.validation.warnings, 0ull);
     const ImageDiff df = compare_rgba(plain.data(), w, h, with_overlay.data(), w, h);
     std::printf("    overlay vs plain: mean abs %.4f, pixels over 8: %.4f\n", df.mean_abs, df.fraction_over_8);
-    CHECK(df.fraction_over_8 > 0.05);   // the menu covers a good part of the 640x360 picture
+    // The Diagnostics window starts folded at the top right (overlay.cpp build_ui): its 420-pixel title bar is about 4 % of the 640x360
+    // picture. Far more than the overlay's absence (0, checked below) and the integrated GPU's differences (none over 8).
+    CHECK(df.fraction_over_8 > 0.03);
 
     // overlay created but never shown: the picture is the plain one
     d.overlay_visible_from_frame = -1;

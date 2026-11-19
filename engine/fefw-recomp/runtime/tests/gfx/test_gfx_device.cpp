@@ -112,9 +112,12 @@ NXTEST(override_picks_the_integrated_gpu_and_the_scene_style_device_works_on_it)
     CHECK(ran);
     CHECK_EQ(dev->validation_stats().errors, 0ull);
 
-    auto by_name = make_device("Intel");
+    // by name: the integrated GPU's own name (Intel's or AMD's), which no discrete GPU of the machine has
+    const std::string igpu_name = dev->gpu().name;
+    auto by_name = make_device(igpu_name.c_str());
     REQUIRE(by_name != nullptr);
     CHECK_EQ(by_name->gpu().type, 1);
+    CHECK(by_name->gpu_override_matched());
     auto by_index = make_device(std::to_string(dev->gpu().index).c_str());
     REQUIRE(by_index != nullptr);
     CHECK_EQ(by_index->gpu().index, dev->gpu().index);

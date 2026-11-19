@@ -281,6 +281,7 @@ Lay make_layout(uint32_t w, uint32_t h, uint32_t levels, uint32_t bw, uint32_t b
     r.d.gob_blocks_y = nxrt::nvn::be::console_block_height((h + bh - 1) / bh);
     r.d.gob_blocks_z = 1;
     r.d.linear_stride_align = 1;
+    r.d.gob_switch2 = nxrt::game::info().platform == nxrt::game::Platform::Switch2;   // the GOB byte order of the registered game's console
     r.L = tegra::compute_layout(r.d);
     return r;
 }

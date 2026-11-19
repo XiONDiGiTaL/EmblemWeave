@@ -13,6 +13,7 @@
 
 #include "nxrt/input_source.h"
 #include "play/play_types.h"
+#include "play_test_game.h"
 #include "test_framework.h"
 NXTEST_GROUP(play_config)
 
@@ -158,6 +159,7 @@ void write_file(const std::filesystem::path& p, const std::string& text) {
 // ---- names -------------------------------------------------------------------------------------------------------------------
 
 NXTEST(act_table_is_complete) {
+    const nxrt::play::test::PlayTestGame play_game;
     std::set<std::string> names;
     for (int i = 0; i < kActCount; ++i) {
         const ActInfo& info = act_info(static_cast<Act>(i));
@@ -173,6 +175,7 @@ NXTEST(act_table_is_complete) {
 }
 
 NXTEST(parse_act_is_lenient) {
+    const nxrt::play::test::PlayTestGame play_game;
     Act a = Act::None;
     CHECK(parse_act("FIRE", &a));
     CHECK(a == Act::Primary);
@@ -187,6 +190,7 @@ NXTEST(parse_act_is_lenient) {
 }
 
 NXTEST(ctx_and_trig_names) {
+    const nxrt::play::test::PlayTestGame play_game;
     for (int c = 0; c < kCtxCount; ++c) {
         Ctx back = Ctx::All;
         CHECK(parse_ctx(ctx_name(static_cast<Ctx>(c)), &back));
@@ -209,6 +213,7 @@ NXTEST(ctx_and_trig_names) {
 }
 
 NXTEST(default_outputs_all_parse) {
+    const nxrt::play::test::PlayTestGame play_game;
     for (int i = 0; i < kActCount; ++i) {
         Output o;
         std::string err;
@@ -219,6 +224,7 @@ NXTEST(default_outputs_all_parse) {
 // ---- outputs -----------------------------------------------------------------------------------------------------------------
 
 NXTEST(output_parse_terms) {
+    const nxrt::play::test::PlayTestGame play_game;
     Output o;
     REQUIRE(parse_output("ZR", &o));
     CHECK(o == make_out(btn(kBtnZR)));
@@ -245,6 +251,7 @@ NXTEST(output_parse_terms) {
 }
 
 NXTEST(output_none_and_cancelation) {
+    const nxrt::play::test::PlayTestGame play_game;
     Output o = make_out(btn(kBtnA));
     CHECK(parse_output("", &o));
     CHECK(o.empty());
@@ -263,6 +270,7 @@ NXTEST(output_none_and_cancelation) {
 }
 
 NXTEST(output_errors) {
+    const nxrt::play::test::PlayTestGame play_game;
     Output o = make_out(7);
     std::string err;
     CHECK(!parse_output("X+FOO", &o, &err));
@@ -279,6 +287,7 @@ NXTEST(output_errors) {
 }
 
 NXTEST(output_text_canonical_and_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     Output o;
     REQUIRE(parse_output("RS_RIGHT+ZR+LS_DOWN", &o));
     CHECK_EQ(output_text(o), std::string("ZR+LS_DOWN+RS_RIGHT"));
@@ -298,6 +307,7 @@ NXTEST(output_text_canonical_and_round_trip) {
 // ---- inputs ------------------------------------------------------------------------------------------------------------------
 
 NXTEST(input_names_parse_and_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* text;
         int scancode;
@@ -329,6 +339,7 @@ NXTEST(input_names_parse_and_round_trip) {
 }
 
 NXTEST(input_mouse_and_wheel) {
+    const nxrt::play::test::PlayTestGame play_game;
     for (int n = 1; n <= 5; ++n) {
         InputId id;
         const std::string name = "Mouse" + std::to_string(n);
@@ -350,6 +361,7 @@ NXTEST(input_mouse_and_wheel) {
 }
 
 NXTEST(input_unknown_names) {
+    const nxrt::play::test::PlayTestGame play_game;
     InputId id;
     CHECK(!parse_input("NoSuchKey", &id));
     CHECK(!parse_input("", &id));
@@ -359,6 +371,7 @@ NXTEST(input_unknown_names) {
 }
 
 NXTEST(input_every_scancode_name_parses_back) {
+    const nxrt::play::test::PlayTestGame play_game;
     for (int sc = 1; sc < SDL_SCANCODE_COUNT; ++sc) {
         const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(sc));
         if (!n || !*n) continue;
@@ -372,6 +385,7 @@ NXTEST(input_every_scancode_name_parses_back) {
 // ---- factory settings --------------------------------------------------------------------------------------------------------
 
 NXTEST(default_settings_bindings_and_outputs) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings s = default_settings();
     CHECK(act_at(s, "W", Ctx::All) == Act::MoveForward);
     CHECK(act_at(s, "Mouse1", Ctx::All) == Act::Primary);
@@ -392,6 +406,7 @@ NXTEST(default_settings_bindings_and_outputs) {
 }
 
 NXTEST(default_settings_text_has_no_warnings) {
+    const nxrt::play::test::PlayTestGame play_game;
     std::vector<std::string> warnings;
     Settings s;
     std::string err;
@@ -402,6 +417,7 @@ NXTEST(default_settings_text_has_no_warnings) {
 // ---- reading the settings file ------------------------------------------------------------------------------------------------
 
 NXTEST(parse_yaw_source_and_radians) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[mouse]\nyaw_source = 2.0\npitch = 0.001\n", &s, &err));
@@ -415,6 +431,7 @@ NXTEST(parse_yaw_source_and_radians) {
 }
 
 NXTEST(file_with_only_mouse_keeps_default_bindings) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[mouse]\ninvert_y = 1\n", &s, &err));
@@ -424,6 +441,7 @@ NXTEST(file_with_only_mouse_keeps_default_bindings) {
 }
 
 NXTEST(old_factory_lock_mode_moves_to_free_once) {
+    const nxrt::play::test::PlayTestGame play_game;
     // A rev 2 file still on the old factory value takes the new one; a player's own choice in a current file stays.
     Settings s;
     std::string err;
@@ -437,6 +455,7 @@ NXTEST(old_factory_lock_mode_moves_to_free_once) {
 }
 
 NXTEST(one_bindings_section_drops_default_bindings) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[bindings.menu]\nReturn = confirm\n[meta]\ndefaults_rev = 2\n", &s, &err));
@@ -446,6 +465,7 @@ NXTEST(one_bindings_section_drops_default_bindings) {
 }
 
 NXTEST(binding_trigger_and_ms_parse) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[bindings.gameplay]\nLeft Ctrl = morph hold 250\nSpace = jump toggle\nMouse1 = fire tap\n[meta]\ndefaults_rev = 2\n", &s, &err));
@@ -461,6 +481,7 @@ NXTEST(binding_trigger_and_ms_parse) {
 }
 
 NXTEST(binding_keys_equals_and_semicolon) {
+    const nxrt::play::test::PlayTestGame play_game;
     // The keys "=" and ";" are real SDL names; a line for each must not be cut apart by the '=' split or taken as a comment.
     const char* eq_name = SDL_GetScancodeName(SDL_SCANCODE_EQUALS);
     const char* semi_name = SDL_GetScancodeName(SDL_SCANCODE_SEMICOLON);
@@ -473,6 +494,7 @@ NXTEST(binding_keys_equals_and_semicolon) {
 }
 
 NXTEST(inline_comments_and_case) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[mouse] # the mouse\ninvert_y = 1 ; yes\nwheel_beams = off # no\n", &s, &err));
@@ -485,6 +507,7 @@ NXTEST(inline_comments_and_case) {
 }
 
 NXTEST(menu_touch_legacy_key_is_ignored) {
+    const nxrt::play::test::PlayTestGame play_game;
     // The old key is accepted silently and does nothing: menu_cursor keeps its default, and the writer never writes menu_touch.
     Settings s;
     std::string err;
@@ -496,6 +519,7 @@ NXTEST(menu_touch_legacy_key_is_ignored) {
 }
 
 NXTEST(menu_cursor_parses_and_round_trips) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -511,6 +535,7 @@ NXTEST(menu_cursor_parses_and_round_trips) {
 }
 
 NXTEST(jc2_mouse_keys_parse_and_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     CHECK(s.mouse.jc2_speed == 1.0 && s.mouse.jc2_wake == 8.0 && s.mouse.jc2_capture);   // the defaults
     std::string err;
@@ -529,6 +554,7 @@ NXTEST(jc2_mouse_keys_parse_and_round_trip) {
 }
 
 NXTEST(lockfree_parses_and_round_trips) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -550,6 +576,7 @@ NXTEST(lockfree_parses_and_round_trips) {
 }
 
 NXTEST(lockfree_rejects_unknown_value) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     CHECK(!parse_settings("[aim]\nlock_mode = sideways\n", &s, &err));
@@ -557,6 +584,7 @@ NXTEST(lockfree_rejects_unknown_value) {
 }
 
 NXTEST(lockfree_margin_parses_and_round_trips) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -572,6 +600,7 @@ NXTEST(lockfree_margin_parses_and_round_trips) {
 }
 
 NXTEST(lockfree_margin_rejects_out_of_range) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     CHECK(!parse_settings("[aim]\nfree_lock_margin = 0.5\n", &s, &err));
@@ -581,6 +610,7 @@ NXTEST(lockfree_margin_rejects_out_of_range) {
 }
 
 NXTEST(camera_gun_drives_view_parses_and_round_trips) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -596,6 +626,7 @@ NXTEST(camera_gun_drives_view_parses_and_round_trips) {
 }
 
 NXTEST(camera_and_aim_defaults_are_free_and_on) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings d = default_settings();
     CHECK(d.aim.lock_mode == LockMode::Free);
     CHECK(d.aim.free_lock_margin == 0.15);
@@ -603,6 +634,7 @@ NXTEST(camera_and_aim_defaults_are_free_and_on) {
 }
 
 NXTEST(parse_errors_name_the_line) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* text;
         const char* expect;   // the start of err
@@ -630,6 +662,7 @@ NXTEST(parse_errors_name_the_line) {
 }
 
 NXTEST(failed_parse_does_not_touch_out) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     s.timing.tap_ms = 123;
     std::string err;
@@ -638,6 +671,7 @@ NXTEST(failed_parse_does_not_touch_out) {
 }
 
 NXTEST(unknown_keys_and_sections_warn) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -651,6 +685,7 @@ NXTEST(unknown_keys_and_sections_warn) {
 // ---- writing and the round trip ----------------------------------------------------------------------------------------------
 
 NXTEST(format_has_sections_in_order) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = format_settings(default_settings());
     const char* order[] = {"[mouse]", "[pad]", "[timing]", "[display]", "[hdr]", "[upscale]", "[latency]", "[prompts]", "[switch]", "[bindings.all]", "[bindings.gameplay]",
                            "[bindings.morph]", "[bindings.map]", "[bindings.menu]", "[bindings.scan]"};
@@ -664,6 +699,7 @@ NXTEST(format_has_sections_in_order) {
 }
 
 NXTEST(format_parse_round_trip_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings d = default_settings();
     const std::string text = format_settings(d);
     Settings r;
@@ -674,6 +710,7 @@ NXTEST(format_parse_round_trip_defaults) {
 }
 
 NXTEST(format_parse_round_trip_modified) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s = default_settings();
     s.mouse.invert_y = true;
     s.mouse.yaw_rad = 0.00125;   // values that %.9g writes exactly
@@ -749,6 +786,7 @@ NXTEST(format_parse_round_trip_modified) {
 }
 
 NXTEST(empty_bindings_stay_empty_after_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s = default_settings();
     s.bindings.clear();
     const std::string text = format_settings(s);
@@ -762,6 +800,7 @@ NXTEST(empty_bindings_stay_empty_after_round_trip) {
 // ---- load and save -----------------------------------------------------------------------------------------------------------
 
 NXTEST(load_missing_file_gives_defaults_and_no_error) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::filesystem::path dir = fresh_test_dir("missing");
     const std::string path = (dir / "settings.ini").string();
     Settings s;
@@ -774,6 +813,7 @@ NXTEST(load_missing_file_gives_defaults_and_no_error) {
 }
 
 NXTEST(load_invalid_file_gives_defaults_and_error) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::filesystem::path dir = fresh_test_dir("invalid");
     const std::string path = (dir / "settings.ini").string();
     write_file(dir / "settings.ini", "[mouse]\nyaw = nope\n");
@@ -789,6 +829,7 @@ NXTEST(load_invalid_file_gives_defaults_and_error) {
 }
 
 NXTEST(save_then_load_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::filesystem::path dir = fresh_test_dir("roundtrip");
     const std::string path = (dir / "sub" / "settings.ini").string();   // the folder does not exist yet: save creates it
 
@@ -820,6 +861,7 @@ NXTEST(save_then_load_round_trip) {
 // ---- S10 display options -----------------------------------------------------------------------------------------------------
 
 NXTEST(display_render_keys_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     const DisplaySettings d = default_settings().display;
     CHECK_EQ(d.render_scale, 100);
     CHECK_EQ(d.render_width, 0);
@@ -836,6 +878,7 @@ NXTEST(display_render_keys_defaults) {
 }
 
 NXTEST(default_settings_text_has_display_keys) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = default_settings_text();
     const char* lines[] = {"render_scale = 100", "render_width = 0",  "render_height = 0", "aspect = 0",        "fov_offset = 0",
                            "dynamic_resolution = 0", "anisotropy = 0", "lod_bias = 0",    "bloom = 1",       "chromatic_aberration = 1",
@@ -849,6 +892,7 @@ NXTEST(default_settings_text_has_display_keys) {
 }
 
 NXTEST(display_render_keys_parse) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     const char* text =
@@ -871,6 +915,7 @@ NXTEST(display_render_keys_parse) {
 }
 
 NXTEST(display_render_keys_range_errors) {
+    const nxrt::play::test::PlayTestGame play_game;
     const struct {
         const char* text;
         const char* expect;
@@ -902,6 +947,7 @@ NXTEST(display_render_keys_range_errors) {
 }
 
 NXTEST(display_render_keys_boundaries_accepted) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[display]\nrender_scale = 25\nrender_width = 320\nrender_height = 16384\naspect = 1.0\nfov_offset = -30\n"
@@ -934,6 +980,7 @@ NXTEST(display_render_keys_boundaries_accepted) {
 }
 
 NXTEST(display_render_keys_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s = default_settings();
     s.display.render_scale = 150;
     s.display.render_width = 1600;
@@ -995,6 +1042,7 @@ const char* const kExtrasFile =
 }  // namespace
 
 NXTEST(extras_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings d = default_settings();
     CHECK(d.extras.hdr.mode == HdrMode::Auto);
     CHECK(d.extras.hdr.format == HdrFormat::Auto);
@@ -1019,6 +1067,7 @@ NXTEST(extras_defaults) {
 }
 
 NXTEST(extras_full_file_every_key) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -1041,6 +1090,7 @@ NXTEST(extras_full_file_every_key) {
 }
 
 NXTEST(extras_numbers_range_and_auto) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* text;
         const char* expect;   // the start of err
@@ -1083,14 +1133,15 @@ NXTEST(extras_numbers_range_and_auto) {
 }
 
 NXTEST(extras_bad_enum_words_name_the_allowed_ones) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* text;
         const char* expect;
     };
     const Case bad[] = {
-        {"[hdr]\nmode = maybe\n", "line 2: mode must be off, auto or on, got 'maybe'"},
+        {"[hdr]\nmode = maybe\n", "line 2: mode must be off, auto, on or native, got 'maybe'"},
         {"[hdr]\nformat = hdr12\n", "line 2: format must be auto, hdr10 or scrgb, got 'hdr12'"},
-        {"[upscale]\nmode = taa\n", "line 2: mode must be off, fsr1, spatial, fsr3, dlss or xess, got 'taa'"},
+        {"[upscale]\nmode = taa\n", "line 2: mode must be off, fsr1, spatial, fsr3, dlss, xess, nis or dlaa, got 'taa'"},
         {"[latency]\nmode = fast\n", "line 2: mode must be off, auto, on or boost, got 'fast'"},
         {"[latency]\nlog_timings = maybe\n", "line 2: log_timings must be 1/0"},
         {"[upscale]\nframe_generation = x\n", "line 2: frame_generation must be 1/0"},
@@ -1104,6 +1155,7 @@ NXTEST(extras_bad_enum_words_name_the_allowed_ones) {
 }
 
 NXTEST(extras_upscale_modes_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* word;      // as written in the file
         UpscaleMode want;
@@ -1128,6 +1180,7 @@ NXTEST(extras_upscale_modes_round_trip) {
 }
 
 NXTEST(extras_unknown_keys_warn_not_fail) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -1139,6 +1192,7 @@ NXTEST(extras_unknown_keys_warn_not_fail) {
 }
 
 NXTEST(extras_keys_and_words_case_insensitive) {
+    const nxrt::play::test::PlayTestGame play_game;
     const char* text =
         "[HDR]\nMODE = ON\nFormat = ScRGB\nPeak_Nits = 1000\nPaper_White_Nits = 0\nHighlight_Boost = 0.5\n"
         "[Upscale]\nMode = FSR1\nSharpness = 0.25\nFrame_Generation = YES\n"
@@ -1161,21 +1215,23 @@ NXTEST(extras_keys_and_words_case_insensitive) {
 }
 
 NXTEST(extras_defaults_are_written) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = format_settings(default_settings());
     CHECK(text.find("[hdr]\nmode = auto\nformat = auto\npeak_nits = 0\npaper_white_nits = 0\nhighlight_boost = 1\n") != std::string::npos);
-    CHECK(text.find("[upscale]\nmode = off\nsharpness = 0.8\nscene_scale = 100\nfsr_dll = \ndlss_dll = \nxess_dll = \nframe_generation = 0\n") !=
+    CHECK(text.find("[upscale]\nmode = off\nquality = quality\nsharpness = 0.8\nscene_scale = 100\nfsr_dll = \ndlss_dll = \nxess_dll = \nframe_generation = 0\n") !=
           std::string::npos);
     CHECK(text.find("[latency]\nmode = off\nframes_ahead = 1\nlog_timings = 0\n") != std::string::npos);
 }
 
 NXTEST(extras_full_file_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings(kExtrasFile, &s, &err), err);
     const std::string text = format_settings(s);
     CHECK(text.find("[hdr]\nmode = on\nformat = hdr10\npeak_nits = 1000\npaper_white_nits = 250\nhighlight_boost = 1.5\n") !=
           std::string::npos);
-    CHECK(text.find("[upscale]\nmode = fsr1\nsharpness = 0.5\nscene_scale = 100\nfsr_dll = C:\\Tools\\amd_fidelityfx_vk.dll\n") != std::string::npos);
+    CHECK(text.find("[upscale]\nmode = fsr1\nquality = quality\nsharpness = 0.5\nscene_scale = 100\nfsr_dll = C:\\Tools\\amd_fidelityfx_vk.dll\n") != std::string::npos);
     CHECK(text.find("xess_dll = \nframe_generation = 1\n") != std::string::npos);
     CHECK(text.find("[latency]\nmode = boost\nframes_ahead = 2\nlog_timings = 1\n") != std::string::npos);
 
@@ -1186,6 +1242,7 @@ NXTEST(extras_full_file_round_trip) {
 }
 
 NXTEST(extras_fsr3_and_dlss_paths_survive_a_save) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s = default_settings();
     s.extras.upscale.mode = UpscaleMode::Fsr3;
     s.extras.upscale.frame_generation = true;
@@ -1202,6 +1259,7 @@ NXTEST(extras_fsr3_and_dlss_paths_survive_a_save) {
 }
 
 NXTEST(extras_numbers_round_trip_exactly) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s = default_settings();
     s.extras.hdr.mode = HdrMode::On;
     s.extras.hdr.format = HdrFormat::ScRgb;
@@ -1224,6 +1282,7 @@ NXTEST(extras_numbers_round_trip_exactly) {
 }
 
 NXTEST(extras_sections_written_after_display) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = format_settings(default_settings());
     const size_t display = text.find("[display]");
     const size_t hdr = text.find("[hdr]");
@@ -1242,12 +1301,14 @@ NXTEST(extras_sections_written_after_display) {
 // ---- button prompts ----------------------------------------------------------------------------------------------------------------
 
 NXTEST(prompt_style_default_is_auto) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     CHECK(s.prompts.style == PromptStyle::Auto);
     CHECK(default_settings().prompts.style == PromptStyle::Auto);
 }
 
 NXTEST(prompt_style_names) {
+    const nxrt::play::test::PlayTestGame play_game;
     const char* names[] = {"switch", "xbox", "playstation", "keyboard", "auto"};
     for (int i = 0; i < kPromptStyleCount; ++i) {
         const PromptStyle st = static_cast<PromptStyle>(i);
@@ -1259,6 +1320,7 @@ NXTEST(prompt_style_names) {
 }
 
 NXTEST(prompt_style_parses_aliases_and_case) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* text;
         PromptStyle want;
@@ -1281,6 +1343,7 @@ NXTEST(prompt_style_parses_aliases_and_case) {
 }
 
 NXTEST(prompt_style_settings_key_parses) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[prompts]\nstyle = PS5\n", &s, &err), err);
@@ -1288,6 +1351,7 @@ NXTEST(prompt_style_settings_key_parses) {
 }
 
 NXTEST(prompt_style_bad_value_names_the_key) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     CHECK(!parse_settings("[prompts]\nstyle = banana\n", &s, &err));
@@ -1296,6 +1360,7 @@ NXTEST(prompt_style_bad_value_names_the_key) {
 }
 
 NXTEST(prompt_style_round_trip_every_style) {
+    const nxrt::play::test::PlayTestGame play_game;
     for (int i = 0; i < kPromptStyleCount; ++i) {
         Settings s = default_settings();
         s.prompts.style = static_cast<PromptStyle>(i);
@@ -1310,6 +1375,7 @@ NXTEST(prompt_style_round_trip_every_style) {
 }
 
 NXTEST(default_settings_text_has_prompts_section) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = default_settings_text();
     const size_t at = text.find("[prompts]");
     REQUIRE_MSG(at != std::string::npos, "[prompts] section");
@@ -1319,6 +1385,7 @@ NXTEST(default_settings_text_has_prompts_section) {
 // ---- frame rate counter and pad remap ----------------------------------------------------------------------------------------------
 
 NXTEST(fps_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings s = default_settings();
     CHECK(!s.fps.show);
     CHECK(s.fps.key == key_id(kScancodeF2));
@@ -1329,6 +1396,7 @@ NXTEST(fps_defaults) {
 }
 
 NXTEST(padmap_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings s = default_settings();
     for (int i = 0; i < kPadSrcCount; ++i) {
         CHECK(s.pad.remap[i] == kPadDefault);
@@ -1336,6 +1404,7 @@ NXTEST(padmap_defaults) {
 }
 
 NXTEST(default_settings_text_fps_and_padmap_match_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> warnings;
@@ -1352,6 +1421,7 @@ NXTEST(default_settings_text_fps_and_padmap_match_defaults) {
 }
 
 NXTEST(format_writes_fps_and_padmap_sections) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = format_settings(default_settings());
     CHECK(text.find("\n[fps]\n") != std::string::npos);
     CHECK(text.find("\n[padmap]\n") != std::string::npos);
@@ -1359,6 +1429,7 @@ NXTEST(format_writes_fps_and_padmap_sections) {
 }
 
 NXTEST(fps_and_padmap_file_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string file_text = "[fps]\nshow = 1\nkey = Tab\ncorner = bottom_right\ndetail = 2\nin_screenshots = 1\n"
                                   "[padmap]\neast = A\nleft_trigger = ZL+L\nstart = none\n";
     Settings s;
@@ -1384,6 +1455,7 @@ NXTEST(fps_and_padmap_file_round_trip) {
 }
 
 NXTEST(fps_key_and_corner_spellings) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[fps]\nkey = f2\ncorner = Top-Right\n", &s, &err), err);
@@ -1392,6 +1464,7 @@ NXTEST(fps_key_and_corner_spellings) {
 }
 
 NXTEST(fps_and_padmap_bad_values_are_errors) {
+    const nxrt::play::test::PlayTestGame play_game;
     struct Case {
         const char* text;
         const char* names;   // a word the message must contain
@@ -1414,6 +1487,7 @@ NXTEST(fps_and_padmap_bad_values_are_errors) {
 }
 
 NXTEST(padmap_unknown_button_warns_only) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -1426,6 +1500,7 @@ NXTEST(padmap_unknown_button_warns_only) {
 }
 
 NXTEST(file_without_fps_and_padmap_keeps_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[mouse]\nyaw = 0.001\n[timing]\ntap_ms = 150\n", &s, &err), err);
@@ -1442,6 +1517,7 @@ NXTEST(file_without_fps_and_padmap_keeps_defaults) {
 // ---- factory-defaults revision ([meta] defaults_rev, kDefaultAdditions in play_config.cpp) --------------------------------------------
 
 NXTEST(old_file_gets_new_factory_binding_on_map) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[bindings.map]\nReturn = confirm\n", &s, &err), err);
@@ -1453,6 +1529,7 @@ NXTEST(old_file_gets_new_factory_binding_on_map) {
 }
 
 NXTEST(old_file_keeps_users_own_key_on_map) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[bindings.map]\nX = back\n", &s, &err), err);
@@ -1462,6 +1539,7 @@ NXTEST(old_file_keeps_users_own_key_on_map) {
 }
 
 NXTEST(file_at_current_revision_is_not_migrated) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[meta]\ndefaults_rev = 3\n[bindings.map]\nReturn = confirm\n", &s, &err), err);
@@ -1471,6 +1549,7 @@ NXTEST(file_at_current_revision_is_not_migrated) {
 }
 
 NXTEST(format_round_trip_keeps_defaults_rev) {
+    const nxrt::play::test::PlayTestGame play_game;
     const Settings s = default_settings();
     const std::string text = format_settings(s);
     CHECK(text.find("[meta]\ndefaults_rev = 3\n") != std::string::npos);
@@ -1483,6 +1562,7 @@ NXTEST(format_round_trip_keeps_defaults_rev) {
 }
 
 NXTEST(factory_text_is_at_current_revision) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings(default_settings_text(), &s, &err), err);
@@ -1493,6 +1573,7 @@ NXTEST(factory_text_is_at_current_revision) {
 }
 
 NXTEST(meta_defaults_rev_is_known_and_unknown_meta_key_warns) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -1505,6 +1586,7 @@ NXTEST(meta_defaults_rev_is_known_and_unknown_meta_key_warns) {
 }
 
 NXTEST(file_without_bindings_gets_factory_bindings_at_current_revision) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[mouse]\nyaw = 0.001\n", &s, &err), err);
@@ -1516,6 +1598,7 @@ NXTEST(file_without_bindings_gets_factory_bindings_at_current_revision) {
 // ---- controller sticks: right_deadzone, invert_y, look_sens ([pad]) ----------------------------------------------------------------
 
 NXTEST(pad_stick_keys_defaults) {
+    const nxrt::play::test::PlayTestGame play_game;
     const PadSettings d = default_settings().pad;
     CHECK(near(d.stick_deadzone, 0.10));
     CHECK(near(d.right_deadzone, 0.10));
@@ -1525,6 +1608,7 @@ NXTEST(pad_stick_keys_defaults) {
 }
 
 NXTEST(pad_stick_keys_round_trip) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s = default_settings();
     s.pad.stick_deadzone = 0.2;
     s.pad.right_deadzone = 0.25;
@@ -1546,6 +1630,7 @@ NXTEST(pad_stick_keys_round_trip) {
 }
 
 NXTEST(pad_stick_keys_written_in_order) {
+    const nxrt::play::test::PlayTestGame play_game;
     const std::string text = format_settings(default_settings());
     const size_t pad_at = text.find("\n[pad]\n");
     REQUIRE_MSG(pad_at != std::string::npos, "[pad] section");
@@ -1560,6 +1645,7 @@ NXTEST(pad_stick_keys_written_in_order) {
 }
 
 NXTEST(pad_stick_keys_range_errors) {
+    const nxrt::play::test::PlayTestGame play_game;
     const struct {
         const char* text;
         const char* expect;
@@ -1583,6 +1669,7 @@ NXTEST(pad_stick_keys_range_errors) {
 }
 
 NXTEST(pad_stick_keys_boundaries_accepted) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[pad]\nright_deadzone = 0\nlook_sens = 0.25\ninvert_y = yes\n", &s, &err), err);
@@ -1596,6 +1683,7 @@ NXTEST(pad_stick_keys_boundaries_accepted) {
 }
 
 NXTEST(pad_right_deadzone_follows_old_deadzone) {
+    const nxrt::play::test::PlayTestGame play_game;
     // A file with deadzone but no right_deadzone was written before the right stick had its own dead zone: the right stick takes deadzone's value.
     Settings s;
     std::string err;
@@ -1612,6 +1700,7 @@ NXTEST(pad_right_deadzone_follows_old_deadzone) {
 }
 
 NXTEST(pad_right_deadzone_explicit_wins_over_deadzone) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[pad]\ndeadzone = 0.3\nright_deadzone = 0.05\n", &s, &err), err);
@@ -1624,6 +1713,7 @@ NXTEST(pad_right_deadzone_explicit_wins_over_deadzone) {
 }
 
 NXTEST(pad_right_deadzone_default_kept_without_pad_deadzone) {
+    const nxrt::play::test::PlayTestGame play_game;
     // No deadzone in [pad]: the right dead zone keeps its default.
     Settings s;
     std::string err;
@@ -1634,6 +1724,7 @@ NXTEST(pad_right_deadzone_default_kept_without_pad_deadzone) {
 // ---- the alternate body's camera (mpr: the morph ball camera, S48): [mouse] alt_camera, alt_sensitivity ------------------------------------
 
 NXTEST(alt_camera_defaults_on) {
+    const nxrt::play::test::PlayTestGame play_game;
     const MouseSettings d = default_settings().mouse;
     CHECK(d.alt_camera);
     CHECK(d.alt_yaw_rad == d.alt_pitch_rad);
@@ -1644,6 +1735,7 @@ NXTEST(alt_camera_defaults_on) {
 }
 
 NXTEST(alt_camera_off_parses_and_round_trips) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings(std::string("[mouse]\n") + key_alt_camera() + " = 0\n", &s, &err), err);
@@ -1658,6 +1750,7 @@ NXTEST(alt_camera_off_parses_and_round_trips) {
 }
 
 NXTEST(alt_sensitivity_is_source_scale_for_both) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings(std::string("[mouse]\n") + key_alt_sens() + " = 3.5\n", &s, &err), err);
@@ -1675,6 +1768,7 @@ NXTEST(alt_sensitivity_is_source_scale_for_both) {
 }
 
 NXTEST(alt_sensitivity_keeps_a_separate_vertical) {
+    const nxrt::play::test::PlayTestGame play_game;
     // the older radians-per-count keys still read; a vertical of its own is written after the pair and survives the round trip
     Settings s;
     std::string err;
@@ -1693,7 +1787,8 @@ NXTEST(alt_sensitivity_keeps_a_separate_vertical) {
 }
 
 NXTEST(ball_camera_keys_with_the_mpr_vocabulary) {
-    // the test executable registers Metroid Prime Remastered: its words for the alternate body's camera keys
+    const nxrt::play::test::PlayTestGame play_game;
+    // the play test game (play_test_game.h) has its own words for the alternate body's camera keys
     REQUIRE(std::string(key_alt_camera()) == "ball_camera");
     REQUIRE(std::string(key_alt_sens()) == "ball_sensitivity");
     REQUIRE(std::string(key_alt_yaw()) == "morph_yaw");
@@ -1719,6 +1814,7 @@ NXTEST(ball_camera_keys_with_the_mpr_vocabulary) {
 }
 
 NXTEST(ball_sensitivity_range) {
+    const nxrt::play::test::PlayTestGame play_game;
     Settings s;
     std::string err;
     for (const char* bad : {"0", "-1", "0.05", "25", "1e9"})

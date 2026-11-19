@@ -16,12 +16,14 @@
 #include <string>
 #include <vector>
 
+#include "nxrt/game.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
 #include "nvn_abi.h"
 #include "nvn_gpu.h"
+#include "nvn_gpu_internal.h"
 #include "project_root.h"
 #include "nvn_shaders.h"
 #include "test_framework.h"
@@ -371,7 +373,12 @@ public:
         uint32_t w = 0, h = 0;
         rend->capture_next_frame(px, &w, &h);
         api.nvnQueuePresentTexture(queue.get(), window.get(), idx);
-        return w == width && h == height && !px->empty();
+        // The present runs on the render thread, one present behind the caller ([nvn] present_ahead = 1): an empty call queued behind it
+        // returns once the frame, and with it the capture, is done.
+        nxrt::nvn::be::gpu::run_on_render_thread([] {});
+        if (w == width && h == height && !px->empty()) return true;
+        std::printf("    capture: %ux%u, %zu bytes (want %ux%u)\n", w, h, px->size(), width, height);
+        return false;
     }
 
     nxrt::gfx::ValidationStats validation() const { return dev->validation_stats(); }
