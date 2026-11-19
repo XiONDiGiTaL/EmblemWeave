@@ -75,9 +75,6 @@ const ImVec4 kRestartTag(0.86f, 0.62f, 0.34f, 0.85f);
 const ImVec4 kGreen(0.55f, 0.86f, 0.55f, 1.0f);
 const ImVec4 kRed(1.0f, 0.42f, 0.38f, 1.0f);
 const ImVec4 kAccent(0.42f, 0.78f, 0.96f, 1.0f);
-const ImVec4 kInk(0.93f, 0.94f, 0.96f, 1.0f);
-const ImVec4 kBody(0.74f, 0.77f, 0.82f, 1.0f);
-const ImVec4 kMuted(0.53f, 0.57f, 0.63f, 1.0f);
 const ImVec4 kAccentDark(0.15f, 0.34f, 0.70f, 1.0f);
 
 enum Tab { kTabDisplay, kTabGraphics, kTabFrameRate, kTabAudio, kTabControls, kTabGame, kTabDebug, kTabCount };
@@ -255,39 +252,6 @@ void pill(const char* text, const ImVec4& tint) {
     ImGui::Dummy(ImVec2(text_size.x + pad.x * 2, height + px(1)));
 }
 
-void draw_header(const play::LiveStatus& live) {
-    const float width = ImGui::GetContentRegionAvail().x;
-    const float height = px(58);
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ImVec4(0.055f, 0.071f, 0.094f, 1.0f)), px(12));
-    dl->AddRect(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.08f)), px(12), 0, 1.0f);
-
-    const float mark = px(30);
-    const ImVec2 mark_at(p.x + px(14), p.y + (height - mark) * 0.5f);
-    dl->AddRectFilled(mark_at, ImVec2(mark_at.x + mark, mark_at.y + mark), ImGui::GetColorU32(kAccentDark), px(9));
-    const char* logo = "EW";
-    const ImVec2 logo_size = ImGui::GetFont()->CalcTextSizeA(px(11), FLT_MAX, 0.0f, logo);
-    dl->AddText(ImGui::GetFont(), px(11), ImVec2(mark_at.x + (mark - logo_size.x) * 0.5f, mark_at.y + (mark - logo_size.y) * 0.5f),
-                IM_COL32(255, 255, 255, 255), logo);
-
-    dl->AddText(ImGui::GetFont(), px(18), ImVec2(p.x + px(56), p.y + px(11)), ImGui::GetColorU32(kInk), tr("Settings"));
-    dl->AddText(ImGui::GetFont(), px(10.5f), ImVec2(p.x + px(57), p.y + px(34)), ImGui::GetColorU32(kMuted), tr("Fire Emblem: Fortune's Weave"));
-
-    const float small = px(10.5f);
-    char fps[48];
-    std::snprintf(fps, sizeof fps, "%.0f FPS", live.fps);
-    const ImVec2 fps_size = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0.0f, fps);
-    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - fps_size.x, p.y + px(13)), ImGui::GetColorU32(kBody), fps);
-    const char* hint = tr("L / R tabs   A select   B close");
-    const ImVec2 hint_size = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0.0f, hint);
-    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - hint_size.x, p.y + px(34)), ImGui::GetColorU32(kMuted), hint);
-    dl->AddRectFilled(ImVec2(p.x + px(14), p.y + height - px(2)), ImVec2(p.x + width - px(14), p.y + height - px(1)),
-                      ImGui::GetColorU32(kAccent), px(1));
-    ImGui::Dummy(ImVec2(0.0f, height));
-    ImGui::Spacing();
-}
-
 void notify(Menu& m, const std::string& text, bool err = false) {
     m.notice = text;
     m.notice_err = err;
@@ -365,7 +329,7 @@ void row(Menu& m, const char* label, When when, const char* help) {
     ImGui::TextUnformatted(tr(label));
     if (when == When::Restart) {
         ImGui::SameLine();
-        pill(tr("restart"), kRestartTag);
+        ImGui::TextColored(kRestartTag, "%s", tr("restart"));
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("Applies on restart: the game reads this once, when it starts."));
     }
     ImGui::TableSetColumnIndex(1);
@@ -1801,7 +1765,12 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
     if (opened) ImGui::SetNextWindowFocus();
     const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("##fefw_menu", nullptr, wf)) {
-        draw_header(live);
+        ImGui::TextColored(kAccent, "%s", tr("Fire Emblem: Fortune's Weave"));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", tr(" settings"));
+        const char* hint = "L / R tabs   A select   B close";
+        ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(hint).x);
+        ImGui::TextDisabled("%s", tr(hint));
 
         m.help.clear();
         const float help_h = ImGui::GetTextLineHeightWithSpacing() * 2.2f;

@@ -1384,7 +1384,7 @@ void ShaderCache::start_preload() {
             pos = nl + 1;
         }
     }
-    const int64_t threads = std::clamp<int64_t>(nxrt::config_get_int("nvn", "shader_preload_threads", 4), 0, 16);
+    const int64_t threads = std::clamp<int64_t>(nxrt::config_get_int("nvn", "shader_preload_threads", 6), 0, 16);
     pre_budget_ = static_cast<size_t>(std::max<int64_t>(64, nxrt::config_get_int("nvn", "shader_preload_mb", 1024))) << 20;
     // New lines of the order file are appended every few seconds by their own thread: a batch held until it was full (77 shaders) or until a
     // shutdown that a closed window never runs was lost, and the next start preloaded none of those shaders.

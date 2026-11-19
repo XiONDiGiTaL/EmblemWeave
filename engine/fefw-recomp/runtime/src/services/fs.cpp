@@ -476,7 +476,7 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     fs::RomfsEdits edits;
     edits.wants = &modapi::file_edit_wanted;
     edits.edit = &modapi::file_edit_run;
-    if (!img->build(dir, &err, overlays, &edits)) {
+    if (!img->build(dir, &err, overlays, modapi::file_edits_close() ? &edits : nullptr)) {
         NXLOG_E("fs", "RomFS folder '%s' cannot be served: %s (set [fs] romfs)", dir.c_str(), err.c_str());
         st().rom_failed = true;
         return nullptr;

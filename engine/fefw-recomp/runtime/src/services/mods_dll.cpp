@@ -121,9 +121,9 @@ uint32_t track(uint32_t id) {
 }
 
 // ---- the sites main was lifted with ---------------------------------------------------------------------------------------------------
-// The game build writes the site list main was lifted with next to the exe, as <exe>.sites (fefw.sites): game-build/fefw/CMakeLists.txt
-// copies the list the libraries were lifted with (recomp/games/fefw/CMakeLists.txt FEFW_SITES: main.sites, plus the mods' sites when
-// the launcher merged them). Without the file the list is unknown: hooks are not checked (a midhook only by the "is a lifted function" test).
+// Whoever builds fefw.exe writes the site list main was lifted with next to it, as <exe>.sites: Set up (fefw_build.py
+// write_lifted_sites, with an @nsobid line) or the developer build (game-build/fefw/CMakeLists.txt, a copy of the list the libraries
+// were lifted with). Without the file the list is unknown: hooks are not checked (a midhook only by the "is a lifted function" test).
 struct SiteList {
     bool known = false;
     std::string bid;                                 // upper-case hex, "" when the file has no @nsobid line
@@ -167,7 +167,7 @@ const SiteList& lifted_sites() {
     return list;
 }
 
-// A main.sites build ID against the list's: a prefix of it, the rest zeros (as Atmosphere matches build IDs).
+// A main.sites build ID against the list's: a prefix of it, the rest zeros (as Set up's bid_matches).
 bool same_build(const std::string& mod_bid, const std::string& list_bid) {
     if (list_bid.empty()) return true;               // a developer build's list: assume the same game build
     std::string full = list_bid;
@@ -190,7 +190,7 @@ void check_hook(const char* api_fn, const char* kind, uint64_t addr) {
     if (site_ok(kind, addr)) return;
     const Mod* m = st().in_init;
     NXLOG_W(kTag, "%s: %s(0x%llx): this build has no %s site there, the hook will never run (a mod lists its sites in "
-                  "exefs/*.sites; the game build lifts them in)", m ? m->name.c_str() : "a code mod", api_fn,
+                  "exefs/*.sites; Set up builds them in)", m ? m->name.c_str() : "a code mod", api_fn,
             static_cast<unsigned long long>(addr), kind);
 }
 
@@ -584,10 +584,10 @@ void load_dll_mods(uint64_t base, uint64_t frame_update) {
         if (mod.exefs.empty()) continue;
         const int missing = sites_missing(u8(std::filesystem::u8path(mod.exefs).parent_path()));
         if (missing <= 0) continue;
-        NXLOG_W(kTag, "%s: %d of its hook sites (exefs/*.sites) are not in this build: its hooks will not run. Build the game again.",
+        NXLOG_W(kTag, "%s: %d of its hook sites (exefs/*.sites) are not in this build: its hooks will not run. Run Set up.",
                 mod.name.c_str(), missing);
         std::lock_guard<std::mutex> lk(st().mu);
-        st().notices.push_back(mod.name + ": build the game again (its hook sites are not in this build)");
+        st().notices.push_back(mod.name + ": run Set up (its hook sites are not in this build)");
     }
     if (!config_get_bool("fs", "dll_mods", true)) {
         NXLOG_I(kTag, "code mods (exefs/*.dll) are off ([fs] dll_mods = false)");
