@@ -83,7 +83,10 @@ struct Entry {
 
 std::mutex g_mu;
 std::condition_variable g_cv;
-bool g_inited = false, g_enabled = false, g_stop = false, g_lto = false, g_cold = true;
+// g_cold: build the parts of programs the game set but has not drawn with yet. Off by default: those are a guess, and in a session measured on
+// this PC 88% of the parts built that way were never taken by a draw, so the guess cost more processor time than the drawing did. With it off a
+// program's parts are built when a command buffer is recorded with it, which is still a few frames before the draw needs them.
+bool g_inited = false, g_enabled = false, g_stop = false, g_lto = false, g_cold = false;
 std::atomic<bool> g_on{false};
 std::atomic<bool> g_discard{false};
 std::atomic<bool> g_prepare_cache{false};      // shader preparation keeps what it compiled in the pipeline cache file ([nvn] prepare_cache)
@@ -612,11 +615,11 @@ void init_once() {
     g_stop = false;
     g_enabled = config_get_bool("nvn", "gpl", true) && device().features().graphics_pipeline_library;
     g_lto = config_get_bool("nvn", "gpl_lto", false);
-    // [nvn] gpl_cold: true / false, or auto (the default): off on a CPU with 8 hardware threads or fewer, where compiling the parts of every
-    // program the game sets (most are never drawn: 15% bound in a 2026-11-16 log, 12% in EmblemWeave's) takes cores from an area load; on
-    // more threads the spare cores build them ahead and a new program's first draw finds its parts ready.
+    // [nvn] gpl_cold: true / false (the default, see g_cold), or auto: off on a CPU with 8 hardware threads or fewer, where compiling the parts
+    // of every program the game sets (most are never drawn: 15% bound in a 2026-11-16 log, 12% in EmblemWeave's) takes cores from an area load;
+    // on more threads the spare cores build them ahead and a new program's first draw finds its parts ready.
     {
-        const std::string c = config_get_str("nvn", "gpl_cold", "auto");
+        const std::string c = config_get_str("nvn", "gpl_cold", "false");
         const unsigned hwc = std::max(1u, std::thread::hardware_concurrency());
         g_cold = (c == "auto") ? hwc > 8 : !(c == "false" || c == "0" || c == "off");
         NXLOG_I(kTag, "parts of programs not drawn yet: %s ([nvn] gpl_cold = %s%s)", g_cold ? "compiled ahead" : "compiled when a draw needs them",
@@ -634,8 +637,8 @@ void init_once() {
     }
     g_rasters.assign(1, RasterKey{});
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    // a quarter of the hardware threads, 1 to 6 (was a sixth, 1 to 4: 2 threads on an 8-core / 16-thread CPU); they run below normal priority
-    const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 4, 1, 6));
+    // Two part-compile workers by default, not four on a 24-thread laptop; the launcher writes this from Graphics. They run below normal priority.
+    const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 8, 1, 2));
     for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main, false);
     // [nvn] gpl_burst_threads (default 2): extra threads for the urgent jobs only (see worker_main); idle otherwise
     const int64_t burst = std::clamp<int64_t>(config_get_int("nvn", "gpl_burst_threads", 2), 0, 8);
