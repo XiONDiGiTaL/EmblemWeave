@@ -42,6 +42,7 @@ public:
     bool visible() const;
     void toggle();
     int toggle_scancode() const;             // SDL scancode of the toggle key
+    int mods_scancode() const;               // SDL scancode of the Mods window's key ([gfx] mods_key), SDL_SCANCODE_UNKNOWN = none
     void set_toggle_scancode(int sc);
     // The on-screen keyboard (the software keyboard applet's question, services_api.h swkbdui): drawn over the game whenever a question is
     // open, menu or not (the menu is not drawn meanwhile). While it is up it takes the keyboard, the mouse and the pad (handle_event returns
