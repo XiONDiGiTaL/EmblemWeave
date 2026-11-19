@@ -5,7 +5,7 @@
     python -I tools/build/fefw_build.py --check --game <install folder> [--cpu V]
 
 --cpu picks the build for the processor (CPU_VARIANTS): fma (FMA3 + AVX, the default and faster one) or compat (no FMA3: Sandy
-Bridge, Ivy Bridge, Xeon E5 v1/v2, AMD Bulldozer, ...; issue 33). auto (the default; the launcher passes the one it detected) asks the
+Bridge, Ivy Bridge, Xeon E5 v1/v2, AMD Bulldozer, ...; issue 33). auto (the default; EmblemWeave passes the one it detected) asks the
 bundled Zig what this processor has. The variant is part of the build stamp, so a fefw.exe built for the other one is rebuilt.
 
 The package ships no game code. This script
@@ -23,8 +23,8 @@ stays until the new one is linked over it). --check compares <game>/build/done.j
 dump check, well under a second) and prints one JSON line {"current": bool, "reason": text}; exit 0 current, 3 not.
 
 Resumable: a module's lift counts once its marker file is written, an object once it is renamed into place, so a stopped
-build continues where it stopped. A file named <game>/build/cancel stops it (the launcher's Pause).
-Output for the launcher, one per line on stdout:  @progress <phase> <done> <total> <text>  /  @error <text>
+build continues where it stopped. A file named <game>/build/cancel stops it (EmblemWeave's Pause).
+Output for EmblemWeave, one per line on stdout:  @progress <phase> <done> <total> <text>  /  @error <text>
 Exit codes: 0 done, 1 error, 2 cancelled.
 """
 import argparse
@@ -43,7 +43,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RECOMP = os.path.join(HERE, 'recomp')
 SDK = os.path.join(HERE, 'sdk')
 WINDOWS = os.name == 'nt'
-# the same Windows target from either host: on Linux the launcher starts fefw.exe through Wine/Proton
+# the same Windows target from either host: on Linux EmblemWeave starts fefw.exe through Wine/Proton
 ZIG = os.path.join(HERE, 'zig', 'zig.exe' if WINDOWS else 'zig')
 FORMAT = 2          # bump when the build layout or the stamp changes: older builds (partial or done) are then started over
 # the lifter as game-build/scripts/make-release.ps1 ships it: paths under RECOMP, the same in the zip (tools/build/recomp/...)
@@ -72,7 +72,7 @@ EXEFS_FILES = ['main', 'sdk', 'subsdk0', 'subsdk1', 'subsdk2', 'rtld', 'main.npd
 #           Zig links otherwise is not exact), so slower in float-heavy code. SSE4.2 and POPCNT keep rounding (FRINT*) and CNT
 #           inline. Intel Nehalem (2008) and newer, AMD Bulldozer (2011) and newer: Sandy / Ivy Bridge, Xeon E5 v1 / v2 (issue 33).
 # 'needs' is what fefw_rt.dll checks before the first game instruction (fefw_rt_api.h FEFW_CPU_*, the stub passes it on);
-# launcher/src-tauri/src/cpu.rs picks the variant by the same rule (variant_for).
+# EmblemWeave picks the variant by the same rule (variant_for).
 CPU_VARIANTS = {
     'fma': {'mcpu': 'x86_64+cx16+fma', 'needs': 'FEFW_CPU_NEEDS_FMA_BUILD', 'features': ('cx16', 'sse4_2', 'avx', 'fma'), 'link': []},
     'compat': {'mcpu': 'x86_64+cx16+sse4_2+popcnt', 'needs': 'FEFW_CPU_NEEDS_COMPAT_BUILD', 'features': ('cx16', 'sse4_2', 'popcnt'),
@@ -140,7 +140,7 @@ def tree_hash(root, rels):
     return h.hexdigest()
 
 
-# The launcher's SHADER_TRANSLATOR_VERSION (launcher/src-tauri/src/setup.rs): keep the two equal.
+# EmblemWeave keeps the same shader translator version in its setup: keep the two equal.
 SHADER_TRANSLATOR_VERSION = 3
 
 
@@ -152,14 +152,14 @@ def tool_stamp(variant):
             'modules': [list(m) for m in MODULES]}
 
 
-# FEFW_CPU_FORCE_MISSING names (as fefw_rt.dll and the launcher read them) -> Zig's feature names
+# FEFW_CPU_FORCE_MISSING names (as fefw_rt.dll and EmblemWeave read them) -> Zig's feature names
 FORCE_NAMES = {'fma': ('fma',), 'avx': ('avx', 'fma'), 'cx16': ('cx16',), 'sse42': ('sse4_2',), 'sse4.2': ('sse4_2',), 'popcnt': ('popcnt',)}
 
 
 def host_features():
     """This processor's features as the bundled Zig detects them (`zig targets`: .native .cpu .features), or None when that
     cannot be read. Zig leaves AVX and FMA out when the operating system does not save the YMM registers, as the check in
-    fefw_rt.dll does. FEFW_CPU_FORCE_MISSING (a test hook, as for the launcher and fefw_rt.dll) hides features."""
+    fefw_rt.dll does. FEFW_CPU_FORCE_MISSING (a test hook, as for EmblemWeave and fefw_rt.dll) hides features."""
     try:
         out = subprocess.run([ZIG, 'targets'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                              creationflags=CREATE_NO_WINDOW, timeout=120).stdout.decode('utf-8', 'replace')

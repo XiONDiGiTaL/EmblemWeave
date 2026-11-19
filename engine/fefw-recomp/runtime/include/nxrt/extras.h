@@ -86,7 +86,7 @@ struct PictureSettings {
     bool neutral() const { return contrast == 1.0 && saturation == 1.0 && black == 0.0 && gamma == 1.0; }
 };
 // The named presets ([picture] preset): "neutral" and "vivid". False for any other name (*out unchanged).
-inline bool picture_preset(const std::string& name, PictureSettings* out) {   // inline: the launcher's settings code uses it without nxrt_gfx
+inline bool picture_preset(const std::string& name, PictureSettings* out) {   // inline: EmblemWeave's settings code uses it without nxrt_gfx
     if (name == "neutral" || name == "off" || name.empty()) {
         *out = PictureSettings{};
         return true;

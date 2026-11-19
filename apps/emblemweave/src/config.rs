@@ -404,6 +404,10 @@ pub struct Config {
     /// install; an older config is migrated to Advanced in `load` so existing
     /// users keep the interface they already know.
     pub interface_mode: InterfaceMode,
+    /// Hide EmblemWeave when the game starts; the taskbar restores it when the
+    /// player comes back. Off by default, so a new install keeps the launcher
+    /// visible unless the player asks for this.
+    pub minimize_on_play: bool,
     /// Built engine checkouts (as `engine.txt` records them) whose reuse offer was declined. The offer for one folder does not
     /// hide an offer for another, and a declined one stays declined across restarts.
     pub reuse_dismissed: Vec<String>,

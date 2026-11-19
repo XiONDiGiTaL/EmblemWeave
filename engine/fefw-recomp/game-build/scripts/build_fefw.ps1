@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 # A PYTHONPATH or PYTHONHOME left by another Python install is inherited by
 # every Python process this build starts, including the engine's own
 # tools\.venv, and can make it import an extension built for another version
-# (issue #43). The launcher clears them too; a manual build gets the same
+# (issue #43). EmblemWeave clears them too; a manual build gets the same
 # treatment here. They are removed from this process only, never from the PC.
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
 Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue

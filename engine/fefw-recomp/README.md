@@ -26,7 +26,7 @@ software and draws with Vulkan. It is not an emulator.
 - Windowed, borderless or fullscreen
 - Keyboard or any controller, with matching button prompts
 - An in-game settings overlay (**F1**)
-- A launcher that sets everything up from your dump, with nothing else to install
+- EmblemWeave sets everything up from your dump, with nothing else to install
 
 ## Requirements
 
@@ -41,24 +41,15 @@ software and draws with Vulkan. It is not an emulator.
 
 ## Getting started
 
-1. Download `fefw-recomp-<version>-win64.zip` from the [Releases](../../releases) page and extract it to its own folder.
-2. Run `fefw-launcher.exe`.
-3. On **Setup**, choose your dump folder (or **.nup** file) and press **Set up**. The launcher checks your files, builds the game on
-   your PC and prepares the shaders. The first setup takes a while; you can **Pause** it and continue later.
-4. Press **Play**.
+Use EmblemWeave, the launcher at this repository's root. It checks your dump, builds the game on your PC and prepares the shaders;
+the first setup takes a while, and you can pause it and continue later. The engine's old standalone launcher has been removed. For a
+direct source build, see [docs/BUILDING.md](docs/BUILDING.md).
 
-Your saves are in the `save\` folder next to the launcher.
-
-### Linux and Steam Deck
-
-Download `fefw-recomp-<version>-linux-x64.tar.gz` instead, extract it and run `fefw-launcher.AppImage`; the steps are the same. The
-game runs through Proton: Play needs Steam with a Proton installed, [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) (`umu-run`) or Wine, or
-press **Add to Steam** on the Play page and start it from Steam (also in the Steam Deck's Game Mode). After an update, run Set up in
-the launcher (Desktop Mode on a Deck) before playing from Steam.
+Your saves are in the `save\` folder in EmblemWeave's run folder.
 
 ### Settings
 
-The launcher's **Settings** page covers resolution, frame rate, upscaling, window mode, sound and controls. Press **F1** in game for
+EmblemWeave's **Graphics** and **Audio** pages cover resolution, frame rate, upscaling, window mode, sound and controls. Press **F1** in game for
 the overlay. Every option is described in [runtime/docs/CONFIG.md](runtime/docs/CONFIG.md).
 
 ### Game language
@@ -71,7 +62,7 @@ language and uses English when the game has no translation for it. The change ap
 
 NVIDIA's files cannot be shipped here, so DLSS stays off until you add them. Take them from NVIDIA's
 [Streamline SDK](https://github.com/NVIDIAGameWorks/Streamline) (v2.x, the `bin/x64` folder of the release, not the development one) and
-put these four files in a folder named `upscalers\streamline` next to `fefw-launcher.exe`:
+put these four files in a folder named `upscalers\streamline` next to `fefw.exe` in the run folder:
 
 ```
 sl.interposer.dll   sl.common.dll   sl.dlss.dll   nvngx_dlss.dll
@@ -94,7 +85,7 @@ is too old, and the mod's own answer decides. `fefw.log` shows the outcome on it
 
 FSR 3 needs AMD's signed FidelityFX files, which you download from AMD's
 [FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) repository. Put them in `upscalers\fsr` next to
-`fefw-launcher.exe` (create the folder):
+`fefw.exe` in the run folder (create the folder):
 
 ```
 amd_fidelityfx_upscaler_vk.dll   amd_fidelityfx_loader_vk.dll   FSR 3 upscaling (Kits/FidelityFX/signedbin of tag v2.4.0)
@@ -110,7 +101,7 @@ whether the files are found, and can point to another folder. If a file is missi
 ### XeSS (any GPU, best on Intel Arc)
 
 XeSS needs Intel's `libxess.dll`, which you download from `bin/` of the [XeSS SDK 3.0.2](https://github.com/intel/xess/releases/tag/v3.0.2)
-release. Put it in `upscalers\xess` next to `fefw-launcher.exe` (create the folder). It also needs the
+release. Put it in `upscalers\xess` next to `fefw.exe` in the run folder (create the folder). It also needs the
 [Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe). Then choose **Intel XeSS** as the
 Upscaler in **Settings** and restart the game. If the file or the runtime is missing, `fefw.log` says so and the game uses TAAU.
 
@@ -184,14 +175,15 @@ page lists the DLC it found.
 
 ### Mods
 
-RomFS mods go in the `mods\` folder next to the launcher (**Play** > **Open mods folder**), in the layout emulators use:
+RomFS mods go in the `mods\` folder in EmblemWeave's run folder (**Play** > **Open mods folder**), in the layout emulators use:
 `mods\<mod name>\romfs\...`. Files in a mod replace the game's files at the same path. If two mods change the same file, the mod
 whose name sorts last wins, so you can name them `01-...` and `02-...`. Rename a mod to start with `-` or `_` to turn it off. Code
 mods (a DLL and its `.sites` file) are loaded by the runtime. The engine does not apply `exefs/` `.ips` / `.pchtxt` patches at run time, because the game code is compiled ahead of time; EmblemWeave's launcher can instead apply supported patches to its uncompressed copy of `main` before the lift. That launcher support is not in the released 0.1.36 build.
 
 ### Updating to a new release
 
-Extract the new zip to a new folder, copy your `save\` folder (and `mods\`, if you use mods) into it, and run **Set up** again.
+Use EmblemWeave's updater or install a newer release into the same folder; your `save\` and `mods\` folders stay in place. Run
+**Set up** again only if the engine sources changed.
 
 ## Troubleshooting
 
@@ -199,7 +191,7 @@ Extract the new zip to a new folder, copy your `save\` folder (and `mods\`, if y
   base game.
 - **Setup stopped or failed**: press **Set up** again to continue where it stopped. **Open full log** on the Setup page shows what
   went wrong.
-- **The game closes or freezes**: look at `fefw.log` in the launcher's folder, and update your GPU driver.
+- **The game closes or freezes**: look at `fefw.log` in EmblemWeave's run folder, and update your GPU driver.
 
 ## Reporting problems
 
@@ -216,8 +208,7 @@ This project stands on the work of others. Thank you.
 
 - [nxrecomp](https://github.com/drakolordx7/nxrecomp) by drakolordx7: the recompiler this is built on.
 - [pokopia-recomp](https://github.com/drakolordx7/pokopia-recomp) (drakolordx7) and [featureJosh/pokopia-recomp](https://github.com/featureJosh/pokopia-recomp)
-  (featureJosh): the runtime, tools and launcher this project started from (GPL-3.0).
-- [drakolordx7/switch2-recomp](https://github.com/drakolordx7/switch2-recomp): the launcher design this launcher follows.
+  (featureJosh): the runtime and tools this project started from (GPL-3.0).
 - [nxnative-penis6](https://git.eden-emu.dev/penis6/nxnative-penis6) by seedds (MIT): the movie decoder front end, its dav1d copy and
   several hardware facts (notices in `runtime/THIRD_PARTY_NOTICES.md`).
 - [metrist38/fefw-recomp](https://github.com/metrist38/fefw-recomp): the frame-rate fixes; the movie decoder's thread priority, automatic
@@ -246,7 +237,7 @@ This project stands on the work of others. Thank you.
 - AMD FidelityFX / FSR SDK headers (MIT), NVIDIA Image Scaling (MIT), NVIDIA Streamline headers (MIT). No AMD or NVIDIA binaries
   are included; FSR and DLSS files are not distributed.
 - [Sascha Willems' Vulkan samples](https://github.com/SaschaWillems/Vulkan) (MIT): the stand-in shader test corpus.
-- [Kenney input prompts](https://kenney.nl/assets/input-prompts) (CC0), DejaVu fonts, [Tauri](https://tauri.app), [Lucide](https://lucide.dev) icons (ISC).
+- [Kenney input prompts](https://kenney.nl/assets/input-prompts) (CC0), DejaVu fonts, [Lucide](https://lucide.dev) icons (ISC).
 
 Licence texts: `runtime/THIRD_PARTY_NOTICES.md`, `recomp/THIRD_PARTY.md`, `tools/*/licenses/`, `tools/textures/THIRD_PARTY.md` and the
 licence files inside `runtime/third_party/`. All of these licences are compatible with the GPL-3.0 this project is released under.

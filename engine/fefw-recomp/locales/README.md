@@ -41,7 +41,7 @@ English source string = Translated string
 
 ## Where the tables live
 
-`make-release.ps1` puts this folder into the release package, and the launcher
+`make-release.ps1` puts this folder into the release package, and EmblemWeave
 copies any `<name>.ini` it finds there into the run folder
 (`<game folder>/locales/`) before the first start and before every Play. A file
 that is already there is left alone, so a translation the player edited or
@@ -60,23 +60,8 @@ the table out of the package over the one in the run folder:
 Delete the file instead if the player's own copy is the one to keep. Both the
 package copy and the run-folder copy are plain text, so a local edit can be
 merged by hand before it is dropped in. The same rule holds for a table the
-player wrote themselves: it lives in the run folder, and the launcher never
+player wrote themselves: it lives in the run folder, and EmblemWeave never
 touches it.
-
-## Two kinds of language packs
-
-The project has two independent language systems; they do not share files:
-
-| | In-game F1 menu | Launcher window |
-| --- | --- | --- |
-| File | `locales/<code>.ini` (next to `fefw_rt.dll`) | `locales/<code>.json` (next to `fefw-launcher.exe`) |
-| Format | `English string = translation` lines | JSON object with `code`, `name`, `strings` |
-| Selected by | `[gfx] ui_language` in `fefw.ini` | `lang` in `launcher.json` |
-| Shipped here | `zh.ini` | `template.json` (an empty starting point) |
-
-`zh.ini` and the launcher's JSON packs are separate features: this folder holds
-the in-game table, and the launcher's packs live in its own install folder. A
-translation of one does not translate the other.
 
 ## Font
 

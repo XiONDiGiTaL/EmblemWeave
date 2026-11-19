@@ -5,7 +5,7 @@
 
 Checks first that main is the build the game's recomp config supports (recomp/games/<game>/config.py, BUILDS), so a different
 version is reported in seconds instead of failing an hour into the lift. The dump is only read. `source.txt` in the output records
-which ExeFS it came from (the launcher uses it to see that the copy is current).
+which ExeFS it came from (EmblemWeave uses it to see that the copy is current).
 """
 import argparse
 import os

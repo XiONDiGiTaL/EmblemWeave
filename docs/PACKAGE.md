@@ -5,6 +5,11 @@ Every release zip is built from this repository by `tools/package_release.ps1` o
 itself runs (`cargo build`, and `dotnet publish` for the shader translator). The same script still works locally for a
 dry run.
 
+Before it builds anything, the package script and the release workflow run `tools/check_release.py`. It fails unless
+`Cargo.toml`, `docs/release.json`, the download button, the README's current-release line and the changelog index all
+name the same version. The version bump and the site stamp are therefore checked together instead of being discovered
+after the zip is published.
+
 ```
 EmblemWeave-vX.Y.Z-windows-x64.zip
 ├── EmblemWeave.exe        the launcher (Rust, Release build) - this is the program you run
@@ -38,7 +43,6 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 | `game/`, `work/` | Your dump and everything generated from it. Never shipped, never uploaded. |
 | `build/`, any `*.obj`, `*.pdb`, `*.lib`, `*.exe` under `engine/` | Build output. The only executable in the zip is `EmblemWeave.exe` and the translator above. |
 | `tools/textures/third_party/`, `tools/shaders/third_party/`, `work/refs/` (not `runtime/third_party/`, which the build needs) | Fetched from their upstreams during **Build the game**, pinned by URL and hash in `runtime/cmake/gfx_deps.cmake` and `tools/textures/scripts/fetch_third_party.ps1`. |
-| `launcher/` | The engine's own Tauri launcher. EmblemWeave has its own launcher and never runs this one; it was only carrying a second updater and 1 MB of dead weight. It remains in the repository. |
 | `node_modules/`, `dist/`, `.git/`, `.github/`, editor folders | Development leftovers, never part of a player package. `.github/` holds the engine's issue templates, which belong to the repository, not to a download. |
 | `.venv/`, `__pycache__/`, `*.pyc`, `.pytest_cache/` | The engine's Python environment and byte-compiled caches, created on your PC by **Build the game**. |
 

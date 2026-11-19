@@ -97,7 +97,7 @@ if(NXRT_BUILD_TESTS)
     # nxrt calls into the graphics shell (switch2.cpp: HDR metadata, tt_core.cpp: screenshot writes), so the tests link it when it is built
     target_link_libraries(nxrt_tests PRIVATE nxrt $<TARGET_NAME_IF_EXISTS:nxrt_gfx>)
     target_compile_definitions(nxrt_tests PRIVATE NXRT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
-    # The NXFormat conformance fixtures are shared with the launcher's Rust reader; keep one copy, not two.
+    # The NXFormat conformance fixtures are shared with EmblemWeave's Rust reader; keep one copy, not two.
     set(NXRT_EW_NX_FIXTURES "${CMAKE_CURRENT_SOURCE_DIR}/../../../crates/ew-format/tests/nx-fixtures")
     if(EXISTS "${NXRT_EW_NX_FIXTURES}/minimal_valid.nx")
         target_compile_definitions(nxrt_tests PRIVATE EW_NX_FIXTURE_DIR="${NXRT_EW_NX_FIXTURES}")

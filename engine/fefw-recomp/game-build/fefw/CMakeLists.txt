@@ -35,7 +35,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 get_filename_component(FEFW_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(FEFW_LIB_DIR "${FEFW_ROOT}/work/build/fefw" CACHE PATH "folder with fefw_{main,sdk,subsdk0,subsdk1,subsdk2,rtld}.lib (recomp scripts build_game.cmd fefw)")
-# Defaults only: fefw.ini ([fs] exefs / main / romfs, written by the launcher) says where the dump is. game/dump/exefs is the copy
+# Defaults only: fefw.ini ([fs] exefs / main / romfs, written by EmblemWeave) says where the dump is. game/dump/exefs is the copy
 # tools/nso/prepare_exefs.py makes from the dump (main uncompressed), so [fs] main can stay empty.
 set(FEFW_EXEFS_DEFAULT "game/dump/exefs" CACHE PATH "default [fs] exefs")
 set(FEFW_ROMFS_DEFAULT "game/dump/romfs" CACHE PATH "default [fs] romfs")
@@ -127,7 +127,7 @@ target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fonts")
 configure_file("${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "${CMAKE_CURRENT_BINARY_DIR}/fonts/DejaVuSans.ttf" COPYONLY)
 # The processor features this build's lifted libraries need (recomp/games/fefw/CMakeLists.txt FEFW_CPU_VARIANT): the stub passes the
-# them to the runtime, which checks the processor before the first game instruction (fefw_cpu.h). The launcher names the variant in
+# them to the runtime, which checks the processor before the first game instruction (fefw_cpu.h). EmblemWeave names the variant in
 # FEFW_CPU_VARIANT (apps/emblemweave/src/cpu.rs): fma (FMA3 + AVX, the default) or compat (SSE4.2 + POPCNT).
 set(FEFW_CPU_VARIANT "fma" CACHE STRING "processor target of the lifted code: fma (FMA3 + AVX) or compat (SSE4.2 + POPCNT)")
 if(DEFINED ENV{FEFW_CPU_VARIANT} AND NOT "$ENV{FEFW_CPU_VARIANT}" STREQUAL "")

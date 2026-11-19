@@ -18,7 +18,7 @@
 //
 // Picking a preset also clears [fefw] render (a fixed render size wins over render_ratio).
 //
-// The launcher has the same table (launcher/src/pages/settings.js PRESETS) and runtime/docs/CONFIG.md describes it: keep the three in step.
+// EmblemWeave has the same table and runtime/docs/CONFIG.md describes it: keep the three in step.
 #pragma once
 
 #include <cstdlib>

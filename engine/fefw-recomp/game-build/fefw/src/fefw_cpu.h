@@ -10,7 +10,7 @@
 //   compat  -mcpu=x86_64+cx16+sse4_2+popcnt: no FMA3 (fma / fmaf are correctly rounded library calls, sdk/fefw_fma.c). Needs
 //           SSE4.2, POPCNT and CMPXCHG16B: Intel Nehalem (2008) / AMD Bulldozer (2011) and newer, so Sandy / Ivy Bridge and Xeon E5 v1 / v2.
 // CMPXCHG16B (-mcx16) in both: the guest's 128-bit exclusive load/store pairs. Set up builds the variant the processor runs
-// (launcher/src-tauri/src/cpu.rs, the same rule), so the check fails only when the processor changed or runs neither.
+// (EmblemWeave's setup uses the same rule), so the check fails only when the processor changed or runs neither.
 //
 // FEFW_CPU_FORCE_MISSING=fma,avx,sse42,popcnt,cx16 (comma list; a test hook) makes the check behave as if those features were absent.
 #pragma once
@@ -105,7 +105,7 @@ inline std::string message(const Report& r, uint32_t needs) {
     if (!r.missing(FEFW_CPU_NEEDS_COMPAT_BUILD)) {
         // a build for another processor (the game folder moved to this PC, or the processor changed): Set up builds the right one
         m += " does not support " + feature_names(missing) + ", which this build of fefw.exe was made for.\n\n"
-             "Run Set up again in the launcher: it builds the compatible version of the game for this processor.";
+             "Run Set up again in EmblemWeave: it builds the compatible version of the game for this processor.";
     } else {
         m += " does not support " + feature_names(r.missing(FEFW_CPU_NEEDS_COMPAT_BUILD)) + ", which the game needs.\n\n"
              "Fortune's Weave needs a processor with CMPXCHG16B, SSE4.2 and POPCNT: an Intel Core i3 / i5 / i7 (2008) or newer, or an "

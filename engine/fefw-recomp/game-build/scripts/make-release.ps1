@@ -6,7 +6,6 @@
 #
 # Inputs, built beforehand from this checkout:
 #   fefw_rt.dll + fefw_rt.lib   pwsh game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON"
-#   fefw-launcher.exe           built here (npm, Rust) with the build machine's paths remapped, unless -Launcher names one
 #   the shader translator       staged shader-translator sources (tools\shaders\scripts\setup_ryujinx.ps1); this script runs dotnet publish
 # Third-party payload, downloaded into the cache folder from the official sites: Zig (checked against ziglang.org's sha256), the Python
 # embeddable package, and the wheels of capstone, lz4, zbic and zstandard (pip, for CPython 3.13 win_amd64).
@@ -14,7 +13,6 @@ param(
     [Parameter(Mandatory)][string]$Version,
     [string]$Out = "",
     [string]$RtDir = "",
-    [string]$Launcher = "",
     [string]$ZigVersion = "0.17.0",
     [string]$ZigSha256 = "b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428",
     [string]$PythonVersion = "3.13.17",
@@ -25,8 +23,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $Out) { $Out = Join-Path $root 'work\release' }
 if (-not $RtDir) { $RtDir = Join-Path $root 'game-build\fefw\build\rtdll' }
-$buildLauncher = -not $Launcher
-if (-not $Launcher) { $Launcher = Join-Path $root 'launcher\src-tauri\target\release\fefw-launcher.exe' }
 $cache = Join-Path $Out 'cache'
 $name = "fefw-recomp-$Version"
 $stage = Join-Path $Out 'stage'
@@ -72,18 +68,6 @@ Need "$root\runtime\third_party\renhdrum\renhdrum.dll" 'renhdrum.dll (runtime\th
 if (Select-String -Path (Join-Path $RtDir 'fefw_rt.dll') -SimpleMatch 'NXRT_ASTC2BC7=OFF' -Quiet) {
     throw "fefw_rt.dll was built without the ASTC transcoder (NXRT_ASTC2BC7=OFF): reconfigure with -DNXRT_ASTC2BC7=ON"
 }
-if ($buildLauncher) {
-    # Rust keeps source paths for panic messages: map the user profile (cargo registry, rustup) and the checkout to neutral names
-    $env:RUSTFLAGS = "--remap-path-prefix=$($env:USERPROFILE)=~ --remap-path-prefix=$root=."
-    if ($env:CARGO_HOME) { $env:RUSTFLAGS += " --remap-path-prefix=$($env:CARGO_HOME)=cargo" }
-    Push-Location (Join-Path $root 'launcher')
-    try {
-        npm install --no-audit --no-fund; if ($LASTEXITCODE) { throw 'npm install failed' }
-        npm run tauri build -- --no-bundle; if ($LASTEXITCODE) { throw 'launcher build failed' }
-    } finally { Pop-Location; Remove-Item Env:RUSTFLAGS }
-}
-Need $Launcher 'fefw-launcher.exe'
-
 # --- built from this checkout
 # --- the haptics engine (MIT OR Apache-2.0, so it can ship, unlike the Streamline and FidelityFX DLLs). src/gfx/haptic.cpp
 # loads it at run time with LoadLibraryExW from the exe folder and falls back to the standard two-motor rumble when it is not
@@ -95,7 +79,6 @@ Put "$root\runtime\third_party\renhdrum\SHA256SUMS" 'licenses\RenHDrum.SHA256SUM
 Put (Join-Path $RtDir 'fefw_rt.dll') 'fefw_rt.dll'
 Put (Join-Path $RtDir 'fonts\DejaVuSans.ttf') 'fonts\DejaVuSans.ttf'
 Get-ChildItem $RtDir -Filter 'astcdec-*-shared.dll' -ErrorAction SilentlyContinue | ForEach-Object { Put $_.FullName $_.Name }
-Put $Launcher 'fefw-launcher.exe'
 Put (Join-Path $RtDir 'fefw_rt.lib') 'tools\build\sdk\fefw_rt.lib'
 foreach ($f in 'fefw_rt_api.h', 'fefw_stub.cpp', 'fefw_fma.c') { Put "$root\game-build\fefw\src\$f" "tools\build\sdk\$f" }
 foreach ($f in 'fefw.rc', 'fefw.manifest', 'fefw.ico') { Put "$root\game-build\fefw\res\$f" "tools\build\sdk\$f" }
@@ -113,7 +96,7 @@ Put "$root\game-build\release\BUNDLED_TOOLS.txt" 'licenses\BUNDLED_TOOLS.txt'
 Put "$root\runtime\THIRD_PARTY_NOTICES.md" 'licenses\THIRD_PARTY_NOTICES.md'
 Put "$root\tools\shaders\licenses\LICENSE.Ryubing.MIT" 'licenses\LICENSE.Ryujinx.MIT.txt'
 
-# --- the language tables fefw_rt.dll reads (locales\<lang>.ini next to the DLL). The launcher copies them into the run folder
+# --- the language tables fefw_rt.dll reads (locales\<lang>.ini next to the DLL). EmblemWeave copies them into the run folder
 # before the first start and does not replace one that is already there, so a player's own translation of a shipped language wins.
 $tables = Get-ChildItem "$root\locales" -Filter '*.ini' -File -ErrorAction SilentlyContinue
 if ($tables) { foreach ($t in $tables) { Put $t.FullName "locales\$($t.Name)" } }
@@ -122,7 +105,7 @@ Put "$root\locales\README.md" 'locales\README.md'
 # --- the shader translator, self-contained (no .NET install needed on the player's PC)
 $harness = Join-Path $Out 'harness'
 # Always rebuild: reusing Out/harness can silently ship an older translator after
-# the launcher invalidates the player's shader cache for a new translator version.
+# EmblemWeave invalidates the player's shader cache for a new translator version.
 Need "$root\tools\shaders\third_party\ryubing" 'staged shader-translator sources (tools\shaders\scripts\setup_ryujinx.ps1)'
 dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness `
     -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$root=."

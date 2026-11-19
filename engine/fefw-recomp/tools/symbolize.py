@@ -69,7 +69,7 @@ def symbolize(symbolizer, dll, pdb, rvas):
 
 
 # the build machine's checkout folder is cut off: .../fefw-recomp/runtime/src/x.cpp -> runtime/src/x.cpp
-TOP_DIRS = ("runtime/", "game-build/", "recomp/", "tools/", "launcher/")
+TOP_DIRS = ("runtime/", "game-build/", "recomp/", "tools/")
 
 
 def short_path(path):

@@ -66,11 +66,10 @@ try {
     Copy-Item (Join-Path $repo 'docs\changelog') (Join-Path $pkg 'docs\changelog') -Recurse
     Copy-Item (Join-Path $repo 'docs\screenshots') (Join-Path $pkg 'docs\screenshots') -Recurse
 
-    # The dump, the build output, the fetched third-party sources and the engine's own unused launcher stay out.
+    # The dump, the build output and the fetched third-party sources stay out.
     $xd = @(
         (Join-Path $repo 'engine\fefw-recomp\game'),
         (Join-Path $repo 'engine\fefw-recomp\work'),
-        (Join-Path $repo 'engine\fefw-recomp\launcher'),
         # The Linux translator ships as its own tarball: a Windows player cannot run 41 MB of ELF.
         (Join-Path $repo 'engine\fefw-recomp\tools\shaders\prebuilt\linux-x64'),
         # The bare name `third_party` stripped `runtime/third_party` too (dav1d, FSR 1, NIS, Streamline, the

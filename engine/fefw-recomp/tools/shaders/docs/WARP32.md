@@ -35,10 +35,10 @@ change does not add cross-invocation barriers or broaden participation.
 ## Cache and release path
 
 The packaged tools/build/fefw_build.py comes from game-build/release/fefw_build.py;
-it builds game code, not shaders. launcher/src-tauri/src/setup.rs runs shader
+it builds game code, not shaders. EmblemWeave's setup pipeline runs shader
 extraction and the packaged self-contained spirv_harness on the player's PC.
 Its shader setup stamp now requires translator_version=2. Old/missing stamps
-force full retranslation, and the source launcher rebuilds its harness first.
+force full retranslation, and a source build rebuilds its harness first.
 make-release.ps1 always publishes the current harness, including when reusing
 an output staging directory. Runtime preload-pack entries are keyed by their
 results.tsv line; changed translations invalidate those entries too.

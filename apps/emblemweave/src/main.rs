@@ -174,6 +174,8 @@ pub struct App {
     pub activity_hover_until: Option<Instant>,
     /// Seen page, so opening a page from elsewhere reopens its navigation group.
     nav_last: Option<Page>,
+    /// A Play succeeded and the launcher should minimize once this frame is done.
+    minimize_after_play: bool,
 }
 
 fn clock() -> String {
@@ -281,6 +283,7 @@ impl App {
             overview_popup: None,
             activity_hover_until: None,
             nav_last: None,
+            minimize_after_play: false,
         };
         match repaired {
             Some(Ok(n)) if n > 0 => app.note(
@@ -471,7 +474,10 @@ impl App {
             return;
         }
         match engine::play(&self.config.graphics, &self.config.audio) {
-            Ok(()) => self.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok),
+            Ok(()) => {
+                self.minimize_after_play = self.config.minimize_on_play;
+                self.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok);
+            }
             Err(e) => self.notify(e, Tone::Bad),
         }
     }
@@ -1100,6 +1106,9 @@ impl eframe::App for App {
         ingame::frame(self, ctx);
         pages::log::window(self, ctx);
         self.take_screenshot(ctx);
+        if std::mem::take(&mut self.minimize_after_play) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         self.autosave();
         if !self.jobs.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(150));

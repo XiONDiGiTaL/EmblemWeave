@@ -392,6 +392,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     });
 
+    widgets::section(ui, &p, "Launcher", |ui| {
+        widgets::setting_row(
+            ui,
+            &p,
+            "Minimize on play",
+            "Hide EmblemWeave while the game is running; restore it from the taskbar when you come back. This stays off unless you choose it.",
+            |ui| {
+                widgets::toggle(ui, &p, &mut app.config.minimize_on_play);
+            },
+        );
+    });
+
     widgets::section_drawer(
         ui,
         &p,

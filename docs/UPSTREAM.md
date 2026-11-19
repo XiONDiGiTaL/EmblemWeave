@@ -37,9 +37,10 @@ That archive is the only known copy of the 0.2.0 package.
 
 ## What it does not ship
 
-The packaged `fefw-launcher.exe`, `fefw_rt.dll`, the bundled Python and Zig
-runtimes and the launcher's translation files stay out of this repository.
-EmblemWeave has its own launcher, and the runtime is built from source here.
+The packaged `fefw_rt.dll`, the bundled Python and Zig runtimes and the
+standalone launcher's translation files stay out of this repository.
+EmblemWeave has its own launcher, and the runtime is built from source here;
+the engine's old standalone launcher has been removed from this tree.
 One library is the exception: `renhdrum.dll` is vendored with its licences at
 `engine/fefw-recomp/runtime/third_party/renhdrum` (MIT OR Apache-2.0), because
 the haptics backends load it from beside `fefw.exe` and there is no source
@@ -82,7 +83,7 @@ had 43 source files this repository did not, and 138 more had moved since:
   with the standard two-motor rumble as the fallback,
 - GPU ASTC decode and BC1 encode (`nvn_astc_gpu.cpp`, three compute shaders, a generator), and texture residency
   (`nvn_residency.cpp`), which ends the minutes-long CPU transcode on entering an area and gives video memory back,
-- the CPU-variant build (`fefw_cpu.h`, `fefw_fma.c`, `launcher/src-tauri/src/cpu.rs`, the `CPU_VARIANTS` in
+- the CPU-variant build (`fefw_cpu.h`, `fefw_fma.c`, the `CPU_VARIANTS` in
   `fefw_build.py`), which builds the lifted code for FMA3 processors or for older ones, and refuses to start a build
   the processor cannot run,
 - the F1 live render state, the Overwolf Vulkan layer filter, FidelityFX DLL discovery, XeSS, F1 menu translation
