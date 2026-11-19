@@ -466,6 +466,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "bloom") return set_bool(&s->display.bloom);
             if (k == "chromatic_aberration") return set_bool(&s->display.chromatic_aberration);
             if (k == "view_distance") return set_real(1.0, 4.0, &s->display.view_distance);
+            if (k == "npc_distance") return set_real(1.0, 4.0, &s->display.npc_distance);
             if (k == "quality_preset") {
                 const std::string q = lower(v);
                 if (q != "switch2" && q != "high" && q != "ultra" && q != "custom") {
@@ -990,6 +991,7 @@ std::string format_settings(const Settings& s) {
     kv("chromatic_aberration", flag(s.display.chromatic_aberration));
     kv("quality_preset", s.display.quality_preset);
     kv("view_distance", num_exact(s.display.view_distance));
+    kv("npc_distance", num_exact(s.display.npc_distance));
     kv("fast_gpu_memory", flag(s.display.fast_gpu_memory));
     kv("fewer_gpu_waits", flag(s.display.fewer_gpu_waits));
     kv("shader_prewarm", flag(s.display.shader_prewarm));

@@ -192,6 +192,9 @@ struct DisplaySettings {
     // console's), the preset names the set of values last picked on the F1 page (switch2, high, ultra; custom after a single change).
     std::string quality_preset = "switch2";
     double view_distance = 1.0;
+    // Fire Emblem: Fortune's Weave, at the next start: the hub townspeople's limits (how many NPC models stay loaded, how far they are
+    // shown, the crowd's draw budget) times this (1.0 .. 4.0, 1 = the game's own). [fefw] npc_distance in the ini wins over this.
+    double npc_distance = 1.0;
     // ---- S38 GPU paths, at the next start; [nvn] pool_mirror and pass_barriers in mpr.ini or the environment win over these.
     bool fast_gpu_memory = true;   // device-local copies of the pools draws read ([nvn] pool_mirror = on); costs up to 2 GiB of video memory
     bool fewer_gpu_waits = true;   // no full barrier after passes that only wrote their attachments ([nvn] pass_barriers = tracked); off also sets [nvn] lean_barriers = false
