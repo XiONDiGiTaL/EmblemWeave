@@ -106,4 +106,10 @@ private:
     Impl* impl_ = nullptr;
 };
 
+// The code mods' panels (mod API version 4, add_panel) into the current ImGui window: used by the Mods window and the menu's Mods tab.
+// Call only while building the overlay's UI.
+void draw_mod_panels();
+// Whether any code mod added a panel (the menu shows its Mods tab only then).
+bool has_mod_panels();
+
 }  // namespace nxrt::gfx
