@@ -30,6 +30,7 @@
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
 #include "nxrt/menu_i18n.h"
+#include "nxrt/mod_panels.h"
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
@@ -168,6 +169,63 @@ constexpr uint64_t kKbDirBits[4] = {
     hid::btn(hid::kBtnLeft) | hid::btn(hid::kBtnStickLLeft), hid::btn(hid::kBtnRight) | hid::btn(hid::kBtnStickLRight)};
 constexpr double kKbRepeatDelay = 0.40, kKbRepeatEvery = 0.07;   // seconds: a held direction or B repeats
 
+// ---- the code mods' widgets (mod API version 4, NxModUi): thin wrappers over ImGui, called from a panel inside the Mods window ----
+const char* lbl(const char* s) { return s && *s ? s : "##unnamed"; }
+void ui_text(const char* t) { ImGui::TextUnformatted(t ? t : ""); }
+void ui_text_disabled(const char* t) { ImGui::TextDisabled("%s", t ? t : ""); }
+void ui_text_colored(uint32_t rgba, const char* t) {
+    const ImVec4 c(static_cast<float>((rgba >> 24) & 0xFF) / 255.f, static_cast<float>((rgba >> 16) & 0xFF) / 255.f,
+                   static_cast<float>((rgba >> 8) & 0xFF) / 255.f, static_cast<float>(rgba & 0xFF) / 255.f);
+    ImGui::TextColored(c, "%s", t ? t : "");
+}
+int ui_checkbox(const char* label, int* v) {
+    if (!v) return 0;
+    bool b = *v != 0;
+    if (!ImGui::Checkbox(lbl(label), &b)) return 0;
+    *v = b ? 1 : 0;
+    return 1;
+}
+int ui_slider_float(const char* label, float* v, float lo, float hi, const char* fmt) {
+    return v && ImGui::SliderFloat(lbl(label), v, lo, hi, fmt ? fmt : "%.2f") ? 1 : 0;
+}
+int ui_slider_int(const char* label, int* v, int lo, int hi, const char* fmt) {
+    return v && ImGui::SliderInt(lbl(label), v, lo, hi, fmt ? fmt : "%d") ? 1 : 0;
+}
+int ui_button(const char* label) { return ImGui::Button(lbl(label)) ? 1 : 0; }
+void ui_same_line() { ImGui::SameLine(); }
+void ui_separator(const char* label) {
+    if (label && *label) ImGui::SeparatorText(label);
+    else ImGui::Separator();
+}
+// A panel's begin_disabled / tree_node it did not close again are closed after it (draw_mods_window), so a slip in one mod cannot
+// break the window: these count what is open.
+int g_ui_disabled = 0, g_ui_trees = 0;
+void ui_begin_disabled(int d) { ImGui::BeginDisabled(d != 0); ++g_ui_disabled; }
+void ui_end_disabled() {
+    if (g_ui_disabled <= 0) return;
+    ImGui::EndDisabled();
+    --g_ui_disabled;
+}
+int ui_tree_node(const char* label, int default_open) {
+    if (default_open) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+    if (!ImGui::TreeNode(lbl(label))) return 0;
+    ++g_ui_trees;
+    return 1;
+}
+void ui_tree_pop() {
+    if (g_ui_trees <= 0) return;
+    ImGui::TreePop();
+    --g_ui_trees;
+}
+void ui_tooltip(const char* t) {
+    if (t && *t) ImGui::SetItemTooltip("%s", t);
+}
+const NxModUi kModUi = {sizeof(NxModUi), &ui_text,           &ui_text_disabled,  &ui_text_colored, &ui_checkbox,
+                        &ui_slider_float, &ui_slider_int,    &ui_button,         &ui_same_line,    &ui_separator,
+                        &ui_begin_disabled, &ui_end_disabled, &ui_tree_node,     &ui_tree_pop,     &ui_tooltip};
+
+bool g_panels_drawn = false;   // a panel was drawn in the current ImGui frame
+
 // Drops pressed keys and mouse buttons so nothing stays latched in ImGui (the caller holds the context's mutex).
 void clear_imgui_input(ImGuiContext* ctx) {
     ImGuiContext* prev = ImGui::GetCurrentContext();
@@ -178,6 +236,36 @@ void clear_imgui_input(ImGuiContext* ctx) {
     ImGui::SetCurrentContext(prev);
 }
 }  // namespace
+
+bool has_mod_panels() { return !services::modapi::panels().empty(); }
+
+// Every code mod's panel (mod API add_panel) as a section that folds open, into the current ImGui window: the Mods window, or the
+// menu's Mods tab (play_ui.cpp), which is how a controller reaches them.
+void draw_mod_panels() {
+    const std::vector<services::modapi::PanelInfo> list = services::modapi::panels();
+    if (list.empty()) {
+        ImGui::TextDisabled("No code mod has a panel here (mods add one with add_panel, mod API version 4).");
+        return;
+    }
+    g_panels_drawn = true;
+    for (size_t i = 0; i < list.size(); ++i) {
+        const services::modapi::PanelInfo& p = list[i];
+        ImGui::PushID(static_cast<int>(i));
+        const bool shown = ImGui::CollapsingHeader(p.title.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+        if (!p.mod.empty()) ImGui::SetItemTooltip("%s", p.mod.c_str());
+        if (shown) {
+            g_ui_disabled = g_ui_trees = 0;
+            ImGui::Indent();
+            ImGui::PushID("##contents");   // the header pushes no ID: a widget labelled like the panel's title must not clash with it
+            p.fn(&kModUi, p.user);
+            while (g_ui_trees > 0) ui_tree_pop();
+            while (g_ui_disabled > 0) ui_end_disabled();
+            ImGui::PopID();
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+}
 
 namespace {
 std::atomic<int> g_shader_backlog{0};
@@ -194,6 +282,8 @@ struct Overlay::Impl {
     std::atomic<bool> visible{false};
     std::mutex mu;                    // guards the ImGui context: events arrive on the game's main thread, drawing happens on the presenting thread
     int toggle_sc = SDL_SCANCODE_F1;
+    int mods_sc = SDL_SCANCODE_F8;        // [gfx] mods_key: shows the Mods window (the code mods' panels) instead of the menu
+    std::atomic<bool> mods_mode{false};   // the overlay shows the Mods window, not the menu
     int trace_sc = SDL_SCANCODE_UNKNOWN;   // [gfx] trace_key: trace the next frame (draws, shaders, targets) into the log
     bool restore_relative = false;
     std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
@@ -242,6 +332,8 @@ struct Overlay::Impl {
     int counter_n = 0;
 
     void build_ui();
+    void build_ui_inner();
+    void draw_mods_window();
     void update_scale(const VkExtent2D& extent);
     void refresh_counter_text(double now_s);
     void draw_counter(const FrameInfo& f, double now_s);
@@ -285,7 +377,37 @@ struct Overlay::Impl {
     void draw_keyboard(double now_s);     // mu held, inside an ImGui frame
 };
 
+// The Mods window: every code mod's panel (mod API add_panel) as a section that folds open. Drawn in place of the menu while the overlay
+// was opened with [gfx] mods_key.
+void Overlay::Impl::draw_mods_window() {
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    const float k = ui_scale > 0.f ? ui_scale : 1.f;
+    // below the corner frame-rate counter; the window fits its contents (up to the frame's height, then it scrolls)
+    ImGui::SetNextWindowPos(ImVec2(16.f * k, 72.f * k), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(320.f * k, 0.f), ImVec2(std::max(320.f * k, disp.x - 32.f * k), std::max(200.f, disp.y - 88.f * k)));
+    bool open = true;
+    if (ImGui::Begin("Mods", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushItemWidth(260.f * k);   // sliders keep one width (an auto-sized window cannot size them by its own width)
+        draw_mod_panels();
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s closes this window", SDL_GetScancodeName(static_cast<SDL_Scancode>(mods_sc)));
+        ImGui::PopItemWidth();
+    }
+    ImGui::End();
+    if (!open) want_hide.store(true);
+}
+
 void Overlay::Impl::build_ui() {
+    g_panels_drawn = false;   // set by draw_mod_panels: whether a mod's panel is on screen this frame (api->panel_visible)
+    build_ui_inner();
+    services::modapi::set_panel_visible(g_panels_drawn);
+}
+
+void Overlay::Impl::build_ui_inner() {
+    if (mods_mode.load()) {
+        draw_mods_window();
+        return;
+    }
     if (menu) {
         menu();
         return;
@@ -425,6 +547,13 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     const std::string key = config_get_str("gfx", "overlay_key", "F1");
     if (const SDL_Scancode sc = SDL_GetScancodeFromName(key.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.toggle_sc = sc;
     else NXLOG_W(kTag, "unknown [gfx] overlay_key '%s': using F1", key.c_str());
+    {   // [gfx] mods_key: the Mods window (the code mods' panels); "none" or empty = no key
+        const std::string mk = config_get_str("gfx", "mods_key", "F8");
+        if (mk.empty() || mk == "none") s.mods_sc = SDL_SCANCODE_UNKNOWN;
+        else if (const SDL_Scancode sc = SDL_GetScancodeFromName(mk.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.mods_sc = sc;
+        else NXLOG_W(kTag, "unknown [gfx] mods_key '%s': using F8", mk.c_str());
+        if (s.mods_sc == s.toggle_sc) s.mods_sc = SDL_SCANCODE_UNKNOWN;   // the menu's key wins
+    }
     {   // [gfx] trace_key: empty = off
         const std::string tk = config_get_str("gfx", "trace_key", "");
         if (!tk.empty()) {
@@ -569,6 +698,8 @@ void Overlay::set_visible(bool v) {
         if (s.restore_relative && platform::has_window()) platform::set_relative_mouse(true);
         s.restore_relative = false;
         std::lock_guard<std::mutex> lk(s.mu);
+        // after the lock: a UI build already running would otherwise set it again once it ends, and nothing would clear it
+        services::modapi::set_panel_visible(false);
         ImGuiContext* prev = ImGui::GetCurrentContext();
         ImGui::SetCurrentContext(s.imgui);
         ImGuiIO& io = ImGui::GetIO();   // drop pressed keys and buttons so nothing stays latched
@@ -582,6 +713,7 @@ void Overlay::set_visible(bool v) {
 bool Overlay::visible() const { return impl_->visible; }
 void Overlay::toggle() { set_visible(!impl_->visible); }
 int Overlay::toggle_scancode() const { return impl_->toggle_sc; }
+int Overlay::mods_scancode() const { return impl_->mods_sc; }
 void Overlay::set_toggle_scancode(int sc) { impl_->toggle_sc = sc; }
 uint64_t Overlay::frames_drawn() const { return impl_->drawn; }
 
@@ -919,6 +1051,7 @@ uint64_t Overlay::set_menu_pad(uint64_t b, int lx, int ly) {
     if (s.hold_on_hide.exchange(false)) s.menu_mask |= b;   // closed (B, F1, the chord): what is still held stays away from the game
     const uint64_t fresh = b & ~s.menu_prev;
     if (s.menu_chord && (b & s.menu_chord) == s.menu_chord && (fresh & s.menu_chord)) {
+        if (!s.visible) s.mods_mode = false;   // the chord opens the menu
         toggle();
         s.menu_mask |= b;
         NXLOG_I(kTag, "overlay %s by the pad chord", s.visible ? "opened" : "closed");
@@ -975,8 +1108,26 @@ bool Overlay::handle_event(const input::Event& e) {
         return true;
     }
     if ((e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.toggle_sc) {
-        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle();
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
+            if (s.visible && s.mods_mode.load()) {   // the Mods window is up: switch to the menu
+                s.mods_mode = false;
+            } else {
+                s.mods_mode = false;
+                toggle();
+            }
+        }
         return true;   // the toggle key never reaches the game (press, repeat and release)
+    }
+    if (s.mods_sc != SDL_SCANCODE_UNKNOWN && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.mods_sc) {
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
+            if (s.visible && s.mods_mode.load()) {
+                set_visible(false);
+            } else {
+                s.mods_mode = true;   // the menu was up: switch to the Mods window
+                if (!s.visible) set_visible(true);
+            }
+        }
+        return true;   // like the menu's key, the Mods key never reaches the game
     }
     const bool kb = s.kb_poll();
     if (kb && (e.type == EventType::KeyDown || e.type == EventType::KeyUp || e.type == EventType::Text)) return s.kb_key_event(e);

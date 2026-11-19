@@ -42,6 +42,7 @@ public:
     bool visible() const;
     void toggle();
     int toggle_scancode() const;             // SDL scancode of the toggle key
+    int mods_scancode() const;               // SDL scancode of the Mods window's key ([gfx] mods_key), SDL_SCANCODE_UNKNOWN = none
     void set_toggle_scancode(int sc);
     // The on-screen keyboard (the software keyboard applet's question, services_api.h swkbdui): drawn over the game whenever a question is
     // open, menu or not (the menu is not drawn meanwhile). While it is up it takes the keyboard, the mouse and the pad (handle_event returns
@@ -105,5 +106,11 @@ private:
     struct Impl;
     Impl* impl_ = nullptr;
 };
+
+// The code mods' panels (mod API version 4, add_panel) into the current ImGui window: used by the Mods window and the menu's Mods tab.
+// Call only while building the overlay's UI.
+void draw_mod_panels();
+// Whether any code mod added a panel (the menu shows its Mods tab only then).
+bool has_mod_panels();
 
 }  // namespace nxrt::gfx

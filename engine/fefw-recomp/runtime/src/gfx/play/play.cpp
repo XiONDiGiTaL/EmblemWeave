@@ -1234,7 +1234,9 @@ public:
     void cancel_capture() override { g().capture_state.store(0); }
     bool reserved_key(const InputId& id) const override {
         G& st = g();
-        return st.overlay && id.kind == InKind::Key && id.code == st.overlay->toggle_scancode();
+        if (!st.overlay || id.kind != InKind::Key) return false;
+        const int mods = st.overlay->mods_scancode();   // the Mods window's key (0 = SDL_SCANCODE_UNKNOWN: none)
+        return id.code == st.overlay->toggle_scancode() || (mods != 0 && id.code == mods);
     }
 };
 Host g_host;

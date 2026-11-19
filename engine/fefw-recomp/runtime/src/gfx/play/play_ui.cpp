@@ -131,7 +131,7 @@ void set_notice(Page& p, const std::string& text, bool warn) {
 
 // Takes the captured input, if the host has one. Results are taken every frame, so a stale one never reaches a later rebind.
 // Only one capture runs at a time (the binding row or the frame rate hotkey), so a result goes to whichever one is waiting.
-// The key that opens the menu cannot be bound (and the frame rate hotkey cannot be bound to an action): the page says so and keeps waiting.
+// The keys that open the menu or the Mods window cannot be bound (and the frame rate hotkey cannot be bound to an action): the page says so and keeps waiting.
 void poll_capture(UiHost& host, Page& p) {
     InputId id;
     if (host.capture_result(&id)) {
@@ -140,7 +140,7 @@ void poll_capture(UiHost& host, Page& p) {
         if (p.fps_capture) {
             // The frame rate hotkey takes keyboard keys only; a mouse button or a wheel notch is dropped and the capture ends.
             if (reserved) {
-                set_notice(p, name + " opens this menu and cannot be the frame rate hotkey. Press another key, Escape cancels.", true);
+                set_notice(p, name + " opens this menu or the Mods window and cannot be the frame rate hotkey. Press another key, Escape cancels.", true);
                 host.begin_capture();
                 return;
             }
@@ -153,7 +153,7 @@ void poll_capture(UiHost& host, Page& p) {
         } else if (p.rebind >= 0 && p.rebind < static_cast<int>(p.edit.bindings.size())) {
             const Settings cur = host.settings();
             if (reserved || (id.kind == InKind::Key && id == cur.fps.key)) {
-                set_notice(p, name + (reserved ? " opens this menu" : " is the frame rate counter hotkey") + " and cannot be bound. Press another input, Escape cancels.", true);
+                set_notice(p, name + (reserved ? " opens this menu or the Mods window" : " is the frame rate counter hotkey") + " and cannot be bound. Press another input, Escape cancels.", true);
                 host.begin_capture();
                 return;
             }
