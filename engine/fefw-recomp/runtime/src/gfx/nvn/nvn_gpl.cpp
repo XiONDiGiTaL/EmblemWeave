@@ -96,6 +96,7 @@ std::deque<std::function<void()>> g_exact_q;   // [nvn] gpl_async: parts a defer
 std::unordered_set<std::string> g_exact_pending;
 std::atomic<int64_t> g_frame_seen_ns{0};      // when the replay last saw the present count move
 std::deque<std::function<void()>> g_pre_q;     // parts of the key file's pipelines (gpl_prebuild): after the hot programs, before the cold ones
+int g_pre_urgent = 0;                          // the first this many of g_pre_q were put in front because the game set their program (a draw is near)
 std::deque<std::function<void()>> g_task_q;    // gpl_queue_task (compute pipelines): after the exact parts, before the hot programs
 std::deque<Job> g_hot_q, g_cold_q;    // hot: programs a command buffer was recorded with (oldest first); cold: set but not yet bound (newest first)
 std::vector<RasterKey> g_rasters;
@@ -509,6 +510,7 @@ void worker_main(bool burst) {
     };
     for (;;) {
         Job j;
+        bool cold = false;
         {
             std::unique_lock<std::mutex> lk(g_mu);
             if (!ab_pause_on()) {
@@ -523,12 +525,18 @@ void worker_main(bool burst) {
             }
             if (!g_exact_q.empty() || !g_task_q.empty() || (g_hot_q.empty() && !g_pre_q.empty())) {
                 auto& q = !g_exact_q.empty() ? g_exact_q : !g_task_q.empty() ? g_task_q : g_pre_q;
+                bool speculative = &q == &g_pre_q;           // key-file keys built ahead: nothing waits for them yet
+                if (speculative && g_pre_urgent > 0) {       // ...unless the game just set their program: a draw is near
+                    --g_pre_urgent;
+                    speculative = false;
+                }
                 std::function<void()> fn = std::move(q.front());
                 q.pop_front();
                 ++g_running;
                 publish_backlog_locked();
                 lk.unlock();
                 fn();
+                if (speculative) pace_shader_work();
                 lk.lock();
                 --g_running;
                 publish_backlog_locked();
@@ -537,15 +545,17 @@ void worker_main(bool burst) {
             if (!g_hot_q.empty()) {
                 j = g_hot_q.front();
                 g_hot_q.pop_front();
+                cold = false;
             } else {                                 // the programs set last belong to the area being loaded now, which is drawn next
                 j = g_cold_q.back();
                 g_cold_q.pop_back();
+                cold = true;
             }
             ++g_running;
             publish_backlog_locked();
         }
         run_job(j);
-        pace_shader_work();
+        if (cold) pace_shader_work();
         {
             std::lock_guard<std::mutex> lk(g_mu);
             --g_running;
@@ -586,9 +596,9 @@ void upgrade_main() {
             }
         }
         const double ms = ms_since(t0);
-        pace_shader_work();
         j.up->pipe = p;
         j.up->state.store(1, std::memory_order_release);
+        pace_shader_work();                  // an upgrade replaces a pipeline that already works: never urgent
         {
             std::lock_guard<std::mutex> lk(g_mu);
             --g_up_running;
@@ -605,7 +615,16 @@ void init_once() {
     g_stop = false;
     g_enabled = config_get_bool("nvn", "gpl", true) && device().features().graphics_pipeline_library;
     g_lto = config_get_bool("nvn", "gpl_lto", false);
-    g_cold = config_get_bool("nvn", "gpl_cold", false);
+    // [nvn] gpl_cold: true / false (the default, see g_cold), or auto: off on a CPU with 8 hardware threads or fewer, where compiling the parts
+    // of every program the game sets (most are never drawn: 15% bound in a 2026-11-16 log, 12% in EmblemWeave's) takes cores from an area load;
+    // on more threads the spare cores build them ahead and a new program's first draw finds its parts ready.
+    {
+        const std::string c = config_get_str("nvn", "gpl_cold", "false");
+        const unsigned hwc = std::max(1u, std::thread::hardware_concurrency());
+        g_cold = (c == "auto") ? hwc > 8 : !(c == "false" || c == "0" || c == "off");
+        NXLOG_I(kTag, "parts of programs not drawn yet: %s ([nvn] gpl_cold = %s%s)", g_cold ? "compiled ahead" : "compiled when a draw needs them",
+                c.c_str(), c == "auto" ? (hwc > 8 ? ", more than 8 hardware threads" : ", 8 hardware threads or fewer") : "");
+    }
     {
         const std::string m = config_get_str("nvn", "gpl_upgrade", "whole");
         g_up_mode = (m == "off" || m == "false" || m == "0") ? UpMode::Off : (m == "lto") ? UpMode::Lto : UpMode::Whole;
@@ -686,6 +705,40 @@ bool cpu_is_hybrid() {
 }  // namespace
 #endif
 
+namespace {
+std::atomic<uint64_t> g_paced_n{0}, g_paced_ms{0}, g_paced_skipped{0};
+uint64_t g_paced_logged_n = 0, g_paced_logged_skipped = 0;
+
+// Work a draw or a dispatch waits for, or soon will: deferred draws' exact parts, compute pipelines, programs a command buffer was recorded with,
+// and key-file parts put in front because the game just set their program. A compile thread never sleeps while any of it is queued.
+bool urgent_shader_work_queued() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return !g_exact_q.empty() || !g_task_q.empty() || !g_hot_q.empty() || g_pre_urgent > 0;
+}
+}  // namespace
+
+void pace_shader_work() {
+    static const int64_t cap = std::clamp<int64_t>(config_get_int("nvn", "compile_pace_ms", 8), 0, 50);
+    static const double after = config_get_double("nvn", "compile_pace_after_ms", 20.0);
+    if (cap <= 0) return;
+    uint64_t frames = 0;
+    double age_ms = 0;
+    if (!hitch_frame_age(&frames, &age_ms) || frames < 2) return;    // before the second presented frame: the boot prewarm runs at full speed
+    float last = 0;
+    if (frame_times_recent(&last, 1) != 1) return;
+    const double late = std::max<double>(last, age_ms) - after;      // the last frame, or the one in progress when it is overdue already
+    if (late <= 0) return;
+    if (urgent_shader_work_queued()) {                               // the next job is one a draw is waiting for: no sleep
+        g_paced_skipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const int64_t ms = std::min<int64_t>(cap, 1 + static_cast<int64_t>(late / 2));
+    Sleep(static_cast<DWORD>(ms));
+    const uint64_t n = g_paced_n.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_paced_ms.fetch_add(static_cast<uint64_t>(ms), std::memory_order_relaxed);
+    if (n == 1) NXLOG_I(kTag, "compile threads step aside for late frames: up to %lld ms after a frame over %.0f ms ([nvn] compile_pace_ms)", static_cast<long long>(cap), after);
+}
+
 void set_compile_thread_priority(bool background) {
 #if defined(_WIN32)
     static const std::string mode = config_get_str("nvn", "compile_priority", "below");
@@ -716,24 +769,6 @@ void set_compile_thread_priority(bool background) {
 #else
     (void)background;
 #endif
-}
-
-// A new area sets hundreds of programs at once and each part is a driver compile that keeps every core busy for tens of milliseconds, so the burst
-// is what a player feels as the processor pegging out when an area loads. Once the frames being presented are late, the background threads step aside
-// for a moment after each part so the frame in flight gets the cores back: the work still finishes, it just stops competing with the picture. Nothing
-// is paced before the first frame (no frame times yet), so a boot prewarm still runs at full speed.
-std::atomic<uint64_t> g_paced_us{0};                 // all threads: the summary divides it into g_stats.paced_ms
-void pace_shader_work() {
-    static const double most = config_get_double("nvn", "compile_pace_ms", 8.0);
-    if (most <= 0) return;
-    static const double after = config_get_double("nvn", "compile_pace_after_ms", 20.0);
-    float last = 0.f;
-    if (!nxrt::frame_times_recent(&last, 1) || last < after) return;
-    // Half of the lateness, so a 33 ms frame waits 7 ms and a 60 ms one waits the most; never less than a millisecond, which the scheduler rounds up.
-    const double wait = std::min(most, 1.0 + (last - after) * 0.5);
-    const auto us = static_cast<uint64_t>(wait * 1000.0);
-    g_paced_us.fetch_add(us, std::memory_order_relaxed);
-    std::this_thread::sleep_for(std::chrono::microseconds(static_cast<long long>(us)));
 }
 
 bool gpl_active() {
@@ -983,8 +1018,12 @@ void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve,
         }
         prebuild_parts(k, *pl);
     };
-    if (front) g_pre_q.push_front(std::move(fn));
-    else g_pre_q.push_back(std::move(fn));
+    if (front) {
+        g_pre_q.push_front(std::move(fn));
+        ++g_pre_urgent;
+    } else {
+        g_pre_q.push_back(std::move(fn));
+    }
     publish_backlog_locked();
     g_cv.notify_one();
 }
@@ -1054,7 +1093,14 @@ void gpl_progress_log() {
             s.draw_part_ms, static_cast<unsigned long long>(s.parts_waited), s.wait_ms, static_cast<unsigned long long>(s.parts_hit), static_cast<unsigned long long>(s.link_failed),
             static_cast<unsigned long long>(s.upgrades_queued), static_cast<unsigned long long>(s.upgrades_done), s.upgrade_ms, static_cast<unsigned long long>(s.upgrades_taken),
             static_cast<unsigned long long>(s.upgrades_failed));
-    if (s.paced_ms > 0) NXLOG_I(kTag, "compile threads stepped aside for late frames: %.0f ms in all", s.paced_ms);
+    const uint64_t pn = g_paced_n.load(std::memory_order_relaxed), ps = g_paced_skipped.load(std::memory_order_relaxed);
+    if (pn != g_paced_logged_n || ps != g_paced_logged_skipped) {
+        g_paced_logged_n = pn;
+        g_paced_logged_skipped = ps;
+        NXLOG_I(kTag, "compile threads stepped aside for late frames: %llu times, %llu ms in all; not while urgent work was queued: %llu times",
+                static_cast<unsigned long long>(pn), static_cast<unsigned long long>(g_paced_ms.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ps));
+    }
     NXLOG_I(kTag, "libraries ahead: programs set %llu (covered by the key file %llu, new %llu), bound %llu (new %llu); jobs queued %llu, run %llu, "
                   "no layout %llu, no modules %llu; draws deferred %llu for %llu parts; single-stage programs %llu; left to their first record %llu; key-file keys queued %llu, run %llu",
             static_cast<unsigned long long>(s.prog_set), static_cast<unsigned long long>(s.prog_covered), static_cast<unsigned long long>(s.prog_new),
@@ -1069,7 +1115,7 @@ void program_bound(const ShaderInfo* const stages[6]) { gpl_program_bound(stages
 GplStats gpl_stats() {
     std::lock_guard<std::mutex> lk(g_mu);
     GplStats s = g_stats;
-    s.paced_ms = static_cast<double>(g_paced_us.load(std::memory_order_relaxed)) / 1000.0;
+    s.paced_ms = static_cast<double>(g_paced_ms.load(std::memory_order_relaxed));
     s.jobs_pending = g_exact_q.size() + g_task_q.size() + g_hot_q.size() + g_pre_q.size() + (g_cold ? g_cold_q.size() : 0) + static_cast<uint64_t>(g_running);
     return s;
 }
@@ -1085,6 +1131,7 @@ void gpl_stop() {
         g_hot_q.clear();
         g_cold_q.clear();
         g_pre_q.clear();
+        g_pre_urgent = 0;
         g_task_q.clear();
         g_exact_q.clear();
         g_exact_pending.clear();

@@ -9,6 +9,7 @@
 // (layout/defaults checked, no code copied). nvnProgramSetShadersExt(NVNprogram*, int count, entries): 0x18-byte entries whose first
 // two words are NVNshaderData's {data, control}; the third word is not used here. Stride from ACNH 3.0.3 main+0x24d9a8 (the caller
 // fills the array with `mov w24, #0x18`), as ACNHRecomp (MIT) found. nvnProgramSetSubroutineLinkage is accepted and ignored: the back end has no subroutine support.
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
@@ -86,7 +87,21 @@ void report_missing(const uint8_t* code, const uint8_t* control) {
         return;
     }
     const std::string key = missing_key(code, control);
-    if (first_report(key)) NXLOG_W("nvn", "nvnProgramSetShaders: no translated shader for block %s; program not linked", key.c_str());
+    if (!first_report(key)) return;
+    // A cache that was never translated names one hash per program: hundreds of
+    // identical warnings and no statement of what they add up to. Say the first
+    // few, then the consequence, once.
+    static std::atomic<int> warned{0};
+    const int n = warned.fetch_add(1, std::memory_order_relaxed);
+    if (n < 8) {
+        NXLOG_W("nvn", "nvnProgramSetShaders: no translated shader for block %s; program not linked (every draw that uses it is skipped)", key.c_str());
+    } else if (n == 8) {
+        NXLOG_E("nvn",
+                "more programs than this log lists have no translated shader. Every draw they belong to is skipped, so the window shows \
+only what the last clear left (black) while the audio plays. The build's shader step writes the SPIR-V to %s, which is where these programs were looked for: run Build the game, which\
+ translates the blocks that are missing.",
+                shader_cache().dir().empty() ? "<the shader cache has no folder>" : shader_cache().dir().c_str());
+    }
 }
 
 NVNboolean nvnProgramInitialize(NVNprogram* program, NVNdevice* device) {

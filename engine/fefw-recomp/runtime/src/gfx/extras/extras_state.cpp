@@ -25,6 +25,7 @@ Settings g_settings;
 bool g_settings_set = false;
 std::atomic<int> g_upscale_mode{-1};          // -1: not read yet
 std::atomic<float> g_upscale_sharp{0.8f};
+std::atomic<int> g_dlss_preset{-1};           // -1: [dlss] preset not read yet
 std::atomic<int> g_scene_scale{100};
 std::atomic<int> g_upscale_quality{static_cast<int>(UpscaleQuality::Quality)};
 std::atomic<float> g_pic_contrast{1.0f}, g_pic_saturation{1.0f}, g_pic_black{0.0f}, g_pic_gamma{1.0f};
@@ -171,6 +172,21 @@ UpscaleMode upscale_mode() {
 }
 
 float upscale_sharpness() { return g_upscale_sharp.load(std::memory_order_relaxed); }
+
+int dlss_preset() {
+    int p = g_dlss_preset.load(std::memory_order_relaxed);
+    if (p >= 0) return p;
+    const std::string v = config_get_str("dlss", "preset", "default");
+    p = dlss_preset_from_word(v);
+    if (p < 0) {
+        NXLOG_W("dlss", "[dlss] preset = %s is not one of default, j, k, l, m: default", v.c_str());
+        p = 0;
+    }
+    g_dlss_preset.store(p, std::memory_order_relaxed);
+    return p;
+}
+
+void set_dlss_preset(int preset) { g_dlss_preset.store(std::max(0, preset), std::memory_order_relaxed); }
 
 int upscale_scene_scale() {
     upscale_mode();      // reads the settings once

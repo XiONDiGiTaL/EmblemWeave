@@ -54,6 +54,15 @@ struct Pad {
 };
 Pad g_pad;
 
+bool listed(uint32_t id) {
+    nxrt::input::GamepadInfo info[8];
+    const size_t n = nxrt::input::gamepad_list(info, 8);
+    for (size_t k = 0; k < n; ++k) {
+        if (info[k].id == id) return true;
+    }
+    return false;
+}
+
 bool setup() {
     static bool done = false, ok = false;
     if (done) return ok;
@@ -85,14 +94,34 @@ bool setup() {
     if (!g_pad.id) return false;
     g_pad.joy = SDL_OpenJoystick(g_pad.id);
     if (!g_pad.joy) return false;
-    for (int i = 0; i < 50; ++i) {      // SDL announces the pad on the next pump
+    for (int i = 0; i < 50; ++i) {      // SDL announces the pad on the next pump (a controller already plugged in may be listed sooner)
         platform::pump_events();
-        if (nxrt::input::gamepad_count() > 0) break;
+        if (listed(g_pad.id)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    ok = nxrt::input::gamepad_count() > 0;
+    ok = listed(g_pad.id);
     return ok;
 }
+
+// A controller of the machine is connected besides the virtual pad: it is player one, so the tests that read player one's state
+// are skipped (unplug it to run them).
+bool other_pad_connected() {
+    nxrt::input::GamepadInfo info[8];
+    const size_t n = nxrt::input::gamepad_list(info, 8);
+    for (size_t k = 0; k < n; ++k) {
+        if (info[k].id != g_pad.id) return true;
+    }
+    return false;
+}
+
+#define REQUIRE_VIRTUAL_PAD_ALONE()                                                                        \
+    do {                                                                                                   \
+        REQUIRE(setup());                                                                                  \
+        if (other_pad_connected()) {                                                                       \
+            nxtest::skip("another controller is connected: it, not the virtual pad, is player one");       \
+            return;                                                                                        \
+        }                                                                                                  \
+    } while (0)
 
 // One frame boundary, then what the hid service would read.
 hid::InputSnapshot sample() {
@@ -114,15 +143,6 @@ void release_all() {
     // a virtual pad's trigger axes span the whole range: the rest position is the minimum (SDL then reports 0 for the trigger)
     set_axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
     set_axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
-}
-
-bool listed(uint32_t id) {
-    nxrt::input::GamepadInfo info[8];
-    const size_t n = nxrt::input::gamepad_list(info, 8);
-    for (size_t k = 0; k < n; ++k) {
-        if (info[k].id == id) return true;
-    }
-    return false;
 }
 
 // Attaches a throwaway virtual pad with the given USB ids, waits until the platform lists it and reads the kind it reports.
@@ -159,7 +179,7 @@ bool probe_kind(uint16_t vendor, uint16_t product, nxrt::input::PadKind* out) {
 }  // namespace
 
 NXTEST(virtual_pad_is_seen_and_player_one_is_connected) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     nxrt::input::GamepadInfo info[4];
     CHECK(nxrt::input::gamepad_list(info, 4) >= 1);
     CHECK(std::strstr(info[0].name, "virtual") != nullptr);
@@ -169,7 +189,7 @@ NXTEST(virtual_pad_is_seen_and_player_one_is_connected) {
 }
 
 NXTEST(face_buttons_follow_the_printed_label_on_an_xbox_layout_pad) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     release_all();
     set_button(SDL_GAMEPAD_BUTTON_SOUTH, true);          // the bottom button, printed A on an Xbox pad
     hid::InputSnapshot s = sample();
@@ -182,7 +202,7 @@ NXTEST(face_buttons_follow_the_printed_label_on_an_xbox_layout_pad) {
 }
 
 NXTEST(every_button_reaches_the_switch_pad) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     struct { SDL_GamepadButton sdl; hid::NpadButtonBit hid; } map[] = {
         {SDL_GAMEPAD_BUTTON_WEST, hid::kBtnX}, {SDL_GAMEPAD_BUTTON_NORTH, hid::kBtnY},
         {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, hid::kBtnL}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, hid::kBtnR},
@@ -201,7 +221,7 @@ NXTEST(every_button_reaches_the_switch_pad) {
 }
 
 NXTEST(sticks_and_triggers) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     release_all();
     set_axis(SDL_GAMEPAD_AXIS_LEFTY, -32768);            // up on the stick is negative in SDL
     set_axis(SDL_GAMEPAD_AXIS_RIGHTX, 32767);
@@ -222,7 +242,7 @@ NXTEST(sticks_and_triggers) {
 }
 
 NXTEST(gyro_reaches_the_six_axis_sample) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     release_all();
     const float accel[3] = {0.0f, 0.0f, 9.80665f};               // lying still, face up
     const float gyro[3] = {6.2831853f, 0.0f, 0.0f};              // one turn per second around SDL's x axis
@@ -239,7 +259,7 @@ NXTEST(gyro_reaches_the_six_axis_sample) {
 }
 
 NXTEST(game_vibration_reaches_the_pad) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     release_all();
     g_rumble = Rumble{};
     hid::VibrationValue v;
@@ -257,7 +277,7 @@ NXTEST(game_vibration_reaches_the_pad) {
 }
 
 NXTEST(unplugging_the_pad_clears_the_state) {
-    CHECK(setup());
+    REQUIRE_VIRTUAL_PAD_ALONE();
     release_all();
     set_button(SDL_GAMEPAD_BUTTON_SOUTH, true);
     hid::InputSnapshot s = sample();

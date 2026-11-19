@@ -153,6 +153,7 @@ void hook_step_choice(::Ctx* c, uint64_t, void*) {
                 NXLOG_I(kTag, "time step: the game's step plus a quarter of the time it owes (smooth_step)");
         }
     }
+    frame_step(c->v[1].f[0], target);   // fefw_frame.cpp: the per-frame amounts follow the step taken
     if (s.step_csv) {
         LARGE_INTEGER q, f;
         QueryPerformanceCounter(&q);
@@ -247,6 +248,11 @@ void clock_thread() {
             continue;
         }
         if (have && ++since_log < period_s) continue;
+        static bool detail_logged = false;
+        if (!detail_logged && have) {
+            detail_logged = true;
+            if (const std::string d = detail_summary(); !d.empty()) NXLOG_I(kTag, "%s", d.c_str());
+        }
         if (have && real > real0) {
             const double rate = static_cast<double>(game - game0) / static_cast<double>(real - real0);
             NXLOG_I(kTag, "game clock: %.3fx real time over %d s (target %d fps, display %d, last step %.2f frames)", rate, period_s,
@@ -256,6 +262,15 @@ void clock_thread() {
             if (n > 1)
                 NXLOG_I(kTag, "map cursor: %llu moves (2 per frame), real step / the game's 60 / target %.2f on average", static_cast<unsigned long long>(n),
                         static_cast<double>(sum) / static_cast<double>(n) / 1000.0);
+            // frame-rate fixes (fefw_frame.cpp): the values changed per group since the start
+            const FrameFixInfo fi = frame_info();
+            if (fi.installed && fi.on && fi.scale < 0.999f) {
+                char line[256];
+                int at = std::snprintf(line, sizeof line, "frame-rate fixes: scale %.3f (native %d):", static_cast<double>(fi.scale), fi.native);
+                for (int g = 0; g < FrameFixInfo::kGroups && at > 0 && at < static_cast<int>(sizeof line); ++g)
+                    at += std::snprintf(line + at, sizeof line - at, " %s %llu", frame_group_name(g), static_cast<unsigned long long>(fi.applied[g]));
+                NXLOG_I(kTag, "%s (quake held %llu)", line, static_cast<unsigned long long>(fi.quake_held));
+            }
         }
         real0 = real;
         game0 = game;
@@ -295,6 +310,7 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     if (write_profile != &nxrt_no_profile_write) tt::set_exit_handler(&exit_writing_profile);
     s.base = base;
     res_install(base);
+    detail_install();   // before the game's file system is set up: the graphics settings files are edited as the RomFS is laid out
     twprobe_start(base);
     s.fps60 = config_get_bool("fefw", "fps60", false);
     s.fps120 = config_get_bool("fefw", "fps120", false);
@@ -316,7 +332,9 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
         NXLOG_I(kTag, "step csv %s: host_ms %.3f at this line", step_csv.c_str(),
                 static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(f.QuadPart));
     }
-    if (smooth || s.step_csv) s.step_hook = hook_add_inline(base + kStepChoice, &hook_step_choice);
+    // always installed: frame_step (fefw_frame.cpp) runs from it, and the F1 menu switches frame_fixes while the game runs
+    s.step_hook = hook_add_inline(base + kStepChoice, &hook_step_choice);
+    frame_install(base);   // fefw_frame.cpp: after the gameplay target hook, both see the same store
     if (config_get_bool("fefw", "cursor_real_time", true)) {
         s.cursor_x = hook_add_inline(base + kCursorStepX, &hook_cursor_step);
         s.cursor_y = hook_add_inline(base + kCursorStepY, &hook_cursor_step);

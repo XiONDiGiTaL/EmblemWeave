@@ -8,25 +8,35 @@
 // accessors read. Pictures are NV12 at the picture's width: the player's CPU-frame path. The console's player uses native images, which the
 // host cannot fill, so the game module selects the other path (games/fefw/fefw_play.cpp).
 //
-// Unlike the fork, a host thread per decoder decodes ahead (dav1d is C only here: a 1440p picture takes tens of milliseconds, which stalled
-// the game's main thread when it was decoded inside ReleaseVideoFrame). Up to kAhead pictures wait in host memory; a guest call or the worker
-// copies them into free frames. The input and output events are host kernel events attached to the guest's SystemEventTypes (as vi's vsync),
-// so the worker can wake the player.
+// Unlike the fork, a host thread per decoder decodes ahead (a 1440p picture takes tens of milliseconds, which stalled the game's main thread
+// when it was decoded inside ReleaseVideoFrame). Up to g_ahead pictures ([media] video_decode_ahead) wait in host memory; a guest call or the
+// worker copies them into free frames. The game's player waits for a late picture and its sound drops out meanwhile; once the pictures catch
+// up with the clock the sound stays behind (Fortune's Weave: 0.9 s late pictures at 43-51 s of a 1440p movie, two dropouts, then the sound out
+// of step to the end). The cushion of decoded pictures rides over a stretch the decoder takes longer for than the movie's frame rate allows;
+// dav1d's x86-64 assembly (NXRT_DAV1D_ASM, needs NASM at build time) makes every picture faster. The input and output events are host
+// kernel events attached to the guest's SystemEventTypes (as vi's vsync), so the worker can wake the player.
 //
 // Layouts (SDK 22.2): VideoFrame +0x08 buffer, +0x28 / +0x30 bytes of luma / chroma written, +0x48 buffer size, +0x78 time, +0x88 end of
 // stream (u8); nn::movie::Buffer +0x00 data, +0x10 bytes, +0x18 time, +0x20 flags (8: end of stream). The host state hangs off the guest
 // object's first word (where the library keeps its own), with a marker in the second.
 //   [media] movies = host | skip          host (default for a title with game::Info::movie_video_decoder); skip: every movie fails to open
 //                                         and the game moves on as after a skip (core/switch2.cpp)
-//   [media] video_decoder_threads = 4     dav1d worker threads per decoder
+//   [media] video_decoder_threads = 0     dav1d worker threads per decoder; 0 (default): half the logical processors, 4 to 8
+//   [media] video_decode_ahead = 30       decoded pictures held ahead of the player (4 to 120; 30 is about 1 s, 165 MiB at 2560x1440)
+//   [media] video_decoder_priority = above  Windows priority of the decode worker and dav1d's task threads: above (default), highest or
+//                                         normal (as before). The process runs in the high class and the guest threads sit at above normal
+//                                         and higher (kernel/sched.cpp), so at normal dav1d got only the CPU the game left: on a CPU with
+//                                         few cores the 1440p movies fell behind (#40). Power throttling is off for them unless normal.
 //   [media] video_decoder_log = 1         one log line per decoder call (verbose)
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -38,6 +48,7 @@
 
 #include "nxrt/abi.h"
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/log.h"
@@ -47,6 +58,7 @@
 
 #if NXRT_HAVE_DAV1D
 #include <dav1d/dav1d.h>
+extern "C" void (*dav1d_nxrt_thread_hook)(int begin);   // third_party/dav1d/src/win32/thread.c
 #endif
 
 namespace nxrt::nvn::be::gpu {   // gfx/nvn/nvn_gpu.h (its header needs the NVN include path)
@@ -75,10 +87,37 @@ constexpr int kMimeAv1 = 3;                // nn::movie::MediaMimeType of an AV1
 constexpr uint32_t kResultNoFrame = 0x7b;  // AcquireVideoFrame with no picture ready, as the library answers
 constexpr uint32_t kAutoClear = 1;         // nn::os::EventClearMode_AutoClear
 constexpr size_t kMaxFrames = 64;
-constexpr size_t kAhead = 4;               // decoded pictures held in host memory while no frame is free
 
 bool g_log = false;
 int g_threads = 4;
+size_t g_ahead = 30;                        // decoded pictures held in host memory while no frame is free ([media] video_decode_ahead)
+int g_priority = THREAD_PRIORITY_ABOVE_NORMAL;   // of the decode worker and dav1d's task threads ([media] video_decoder_priority)
+std::atomic<int> g_dav1d_threads{0};        // dav1d task threads alive (numbers their names)
+
+// The calling thread as a movie decoder thread: its priority, no power throttling (EcoQoS would clock it down on a hybrid or a laptop CPU),
+// and a diag registration, so place_log, the sampling profiler and the freeze watchdog see it.
+void decoder_thread_begin(const char* name) {
+    log_set_thread_name(name);
+    diag_register_thread(name, nullptr);
+    if (g_priority == THREAD_PRIORITY_NORMAL) return;
+    SetThreadPriority(GetCurrentThread(), g_priority);
+    THREAD_POWER_THROTTLING_STATE st = {};
+    st.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    st.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    st.StateMask = 0;   // explicitly not throttled
+    SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &st, sizeof st);
+}
+
+void dav1d_thread_hook(int begin) {
+    if (!begin) {
+        diag_unregister_thread();
+        g_dav1d_threads.fetch_sub(1, std::memory_order_relaxed);
+        return;
+    }
+    char name[32];
+    snprintf(name, sizeof name, "movie-av1-%d", g_dav1d_threads.fetch_add(1, std::memory_order_relaxed));
+    decoder_thread_begin(name);
+}
 std::atomic<uint64_t> s_packets{0}, s_pictures{0}, s_acquired{0}, s_released{0};
 // Decode time of the packets since the last stats line (worker threads): total and the slowest, in microseconds.
 std::atomic<uint64_t> s_dec_us{0}, s_dec_n{0}, s_dec_max_us{0};
@@ -335,11 +374,12 @@ Dav1dContext* open_av1(Decoder& d, const std::vector<uint8_t>& config) {
 }
 
 void worker_main(Decoder* d) {
+    decoder_thread_begin("movie-vdec");
     Dav1dContext* av1 = nullptr;
     uint64_t gen = d->generation;
     std::unique_lock<std::mutex> lk(d->mu);
     for (;;) {
-        const auto can_work = [&] { return d->stop || (!d->queue.empty() && d->decoded.size() < kAhead); };
+        const auto can_work = [&] { return d->stop || (!d->queue.empty() && d->decoded.size() < g_ahead); };
         while (!can_work()) {
             if (d->pending_free.empty()) d->cv.wait(lk);
             else {   // frames wait for the GPU: look again shortly (deliver frees them and wakes the player)
@@ -391,6 +431,7 @@ void worker_main(Decoder* d) {
         }
     }
     if (av1) dav1d_close(&av1);
+    diag_unregister_thread();
 }
 
 void stop_worker(Decoder& d) {
@@ -710,19 +751,34 @@ bool install_movie_decoder_hle() {
             return;
         }
         g_log = config_get_bool("media", "video_decoder_log", false);
-        g_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("media", "video_decoder_threads", 4), 1, 16));
+        const int64_t auto_threads = std::clamp<int64_t>(static_cast<int64_t>(std::thread::hardware_concurrency()) / 2, 4, 8);
+        const int64_t threads = config_get_int("media", "video_decoder_threads", 0);
+        g_threads = static_cast<int>(threads <= 0 ? auto_threads : std::clamp<int64_t>(threads, 1, 16));
+        g_ahead = static_cast<size_t>(std::clamp<int64_t>(config_get_int("media", "video_decode_ahead", 30), 4, 120));
+        {
+            std::string p = config_get_str("media", "video_decoder_priority", "above");
+            for (char& ch : p) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (p == "normal") g_priority = THREAD_PRIORITY_NORMAL;
+            else if (p == "highest") g_priority = THREAD_PRIORITY_HIGHEST;
+            else {
+                if (p != "above" && p != "above_normal") NXLOG_W(kTag, "[media] video_decoder_priority = %s is not above, highest or normal: above", p.c_str());
+                g_priority = THREAD_PRIORITY_ABOVE_NORMAL;
+            }
+        }
+        dav1d_nxrt_thread_hook = dav1d_thread_hook;
         for (const Import& im : kImports) {
             hle_register(im.name, im.fn);
             module_override_symbol(im.name);
         }
         g_enabled = true;
+        const char* prio_name = g_priority == THREAD_PRIORITY_NORMAL ? "normal" : g_priority == THREAD_PRIORITY_HIGHEST ? "highest" : "above normal";
 #if NXRT_DAV1D_ASM
-        NXLOG_I(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s with x86-64 assembly (%d threads), %zu imports routed",
-                dav1d_version(), g_threads, sizeof kImports / sizeof kImports[0]);
+        NXLOG_I(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s with x86-64 assembly (%d threads at %s priority, %zu pictures ahead), %zu imports routed",
+                dav1d_version(), g_threads, prio_name, g_ahead, sizeof kImports / sizeof kImports[0]);
 #else
         // A runtime built without NASM: 1440p pictures take 30-50 ms instead of 10-15, so the movies play below 30 fps (choppy cutscenes).
         NXLOG_W(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s, C only: built without NASM, movies decode several times slower "
-                "and may play below their frame rate (%d threads), %zu imports routed", dav1d_version(), g_threads, sizeof kImports / sizeof kImports[0]);
+                "and may play below their frame rate (%d threads at %s priority, %zu pictures ahead), %zu imports routed", dav1d_version(), g_threads, prio_name, g_ahead, sizeof kImports / sizeof kImports[0]);
 #endif
     });
     return g_enabled;

@@ -96,7 +96,7 @@ void frame_boundary(::Ctx* c = nullptr);
 // Unit tests: run with frame_source=manual and call this; `now` hooks are not registered. Resets everything (counters, files closed).
 void reset_for_tests();
 // Registers the game's entry hooks of the frame source and of the state-pointer capture (GameProbes::install_hooks).
-void install_game_hooks();
+bool install_game_hooks();   // false: the game has no frame hook (the caller then takes the present tick)
 // The state-pointer capture, called from the ProcessInput hook (x0 = CPlayerMP1*, x2 = CStateManager&); tests call it directly.
 void set_player_pointers(uint64_t player, uint64_t state_manager);
 // The context of the hook that is running the frame boundary: lets read_state call guest functions (the physics velocity). Null outside a hook.

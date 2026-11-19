@@ -142,6 +142,7 @@ struct Sl {
     PFun_slGetFeatureFunction* feature_fn = nullptr;
     PFun_slDLSSSetOptions* set_options = nullptr;
     PFun_slDLSSGetOptimalSettings* optimal = nullptr;
+    PFun_slFreeResources* free_resources = nullptr;   // optional: DLSS's memory goes back while it waits for a retry
 };
 Sl& sl_state() {
     static Sl s;
@@ -224,17 +225,31 @@ public:
     bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
         Sl& s = sl_state();
         if (failed_) return false;
-        // After a per-frame failure (slEvaluateFeature 39 under VRAM pressure, issue 21) the caller runs the built-in upscaler until the
-        // retry time; the next try starts from no history (the caller's sdk_valid is cleared by the frames the built-in upscaler ran).
-        if (retry_pending_ && std::chrono::steady_clock::now() < retry_at_) return false;
         // DLSS-G consumes viewport 0 at present; keep SR tags/constants separate.
         const sl::ViewportHandle vp(framegen_dlss() ? 1u : 0u);
+        // After a per-frame failure (slEvaluateFeature 39 under VRAM pressure, issue 21) the caller runs the built-in upscaler until the
+        // retry time; the next try starts from no history (the caller's sdk_valid is cleared by the frames the built-in upscaler ran).
+        if (retry_pending_) {
+            const auto now = std::chrono::steady_clock::now();
+            // DLSS's memory goes back half a second after the failure, so the failing frame is behind us and a VRAM shortage has had a
+            // moment to settle. Streamline requires the command list a pending evaluation is on to be flushed before its resources are freed
+            // (sl_core_api.h), and the render thread records ahead of the GPU, so the timer proves nothing on its own: drain the device first.
+            // Holding this memory while the built-in upscaler stands in kept an 8 GB card at 15-30 fps (Fortune's Eden v1.6.7.3).
+            if (free_pending_ && now >= free_at_) {
+                free_pending_ = false;
+                dev_->wait_idle();
+                if (s.free_resources && s.free_resources(sl::kFeatureDLSS, vp) == sl::Result::eOk) NXLOG_I(kTag, "DLSS's memory released until the retry");
+            }
+            if (now < retry_at_) return false;
+        }
+        if (test_failure()) return fail_frame("slEvaluateFeature (test: [dlss] test_fail_after_s)", 39);
         sl::FrameToken* frame = static_cast<sl::FrameToken*>(sl_frame_token());
         if (!frame) return fail("slGetNewFrameToken");
         // The mode: kept while the input size stays in its dynamic range (the game may change its render size per frame), else the one
         // whose scale is nearest the actual ratio and whose range holds the input (DLAA at the same size).
         const bool same_out = f.out.width == last_out_.width && f.out.height == last_out_.height;
-        if (!same_out || !in_range(range_, f.render)) {
+        const int preset = extras::dlss_preset();   // the F1 menu changes it live
+        if (!same_out || !in_range(range_, f.render) || preset != last_preset_) {
             sl::DLSSMode m = sl::DLSSMode::eDLAA;
             Range rg{f.out.width, f.out.height, f.out.width, f.out.height};
             const double r = static_cast<double>(f.out.width) / static_cast<double>(f.render.width);
@@ -257,7 +272,8 @@ public:
                     }
                 }
             }
-            if ((m != last_mode_ || !same_out) && s.set_options(vp, options(m, f.out)) != sl::Result::eOk) return fail("slDLSSSetOptions");
+            const bool new_opts = m != last_mode_ || !same_out || preset != last_preset_;
+            if (new_opts && s.set_options(vp, options(m, f.out)) != sl::Result::eOk) return fail("slDLSSSetOptions");
             {
                 static bool modules_logged = false;
                 if (!modules_logged) {
@@ -265,9 +281,10 @@ public:
                     log_streamline_modules("at the first DLSS mode");
                 }
             }
-            if (m != last_mode_ || !same_out)
-                NXLOG_I(kTag, "%s: mode %s, %ux%u -> %ux%u (input range %ux%u .. %ux%u)", name(), mode_name(m), f.render.width, f.render.height, f.out.width,
-                        f.out.height, rg.min_w, rg.min_h, rg.max_w, rg.max_h);
+            if (new_opts)
+                NXLOG_I(kTag, "%s: mode %s, model preset %s, %ux%u -> %ux%u (input range %ux%u .. %ux%u)", name(), mode_name(m), extras::dlss_preset_word(preset),
+                        f.render.width, f.render.height, f.out.width, f.out.height, rg.min_w, rg.min_h, rg.max_w, rg.max_h);
+            last_preset_ = preset;
             if (!in_range(rg, f.render) && !same_out)
                 NXLOG_W(kTag, "%s: input %ux%u is outside every mode's range for %ux%u", name(), f.render.width, f.render.height, f.out.width, f.out.height);
             last_mode_ = m;
@@ -325,28 +342,12 @@ private:
         return e.width >= r.min_w && e.height >= r.min_h && e.width <= r.max_w && e.height <= r.max_h && r.max_w;
     }
     // [dlss] preset: the DLSS model for every mode (DLAA included): default (the driver's / an override's choice), or a letter j, k, l or m
-    // (sl_dlss.h DLSSPreset; the older letters were removed or revert to the default). Read once.
-    static sl::DLSSPreset preset() {
-        static const sl::DLSSPreset p = [] {
-            std::string v = nxrt::config_get_str("dlss", "preset", "default");
-            for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (v.rfind("preset", 0) == 0) v = v.substr(6);
-            while (!v.empty() && (v[0] == ' ' || v[0] == '_')) v.erase(0, 1);
-            sl::DLSSPreset r = sl::DLSSPreset::eDefault;
-            if (v == "j") r = sl::DLSSPreset::ePresetJ;
-            else if (v == "k") r = sl::DLSSPreset::ePresetK;
-            else if (v == "l") r = sl::DLSSPreset::ePresetL;
-            else if (v == "m") r = sl::DLSSPreset::ePresetM;
-            else if (v != "default" && !v.empty()) NXLOG_W("dlss", "[dlss] preset = %s is not one of default, j, k, l, m: default", v.c_str());
-            if (r != sl::DLSSPreset::eDefault) NXLOG_I("dlss", "[dlss] preset = %s: every DLSS mode uses preset %c", v.c_str(), static_cast<char>(std::toupper(v[0])));
-            return r;
-        }();
-        return p;
-    }
+    // (sl_dlss.h DLSSPreset; the older letters were removed or revert to the default). Live: extras::dlss_preset() (the F1 menu changes it);
+    // evaluate() sets the options again when it differs from last_preset_, and after a failed frame (last_out_ cleared) at the retry.
     static sl::DLSSOptions options(sl::DLSSMode m, VkExtent2D out) {
         sl::DLSSOptions o;
         o.mode = m;
-        const sl::DLSSPreset p = preset();
+        const sl::DLSSPreset p = static_cast<sl::DLSSPreset>(extras::dlss_preset());
         o.dlaaPreset = o.qualityPreset = o.balancedPreset = o.performancePreset = o.ultraPerformancePreset = o.ultraQualityPreset = p;
         o.outputWidth = out.width;
         o.outputHeight = out.height;
@@ -387,25 +388,41 @@ private:
     // usual cause passes (video memory over the OS budget during a level load, which Streamline warns about beside the error). DLSS is
     // tried again after a delay that doubles with each failure in a row, from 2 s up to 30 s, so a lasting failure costs one call a
     // half minute rather than one a frame, and a passing one gives DLSS back instead of the built-in upscaler for the rest of the session.
+    // Its own memory is released half a second later (evaluate) and the mode and options are set again at the retry.
     bool fail_frame(const char* what, int code = -1) {
         ++fail_streak_;
         const unsigned shift = fail_streak_ > 5 ? 4u : fail_streak_ - 1u;
         const int delay_s = std::min(2 << shift, 30);
         retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(delay_s);
         retry_pending_ = true;
+        free_pending_ = true;    // released from the next evaluation half a second on (above)
+        free_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        last_out_ = {};          // the mode and its options are set again at the retry (the feature is freed meanwhile)
         if (fail_streak_ == 1) NXLOG_E(kTag, "%s failed (%d): the built-in upscaler until DLSS is tried again in %d s", what, code, delay_s);
         else NXLOG_W(kTag, "%s failed (%d) again (%u in a row): next try in %d s", what, code, fail_streak_, delay_s);
         if (code >= 0) std::snprintf(failure_, sizeof(failure_), "%s failed (%d): retrying in %d s", what, code, delay_s);
         else std::snprintf(failure_, sizeof(failure_), "%s failed: retrying in %d s", what, delay_s);
         return false;
     }
+    // [dlss] test_fail_after_s = N (a test aid): one evaluation N seconds after the first is treated as failed, to see the retry and the
+    // memory release on a GPU with video memory to spare.
+    bool test_failure() {
+        static const double after = config_get_double("dlss", "test_fail_after_s", 0.0);
+        if (after <= 0 || test_done_) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (first_eval_ == std::chrono::steady_clock::time_point{}) first_eval_ = now;
+        if (std::chrono::duration<double>(now - first_eval_).count() < after) return false;
+        test_done_ = true;
+        return true;
+    }
     const char* last_failure() const override { return failure_; }
     gfx::Device* dev_;
-    bool dlaa_ = false, failed_ = false, retry_pending_ = false;
+    bool dlaa_ = false, failed_ = false, retry_pending_ = false, free_pending_ = false, test_done_ = false;
     unsigned fail_streak_ = 0;
-    std::chrono::steady_clock::time_point retry_at_{};
+    std::chrono::steady_clock::time_point retry_at_{}, free_at_{}, first_eval_{};
     char failure_[96] = {};
     sl::DLSSMode last_mode_ = sl::DLSSMode::eCount;
+    int last_preset_ = -1;
     VkExtent2D last_out_ = {};
     Range range_;
 };
@@ -478,6 +495,7 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
     s.tag = reinterpret_cast<PFun_slSetTagForFrame*>(get("slSetTagForFrame"));
     s.evaluate = reinterpret_cast<PFun_slEvaluateFeature*>(get("slEvaluateFeature"));
     s.feature_fn = reinterpret_cast<PFun_slGetFeatureFunction*>(get("slGetFeatureFunction"));
+    s.free_resources = reinterpret_cast<PFun_slFreeResources*>(get("slFreeResources"));
     auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(get("vkGetInstanceProcAddr"));
     if (!s.init || !s.supported || !s.token || !s.constants || !s.tag || !s.evaluate || !s.feature_fn || !gipa) {
         NXLOG_E(kTag, "sl.interposer.dll lacks the Streamline API");

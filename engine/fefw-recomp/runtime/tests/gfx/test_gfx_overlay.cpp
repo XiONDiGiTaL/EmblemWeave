@@ -133,14 +133,16 @@ NXTEST(mouse_is_wanted_only_over_the_menu) {
     REQUIRE(rig.make(false));
     Overlay& o = *rig.overlay;
     o.set_visible(true);
-    for (int i = 0; i < 3; ++i) rig.frame();    // ImGui learns where its window is (16,16, 420 wide)
-    o.handle_event(motion(100, 60));
+    // ImGui learns where its window is: the Diagnostics window starts folded at the top right (overlay.cpp build_ui), its title bar
+    // 420 wide from x = 800 - 420 - 16 = 364, at y = 16
+    for (int i = 0; i < 3; ++i) rig.frame();
+    o.handle_event(motion(574, 24));            // the middle of that title bar
     rig.frame();
     std::printf("    pointer over the menu: wants_mouse %d\n", o.wants_mouse());
     CHECK(o.wants_mouse());
     input::Event click;
     click.type = input::EventType::MouseButtonDown;
-    click.u.button = {1, 1, 100.f, 60.f};
+    click.u.button = {1, 1, 574.f, 24.f};
     CHECK(o.handle_event(click));               // a click on the menu is the menu's
     click.type = input::EventType::MouseButtonUp;
     CHECK(o.handle_event(click));

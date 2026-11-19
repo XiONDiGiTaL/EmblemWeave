@@ -64,6 +64,7 @@ private:
     int64_t remaining_ = 0;
     uint64_t start_frame_ = 0;
     uint64_t start_ms_ = 0;
+    uint64_t run_t0_ms_ = 0;      // host ms at the script's first frame (@at)
     double start_igt_ = -1;
     uint64_t next_mash_ms_ = 0, mash_release_ms_ = 0;
     int64_t default_timeout_ = 3600;

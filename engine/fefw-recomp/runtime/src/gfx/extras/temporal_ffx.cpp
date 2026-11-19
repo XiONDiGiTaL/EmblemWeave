@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 
+#include "extras/ffx_device_proc.h"
 #include "extras/ffx_files.h"
 #include "extras/temporal.h"
 #include "nxrt/extras.h"
@@ -31,15 +32,8 @@ void on_message(uint32_t type, const wchar_t* msg) {
     else NXLOG_W(kTag, "%s", buf);
 }
 
-// FFX's backend asks for KHR aliases of core functions (vkGetBufferMemoryRequirements2KHR) and calls them unchecked; on a 1.3 device
-// without the old extensions those names give null: fall back to the core name. The frame generation path already does this.
-VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL device_proc(VkDevice d, const char* name) {
-    if (PFN_vkVoidFunction f = vkGetDeviceProcAddr(d, name)) return f;
-    const size_t n = name ? std::strlen(name) : 0;
-    if (n > 3 && std::strcmp(name + n - 3, "KHR") == 0) return vkGetDeviceProcAddr(d, std::string(name, n - 3).c_str());
-    NXLOG_W(kTag, "FFX asked for %s: the device has no such function", name ? name : "(null)");
-    return nullptr;
-}
+// The shared KHR-alias resolver (ffx_device_proc.h), with a miss logged under this module's tag.
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL device_proc(VkDevice d, const char* name) { return ffx_device_proc(d, name, kTag); }
 
 FfxApiResource resource(const TemporalImage& t, uint32_t state, uint32_t usage) {
     FfxApiResource r = {};

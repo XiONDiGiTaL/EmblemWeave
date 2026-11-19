@@ -119,6 +119,23 @@ std::string lower(std::string s) {
     return s;
 }
 
+/// The driver version as its vendor numbers it: NVIDIA packs major, minor,
+/// third and build into 10/8/8/6 bits, Intel's Windows driver two components
+/// into 14/14 bits; everyone else follows the Vulkan variant, major, minor,
+/// patch layout. Printed with the raw value, so a report can be matched
+/// against a vendor's release notes without guessing.
+std::string driver_text(const VkPhysicalDeviceProperties& p) {
+    char b[64];
+    if (p.vendorID == 0x10de)
+        std::snprintf(b, sizeof b, "%u.%u.%u.%u", (p.driverVersion >> 22) & 0x3ff, (p.driverVersion >> 14) & 0xff, (p.driverVersion >> 6) & 0xff,
+                      p.driverVersion & 0x3f);
+    else if (p.vendorID == 0x8086)
+        std::snprintf(b, sizeof b, "%u.%u", p.driverVersion >> 14, p.driverVersion & 0x3fff);
+    else
+        std::snprintf(b, sizeof b, "%u.%u.%u", VK_API_VERSION_MAJOR(p.driverVersion), VK_API_VERSION_MINOR(p.driverVersion), VK_API_VERSION_PATCH(p.driverVersion));
+    return b;
+}
+
 const char* type_name(int t) {
     static const char* const names[] = {"other", "integrated", "discrete", "virtual", "cpu"};
     return t >= 0 && t <= 4 ? names[t] : "?";
@@ -301,22 +318,31 @@ uint32_t device_local_heap(VmaAllocator a) {
     return best;
 }
 
-std::mutex g_guard_mu;                 // the memguard thread reads these through gpu_bytes_for_guard; the device destructor clears them
+// Timed, not plain: the watchdog's freeze report reads these through memguard_video / memguard_footprint_host, and a budget
+// query stalled in VMA or the driver during a GPU freeze must not keep the report from being written. A read that cannot take
+// the lock within 200 ms reports the last figure it read (the guard compares footprint minus this with its limit, so a zero would
+// count dedicated VRAM against it and could stop the game).
+std::timed_mutex g_guard_mu;           // the memguard thread reads these through gpu_bytes_for_guard; the device destructor clears them
 VmaAllocator g_guard_vma = nullptr;
 int g_guard_heap = -1;                 // -1: nothing to subtract
+std::atomic<uint64_t> g_guard_last{0};   // the last discount read under the lock
 uint64_t gpu_bytes_for_guard() {      // the device's dedicated memory in use by this process, for the memory guard (nxrt/memguard.h)
     // Held across the query: unregister_vma_gauges takes the same lock before the allocator is destroyed.
-    std::lock_guard<std::mutex> lk(g_guard_mu);
+    std::unique_lock<std::timed_mutex> lk(g_guard_mu, std::defer_lock);
+    if (!lk.try_lock_for(std::chrono::milliseconds(200))) return g_guard_last.load(std::memory_order_relaxed);
     if (!g_guard_vma || g_guard_heap < 0) return 0;
     VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
     vmaGetHeapBudgets(g_guard_vma, b);
-    return static_cast<uint64_t>(b[g_guard_heap].usage);
+    const uint64_t usage = static_cast<uint64_t>(b[g_guard_heap].usage);
+    g_guard_last.store(usage, std::memory_order_relaxed);
+    return usage;
 }
 
 bool g_budget_exact = false;           // VK_EXT_memory_budget is on: heap usage and budget are the driver's figures
 int g_video_heap = -1;                 // the largest device-local heap (guarded by g_guard_mu, as the allocator pointer)
 void video_for_guard(nxrt::MemGuardVideo* out) {
-    std::lock_guard<std::mutex> lk(g_guard_mu);
+    std::unique_lock<std::timed_mutex> lk(g_guard_mu, std::defer_lock);
+    if (!lk.try_lock_for(std::chrono::milliseconds(200))) return;   // the freeze report gets no video line rather than a blocked thread
     if (!g_guard_vma || g_video_heap < 0) return;
     VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
     vmaGetHeapBudgets(g_guard_vma, b);
@@ -334,7 +360,7 @@ void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
     {
         const VkPhysicalDeviceMemoryProperties* mp = nullptr;
         vmaGetMemoryProperties(a, &mp);
-        std::lock_guard<std::mutex> lk(g_guard_mu);
+        std::lock_guard<std::timed_mutex> lk(g_guard_mu);
         g_guard_heap = mp ? vk_guard_discount_heap(*mp, type) : -1;
         g_guard_vma = a;
         g_video_heap = static_cast<int>(heap);
@@ -362,7 +388,7 @@ void unregister_vma_gauges() {
     nxrt::memguard_set_discount(nullptr);
     nxrt::memguard_set_video(nullptr);
     {
-        std::lock_guard<std::mutex> lk(g_guard_mu);   // waits for a guard read in flight; later reads see a null allocator
+        std::lock_guard<std::timed_mutex> lk(g_guard_mu);   // waits for a guard read in flight; later reads see a null allocator
         g_guard_vma = nullptr;
         g_video_heap = -1;
         g_guard_heap = -1;
@@ -411,7 +437,7 @@ bool quirk_key(const char* key, bool dflt) {
 const GpuQuirks& gpu_quirks() { return g_quirks; }
 
 uint64_t video_budget_bytes() {
-    std::lock_guard<std::mutex> lk(g_guard_mu);
+    std::lock_guard<std::timed_mutex> lk(g_guard_mu);
     if (!g_guard_vma || g_video_heap < 0) return 0;
     VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
     vmaGetHeapBudgets(g_guard_vma, b);
@@ -428,7 +454,7 @@ bool video_memory_pressure() {
     if (now < due || !next_ms.compare_exchange_strong(due, now + 250, std::memory_order_relaxed)) return tight.load(std::memory_order_relaxed);
     uint64_t usage = 0, budget = 0;
     {
-        std::lock_guard<std::mutex> lk(g_guard_mu);
+        std::lock_guard<std::timed_mutex> lk(g_guard_mu);
         if (!g_guard_vma || g_video_heap < 0) return false;
         VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
         vmaGetHeapBudgets(g_guard_vma, b);
@@ -455,7 +481,7 @@ int video_usage_percent() {
     if (now < due || !next_ms.compare_exchange_strong(due, now + 250, std::memory_order_relaxed)) return last.load(std::memory_order_relaxed);
     int pct = -1;
     {
-        std::lock_guard<std::mutex> lk(g_guard_mu);
+        std::lock_guard<std::timed_mutex> lk(g_guard_mu);
         if (g_guard_vma && g_video_heap >= 0) {
             VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
             vmaGetHeapBudgets(g_guard_vma, b);
@@ -476,7 +502,7 @@ int video_live_percent() {
     if (now < due || !next_ms.compare_exchange_strong(due, now + 250, std::memory_order_relaxed)) return last.load(std::memory_order_relaxed);
     int pct = -1;
     {
-        std::lock_guard<std::mutex> lk(g_guard_mu);
+        std::lock_guard<std::timed_mutex> lk(g_guard_mu);
         if (g_guard_vma && g_video_heap >= 0) {
             VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
             vmaGetHeapBudgets(g_guard_vma, b);
@@ -689,9 +715,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         gi.can_present = c.eligible;
         gpus_.push_back(gi);
         cands.push_back(c);
-        NXLOG_I(kTag, "GPU %u: %s (%s, Vulkan %u.%u.%u, driver 0x%08x, %.1f GiB)%s%s", i, p.deviceName, type_name(gi.type),
-                VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion),
-                p.driverVersion, static_cast<double>(gi.vram_bytes) / (1024.0 * 1024.0 * 1024.0),
+        NXLOG_I(kTag, "GPU %u: %s (%s, vendor 0x%04x, device 0x%04x, Vulkan %u.%u.%u, driver %s [0x%08x], %.1f GiB)%s%s", i, p.deviceName, type_name(gi.type),
+                p.vendorID, p.deviceID, VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion),
+                driver_text(p).c_str(), p.driverVersion, static_cast<double>(gi.vram_bytes) / (1024.0 * 1024.0 * 1024.0),
                 c.eligible ? "" : " NOT USABLE: ", c.eligible ? "" : c.why.c_str());
     }
 
@@ -753,6 +779,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR acsd = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
     VkPhysicalDeviceMemoryPriorityFeaturesEXT ampri = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT};
     VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT apage = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT aaf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -765,6 +792,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         return true;
     };
     const bool x_fsi = add_ext(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME, &afsi);
+    const bool x_af = add_ext(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, &aaf);   // native float adds to buffers (spirv_native_float_add)
     const bool x_dcc = add_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, &adcc);
     const bool x_dce = add_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME, &adce);
     const bool x_cbc = add_ext(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME, &acbc);
@@ -867,6 +895,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.dynamic_rendering_unused_attachments = x_drua && adrua.dynamicRenderingUnusedAttachments;
     features_.transform_feedback = x_tfb && atfb.transformFeedback;
     features_.index_type_uint8 = x_u8 && au8.indexTypeUint8;
+    features_.buffer_float32_atomic_add = x_af && aaf.shaderBufferFloat32AtomicAdd;
     if (features_.transform_feedback) {   // transformFeedbackQueries is a property: the primitive counters of indirect draws under feedback need it
         VkPhysicalDeviceTransformFeedbackPropertiesEXT tfp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT};
         VkPhysicalDeviceProperties2 tfpp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &tfp};
@@ -956,6 +985,13 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     dci.ppEnabledExtensionNames = dev_exts.data();
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
+    {   // What the device was created with, in the log rather than only in a report:
+        // a driver that drops an extension, or a run whose swapchain extension was
+        // never enabled, is one line to see.
+        std::string names;
+        for (const char* e : dev_exts) names += (names.empty() ? "" : ", ") + std::string(e);
+        NXLOG_I(kTag, "device extensions enabled (%zu): %s", dev_exts.size(), names.empty() ? "none" : names.c_str());
+    }
     if (sl_gipa) {
         // Resolve the device loader from the interposer itself. Do not let device loading
         // replace the swapchain hooks with driver pointers (including on recreation).
@@ -1024,7 +1060,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         q.intel_integrated = q.intel && props_.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
         q.budget_detail = quirk_key("budget_detail", q.intel);
         q.pressure_detail = quirk_key("pressure_detail", q.intel) && x_membudget;   // needs the OS's figures, not VMA's estimate
-        q.igpu_compat = quirk_key("igpu_compat", q.intel_integrated);                 // #5, #18
+        q.igpu_compat = quirk_key("igpu_compat", q.intel);                            // #5, #18; Arc A770 and B580 too (#45)
         g_quirks = q;
         VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
         vmaGetHeapBudgets(vma_, b);
@@ -1045,7 +1081,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
 
-    NXLOG_I(kTag, "device ready: %s, queue family %u, validation %s, %s", props_.deviceName, queue_family_, validation_ ? "on" : "off",
+    NXLOG_I(kTag, "device ready: %s (vendor 0x%04x, device 0x%04x, Vulkan %u.%u.%u, driver %s [0x%08x]), queue family %u, validation %s, %s",
+            props_.deviceName, props_.vendorID, props_.deviceID, VK_API_VERSION_MAJOR(props_.apiVersion), VK_API_VERSION_MINOR(props_.apiVersion),
+            VK_API_VERSION_PATCH(props_.apiVersion), driver_text(props_).c_str(), props_.driverVersion, queue_family_, validation_ ? "on" : "off",
             headless ? "headless" : "window surface");
     return true;
 }

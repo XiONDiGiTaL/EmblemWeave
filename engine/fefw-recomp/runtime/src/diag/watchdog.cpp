@@ -200,7 +200,9 @@ std::string memory_text() {
     } else {
         out += "  private commit: the query failed\n";
     }
-    const double limit_gb = std::atof(config_get_str("memory", "limit_gb", game::info().platform == game::Platform::Switch2 ? "16" : "8").c_str());
+    // The guard's own parser, so the report names the limit the guard enforces (invalid or non-positive text falls back to 8.0)
+    const double limit_gb =
+        memguard_limit_gb(config_get_str("memory", "limit_gb", game::info().platform == game::Platform::Switch2 ? "16" : "8").c_str());
     std::snprintf(b, sizeof b, "  host footprint %.2f GB (peak %.2f GB), guard limit %.1f GB ([memory] limit_gb), guard %s\n",
                   static_cast<double>(memguard_footprint_host()) / gb, static_cast<double>(memguard_peak()) / gb, limit_gb,
                   memguard_running() ? "running" : "not running");

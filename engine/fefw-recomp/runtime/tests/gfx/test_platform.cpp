@@ -269,6 +269,8 @@ NXTEST(gamepad_hotplug_virtual_pad) {
     Session s;
     REQUIRE(s.ok);
 
+    // Controllers already plugged into the machine are announced on the first pumps: let them arrive before counting.
+    pump_until([] { return false; }, 300);
     const size_t before = input::gamepad_count();
     input::queue_clear();
 

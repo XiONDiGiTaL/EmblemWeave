@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "nxrt/config.h"
+#include "nxrt/gauge.h"
 #include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
@@ -210,6 +211,7 @@ void Runner::frame(uint64_t k, const GameState& s, bool valid, ::Ctx* c) {
             if (!name.empty() && !take_shot(name, &why)) NXLOG_W("tt", "live shot %s: %s", name.c_str(), why.c_str());
         }
     }
+    if (!run_t0_ms_) run_t0_ms_ = GetTickCount64();
     for (int guard = 0; guard < 100000; guard++) {
         if (done_) return;
         if (idx_ >= script_.steps.size() && !live_path_.empty()) {
@@ -360,6 +362,9 @@ void Runner::frame(uint64_t k, const GameState& s, bool valid, ::Ctx* c) {
                 if (!detail::give_item(static_cast<int>(st.x), static_cast<int>(st.y))) { fail(st, "@give: the player state is not readable yet"); return; }
                 advance();
                 continue;
+            case StepKind::WaitAt:
+                if (static_cast<double>(GetTickCount64() - run_t0_ms_) >= st.x) { advance(); continue; }
+                return;
             case StepKind::WaitMs: {
                 const uint64_t now_ms = GetTickCount64();
                 if (first) start_ms_ = now_ms;
@@ -489,8 +494,13 @@ void Runner::frame(uint64_t k, const GameState& s, bool valid, ::Ctx* c) {
             case StepKind::Log:
                 NXLOG_I("script", "%s", st.text.c_str());
                 if (ft::on() && st.text.compare(0, 6, "SCENE ") == 0) ft::mark(st.text.c_str());   // S34: scene windows in the frame trace
-                if (st.text.compare(0, 12, "SCENE start ") == 0) prof_sampler_label(st.text.c_str() + 12);   // and in the sampling profiler
-                else if (st.text.compare(0, 10, "SCENE end ") == 0) prof_sampler_label("");
+                if (st.text.compare(0, 12, "SCENE start ") == 0) {
+                    prof_sampler_label(st.text.c_str() + 12);   // and in the sampling profiler
+                    hitch_scene(st.text.c_str() + 12, true);    // and a frame-time summary of exactly that window (perf routes)
+                } else if (st.text.compare(0, 10, "SCENE end ") == 0) {
+                    prof_sampler_label("");
+                    hitch_scene(st.text.c_str() + 10, false);
+                }
                 advance();
                 continue;
             case StepKind::Assert: {

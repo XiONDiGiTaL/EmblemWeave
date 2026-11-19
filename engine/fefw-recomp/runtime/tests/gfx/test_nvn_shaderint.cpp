@@ -141,7 +141,7 @@ Block& imgtex_cs_block() {
     return b;
 }
 
-// The shader cache of these scenes, written once and made [nvn] shader_cache before the back end opens its cache (install_backend).
+// The shader cache of these scenes, written once, made [nvn] shader_cache and opened as the back end's cache.
 bool cache_ready() {
     static int state = -1;
     if (state >= 0) return state == 1;
@@ -163,6 +163,14 @@ bool cache_ready() {
     nxrt::config_set("nvn", "shader_cache", d.c_str());
     nxrt::config_set("nvn", "shader_order", "");      // no boot preload order file in the test's folder
     nxrt::config_set("nvn", "shader_pack", "false");
+    // The back end opens its cache once per process. Open it on this folder now in case an earlier group (DLSS, in --all)
+    // already made the back end look for one and found none; a cache already open on another folder cannot be moved.
+    ShaderCache& cache = shader_cache();
+    if (!cache.is_open()) cache.open(d);
+    if (!cache.is_open() || fs::path(cache.dir()) != fs::path(d)) {
+        std::fprintf(stderr, "shader cache is open on %s, not the test cache\n", cache.is_open() ? cache.dir().c_str() : "nothing");
+        return false;
+    }
     state = 1;
     return true;
 }

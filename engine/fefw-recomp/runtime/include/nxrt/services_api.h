@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+struct NxModFile;    // nxrt/mod_api.h
+
 namespace nxrt::services {
 
 // ---- fs (fs.cpp): save data backend used by am (EnsureSaveData ...) and the fsp-srv commands ---------------------------------------
@@ -78,6 +80,10 @@ int sites_missing(const std::string& mod_dir);
 // What the overlay shows on screen at start about code mods (installed mods whose sites are missing): lines, "" for nothing.
 std::string notice();
 bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data);
+// A file edit of the runtime or the game module itself (not a mod), with the same NxModFile interface: match gets the image path in lower
+// case ("/graphics/settings/x.set") and says whether fn edits it. Runs before the code mods' edits of the same file. Register before the
+// RomFS image is built (play mode install); false when it is too late.
+bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user);
 }  // namespace modapi
 
 // ---- acc (acc.cpp) ----------------------------------------------------------------------------------------------------------------
