@@ -193,6 +193,135 @@ pub const NO_DATA_DIR: &str = if cfg!(windows) {
     "neither XDG_CONFIG_HOME nor HOME is set"
 };
 
+/// Start title-bar moves in the Windows hit-test pass, before egui sees the
+/// press. `ViewportCommand::StartDrag` can only run after the frame that saw
+/// the click, which leaves one frame where the pointer travels and the window
+/// catches up: the slide the launcher had when grabbed.
+pub fn install_native_drag() {
+    #[cfg(windows)]
+    native_drag::install();
+}
+
+#[cfg(windows)]
+mod native_drag {
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsZoomed, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_WNDPROC, HTCAPTION, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    };
+
+    type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+
+    static ORIGINAL: AtomicIsize = AtomicIsize::new(0);
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+    /// The painted top bar and this hit test share the same insets; only the
+    /// empty centre of the bar is caption, so the chips and window controls
+    /// keep their own clicks.
+    /// A maximized window has no caption left to move from: the shell restores
+    /// it on the press and starts the move at once. This window is borderless,
+    /// so the press goes through winit's procedure, which starts the move only
+    /// for a restored window, and a grabbed maximized launcher sat still until
+    /// it was restored by hand. Restore it here, under the pointer, so the same
+    /// press moves the window from the place it was grabbed.
+    unsafe fn restore_under_cursor(hwnd: HWND, lparam: LPARAM) {
+        let cx = (lparam & 0xffff) as u16 as i16 as i32;
+        let cy = ((lparam >> 16) & 0xffff) as u16 as i16 as i32;
+        let mut maximized: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut maximized) == 0 {
+            return;
+        }
+        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        let normal = if GetWindowPlacement(hwnd, &mut placement) != 0 { placement.rcNormalPosition } else { maximized };
+        let mw = (maximized.right - maximized.left).max(1) as f32;
+        let mh = (maximized.bottom - maximized.top).max(1) as f32;
+        let nw = (normal.right - normal.left).max(1) as f32;
+        let nh = (normal.bottom - normal.top).max(1) as f32;
+        // The pointer keeps the same fraction of the window, so the caption does
+        // not jump out from under it.
+        let fx = ((cx - maximized.left) as f32 / mw).clamp(0.0, 1.0);
+        let fy = ((cy - maximized.top) as f32 / mh).clamp(0.0, 1.0);
+        let x = cx - (fx * nw).round() as i32;
+        let y = cy - (fy * nh).round() as i32;
+        ShowWindow(hwnd, SW_RESTORE);
+        SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    unsafe extern "system" fn hit_test(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg == WM_NCLBUTTONDOWN && wparam as u32 == HTCAPTION && IsZoomed(hwnd) != 0 {
+            restore_under_cursor(hwnd, lparam);
+        }
+        if msg == WM_NCHITTEST {
+            let mut point = POINT {
+                x: (lparam & 0xffff) as u16 as i16 as i32,
+                y: ((lparam >> 16) & 0xffff) as u16 as i16 as i32,
+            };
+            let mut client: RECT = std::mem::zeroed();
+            if ScreenToClient(hwnd, &mut point) != 0 && GetClientRect(hwnd, &mut client) != 0 {
+                let dpi = GetDpiForWindow(hwnd);
+                let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+                let top = (crate::theme::TOPBAR_HEIGHT * scale).round() as i32;
+                let left = (crate::theme::TOPBAR_DRAG_LEFT * scale).round() as i32;
+                let right = client.right - (crate::theme::TOPBAR_DRAG_RIGHT * scale).round() as i32;
+                if point.y >= 0 && point.y < top && point.x >= left && point.x < right {
+                    return HTCAPTION as LRESULT;
+                }
+            }
+        }
+
+        let original = ORIGINAL.load(Ordering::Relaxed);
+        if original != 0 {
+            let original: WndProc = std::mem::transmute(original);
+            return CallWindowProcW(Some(original), hwnd, msg, wparam, lparam);
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
+    unsafe extern "system" fn find_launcher(hwnd: HWND, found: LPARAM) -> BOOL {
+        let mut process = 0;
+        GetWindowThreadProcessId(hwnd, &mut process);
+        if process == GetCurrentProcessId() {
+            let mut title = [0u16; 64];
+            let len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+            if len > 0 && String::from_utf16_lossy(&title[..len as usize]) == "EmblemWeave" {
+                *(found as *mut HWND) = hwnd;
+                return 0;
+            }
+        }
+        1
+    }
+
+    pub fn install() {
+        if INSTALLED.load(Ordering::Relaxed) {
+            return;
+        }
+        unsafe {
+            let mut hwnd: HWND = std::ptr::null_mut();
+            EnumWindows(Some(find_launcher), &mut hwnd as *mut HWND as LPARAM);
+            if hwnd.is_null() {
+                return;
+            }
+            let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+            if original == 0 {
+                return;
+            }
+            ORIGINAL.store(original, Ordering::Relaxed);
+            if SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hit_test as *const () as usize as isize) == 0 {
+                ORIGINAL.store(0, Ordering::Relaxed);
+                return;
+            }
+            INSTALLED.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

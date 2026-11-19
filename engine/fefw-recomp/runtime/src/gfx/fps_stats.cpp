@@ -32,7 +32,12 @@ void FpsStats::push(double now_s, double dt_ms) {
 
 FpsStats::Snapshot FpsStats::snapshot(double now_s) const {
     Snapshot s;
-    std::vector<double> dts;   // frame times of the last 5 s
+    // Frame times of the last 5 s, in a buffer this thread keeps: the overlay
+    // asks every 250 ms while the counter is up, and a fresh vector each time
+    // was a heap allocation (and a copy) on the render thread for numbers that
+    // never outlive the call.
+    static thread_local std::vector<double> dts;
+    dts.clear();
     dts.reserve(count_);
     double sum_short = 0, max_short = 0;
     std::size_t n_short = 0;

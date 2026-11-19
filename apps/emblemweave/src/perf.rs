@@ -59,47 +59,37 @@ impl Frames {
         self.times.iter().copied().collect()
     }
 
-    /// A frame time at rank `p` of the sorted ones, in milliseconds.
-    fn pct(&self, p: f32) -> f32 {
-        let mut t = self.samples();
-        if t.is_empty() {
-            return 0.0;
-        }
-        t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let i = ((t.len() as f32 * p).ceil() as usize).saturating_sub(1).min(t.len() - 1);
-        t[i] * 1000.0
-    }
-
-    /// The rate of the slowest `1 - p` of the frames: the 1 % low is the worst
-    /// frame of the slowest hundredth, not whichever frame sits at that rank.
-    fn low(&self, p: f32) -> f32 {
-        let mut t = self.samples();
-        let n = t.len();
-        if n == 0 {
-            return 0.0;
-        }
-        t.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let k = ((n as f32) * (1.0 - p)).ceil().max(1.0) as usize;
-        1.0 / t[n - k.min(n)]
-    }
-
+    /// The sorted samples once, then every number below read from that order.
+    /// The percentiles and both lows used to take a copy each and sort it, so
+    /// one call sorted the same 900 samples three times — on every frame the
+    /// Diagnostics page and the overview graph asked for them.
     pub fn stats(&self) -> Stats {
-        let times = self.samples();
+        let mut times: Vec<f32> = self.times.iter().copied().collect();
         let n = times.len();
         if n == 0 {
             return Stats::default();
         }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let sum: f32 = times.iter().sum();
-        let max = times.iter().copied().fold(0.0_f32, f32::max);
-        let avg_ms = sum / n as f32 * 1000.0;
+        // A frame time at rank `p` of the sorted ones, in milliseconds.
+        let pct = |p: f32| {
+            let i = ((n as f32 * p).ceil() as usize).saturating_sub(1).min(n - 1);
+            times[i] * 1000.0
+        };
+        // The rate of the slowest `1 - p` of the frames: the 1 % low is the worst
+        // frame of the slowest hundredth, not whichever frame sits at that rank.
+        let low = |p: f32| {
+            let k = ((n as f32) * (1.0 - p)).ceil().max(1.0) as usize;
+            1.0 / times[n - k.min(n)]
+        };
         Stats {
             frames: n,
-            avg_ms,
-            max_ms: max * 1000.0,
-            p99_ms: self.pct(0.99),
+            avg_ms: sum / n as f32 * 1000.0,
+            max_ms: times[n - 1] * 1000.0,
+            p99_ms: pct(0.99),
             avg_fps: 1.0 / (sum / n as f32),
-            low1_fps: self.low(0.99),
-            low01_fps: self.low(0.999),
+            low1_fps: low(0.99),
+            low01_fps: low(0.999),
         }
     }
 }

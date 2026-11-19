@@ -17,6 +17,17 @@ instruction-cache footprint for the same code. It is a small win, measured rathe
 The build also removes the `RCX*.tmp` scratch files lld leaves behind when a link is interrupted. One build folder had
 eight of them, 1.2 GB in total, none of them ever read again.
 
+## This pass: the launcher's caption and the frame counters
+
+| Change | Before | After | How it was measured |
+| --- | --- | --- | --- |
+| Maximized launcher caption drag (`apps/emblemweave/src/platform.rs`) | 0 px of window movement through a 1.9 s drag on the caption: winit starts a move only for a restored borderless window, so a maximized launcher sat still until it was restored by hand | restores under the pointer 40 ms after the press, then tracks the cursor with 0 px lag | A scripted Win32 probe (`SetCursorPos` + `mouse_event`, `GetWindowRect` at every step) against the installed launcher; the same probe on the restored path measures 0 px lag and a first move after 36 ms |
+| `Frames::stats()` (`apps/emblemweave/src/perf.rs`) | three copies of the last 900 frame times, each sorted, on every call the Diagnostics page and overview graph made | one copy, one sort, every number read from that order | `perf::tests`; the sort count is structural, not an FPS claim |
+| `FpsStats::snapshot()` (`engine/fefw-recomp/runtime/src/gfx/fps_stats.cpp`) | a fresh `std::vector` for up to 5 s of frames, allocated and filled every 250 ms while the counter is shown | the same buffer, kept per thread and refilled | `gfx_fps_stats` tests cover every number it reports; the allocation removal is not a gameplay FPS claim |
+| F1 counter (`engine/fefw-recomp/runtime/src/gfx/overlay.cpp`) | the most detailed view filled five lines into a four-float array | the array is sized for all five lines | code inspection; the fifth line only appears with frame generation on |
+
+No gameplay FPS number is claimed for this pass: none of these changes was measured on the game with a capture.
+
 ## What the engine already does
 
 These are in `engine/fefw-recomp/runtime` and are on by default; `runtime/docs/CONFIG.md` has every key.
