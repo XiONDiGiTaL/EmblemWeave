@@ -256,9 +256,11 @@ void draw_mod_panels() {
         if (shown) {
             g_ui_disabled = g_ui_trees = 0;
             ImGui::Indent();
+            ImGui::PushID("##contents");   // the header pushes no ID: a widget labelled like the panel's title must not clash with it
             p.fn(&kModUi, p.user);
             while (g_ui_trees > 0) ui_tree_pop();
             while (g_ui_disabled > 0) ui_end_disabled();
+            ImGui::PopID();
             ImGui::Unindent();
         }
         ImGui::PopID();
@@ -688,7 +690,6 @@ void Overlay::set_visible(bool v) {
     Impl& s = *impl_;
     if (s.visible == v) return;
     s.visible = v;
-    if (!v) services::modapi::set_panel_visible(false);
     if (v) {
         s.restore_relative = platform::has_window() && platform::relative_mouse();
         if (s.restore_relative) platform::set_relative_mouse(false);
@@ -697,6 +698,8 @@ void Overlay::set_visible(bool v) {
         if (s.restore_relative && platform::has_window()) platform::set_relative_mouse(true);
         s.restore_relative = false;
         std::lock_guard<std::mutex> lk(s.mu);
+        // after the lock: a UI build already running would otherwise set it again once it ends, and nothing would clear it
+        services::modapi::set_panel_visible(false);
         ImGuiContext* prev = ImGui::GetCurrentContext();
         ImGui::SetCurrentContext(s.imgui);
         ImGuiIO& io = ImGui::GetIO();   // drop pressed keys and buttons so nothing stays latched
@@ -710,6 +713,7 @@ void Overlay::set_visible(bool v) {
 bool Overlay::visible() const { return impl_->visible; }
 void Overlay::toggle() { set_visible(!impl_->visible); }
 int Overlay::toggle_scancode() const { return impl_->toggle_sc; }
+int Overlay::mods_scancode() const { return impl_->mods_sc; }
 void Overlay::set_toggle_scancode(int sc) { impl_->toggle_sc = sc; }
 uint64_t Overlay::frames_drawn() const { return impl_->drawn; }
 

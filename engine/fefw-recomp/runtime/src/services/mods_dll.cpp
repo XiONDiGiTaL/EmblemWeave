@@ -83,6 +83,7 @@ struct Panel {
     NxModPanelFn fn;
     void* user;
     const Mod* owner;            // the mod whose nxmod_init added it (removed if that mod declines), or null
+    bool live;                   // shown: added outside nxmod_init, or that nxmod_init has succeeded
 };
 
 struct State {
@@ -372,7 +373,8 @@ std::atomic<bool> g_panel_visible{false};
 int api_add_panel(const char* title, NxModPanelFn fn, void* user) {
     if (!title || !*title || !fn) return 0;
     std::lock_guard<std::mutex> lk(st().mu);
-    st().panels.push_back({title, fn, user, st().in_init});
+    // added from nxmod_init: kept back until it returns 0, so the overlay never calls into a mod that is still starting or declined
+    st().panels.push_back({title, fn, user, st().in_init, st().in_init == nullptr});
     return 1;
 }
 int api_panel_visible() { return g_panel_visible.load(std::memory_order_relaxed) ? 1 : 0; }
@@ -423,6 +425,11 @@ void start_all() {
             withdraw(m);
             NXLOG_W(kTag, "%s: declined to start (nxmod_init returned %d); its hooks are removed", m->name.c_str(), rc);
             continue;   // the DLL stays loaded: it may still own memory the runtime saw
+        }
+        {
+            std::lock_guard<std::mutex> lk(st().mu);
+            for (Panel& p : st().panels)
+                if (p.owner == m) p.live = true;
         }
         NXLOG_I(kTag, "%s: code mod started (%zu hooks)", m->name.c_str(), m->hooks.size());
     }
@@ -643,7 +650,8 @@ std::vector<PanelInfo> panels() {
     std::lock_guard<std::mutex> lk(st().mu);
     std::vector<PanelInfo> out;
     out.reserve(st().panels.size());
-    for (const Panel& p : st().panels) out.push_back({p.title, p.owner ? p.owner->name : std::string(), p.fn, p.user});
+    for (const Panel& p : st().panels)
+        if (p.live) out.push_back({p.title, p.owner ? p.owner->name : std::string(), p.fn, p.user});
     return out;
 }
 
