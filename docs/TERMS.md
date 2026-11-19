@@ -85,7 +85,10 @@ EmblemWeave includes or invokes third-party components with their own licences
 and terms. `docs/THIRD_PARTY.md` and the notices in `engine/fefw-recomp` name
 them. GitHub, GameBanana, LLVM, AMD, NVIDIA, Intel, Microsoft, Python, and the
 other services and tools mentioned in the documentation are independent of this
-project and have their own terms and privacy practices.
+project and have their own terms and privacy practices. Discord is optional:
+when Rich Presence is enabled, the launcher sends an activity message to the
+Discord desktop client over its local IPC pipe. Discord's terms and privacy
+policy apply.
 
 ## Reporting problems safely
 

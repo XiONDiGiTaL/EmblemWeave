@@ -29,6 +29,20 @@ No telemetry is attached to those requests. The site at
 `xiondigital.net/EmblemWeave` is a static page and does not include analytics or
 advertising scripts from this project.
 
+## Discord Rich Presence
+
+Rich Presence is optional; the toggle is on **About**. When it is on, the
+launcher and the game send a small activity message to the Discord desktop
+client on the same PC over Discord's local IPC pipe. It contains the public
+EmblemWeave application id, whether the launcher or game is running, a start
+time and the local process id. It does not contain your game path, saves,
+account name, game data or a Discord token. The launcher does not contact
+Discord's servers directly and does not use a bot or OAuth account.
+
+Discord displays that activity to you and, depending on your Discord privacy
+settings, to your friends. Discord handles it under Discord's own privacy
+policy. EmblemWeave stores only the local on/off setting.
+
 ## Diagnostic reports and issues
 
 **Troubleshooter > Create report bundle** writes a `.zip` on your PC. Nothing is
