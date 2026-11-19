@@ -15,6 +15,8 @@
 
 namespace nxrt::gfx {
 
+void wait_screenshot_writes();   // vk_renderer.cpp: screenshots are written to disk on a worker thread
+
 SceneRunResult run_scene(const SceneRunDesc& desc) {
     // Environment switches for automated runs (also ini keys): [gfx] headless / NXRT_GFX_HEADLESS=1 runs offscreen without a
     // window; [gfx] screenshot / NXRT_GFX_SCREENSHOT=<file.png> captures [gfx] screenshot_frame (default 60).
@@ -169,6 +171,9 @@ SceneRunResult run_scene(const SceneRunDesc& desc) {
         platform::destroy_window();
         platform::shutdown();
     }
+    // The screenshot PNG is encoded on a worker: the run is over only once it is on disk, so a caller that loads it does not read a
+    // missing file, a half-written one, or the one an earlier run left there.
+    if (d.screenshot_frame >= 0 && !d.screenshot_path.empty()) wait_screenshot_writes();
     res.ok = true;
     return res;
 }
