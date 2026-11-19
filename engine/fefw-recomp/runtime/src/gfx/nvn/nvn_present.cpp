@@ -185,8 +185,7 @@ void present_on_render_thread(Window* w, int index, bool again) {
     pp->set_flip_y(window_origin_mode() == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT);   // the game runs with the lower-left origin (mode 0)
     // HDR scene / HDR swapchain / FSR 1 or NIS / picture controls go through the output pass (S14); everything else is the plain present pass of the SDR path
     const extras::HdrState hs = extras::hdr_state();
-    extras::PictureLive pic = extras::picture_live();
-    if (hs.output != extras::OutputKind::Sdr8) pic.active = false;   // HDR output: the picture controls are hidden and off (Scene grading instead)
+    const extras::PictureLive pic = extras::picture_live();
     extras::OutputPass* op = output_pass();
     auto draw_picture = [&](VkImageView from, VkExtent2D from_extent, const int32_t* from_crop, VkImageView to) {   // also frame generation's HUD-less colour (nvn_framegen.h)
         if (op && (hs.scene_hdr || hs.output != extras::OutputKind::Sdr8 || extras::upscale_mode() == extras::UpscaleMode::Fsr1 ||

@@ -36,9 +36,13 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
     if (words.size() <= 16384) {
         ok = spirv_hdr_tonemap(words, out);
         const bool wide = settings().hdr.wide_gamut;
-        if (!ok && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out, wide)) {
+        if (!ok && wide && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out, true)) {
             ok = true;
-            kind = wide ? "GT shoulder moved to peak, BT.2020 colours kept" : "GT shoulder moved to peak";
+            kind = "GT shoulder moved to peak, BT.2020 colours kept";
+        }
+        if (!ok && spirv_hdr_tonemap_gt(words, hdr_state().peak_ratio, out)) {   // also [hdr] wide_gamut when its clamps did not match
+            ok = true;
+            kind = wide ? "GT shoulder moved to peak; wide_gamut not applied (the output clamps did not match)" : "GT shoulder moved to peak";
         }
     }
     if (!ok && spirv_hdr_tonemap_lut(words, hdr_state().peak_ratio, out)) {
@@ -78,7 +82,7 @@ bool hdr_gt_grade_push(float out[12]) {
     out[5] = static_cast<float>(h.grade_highlights);
     out[6] = static_cast<float>(h.highlight_saturation);
     out[7] = h.wide_gamut ? 1.0f : 0.0f;
-    out[8] = h.compare ? 1.0f : 0.0f;   // split screen: the left half as the game draws it
+    out[8] = 0.0f;   // [hdr] compare: the replay sets the split (half the draw's target width) per draw
     out[9] = static_cast<float>(h.hue_preserve);
     out[10] = out[11] = 0.0f;
     return !neutral || h.compare;

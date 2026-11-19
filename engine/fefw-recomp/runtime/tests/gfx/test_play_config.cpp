@@ -115,6 +115,13 @@ bool same_settings(const Settings& a, const Settings& b) {
     if (!(ea.hdr.mode == eb.hdr.mode && ea.hdr.format == eb.hdr.format && ea.hdr.peak_nits == eb.hdr.peak_nits &&
           ea.hdr.paper_white_nits == eb.hdr.paper_white_nits && ea.hdr.highlight_boost == eb.hdr.highlight_boost))
         return false;
+    const nxrt::extras::HdrSettings &ha = ea.hdr, &hb = eb.hdr;
+    if (!(ha.ui_nits == hb.ui_nits && ha.sdr_gamma == hb.sdr_gamma && ha.grade_exposure == hb.grade_exposure && ha.grade_contrast == hb.grade_contrast &&
+          ha.grade_shadows == hb.grade_shadows && ha.grade_highlights == hb.grade_highlights && ha.grade_saturation == hb.grade_saturation &&
+          ha.hue_preserve == hb.hue_preserve && ha.highlight_saturation == hb.highlight_saturation && ha.compare == hb.compare &&
+          ha.sharpen == hb.sharpen && ha.motion_blur == hb.motion_blur && ha.depth_of_field == hb.depth_of_field && ha.vignette == hb.vignette &&
+          ha.bloom == hb.bloom && ha.wide_gamut == hb.wide_gamut && ha.dither == hb.dither && ha.gamut_expand == hb.gamut_expand))
+        return false;
     if (!(ea.upscale.mode == eb.upscale.mode && ea.upscale.sharpness == eb.upscale.sharpness && ea.upscale.fsr_dll == eb.upscale.fsr_dll &&
           ea.upscale.dlss_dll == eb.upscale.dlss_dll && ea.upscale.xess_dll == eb.upscale.xess_dll &&
           ea.upscale.frame_generation == eb.upscale.frame_generation))
@@ -1728,4 +1735,36 @@ NXTEST(ball_sensitivity_range) {
         CHECK(!parse_settings(std::string("[mouse]\nmorph_pitch = ") + bad + "\n", &s, &err));
     }
     for (const char* ok : {"0.1", "2", "20"}) REQUIRE_MSG(parse_settings(std::string("[mouse]\nball_sensitivity = ") + ok + "\n", &s, &err), err);
+}
+
+NXTEST(hdr_post_options_parse_and_round_trip) {
+    Settings s;
+    std::string err;
+    std::vector<std::string> w;
+    REQUIRE_MSG(parse_settings("[hdr]\nui_nits = 150\nsdr_gamma = 2.4\ngrade_exposure = -0.5\ngrade_contrast = 1.25\ngrade_shadows = 0.75\n"
+                               "grade_highlights = 1.5\ngrade_saturation = 0.25\nhue_preserve = 0.5\nhighlight_saturation = 1\ncompare = 1\n"
+                               "sharpen = 2.5\nmotion_blur = 0\ndepth_of_field = 1.75\nvignette = 0.5\nbloom = 3\nwide_gamut = 1\ndither = 1\n"
+                               "gamut_expand = 0.75\n",
+                               &s, &err, &w), err);
+    CHECK(w.empty());
+    const nxrt::extras::HdrSettings& h = s.extras.hdr;
+    CHECK(h.ui_nits == 150.0 && h.sdr_gamma == 2.4 && h.grade_exposure == -0.5 && h.grade_contrast == 1.25 && h.grade_shadows == 0.75);
+    CHECK(h.grade_highlights == 1.5 && h.grade_saturation == 0.25 && h.hue_preserve == 0.5 && h.highlight_saturation == 1.0 && h.compare);
+    CHECK(h.sharpen == 2.5 && h.motion_blur == 0.0 && h.depth_of_field == 1.75 && h.vignette == 0.5 && h.bloom == 3.0);
+    CHECK(h.wide_gamut && h.dither && h.gamut_expand == 0.75);
+    Settings r;
+    REQUIRE_MSG(parse_settings(format_settings(s), &r, &err), err);
+    CHECK(same_settings(s, r));
+
+    // sdr_gamma = srgb is 0 and is written back as srgb
+    REQUIRE_MSG(parse_settings("[hdr]\nsdr_gamma = srgb\n", &s, &err), err);
+    CHECK(s.extras.hdr.sdr_gamma == 0.0);
+    CHECK(format_settings(s).find("sdr_gamma = srgb") != std::string::npos);
+    REQUIRE_MSG(parse_settings(format_settings(s), &r, &err), err);
+    CHECK(same_settings(s, r));
+
+    // out-of-range values are refused
+    CHECK(!parse_settings("[hdr]\nsdr_gamma = 3\n", &s, &err));
+    CHECK(!parse_settings("[hdr]\nbloom = 4.5\n", &s, &err));
+    CHECK(!parse_settings("[hdr]\ngrade_exposure = -2.5\n", &s, &err));
 }

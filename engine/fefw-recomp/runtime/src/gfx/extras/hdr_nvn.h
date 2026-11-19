@@ -22,9 +22,9 @@ bool hdr_tonemap_variant(const std::vector<uint32_t>& words, const std::string& 
 bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash);
 
 // Scene grading and highlight saturation ([hdr] grade_*, highlight_saturation) for the GT tone map (Fire Emblem Fortune's Weave): the
-// game's tone-map shader is replaced by kFefwGtGradeFrag (extras_shaders.inc), which takes its settings from a 32-byte fragment push constant.
+// game's tone-map shader is replaced by kFefwGtGradeFrag (extras_shaders.inc), which takes its settings from a 48-byte fragment push constant (12 floats).
 // hdr_is_gt_tonemap: `words` is that GT tone-map shader. hdr_gt_grade_words: the replacement. hdr_gt_grade_push: this frame's push values
-// (8 floats); false when every setting is neutral (the draw then keeps the HDR variant of the game's own shader).
+// (12 floats; [8], the compare split, is set per draw by the replay); false when every setting is neutral (the draw then keeps the HDR variant of the game's own shader).
 bool hdr_is_gt_tonemap(const std::vector<uint32_t>& words);
 const std::vector<uint32_t>& hdr_gt_grade_words();
 // [hdr] sharpen: kFefwSharpenFrag, the replacement of Fortune's Weave's sharpen pass (push: scene gain, strength multiplier, compare).

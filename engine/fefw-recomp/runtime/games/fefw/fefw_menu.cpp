@@ -840,7 +840,9 @@ void hdr_group(UiHost& host, Menu& m) {
 void grading_group(UiHost& host, Menu& m) {
     extras::HdrSettings& h = m.edit.extras.hdr;
     section("Scene grading");
-    if (begin_rows("grade")) {
+    if (!extras::hdr_scene_active()) {   // the grade runs in the replacement HDR tone map only
+        ImGui::TextDisabled(tr("Needs the HDR scene (HDR on): the grading runs in the HDR tone map. In SDR use Picture below."));
+    } else if (begin_rows("grade")) {
         row(m, "Exposure", When::Live, "Brightness of the 3D scene before the tone map, in stops. 0 = the game's.");
         if (slider(m, "##ge", &h.grade_exposure, -2.0, 2.0, 0.1, "%+.1f")) apply(host, m);
         row(m, "Contrast", When::Live, "Scene contrast around mid grey, before the tone map. 1 = the game's.");
@@ -979,7 +981,7 @@ void graphics_page(UiHost& host, Menu& m) {
     live_status_group();
     hdr_group(host, m);
     grading_group(host, m);
-    if (extras::hdr_state().output == extras::OutputKind::Sdr8) picture_group(host, m);   // HDR: Scene grading replaces the picture controls
+    picture_group(host, m);
 }
 
 // ---- Frame rate -------------------------------------------------------------------------------------------------------------------------

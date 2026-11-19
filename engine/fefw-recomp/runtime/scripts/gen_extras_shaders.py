@@ -159,7 +159,7 @@ void main() {
 
 # Fire Emblem Fortune's Weave tone map (ImageProcessing.bfsha aa98bfc2796de9bf), rewritten: the game's GT curve per channel on its BT.2020
 # scene, then BT.2020 -> BT.709. Interface identical to the game's translated shader (set 0 binding 22: its constant buffer c3; set 2 binding
-# 128: the scene; location 0 in/out), plus a 32-byte fragment push constant (the alpha-test layout's range). With the neutral push values
+# 128: the scene; location 0 in/out), plus a 48-byte fragment push constant (the alpha-test layout's range). With the neutral push values
 # (R = the peak ratio, exposure 1, contrast/shadows/highlights/saturation 1, highlight saturation 0) it computes what the HDR variant of the
 # game's shader computes (spirv_hdr_tonemap_gt): P = max(c2.x, R), the same toe, linear section and shoulder.
 # [hdr] sharpen: Fortune's Weave's sharpen pass (filter.bfsha, fs e14b86c9fc0181d1), term for term: a 5-tap cross with the centre weight
@@ -171,7 +171,8 @@ layout(set = 2, binding = 128) uniform sampler2D u_src;
 layout(location = 0) in vec4 v_tc;
 layout(location = 0) out vec4 o_color;
 layout(push_constant) uniform PushConstants {
-    vec4 a;   // x: scene gain (1 = none), y: strength multiplier (1 = the game's), z: 1 = compare (the left half keeps the game's strength)
+    vec4 a;   // x: scene gain (1 = none), y: strength multiplier (1 = the game's), z: compare: > 0 = half the target's width in pixels (the left
+              // half keeps the game's strength), 0 = off
 } pc;
 
 void main() {
@@ -186,7 +187,7 @@ void main() {
     vec4 e = texture(u_src, vec2(cu, min(maxv, max(0.0, v - c0.y))));
     vec4 m = texture(u_src, vec2(u, v));
     float k = cb.c[1].x;
-    bool game_half = pc.a.z > 0.5 && gl_FragCoord.x < 0.5 * float(textureSize(u_src, 0).x);
+    bool game_half = gl_FragCoord.x < pc.a.z;   // the target's pixels, not the source's (the scene may be upscaled)
     if (!game_half) k *= pc.a.y;
     float wn = (-k + 2.5) + fma(k, 0.16665999591350555419921875, -0.5);
     wn = wn + fma(k, 2.0, -4.0);
@@ -206,7 +207,8 @@ layout(location = 0) out vec4 o_color;
 layout(push_constant) uniform PushConstants {
     vec4 a;   // x: peak ratio R (P = max(game P, R); <= 1: the game's P), y: exposure (multiplier), z: contrast, w: scene saturation
     vec4 b;   // x: shadows, y: highlights, z: highlight saturation 0..1, w: 1 = keep colours outside BT.709 (no max(0, .))
-    vec4 c;   // x: 1 = compare: the left half of the target as the game draws it (no grading, no highlight saturation; testing aid),
+    vec4 c;   // x: compare: > 0 = half the target's width in pixels; the left half as the game draws it (no grading, no highlight
+              // saturation; testing aid), 0 = off,
               // y: hue preservation 0..1 (the curve on luminance, the scene colour's ratios kept)
 } pc;
 
@@ -253,8 +255,7 @@ void main() {
     vec4 s = texture(u_scene, uv);
     vec4 c0 = cb.c[0], c2 = cb.c[2];
     float P = pc.a.x > 1.001 ? max(c2.x, pc.a.x) : c2.x;
-    float half_w = 0.5 * float(textureSize(u_scene, 0).x);
-    bool game_half = pc.c.x > 0.5 && gl_FragCoord.x < half_w;
+    bool game_half = gl_FragCoord.x < pc.c.x;   // the target's pixels, not the scene's (it may be smaller when upscaled)
     vec3 x = game_half ? s.rgb : grade(s.rgb);
     vec3 t = vec3(gt(x.r, c0.x, c0.y, c0.z, c0.w, P, c2.y), gt(x.g, c0.x, c0.y, c0.z, c0.w, P, c2.y), gt(x.b, c0.x, c0.y, c0.z, c0.w, P, c2.y));
     // Hue preservation: the game's curve applied per channel shifts hues as channels compress unevenly (bright orange toward yellow, saturated

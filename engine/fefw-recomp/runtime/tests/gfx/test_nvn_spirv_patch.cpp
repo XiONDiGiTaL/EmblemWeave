@@ -709,3 +709,82 @@ NXTEST(predict_int_fetches_retypes_the_light_grid) {
     CHECK(gpu::spirv_predict_int_fetches(plain).empty());
     CHECK(gpu::spirv_predict_int_fetches(std::vector<uint32_t>{1u, 2u}).empty());
 }
+
+// ---- spirv_push_scale_cb ([hdr] motion_blur, vignette, depth_of_field) on authored stand-ins (post_patch_shaders.frag) -------------------
+
+#include "post_patch_spirv.inc"
+
+namespace {
+
+template <size_t N>
+std::vector<uint32_t> words_of(const uint32_t (&a)[N]) { return std::vector<uint32_t>(a, a + N); }
+
+struct PushCensus {
+    int push_vars = 0, fmul = 0, fsub = 0, fmax = 0;
+};
+
+PushCensus push_census(const std::vector<uint32_t>& w) {
+    PushCensus c;
+    for (size_t i = 5; i < w.size();) {
+        const uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (!len) break;
+        if (op == 59 && len >= 4 && w[i + 3] == 9) ++c.push_vars;   // OpVariable PushConstant
+        if (op == 133) ++c.fmul;
+        if (op == 131) ++c.fsub;
+        if (op == 12 && len >= 5 && w[i + 4] == 40) ++c.fmax;       // GLSL FMax
+        i += len;
+    }
+    return c;
+}
+
+void check_valid(const std::vector<uint32_t>& w, const char* tag) {
+    if (!spirv_val_present()) return;   // the structural checks still ran
+    std::string log;
+    const int rc = run_spirv_val(w, tag, log);
+    CHECK_MSG(rc == 0, std::string(tag) + ": spirv-val exit " + std::to_string(rc) + ": " + log);
+}
+
+}  // namespace
+
+NXTEST(push_scale_cb_mode0_scales_the_load) {
+    const std::vector<uint32_t> in = words_of(kMotionBlurLike);
+    std::vector<uint32_t> out;
+    CHECK(gpu::spirv_push_scale_cb(in, 0, 1, 0, out));   // c[0].y
+    const PushCensus a = push_census(in), b = push_census(out);
+    CHECK_EQ(a.push_vars, 0);
+    CHECK_EQ(b.push_vars, 1);
+    CHECK_EQ(b.fmul, a.fmul + 1);   // one load of c[0].y: one FMul by the push constant
+    check_valid(out, "push_scale_mode0");
+}
+
+NXTEST(push_scale_cb_mode1_rewrites_the_falloff) {
+    const std::vector<uint32_t> in = words_of(kVignetteLike);
+    std::vector<uint32_t> out;
+    CHECK(gpu::spirv_push_scale_cb(in, 5, 3, 1, out));   // exp2(log2(x) * c[5].w)
+    const PushCensus a = push_census(in), b = push_census(out);
+    CHECK_EQ(b.push_vars, 1);
+    CHECK_EQ(b.fsub, a.fsub + 2);   // max(1 - s * (1 - v), 0)
+    CHECK_EQ(b.fmul, a.fmul + 1);
+    CHECK_EQ(b.fmax, a.fmax + 1);
+    check_valid(out, "push_scale_mode1");
+}
+
+NXTEST(push_scale_cb_refusals_leave_out_untouched) {
+    std::vector<uint32_t> out = {7};
+    CHECK(!gpu::spirv_push_scale_cb(words_of(kMotionBlurLike), 3, 2, 0, out));   // no load of c[3].z
+    CHECK(!gpu::spirv_push_scale_cb(words_of(kMotionBlurLike), 0, 1, 1, out));   // mode 1: no exp2 of a product with it
+    CHECK(!gpu::spirv_push_scale_cb(words_of(kOwnPushConstant), 0, 1, 0, out));  // the module has push constants of its own
+    CHECK(!gpu::spirv_push_scale_cb(words_of(kMotionBlurLike), 0, 1, 2, out));   // unknown mode
+    CHECK(!gpu::spirv_push_scale_cb(std::vector<uint32_t>{1, 2, 3}, 0, 1, 0, out));
+    CHECK_EQ(out.size(), size_t(1));
+}
+
+NXTEST(push_scale_cb_binding_filter) {
+    const std::vector<uint32_t> in = words_of(kTwoBuffers);
+    std::vector<uint32_t> out;
+    CHECK(!gpu::spirv_push_scale_cb(in, 1, 0, 0, out));       // c[1].x of two buffers: ambiguous without a binding
+    CHECK(gpu::spirv_push_scale_cb(in, 1, 0, 0, out, 23));    // fp_c4 only
+    CHECK_EQ(push_census(out).fmul, push_census(in).fmul + 1);
+    check_valid(out, "push_scale_binding");
+    CHECK(!gpu::spirv_push_scale_cb(in, 1, 0, 0, out, 24));   // no buffer at that binding
+}
