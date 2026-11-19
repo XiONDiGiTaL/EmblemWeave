@@ -1527,10 +1527,13 @@ void prepare_textures(const ProgLayout& pl) {
     // on screen for its finished result ([nvn] pool_swap_budget, default on), bound or pool: the image already holds valid (approximate) data,
     // so a swap can wait a frame anywhere; at a load-in a thousand results land within a second or two and their copies piled into one frame.
     static const bool swap_budget = config_get_bool("nvn", "pool_swap_budget", true);
-    // [nvn] bound_upload_defer (default on): while a backlog streams in (burst), first uploads of asset textures a draw binds itself wait too;
+    // [nvn] bound_upload_defer (default off): while a backlog streams in (burst), first uploads of asset textures a draw binds itself wait too;
     // the draw samples the dummy texture until theirs is in (descriptor resolution below). A load-in's first frame still made 583 uploads, most
     // of them bound, in 582 ms (s2-default). Outside a burst bound textures always go at once.
-    static const bool bound_defer = config_get_bool("nvn", "bound_upload_defer", true);
+    // Off by default: the dummy is black, and models showed black for a split second after every load-in (reported against the
+    // ObeliskChamber fork). With it off, that load-in frame took 436 ms instead of 193 + 283 ms over two frames, under the game's fade, and
+    // nothing showed black.
+    static const bool bound_defer = config_get_bool("nvn", "bound_upload_defer", false);
     // more than pool_upload_burst_firsts first uploads needed by this frame's draws so far (the first frame after a loading screen, spread
     // over many draws) start the burst at once; s3-default's load-in frame still made 576 uploads with a per-draw count
     // [nvn] pool_upload_burst_firsts (default 256): the threshold of this count. 64 also fired while walking into a cold street (s4-default:
@@ -2475,7 +2478,12 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     ii.imageView = v;
                     // GENERAL: the op also writes it as a storage image (prepare_textures left it there)
                     ii.imageLayout = tex_layout(r.tex) == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : tex_sampled_layout(r.tex);
-                    if (r.has_sampler) ii.sampler = sampler_for(int_comp ? unfiltered(r.smp) : r.smp);
+                    // Integer views (the integer sampler variant, and images the shader reads only as integer bits, reflected as uint) take the
+                    // unfiltered sampler: Vulkan has no linear filtering of integer formats (VUID-vkCmdDrawIndexed-magFilter-04553), and Maxwell
+                    // takes the nearest texel of them anyway. [nvn] int_view_nearest = false: the game's sampler as before.
+                    static const bool int_nearest = nxrt::config_get_bool("nvn", "int_view_nearest", true);
+                    const bool int_view = int_comp || (int_nearest && component >= 2);
+                    if (r.has_sampler) ii.sampler = sampler_for(int_view ? unfiltered(r.smp) : r.smp);
                     // [nvn] reserved_sampler (default on): a texel-fetch handle (sampler id 0, the driver's reserved range) sampled with filtering
                     // gets the linear reserved sampler, as on the console; integer and depth textures keep the nearest dummy
                     else if (r.sid0 && component == 1 && !(tex_aspect(r.tex) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
@@ -5547,6 +5555,7 @@ void replay_begin_submit(Frame& f) {
     rs_report();
     F = &f;
     tex_poll_cpu_writes();
+    resid_tick();      // the residency clock, once per submission
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
     if (g_trace_frame == -2) {
         // [nvn] trace_frame = "6050" or "6050,9300": every listed presented frame is traced (the first one is the main one)

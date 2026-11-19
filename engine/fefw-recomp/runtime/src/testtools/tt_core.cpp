@@ -448,7 +448,13 @@ bool init() {
     }
     diag_set_frame_listener(tick_listener);
     if (s.src == Source::Svc) detail::svc_every.store(s.svc_n);
-    if (s.src == Source::Hook) install_game_hooks();
+    // A game without a frame hook of its own (Fortune's Weave) counts frames at the runtime's present tick instead: with the hook
+    // source and no hook, no frame boundary would ever come and a script would never start.
+    if (s.src == Source::Hook && !install_game_hooks()) {
+        s.src = Source::Tick;
+        NXLOG_I("tt", "frame source: the game (%s) has no frame hook, so each presented frame is a frame boundary ([test] frame_source = tick)",
+                game::info().id);
+    }
     if (s.wall_timeout_s > 0) s.wall_thread = std::thread(wall_loop, &s, s.wall_timeout_s);
     return true;
 }

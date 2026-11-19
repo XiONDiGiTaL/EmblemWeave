@@ -124,4 +124,11 @@ struct SpvXfbOutput {
 // captured outputs, stride the bytes of one captured vertex. False (out untouched): no Location outputs or an unexpected module.
 bool spirv_add_xfb(const std::vector<uint32_t>& in, std::vector<uint32_t>& out, std::vector<SpvXfbOutput>* layout, uint32_t* stride);
 
+// The translator writes a float add to a storage buffer (RED.E.ADD.F32 / ATOM.E.ADD.F32) as a compare-and-swap loop on the uint words:
+//   L = bits(load p); do { old = L; L = CAS(p, bits(f(L) + v), old) } while (L != old)
+// With shaderBufferFloat32AtomicAdd (VK_EXT_shader_atomic_float) one OpAtomicFAddEXT does it: the loop's CAS becomes the add (through a
+// float alias of the same buffer: a new variable at the same set and binding) and its result becomes the comparator, so the loop ends after
+// one pass. Returns the number of loops rewritten (0: out untouched).
+int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+
 }  // namespace nxrt::nvn::be::gpu

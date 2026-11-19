@@ -8,13 +8,13 @@
 // accessors read. Pictures are NV12 at the picture's width: the player's CPU-frame path. The console's player uses native images, which the
 // host cannot fill, so the game module selects the other path (games/fefw/fefw_play.cpp).
 //
-// Unlike the fork, a host thread per decoder decodes ahead (dav1d is C only here: a 1440p picture takes tens of milliseconds, which stalled
-// the game's main thread when it was decoded inside ReleaseVideoFrame). Up to g_ahead pictures ([media] video_decode_ahead) wait in host
-// memory; a guest call or the worker copies them into free frames. The game's player waits for a late picture and its sound drops out
-// meanwhile; once the pictures catch up with the clock the sound stays behind. The cushion of decoded pictures rides over a stretch the
-// decoder takes longer for than the movie's frame rate allows; dav1d's x86-64 assembly (NXRT_DAV1D_ASM, needs NASM at build time) makes
-// every picture faster. The input and output events are host kernel events attached to the guest's SystemEventTypes (as vi's vsync), so the
-// worker can wake the player.
+// Unlike the fork, a host thread per decoder decodes ahead (a 1440p picture takes tens of milliseconds, which stalled the game's main thread
+// when it was decoded inside ReleaseVideoFrame). Up to g_ahead pictures ([media] video_decode_ahead) wait in host memory; a guest call or the
+// worker copies them into free frames. The game's player waits for a late picture and its sound drops out meanwhile; once the pictures catch
+// up with the clock the sound stays behind (Fortune's Weave: 0.9 s late pictures at 43-51 s of a 1440p movie, two dropouts, then the sound out
+// of step to the end). The cushion of decoded pictures rides over a stretch the decoder takes longer for than the movie's frame rate allows;
+// dav1d's x86-64 assembly (NXRT_DAV1D_ASM, needs NASM at build time) makes every picture faster. The input and output events are host
+// kernel events attached to the guest's SystemEventTypes (as vi's vsync), so the worker can wake the player.
 //
 // Layouts (SDK 22.2): VideoFrame +0x08 buffer, +0x28 / +0x30 bytes of luma / chroma written, +0x48 buffer size, +0x78 time, +0x88 end of
 // stream (u8); nn::movie::Buffer +0x00 data, +0x10 bytes, +0x18 time, +0x20 flags (8: end of stream). The host state hangs off the guest
@@ -87,6 +87,7 @@ constexpr int kMimeAv1 = 3;                // nn::movie::MediaMimeType of an AV1
 constexpr uint32_t kResultNoFrame = 0x7b;  // AcquireVideoFrame with no picture ready, as the library answers
 constexpr uint32_t kAutoClear = 1;         // nn::os::EventClearMode_AutoClear
 constexpr size_t kMaxFrames = 64;
+
 bool g_log = false;
 int g_threads = 4;
 size_t g_ahead = 30;                        // decoded pictures held in host memory while no frame is free ([media] video_decode_ahead)
@@ -777,8 +778,7 @@ bool install_movie_decoder_hle() {
 #else
         // A runtime built without NASM: 1440p pictures take 30-50 ms instead of 10-15, so the movies play below 30 fps (choppy cutscenes).
         NXLOG_W(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s, C only: built without NASM, movies decode several times slower "
-                "and may play below their frame rate (%d threads at %s priority, %zu pictures ahead), %zu imports routed", dav1d_version(), g_threads, prio_name, g_ahead,
-                sizeof kImports / sizeof kImports[0]);
+                "and may play below their frame rate (%d threads at %s priority, %zu pictures ahead), %zu imports routed", dav1d_version(), g_threads, prio_name, g_ahead, sizeof kImports / sizeof kImports[0]);
 #endif
     });
     return g_enabled;

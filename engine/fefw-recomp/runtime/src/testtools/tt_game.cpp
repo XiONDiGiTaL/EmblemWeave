@@ -62,9 +62,12 @@ void no_game(std::string* err) {
 }  // namespace
 
 // ---- the game's probes ----
-void install_game_hooks() {
-    if (const GameProbes* p = P(); p && p->install_hooks) p->install_hooks();
-    else NXLOG_W("tt", "frame source hook: the game (%s) has no probes, no game hooks are registered", game::info().id);
+bool install_game_hooks() {
+    if (const GameProbes* p = P(); p && p->install_hooks) {
+        p->install_hooks();
+        return true;
+    }
+    return false;
 }
 bool read_state(GameState* out) {
     const GameProbes* p = P();

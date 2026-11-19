@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Play mode settings page (src/gfx/play/play_ui.cpp) drawn headless: ImGui without a renderer or platform backend, a few frames
 // at a time, against a fake host. No input is simulated: tabs are opened through ImGui's tab bar (TabBarQueueFocus).
+#include "play_test_game.h"
 #include "test_framework.h"
 
 #include <windows.h>
@@ -87,23 +88,26 @@ void run_frames(play::UiHost& host, int n) {
     }
 }
 
-// The tab bar of the settings page inside the Controls window, or nullptr before the first frame.
-ImGuiTabBar* settings_tab_bar() {
+// The page's tab bars (play_ui.cpp draw_settings_page): "settings_pages" in the Controls window, and "controls_tabs" inside its Controls
+// page. A tab's id is its label hashed with its tab bar's id as the seed (the bar is on the ID stack while its tabs are drawn), and an open
+// tab item pushes its own id, so the inner bar's id is seeded with the Controls tab's id.
+ImGuiID pages_bar_id() {
     ImGuiWindow* win = ImGui::FindWindowByName("Controls");
-    return win ? ImGui::TabBarFindByID(win->GetID("settings_tabs")) : nullptr;
+    return win ? win->GetID("settings_pages") : 0;
+}
+ImGuiID controls_bar_id() {
+    const ImGuiID pages = pages_bar_id();
+    return pages ? ImHashStr("controls_tabs", 0, ImHashStr("Controls", 0, pages)) : 0;
 }
 
-// Asks the tab bar to open the named tab at the next frame. A tab's id is its label hashed with the tab bar's id as the seed (the tab
-// bar is on the ID stack while its tabs are drawn). TabBarQueueFocus by name needs a current window, which there is not between frames.
-void open_tab(const char* name) {
-    ImGuiWindow* win = ImGui::FindWindowByName("Controls");
-    ImGuiTabBar* bar = settings_tab_bar();
-    if (win && bar) bar->NextSelectedTabId = ImHashStr(name, 0, win->GetID("settings_tabs"));
+// Asks the tab bar to open the named tab at the next frame. TabBarQueueFocus by name needs a current window, which there is not between frames.
+void open_tab(ImGuiID bar_id, const char* name) {
+    if (ImGuiTabBar* bar = bar_id ? ImGui::TabBarFindByID(bar_id) : nullptr) bar->NextSelectedTabId = ImHashStr(name, 0, bar_id);
 }
 
-// Returns true when the open tab has this name. Checked through the tab bar's selected id.
-bool tab_open(const char* name) {
-    ImGuiTabBar* bar = settings_tab_bar();
+// Returns true when the open tab of the bar has this name. Checked through the tab bar's selected id.
+bool tab_open(ImGuiID bar_id, const char* name) {
+    ImGuiTabBar* bar = bar_id ? ImGui::TabBarFindByID(bar_id) : nullptr;
     if (!bar) return false;
     for (int i = 0; i < bar->Tabs.Size; ++i) {
         if (bar->Tabs[i].ID == bar->SelectedTabId) return std::strcmp(ImGui::TabBarGetTabName(bar, &bar->Tabs[i]), name) == 0;
@@ -111,26 +115,32 @@ bool tab_open(const char* name) {
     return false;
 }
 
-// Draws every tab: one frame so the tabs exist, then each tab is opened in turn with two frames, and checked to be the open one.
+// Opens one tab with two frames and checks that it is the open one.
+bool open_and_check(play::UiHost& host, ImGuiID bar_id, const char* name) {
+    open_tab(bar_id, name);
+    run_frames(host, 2);
+    if (tab_open(bar_id, name)) return true;
+    std::printf("    tab did not open: %s\n", name);
+    return false;
+}
+
+// Draws every tab: one frame so the tabs exist, then each page is opened in turn, and inside the Controls page each of its tabs.
 // Returns false when a tab did not open.
 bool draw_all_tabs(play::UiHost& host) {
-    static const char* const kTabs[] = {"Mouse", "Controller", "Display", "Bindings", "Switch layout", "Status"};
+    static const char* const kPages[] = {"Display", "Graphics", "Controls", "Audio", "About"};
+    static const char* const kControls[] = {"Mouse", "Keyboard and mouse buttons", "Gamepad", "Switch layout", "Status"};
     bool ok = true;
     run_frames(host, 1);
-    for (const char* t : kTabs) {
-        open_tab(t);
-        run_frames(host, 2);
-        if (!tab_open(t)) {
-            std::printf("    tab did not open: %s\n", t);
-            ok = false;
-        }
-    }
+    for (const char* t : kPages) ok = open_and_check(host, pages_bar_id(), t) && ok;
+    ok = open_and_check(host, pages_bar_id(), "Controls") && ok;
+    for (const char* t : kControls) ok = open_and_check(host, controls_bar_id(), t) && ok;
     return ok;
 }
 
 }  // namespace
 
 NXTEST(default_settings_draw_20_frames) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     run_frames(host, 20);
@@ -139,6 +149,7 @@ NXTEST(default_settings_draw_20_frames) {
 }
 
 NXTEST(every_tab_draws_with_default_settings) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     CHECK(draw_all_tabs(host));
@@ -148,6 +159,7 @@ NXTEST(every_tab_draws_with_default_settings) {
 
 // The page keeps its working copy for the life of the process, so the binding counts run in a fresh process each.
 NXTEST_CHILD(play_ui_empty_bindings) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     host.settings_.bindings.clear();
@@ -155,6 +167,7 @@ NXTEST_CHILD(play_ui_empty_bindings) {
 }
 
 NXTEST_CHILD(play_ui_300_bindings) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     host.settings_.bindings.clear();
@@ -172,6 +185,7 @@ NXTEST_CHILD(play_ui_300_bindings) {
 }
 
 NXTEST(bindings_empty_and_300_each_in_fresh_process) {
+    const nxrt::play::test::PlayTestGame play_game;
     char exe[MAX_PATH] = {};
     GetModuleFileNameA(nullptr, exe, MAX_PATH);
     const char* kids[] = {"play_ui_empty_bindings", "play_ui_300_bindings"};
@@ -184,6 +198,7 @@ NXTEST(bindings_empty_and_300_each_in_fresh_process) {
 }
 
 NXTEST(status_values_draw) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     host.status_.fps = 59.94;
@@ -206,6 +221,7 @@ NXTEST(status_values_draw) {
 }
 
 NXTEST(capture_hint_and_result_are_consumed) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     host.begin_capture();   // the host is capturing: the page shows the hint line
@@ -222,6 +238,7 @@ NXTEST(capture_hint_and_result_are_consumed) {
 // The frame rate counter is live: the game's hotkey can flip fps.show after the page has loaded. Drawing every tab after that must not
 // hand anything to the host, and the page keeps drawing.
 NXTEST(fps_flip_after_load_draws_without_apply) {
+    const nxrt::play::test::PlayTestGame play_game;
     Headless ui;
     FakeHost host;
     CHECK(draw_all_tabs(host));

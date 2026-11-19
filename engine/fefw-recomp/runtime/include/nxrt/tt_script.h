@@ -34,6 +34,8 @@
 //                                     name without case or underscores (MorphBall, ChargeBeam, Missiles, XRayVisor, WaveBeam ...)
 //   @rate <hz>                        the game step is exactly 1/hz for every frame from here on (hz > 0), 0 = the configured mode again; the clock
 //                                     itself stays real, so areas load at full speed
+//   @at <ms>                          wait until <ms> of host wall-clock time have passed since the script's first frame (an absolute time:
+//                                     a recorded route's steps keep their times however many waits came before; tools/perf/record_to_route.py)
 //   @sleep <ms>                       wait <ms> of host wall-clock time (not game time: loading and fade-outs run on the host clock even in
 //                                     deterministic mode); frames keep being delivered meanwhile
 //   @warp <world> <area>              warp to the area (practice-mod sequence, done by the runner); then waits until that area is current
@@ -110,6 +112,7 @@ enum class StepKind : uint8_t {
     Rays,        // text = "IN OUT": batch of static-collision ray casts (S26)
     PressUntil,  // buttons pressed 4 frames every `count` frames until the condition (field/op/x/id, as Assert) holds; timeout
     GoTo,        // x, z, r: steer the left stick until the player is within r of (x, z); soft = a timeout logs and goes on
+    WaitAt,      // x = milliseconds of host time since the script's first frame
 };
 
 enum class AssertField : uint8_t { Area, World, Frame, Igt, Health, PosX, PosY, PosZ, VelX, VelY, VelZ, Speed, State, Tod, Prog };

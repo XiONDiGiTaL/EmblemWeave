@@ -9,6 +9,7 @@
 #include "nxrt/input_source.h"
 #include "play/play_engine.h"
 #include "play/play_types.h"
+#include "play_test_game.h"
 #include "test_framework.h"
 NXTEST_GROUP(play_engine)
 
@@ -73,6 +74,7 @@ const char* const kLayers =
 }  // namespace
 
 NXTEST(press_key_and_mouse) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nSpace = jump\nMouse1 = fire\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_SPACE, true, ms(1100));
@@ -86,6 +88,7 @@ NXTEST(press_key_and_mouse) {
 }
 
 NXTEST(tap_pulses_after_quick_release) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nF = missile tap\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_F, true, ms(1000));
@@ -103,6 +106,7 @@ NXTEST(tap_pulses_after_quick_release) {
 }
 
 NXTEST(hold_starts_after_delay) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nLeft Ctrl = morph hold\n"));
     to_gameplay(e);   // default hold delay 250 ms
     e.key(SDL_SCANCODE_LCTRL, true, ms(2000));
@@ -118,6 +122,7 @@ NXTEST(hold_starts_after_delay) {
 }
 
 NXTEST(hold_custom_delay) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nLeft Ctrl = morph hold 500\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_LCTRL, true, ms(3000));
@@ -127,6 +132,7 @@ NXTEST(hold_custom_delay) {
 }
 
 NXTEST(toggle_flips_per_press) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nSpace = jump toggle\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_SPACE, true, ms(1000));
@@ -147,6 +153,7 @@ NXTEST(toggle_flips_per_press) {
 }
 
 NXTEST(doubletap_active_only_on_quick_second_press) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nQ = lock_on doubletap\n"));
     to_gameplay(e);
     // A single press does nothing, before or after its release.
@@ -170,6 +177,7 @@ NXTEST(doubletap_active_only_on_quick_second_press) {
 }
 
 NXTEST(wheel_notch_pulses_beam_select) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nWheelUp = beam_prev\nWheelDown = beam_next\n"));
     to_gameplay(e);
     e.wheel(-1, ms(1000));   // WheelDown = beam_next: tracked beam 0 -> 1 (wave, X+RIGHT)
@@ -181,6 +189,7 @@ NXTEST(wheel_notch_pulses_beam_select) {
 }
 
 NXTEST(wheel_notches_are_serialised) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nWheelUp = beam_prev\nWheelDown = beam_next\n"));
     to_gameplay(e);
     e.wheel(-1, ms(2000));   // beam 0 -> 1 (X+RIGHT)
@@ -199,6 +208,7 @@ NXTEST(wheel_notches_are_serialised) {
 }
 
 NXTEST(wheel_non_select_action_is_pulse) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nWheelUp = dpad_up\n"));
     to_gameplay(e);
     e.wheel(1, ms(3000));
@@ -207,6 +217,7 @@ NXTEST(wheel_non_select_action_is_pulse) {
 }
 
 NXTEST(beam_key_pulses_select_only) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\n1 = beam_1\n2 = beam_2\n3 = beam_3\n4 = beam_4\nE = beam_next\nR = beam_prev\n"));
     to_gameplay(e);
     // Beam 4 (plasma, X+LEFT), a quick press: tracked beam becomes 3.
@@ -239,6 +250,7 @@ NXTEST(beam_key_pulses_select_only) {
 }
 
 NXTEST(beam_cycle_skips_unowned_beams) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nE = beam_next\nR = beam_prev\n"));
     to_gameplay(e);
     e.set_cycle_hint(2, 0b0101, ms(0));   // owns beams 0 and 2 only; currently on beam 2
@@ -252,6 +264,7 @@ NXTEST(beam_cycle_skips_unowned_beams) {
 }
 
 NXTEST(context_layers_win_over_all) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from(kLayers));
     e.set_context(Ctx::Play, ms(1000));
     e.mouse_button(1, true, ms(1100));
@@ -280,6 +293,7 @@ NXTEST(context_layers_win_over_all) {
 }
 
 NXTEST(context_switch_consumes_held_inputs) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from(kLayers));
     e.set_context(Ctx::Play, ms(1000));
     e.mouse_button(1, true, ms(1100));
@@ -297,6 +311,7 @@ NXTEST(context_switch_consumes_held_inputs) {
 }
 
 NXTEST(context_switch_keeps_identical_binding) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from(kLayers));
     e.set_context(Ctx::Play, ms(1000));
     e.key(SDL_SCANCODE_W, true, ms(1100));
@@ -307,6 +322,7 @@ NXTEST(context_switch_keeps_identical_binding) {
 }
 
 NXTEST(menu_cursor_owns_left_click) {
+    const nxrt::play::test::PlayTestGame play_game;
     // Default menu_cursor = 1: in the menu the left click belongs to the pointer, so a binding of Mouse1 gets nothing there.
     Engine e(settings_from("[bindings.all]\nMouse1 = fire\n"));
     CHECK(e.context() == Ctx::Menu);               // engines start in the menu context
@@ -321,6 +337,7 @@ NXTEST(menu_cursor_owns_left_click) {
 }
 
 NXTEST(stick_diagonal_is_normalised) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nW = move_forward\nD = move_right\nS = move_back\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_W, true, ms(1000));
@@ -349,6 +366,7 @@ NXTEST(stick_diagonal_is_normalised) {
 }
 
 NXTEST(release_all_clears_everything) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nW = move_forward\nMouse1 = fire\nF = missile tap\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_W, true, ms(1000));
@@ -368,6 +386,7 @@ NXTEST(release_all_clears_everything) {
 }
 
 NXTEST(set_settings_consumes_rebound_held_input) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nMouse1 = fire\nW = move_forward\n"));
     to_gameplay(e);
     e.mouse_button(1, true, ms(1100));
@@ -390,6 +409,7 @@ NXTEST(set_settings_consumes_rebound_held_input) {
 // Probe: a binding added in front of the held key's binding moves that binding's index in Settings::bindings, but the held key's
 // own bindings did not change. play_engine.cpp compares the indices (effective() returns indices), so this is expected to fail.
 NXTEST(set_settings_keeps_unrelated_held_key_when_bindings_shift) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nMouse1 = fire\nW = move_forward\n"));
     to_gameplay(e);
     e.key(SDL_SCANCODE_W, true, ms(1100));
@@ -401,6 +421,7 @@ NXTEST(set_settings_keeps_unrelated_held_key_when_bindings_shift) {
 }
 
 NXTEST(activations_count_edges) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nMouse1 = fire\nF = missile tap\n"));
     to_gameplay(e);
     CHECK(e.activations(Act::Primary) == 0);
@@ -422,6 +443,7 @@ NXTEST(activations_count_edges) {
 }
 
 NXTEST(default_settings_smoke) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(play::default_settings());
     CHECK(e.context() == Ctx::Menu);
 
@@ -469,6 +491,7 @@ NXTEST(default_settings_smoke) {
 }
 
 NXTEST(select_pulse_survives_a_slow_game_frame) {
+    const nxrt::play::test::PlayTestGame play_game;
     // The game polls once per frame and a frame can take 100 ms or more: a pulse that started and ended between two polls must still be
     // reported once, and two selects must never show in the same poll.
     Engine e(settings_from("[bindings.all]\n1 = beam_1\n2 = beam_2\n"));
@@ -489,6 +512,7 @@ NXTEST(select_pulse_survives_a_slow_game_frame) {
 }
 
 NXTEST(select_pulse_holds_for_frame_boundaries_once_they_are_counted) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\n2 = beam_2\n"));
     to_gameplay(e);
     e.frame_tick();
@@ -504,6 +528,7 @@ NXTEST(select_pulse_holds_for_frame_boundaries_once_they_are_counted) {
 }
 
 NXTEST(engine_pulse_confirm_presses_a_once) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e;
     CHECK(e.output(ms(900)).buttons == 0);
     e.pulse(Act::Confirm, ms(1000));                // [timing] pulse_ms (80 ms by default)
@@ -513,6 +538,7 @@ NXTEST(engine_pulse_confirm_presses_a_once) {
 }
 
 NXTEST(engine_pulse_uses_given_length) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e;
     e.pulse(Act::BtnR, ms(2000), 300);              // 300 ms, not the 80 ms default
     CHECK(has(e.output(ms(2010)), hid::kBtnR));
@@ -522,6 +548,7 @@ NXTEST(engine_pulse_uses_given_length) {
 }
 
 NXTEST(engine_aux_sticks_add_and_clamp) {
+    const nxrt::play::test::PlayTestGame play_game;
     Engine e(settings_from("[bindings.all]\nW = move_forward\n"));
     to_gameplay(e);
     e.set_aux_sticks(0.5f, 0, 0, 0);

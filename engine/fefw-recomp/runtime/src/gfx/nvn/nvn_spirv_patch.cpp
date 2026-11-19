@@ -2,6 +2,7 @@
 // SPIR-V rewrites (declarations in nvn_spirv_patch.h).
 #include "nvn_spirv_patch.h"
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 #include <map>
@@ -1414,6 +1415,218 @@ bool spirv_push_scale_cb(const std::vector<uint32_t>& in, uint32_t vec, uint32_t
     }
     out[3] = bound;
     return true;
+}
+
+}  // namespace nxrt::nvn::be::gpu
+
+// ---- spirv_native_float_add -------------------------------------------------------------------------------------------------------------
+
+namespace nxrt::nvn::be::gpu {
+
+int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    enum : uint32_t {
+        OpExtension = 10, OpCapability = 17, OpTypeRuntimeArray = 29, OpTypeStruct = 30,
+        OpLoad = 61, OpStore = 62, OpAccessChain = 65, OpMemberDecorate = 72, OpCopyObject = 83, OpBitcast = 124, OpFAdd = 129,
+        OpAtomicCompareExchange = 230, OpLabel = 248, OpAtomicFAddEXT = 6035,
+        CapAtomicFloat32AddEXT = 6033, DecArrayStride = 6, DecBlock = 2, DecBufferBlock = 3, DecBinding = 33, DecDescriptorSet = 34,
+        DecAliased = 20, StorageFunction = 7, StorageUniform = 2, StorageBuffer = 12,
+    };
+    if (in.size() < 5 || in[0] != 0x07230203) return 0;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return 0;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    const uint32_t version = in[1];
+    uint32_t f32 = 0, u32 = 0;
+    bool has_cap = false, has_ext = false;
+    size_t after_cap = 0, after_caps = 0, first_type = 0, first_function = 0;
+    std::map<uint32_t, size_t> def;                          // result id -> index in insts (instructions with a result type)
+    std::map<uint32_t, uint32_t> rtarr, var_sc, var_type;   // runtime array -> element; variable -> storage class / pointer type
+    std::map<uint32_t, std::vector<uint32_t>> structs;      // struct -> member types
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> ptr;  // pointer type -> (storage class, pointee)
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> ptr_of;
+    const char kExt[] = "SPV_EXT_shader_atomic_float_add";
+    for (size_t k = 0; k < insts.size(); ++k) {
+        const Inst& n = insts[k];
+        const uint32_t* w = &in[n.at];
+        if (n.op == OpCapability) after_cap = n.at + n.len;
+        if (n.op == OpCapability || n.op == OpExtension) after_caps = n.at + n.len;
+        if (n.op == OpCapability && n.len == 2 && w[1] == CapAtomicFloat32AddEXT) has_cap = true;
+        if (n.op == OpExtension && n.len >= 2 && std::strncmp(reinterpret_cast<const char*>(&w[1]), kExt, (n.len - 1) * 4) == 0) has_ext = true;
+        if (!first_type && is_type_or_constant(n.op)) first_type = n.at;
+        if (!first_function && n.op == OpFunction) first_function = n.at;
+        if (n.op == OpTypeFloat && n.len == 3 && w[2] == 32) f32 = w[1];
+        else if (n.op == OpTypeInt && n.len == 4 && w[2] == 32 && w[3] == 0) u32 = w[1];
+        else if (n.op == OpTypeRuntimeArray && n.len == 3) rtarr[w[1]] = w[2];
+        else if (n.op == OpTypeStruct) structs[w[1]].assign(w + 2, w + n.len);
+        else if (n.op == OpTypePointer && n.len == 4) { ptr[w[1]] = {w[2], w[3]}; ptr_of[{w[2], w[3]}] = w[1]; }
+        else if (n.op == OpVariable && n.len >= 4) { var_sc[w[2]] = w[3]; var_type[w[2]] = w[1]; }
+        if ((n.op == OpLoad || n.op == OpBitcast || n.op == OpFAdd || n.op == OpAccessChain || n.op == OpAtomicCompareExchange) && n.len >= 3)
+            def[w[2]] = k;
+    }
+    if (!f32 || !u32 || !after_cap || !first_type || !first_function) return 0;
+    auto def_of = [&](uint32_t id, uint32_t op) -> const uint32_t* {
+        auto it = def.find(id);
+        if (it == def.end() || insts[it->second].op != op) return nullptr;
+        return &in[insts[it->second].at];
+    };
+    // A bitcast to uint of a load of a Function variable: that variable (0: not this shape).
+    auto bits_of_load = [&](uint32_t id, size_t* load_k) -> uint32_t {
+        const uint32_t* b = def_of(id, OpBitcast);
+        if (!b || b[1] != u32) return 0;
+        const uint32_t* l = def_of(b[3], OpLoad);
+        if (!l) return 0;
+        auto sc = var_sc.find(l[3]);
+        if (sc == var_sc.end() || sc->second != StorageFunction) return 0;
+        *load_k = def[b[3]];
+        return l[3];
+    };
+
+    struct Hit { size_t cas_k; uint32_t buffer_var, value; };
+    std::vector<Hit> hits;
+    for (size_t k = 0; k < insts.size(); ++k) {
+        if (insts[k].op != OpAtomicCompareExchange || insts[k].len != 9) continue;
+        const uint32_t* c = &in[insts[k].at];
+        if (c[1] != u32) continue;
+        size_t cmp_load = 0, add_load = 0;
+        const uint32_t L = bits_of_load(c[8], &cmp_load);
+        if (!L) continue;
+        const uint32_t* vb = def_of(c[7], OpBitcast);
+        const uint32_t* fa = vb && vb[1] == u32 ? def_of(vb[3], OpFAdd) : nullptr;
+        if (!fa || fa[1] != f32) continue;
+        uint32_t value = 0;
+        for (int side = 0; side < 2 && !value; ++side) {
+            const uint32_t* fb = def_of(fa[3 + side], OpBitcast);   // the float view of L
+            const uint32_t* fl = fb && fb[1] == f32 ? def_of(fb[3], OpLoad) : nullptr;
+            const uint32_t* dl = def_of(fa[3 + side], OpLoad);       // or L itself is a float variable
+            if (fl && fl[3] == L) { add_load = def[fb[3]]; value = fa[4 - side]; }
+            else if (dl && dl[3] == L && dl[1] == f32) { add_load = def[fa[3 + side]]; value = fa[4 - side]; }
+        }
+        if (!value) continue;
+        // Both loads of L and the CAS in one block, with no store to L between: the CAS compares against what the add started from.
+        const size_t from = std::min(cmp_load, add_load);
+        if (from > k) continue;
+        bool clean = true;
+        for (size_t j = from; j < k && clean; ++j) {
+            if (insts[j].op == OpLabel) clean = false;
+            if (insts[j].op == OpStore && in[insts[j].at + 1] == L) clean = false;
+        }
+        if (!clean) continue;
+        // The pointer: an access chain into a buffer variable whose block is { uint[] }.
+        const uint32_t* ac = def_of(c[3], OpAccessChain);
+        if (!ac || ac[0] >> 16 < 5) continue;
+        auto vt = var_type.find(ac[3]);
+        if (vt == var_type.end()) continue;
+        const uint32_t sc = var_sc[ac[3]];
+        if (sc != StorageUniform && sc != StorageBuffer) continue;
+        auto pt = ptr.find(vt->second);
+        if (pt == ptr.end()) continue;
+        auto st = structs.find(pt->second.second);
+        if (st == structs.end() || st->second.size() != 1) continue;
+        auto ra = rtarr.find(st->second[0]);
+        if (ra == rtarr.end() || ra->second != u32) continue;
+        hits.push_back({k, ac[3], value});
+    }
+    if (hits.empty()) return 0;
+
+    // A float alias for each buffer: runtime array of float, the same block decorations, a variable at the same set and binding.
+    uint32_t bound = in[3];
+    std::vector<uint32_t> caps, exts, decos, decls;
+    if (!has_cap) caps.insert(caps.end(), {(2u << 16) | OpCapability, CapAtomicFloat32AddEXT});
+    if (!has_ext) {
+        const uint32_t n = static_cast<uint32_t>(sizeof(kExt) + 3) / 4;
+        std::vector<uint32_t> s(n, 0);
+        std::memcpy(s.data(), kExt, sizeof(kExt));
+        exts.push_back(((n + 1) << 16) | OpExtension);
+        exts.insert(exts.end(), s.begin(), s.end());
+    }
+    auto pointer = [&](uint32_t sc, uint32_t pointee) -> uint32_t {
+        auto it = ptr_of.find({sc, pointee});
+        if (it != ptr_of.end()) return it->second;
+        const uint32_t id = bound++;
+        decls.insert(decls.end(), {(4u << 16) | OpTypePointer, id, sc, pointee});
+        ptr_of[{sc, pointee}] = id;
+        return id;
+    };
+    std::map<uint32_t, uint32_t> alias;   // buffer variable -> float alias
+    for (const Hit& h : hits) {
+        if (alias.count(h.buffer_var)) continue;
+        const uint32_t sc = var_sc[h.buffer_var];
+        const uint32_t old_struct = ptr[var_type[h.buffer_var]].second;
+        const uint32_t arr = bound++, blk = bound++, var = bound++;
+        decls.insert(decls.end(), {(3u << 16) | OpTypeRuntimeArray, arr, f32});
+        decls.insert(decls.end(), {(3u << 16) | OpTypeStruct, blk, arr});
+        const uint32_t blk_ptr = pointer(sc, blk);
+        decls.insert(decls.end(), {(4u << 16) | OpVariable, blk_ptr, var, sc});
+        decos.insert(decos.end(), {(4u << 16) | OpDecorate, arr, DecArrayStride, 4u});
+        bool set = false, binding = false;
+        for (const Inst& n : insts) {
+            const uint32_t* w = &in[n.at];
+            if (n.op == OpDecorate && n.len >= 3 && w[1] == old_struct && (w[2] == DecBlock || w[2] == DecBufferBlock)) {
+                decos.push_back(in[n.at]);
+                decos.push_back(blk);
+                decos.insert(decos.end(), w + 2, w + n.len);
+            } else if (n.op == OpMemberDecorate && n.len >= 4 && w[1] == old_struct && w[2] == 0) {
+                decos.push_back(in[n.at]);
+                decos.push_back(blk);
+                decos.insert(decos.end(), w + 2, w + n.len);
+            } else if (n.op == OpDecorate && n.len == 4 && w[1] == h.buffer_var && (w[2] == DecDescriptorSet || w[2] == DecBinding)) {
+                decos.insert(decos.end(), {in[n.at], var, w[2], w[3]});
+                (w[2] == DecBinding ? binding : set) = true;
+            }
+        }
+        if (!set || !binding) return 0;
+        // The two views of one buffer may alias: the compiler must not reorder the uint view's loads around the float view's add.
+        decos.insert(decos.end(), {(3u << 16) | OpDecorate, var, DecAliased});
+        bool aliased = false;
+        for (const Inst& n : insts)
+            if (n.op == OpDecorate && n.len == 3 && in[n.at + 1] == h.buffer_var && in[n.at + 2] == DecAliased) aliased = true;
+        if (!aliased) decos.insert(decos.end(), {(3u << 16) | OpDecorate, h.buffer_var, DecAliased});
+        alias[h.buffer_var] = var;
+    }
+    std::map<size_t, std::vector<uint32_t>> before;   // insts index of a CAS -> the access chain and the add that go in front of it
+    std::map<size_t, uint32_t> cas_hit;
+    for (const Hit& h : hits) {
+        const uint32_t* c = &in[insts[h.cas_k].at];
+        const uint32_t* ac = def_of(c[3], OpAccessChain);
+        const uint32_t elem_ptr = pointer(var_sc[h.buffer_var], f32);
+        const uint32_t ac_id = bound++, add_id = bound++;
+        std::vector<uint32_t>& b = before[h.cas_k];
+        const uint32_t ac_len = ac[0] >> 16;
+        b.push_back((ac_len << 16) | OpAccessChain);
+        b.insert(b.end(), {elem_ptr, ac_id, alias[h.buffer_var]});
+        b.insert(b.end(), ac + 4, ac + ac_len);
+        b.insert(b.end(), {(7u << 16) | OpAtomicFAddEXT, f32, add_id, ac_id, c[4], c[5], h.value});
+    }
+
+    const bool interface_all = version >= 0x00010400;   // SPIR-V 1.4+: the entry point lists every global variable it uses
+    out.clear();
+    out.reserve(in.size() + caps.size() + exts.size() + decos.size() + decls.size() + 32 * hits.size());
+    out.insert(out.end(), in.begin(), in.begin() + 5);
+    for (size_t k = 0; k < insts.size(); ++k) {
+        const Inst& n = insts[k];
+        const uint32_t* w = &in[n.at];
+        if (n.at == first_type) out.insert(out.end(), decos.begin(), decos.end());
+        if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
+        if (n.op == OpEntryPoint && interface_all) {
+            out.push_back(((n.len + static_cast<uint32_t>(alias.size())) << 16) | OpEntryPoint);
+            out.insert(out.end(), w + 1, w + n.len);
+            for (const auto& a : alias) out.push_back(a.second);
+        } else if (before.count(k)) {
+            const std::vector<uint32_t>& b = before[k];
+            out.insert(out.end(), b.begin(), b.end());
+            out.insert(out.end(), {(4u << 16) | OpCopyObject, w[1], w[2], w[8]});   // the CAS "returns" the comparator: the loop ends
+        } else {
+            out.insert(out.end(), w, w + n.len);
+        }
+        if (n.at + n.len == after_cap) out.insert(out.end(), caps.begin(), caps.end());
+        if (n.at + n.len == after_caps) out.insert(out.end(), exts.begin(), exts.end());
+    }
+    out[3] = bound;
+    return static_cast<int>(hits.size());
 }
 
 }  // namespace nxrt::nvn::be::gpu

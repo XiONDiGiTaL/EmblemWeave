@@ -27,7 +27,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>

@@ -121,6 +121,9 @@ if(NXRT_BUILD_TESTS)
         add_test(NAME ${g} COMMAND nxrt_tests ${g} WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
         set_tests_properties(${g} PROPERTIES TIMEOUT 120)
     endforeach()
+    if(TEST write_watch)
+        set_tests_properties(write_watch PROPERTIES TIMEOUT 300)   # 3000 region rebuilds under four faulting writers: 90-110 s on 4 cores
+    endif()
     message(STATUS "nxrt test groups: ${NXRT_GROUPS}")
 
     # Lifted-code integration tests (tests/lift): need the recompiler, its Python environment and the AArch64 clang.

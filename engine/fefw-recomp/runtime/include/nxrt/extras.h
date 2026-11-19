@@ -13,6 +13,7 @@
 //             camera matrices and the game's own projection jitter (src/gfx/extras/temporal.h, docs/S14.md). XeSS through libxess.dll (temporal_xess.cpp).
 //   Latency   NVIDIA Reflex (VK_NV_low_latency2) and AMD Anti-Lag 2 (VK_AMD_anti_lag) markers and sleeps around input sampling.
 #pragma once
+#include <cctype>
 #include <cstdint>
 #include <string>
 
@@ -116,6 +117,27 @@ void set_settings(const Settings& s);
 // Lock-free reads of the live upscale fields (the render thread asks every frame).
 UpscaleMode upscale_mode();
 float upscale_sharpness();
+// The DLSS model ([dlss] preset): 0 = default, else Streamline's DLSSPreset number (J 10, K 11, L 12, M 13). Read from the config at the first call;
+// the F1 menu changes it live (set_dlss_preset) and the DLSS backend sets its options again when it differs from the one in use.
+int dlss_preset();
+void set_dlss_preset(int preset);
+inline int dlss_preset_from_word(std::string w) {   // "default", "j" .. "m" ("preset_m" too); -1 when unknown
+    for (char& c : w) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (w.rfind("preset", 0) == 0) w.erase(0, 6);
+    while (!w.empty() && (w[0] == ' ' || w[0] == '_')) w.erase(0, 1);
+    if (w.empty() || w == "default") return 0;
+    if (w.size() == 1 && w[0] >= 'j' && w[0] <= 'm') return w[0] - 'a' + 1;
+    return -1;
+}
+inline const char* dlss_preset_word(int preset) {
+    switch (preset) {
+        case 10: return "j";
+        case 11: return "k";
+        case 12: return "l";
+        case 13: return "m";
+        default: return "default";
+    }
+}
 int upscale_scene_scale();          // percent, 100 = off (a temporal mode with a quality preset other than Custom: the preset's percent)
 UpscaleQuality upscale_quality();
 bool upscale_temporal();            // the mode is FSR 3, DLSS, DLAA or XeSS

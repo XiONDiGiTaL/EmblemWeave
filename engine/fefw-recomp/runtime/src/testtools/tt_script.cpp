@@ -612,6 +612,15 @@ bool parse_stmt(const std::string& body, const std::vector<std::string>& t, cons
         return true;
     }
 
+    if (kw == "@at") {
+        if (n != 2) return usage(msg, "@at <ms since the start>");
+        Step s = make(StepKind::WaitAt);
+        if (!real_arg(t[1], &s.x, msg)) return false;
+        if (s.x < 0.0) return fail_with(msg, "@at ms must be >= 0, got '" + t[1] + "'");
+        out.push_back(s);
+        return true;
+    }
+
     if (kw == "@sleep") {
         if (n != 2) return usage(msg, "@sleep <ms>");
         Step s = make(StepKind::WaitMs);

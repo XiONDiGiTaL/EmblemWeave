@@ -71,6 +71,8 @@ struct Editor {
     NxModFileFn fn;
     void* user;
     const Mod* owner;            // the mod whose nxmod_early / nxmod_init registered it, or null
+    bool (*match)(const std::string& key) = nullptr;   // a runtime edit (add_runtime_edit): matches by pattern instead of key
+    std::string owner_name;      // a runtime edit's owner, for the log
 };
 
 struct State {
@@ -512,11 +514,38 @@ std::string notice() {
 
 void set_codec(const ModCodec& c) { st().codec = c; }
 
+bool file_edits_close() {
+    std::lock_guard<std::mutex> lk(st().mu);
+    st().edits_closed = true;
+    return !st().editors.empty();
+}
+
+bool editor_matches(const Editor& e, const std::string& key) { return e.match ? e.match(key) : e.key == key; }
+
 bool file_edit_wanted(const std::string& image_path) {
     const std::string key = edit_key(image_path.c_str());
     std::lock_guard<std::mutex> lk(st().mu);
     st().edits_closed = true;
-    return std::any_of(st().editors.begin(), st().editors.end(), [&](const Editor& e) { return e.key == key; });
+    return std::any_of(st().editors.begin(), st().editors.end(), [&](const Editor& e) { return editor_matches(e, key); });
+}
+
+bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user) {
+    if (!match || !fn) return false;
+    std::lock_guard<std::mutex> lk(st().mu);
+    if (st().edits_closed) {
+        NXLOG_W(kTag, "%s: file edit registered too late, the game's file system is already set up", owner ? owner : "?");
+        return false;
+    }
+    Editor e;
+    e.fn = fn;
+    e.user = user;
+    e.owner = nullptr;
+    e.match = match;
+    e.owner_name = owner ? owner : "runtime";
+    // runtime edits first: a code mod's edit of the same file sees the result
+    const auto it = std::find_if(st().editors.begin(), st().editors.end(), [](const Editor& x) { return !x.match; });
+    st().editors.insert(it, std::move(e));
+    return true;
 }
 
 bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data) {
@@ -526,18 +555,19 @@ bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data) {
         std::lock_guard<std::mutex> lk(st().mu);
         st().edits_closed = true;
         for (const Editor& e : st().editors)
-            if (e.key == key) run.push_back(e);
+            if (editor_matches(e, key)) run.push_back(e);
     }
     bool changed = false;
     for (const Editor& e : run) {   // each editor sees what the one before it left
         FileCall call;
-        call.pub.path = e.path.c_str();
+        call.pub.path = e.match ? image_path.c_str() : e.path.c_str();
         call.pub.data = data.data();
         call.pub.size = data.size();
         call.pub.replace = &file_replace;
         e.fn(&call.pub, e.user);
         if (!call.replaced) continue;
-        NXLOG_I(kTag, "%s: %s edited (%zu -> %zu bytes)", e.owner ? e.owner->name.c_str() : "?", image_path.c_str(), data.size(),
+        NXLOG_I(kTag, "%s: %s edited (%zu -> %zu bytes)", e.owner ? e.owner->name.c_str() : !e.owner_name.empty() ? e.owner_name.c_str() : "?",
+                image_path.c_str(), data.size(),
                 call.next.size());
         data = std::move(call.next);
         changed = true;

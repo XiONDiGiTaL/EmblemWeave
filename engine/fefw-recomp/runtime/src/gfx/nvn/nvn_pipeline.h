@@ -279,8 +279,12 @@ struct GplStats {
 };
 GplStats gpl_stats();
 void set_compile_thread_priority(bool background = true);                                  // [nvn] compile_priority for the threads that build pipelines in the background
-// Called by each thread that builds pipelines in the background after a part: once presented frames are late it sleeps for a moment, so a burst of
-// new-area programs does not keep every core busy while the frame in flight needs them ([nvn] compile_pace_ms, 0 = never step aside).
+// [nvn] compile_pace_ms / compile_pace_after_ms: called by a background compile thread after each speculative job (a cold part, a
+// key-file build ahead, an upgrade). When the last presented frame (or the one in progress) is over compile_pace_after_ms, the thread
+// sleeps 1 ms plus half the lateness, at most compile_pace_ms, so an area load's CPU work is not slowed by compiles nothing waits for.
+// Never before the second presented frame (the boot prewarm runs at full speed); never after work a draw waits for or will soon (a
+// part or key-file pipeline moved ahead because the game set its program), and never while such work is queued. Technique from
+// EmblemWeave (moistman7).
 void pace_shader_work();
 
 // ---- shader preparation (nvn_gpl.cpp, S24) ---------------------------------------------------------------------------------

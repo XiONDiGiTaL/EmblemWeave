@@ -709,3 +709,51 @@ NXTEST(predict_int_fetches_retypes_the_light_grid) {
     CHECK(gpu::spirv_predict_int_fetches(plain).empty());
     CHECK(gpu::spirv_predict_int_fetches(std::vector<uint32_t>{1u, 2u}).empty());
 }
+
+// The compute shader that adds floats to a buffer through the translator's compare-and-swap loop (issue #81 test build, big win #14):
+// the loop's CAS becomes OpAtomicFAddEXT through a float alias of set 1 binding 0, and the module stays valid.
+NXTEST(native_float_add_on_real_compute_shader) {
+    const char* kFloatAddHash = "ef6da91df3826bd7";
+    std::error_code ec;
+    if (!fs::exists(fs::path(kSpvDir) / (std::string(kFloatAddHash) + ".spv"), ec)) {
+        nxtest::skip("ef6da91df3826bd7.spv not under work/shader_cache/spirv");
+        return;
+    }
+    std::vector<uint32_t> in;
+    REQUIRE(load_hash(kFloatAddHash, in));
+    const std::vector<uint32_t> before = in;
+    std::vector<uint32_t> out;
+    CHECK_EQ(gpu::spirv_native_float_add(in, out), 1);
+    CHECK(in == before);
+    int cas = 0, fadd = 0;
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t len = out[i] >> 16;
+        REQUIRE(len && i + len <= out.size());
+        if ((out[i] & 0xffff) == 230) ++cas;
+        if ((out[i] & 0xffff) == 6035) ++fadd;
+        i += len;
+    }
+    CHECK_EQ(fadd, 1);
+    CHECK_EQ(cas, 0);
+    std::vector<uint32_t> again = {7u};
+    CHECK_EQ(gpu::spirv_native_float_add(out, again), 0);   // nothing left to rewrite: out untouched
+    CHECK_EQ(again.size(), size_t(1));
+    if (!spirv_val_present()) {
+        nxtest::skip(nxtest::spirv_val_missing());
+        return;
+    }
+    std::string log;
+    const int rc = run_spirv_val(out, "spirv_patch_fadd", log);
+    CHECK_MSG(rc == 0, "spirv-val exit " + std::to_string(rc) + ": " + log);
+}
+
+NXTEST(native_float_add_ignores_other_modules) {
+    std::vector<uint32_t> out = {7u};
+    CHECK_EQ(gpu::spirv_native_float_add(std::vector<uint32_t>{0x07230203u, 0x10300u, 0, 1, 0}, out), 0);
+    CHECK_EQ(gpu::spirv_native_float_add(std::vector<uint32_t>{1u, 2u}, out), 0);
+    CHECK_EQ(out.size(), size_t(1));
+    if (absent_input()) return;
+    std::vector<uint32_t> vs;
+    REQUIRE(load_hash(kVertexHash, vs));
+    CHECK_EQ(gpu::spirv_native_float_add(vs, out), 0);
+}

@@ -1318,6 +1318,10 @@ void ShaderCache::pack_build(size_t missing) {
 bool ShaderCache::open(const std::string& dir) {
     std::lock_guard lk(lock_);
     if (open_) return false;  // one directory per cache: loaded ShaderInfos keep their addresses
+    // Set before the results are read: when results.tsv is missing the cache stays
+    // closed, and the logs that explain the missing shaders must still name the
+    // folder that was asked for (they printed an empty path otherwise).
+    dir_ = dir;
     std::string text;
     if (!read_file(dir + "/results.tsv", text)) {
         NXLOG_W("nvn", "shader cache %s: no readable results.tsv", dir.c_str());

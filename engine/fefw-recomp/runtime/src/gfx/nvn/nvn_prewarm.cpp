@@ -198,6 +198,7 @@ void worker_main() {
     set_compile_thread_priority();
     for (;;) {
         std::shared_ptr<Job> j;
+        bool urgent = false;                   // moved ahead: the game set one of its programs, a draw is near
         {
             std::unique_lock<std::mutex> lk(g_mu);
             g_cv.wait(lk, [] { return g_stop || !g_queue.empty(); });
@@ -206,6 +207,7 @@ void worker_main() {
             g_queue.pop_front();
             if (j->state != 0) continue;       // built already (it was moved ahead) or a draw took it over
             j->state = 1;
+            urgent = j->promoted;
         }
         VkPipeline p = VK_NULL_HANDLE;
         {
@@ -214,10 +216,15 @@ void worker_main() {
             const ProgLayout* pl = nullptr;
             if (stub_key(j->rec, k, pl)) p = build_graphics_pipeline(k, *pl);
         }
-        pace_shader_work();       // late frames get the cores back (nvn_gpl.cpp, [nvn] compile_pace_ms)
+        bool next_urgent = false;
         {
             std::lock_guard<std::mutex> lk(g_mu);
             j->state = 2;
+            for (const auto& n : g_queue) {    // the next job this thread would take: no sleep before one a draw is near
+                if (n->state != 0) continue;
+                next_urgent = n->promoted;
+                break;
+            }
             if (p) ++g_stats.built; else ++g_stats.failed;
             if (j->up) {                       // a draw linked it meanwhile: this one replaces the linked one (gpl_take_upgrade)
                 j->up->pipe = p;
@@ -228,6 +235,7 @@ void worker_main() {
             }
         }
         g_cv.notify_all();
+        if (!urgent && !next_urgent) pace_shader_work();   // a key-file pipeline built ahead: nothing waits for it yet
     }
 }
 

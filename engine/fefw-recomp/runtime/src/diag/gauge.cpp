@@ -671,6 +671,71 @@ void soak_note_frame() {
     hitch_on_frame(t, prev_t, n + 1);
 }
 
+namespace {
+struct Scene {
+    std::mutex mu;
+    bool open = false;
+    std::string label;
+    uint64_t first = 0;                 // frame index (g_ring_n) at the begin
+    double phase0[kHpCount] = {};
+};
+Scene& scene() {
+    static Scene* s = new Scene;
+    return *s;
+}
+}  // namespace
+
+void hitch_scene(const char* label, bool begin) {
+    Scene& sc = scene();
+    std::lock_guard<std::mutex> lk(sc.mu);
+    const uint64_t n = g_ring_n.load(std::memory_order_acquire);
+    if (begin) {
+        sc.open = true;
+        sc.label = label ? label : "";
+        sc.first = n;
+        for (int i = 0; i < kHpCount; i++) sc.phase0[i] = hitch_phase_total_ms(i);
+        NXLOG_I("hitch", "scene '%s' begins at frame %llu", sc.label.c_str(), static_cast<unsigned long long>(n));
+        return;
+    }
+    if (!sc.open) {
+        NXLOG_W("hitch", "scene '%s' ends without a begin: nothing measured", label ? label : "");
+        return;
+    }
+    sc.open = false;
+    // the intervals of the frames presented inside the window (the first one is measured from the frame before the begin).
+    // A scene longer than the ring (kRing frames, ~9 min at 120 fps) lost its oldest intervals to the wrap-around: the frame
+    // statistics then cover only the tail while the phase totals still span the whole scene, so say so and divide the phases
+    // by the scene's whole frame count, not by the retained one.
+    const uint64_t total = n - sc.first;
+    const uint64_t first = std::max<uint64_t>(sc.first, n > kRing - 1 ? n - (kRing - 1) : 0);
+    const bool overflowed = first > sc.first;
+    if (overflowed)
+        NXLOG_W("hitch", "scene '%s': %llu frames is more than the %zu-frame ring kept: the frame statistics below cover the last %llu "
+                         "frames only; keep scenes under ~%zu frames (~9 min at 120 fps) for an exact A/B",
+                sc.label.c_str(), static_cast<unsigned long long>(total), kRing, static_cast<unsigned long long>(n - first), kRing);
+    std::vector<double> dt;
+    dt.reserve(static_cast<size_t>(n - first));
+    uint64_t prev = first > 0 ? g_ring[(first - 1) % kRing].load(std::memory_order_relaxed) : 0;
+    for (uint64_t i = first; i < n; i++) {
+        const uint64_t t = g_ring[i % kRing].load(std::memory_order_relaxed);
+        if (prev && t > prev) dt.push_back(static_cast<double>(t - prev) * 1000.0 / qpc_freq());
+        prev = t;
+    }
+    size_t over25 = 0, over50 = 0;
+    for (double d : dt) {
+        if (d > 25.0) over25++;
+        if (d > 50.0) over50++;
+    }
+    const FrameStats st = stats_of(dt);
+    const double frames = total ? static_cast<double>(total) : 1.0;
+    auto per_frame = [&](int ph) { return (hitch_phase_total_ms(ph) - sc.phase0[ph]) / frames; };
+    NXLOG_I("hitch", "scene '%s': %zu frames in %.1f s%s: mean %.1f fps, 1%% low %.1f fps, worst %.1f ms, %zu over 25 ms, %zu over 50 ms, "
+                     "%zu over 2x the median (%.2f ms); render thread ms/frame: replay %.2f, present %.2f (limiter %.2f), idle %.2f",
+            sc.label.c_str(), st.frames, st.span_s, overflowed ? " (tail of a longer scene)" : "", st.mean_fps, st.low1_fps, st.worst_ms,
+            over25, over50, st.over2x, st.median_ms, per_frame(kHpRenderReplay), per_frame(kHpRenderPresent), per_frame(kHpRenderLimiter),
+            per_frame(kHpRenderIdle));
+}
+
 size_t frame_times_recent(float* ms, size_t n) {
     const uint64_t total = g_ring_n.load(std::memory_order_acquire);
     if (!ms || n == 0 || total < 2) return 0;

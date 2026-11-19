@@ -118,5 +118,10 @@ double hitch_phase_total_ms(int phase);
 // Frames presented so far and the ms since the last one (the frame in progress is number *frames + 1, as the hitch line counts). Lock-free.
 // False before the first frame.
 bool hitch_frame_age(uint64_t* frames, double* age_ms);
+// A measurement window ("scene") over the presented frames: begin notes where it starts, end logs one line for exactly the frames between
+// (hitch: scene '<label>': frames, seconds, mean fps, 1% low, worst, frames over 25 and 50 ms, over 2x the median; render thread ms per
+// frame: replay, present, idle), for A/B runs (tools/perf/perf_report.py, docs/PERF_ROUTES.md). A scripted run's `@log SCENE start <name>` /
+// `@log SCENE end <name>` call it; a second begin restarts the window. Any thread.
+void hitch_scene(const char* label, bool begin);
 
 }  // namespace nxrt

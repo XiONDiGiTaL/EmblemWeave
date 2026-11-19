@@ -248,6 +248,11 @@ void clock_thread() {
             continue;
         }
         if (have && ++since_log < period_s) continue;
+        static bool detail_logged = false;
+        if (!detail_logged && have) {
+            detail_logged = true;
+            if (const std::string d = detail_summary(); !d.empty()) NXLOG_I(kTag, "%s", d.c_str());
+        }
         if (have && real > real0) {
             const double rate = static_cast<double>(game - game0) / static_cast<double>(real - real0);
             NXLOG_I(kTag, "game clock: %.3fx real time over %d s (target %d fps, display %d, last step %.2f frames)", rate, period_s,
@@ -305,11 +310,11 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     if (write_profile != &nxrt_no_profile_write) tt::set_exit_handler(&exit_writing_profile);
     s.base = base;
     res_install(base);
+    detail_install();   // before the game's file system is set up: the graphics settings files are edited as the RomFS is laid out
     twprobe_start(base);
     s.fps60 = config_get_bool("fefw", "fps60", false);
     s.fps120 = config_get_bool("fefw", "fps120", false);
     if (s.fps60 || s.fps120) s.hook = hook_add_inline(base + kGameplayTargetStore, &hook_gameplay_target);
-    frame_install(base);   // fefw_frame.cpp: after the gameplay target hook, both see the same store
     // The game only runs at its target when the frame limit lets that many frames through: the shipped [display] fps_limit = 60 held fps120 at
     // 60 without a word in the log. The floor raises a numeric limit below the target (play mode logs it); "auto" and vsync keep the display's say
     // and get a warning there.
@@ -329,6 +334,7 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     }
     // always installed: frame_step (fefw_frame.cpp) runs from it, and the F1 menu switches frame_fixes while the game runs
     s.step_hook = hook_add_inline(base + kStepChoice, &hook_step_choice);
+    frame_install(base);   // fefw_frame.cpp: after the gameplay target hook, both see the same store
     if (config_get_bool("fefw", "cursor_real_time", true)) {
         s.cursor_x = hook_add_inline(base + kCursorStepX, &hook_cursor_step);
         s.cursor_y = hook_add_inline(base + kCursorStepY, &hook_cursor_step);
