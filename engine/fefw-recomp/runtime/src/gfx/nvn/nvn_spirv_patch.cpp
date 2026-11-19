@@ -1394,10 +1394,17 @@ bool spirv_push_scale_cb(const std::vector<uint32_t>& in, uint32_t vec, uint32_t
     out.clear();
     out.reserve(in.size() + decls.size() + annots.size() + 24 * targets.size());
     out.insert(out.end(), in.begin(), in.begin() + 5);
+    const bool interface_all = in[1] >= 0x00010400;   // SPIR-V 1.4+: the entry point lists every global variable it uses
     size_t ti = 0;
     for (const Inst& n : insts) {
         if (n.at == first_type) out.insert(out.end(), annots.begin(), annots.end());
         if (n.at == first_function) out.insert(out.end(), decls.begin(), decls.end());
+        if (n.op == OpEntryPointOp && interface_all) {   // the push constant joins the interface
+            out.push_back(((n.len + 1) << 16) | OpEntryPointOp);
+            out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.at + 1), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
+            out.push_back(pc_var);
+            continue;
+        }
         out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(n.at), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
         if (ti >= targets.size() || targets[ti] != n.at) continue;
         ++ti;

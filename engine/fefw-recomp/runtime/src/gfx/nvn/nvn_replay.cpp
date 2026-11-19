@@ -282,8 +282,16 @@ bool g_alpha_draw = false;       // this draw uses the alpha-test layout: build_
 bool g_grade_draw = false;       // [hdr] grade_*: the GT tone-map draw runs the replacement (alpha-test layout, g_grade_push pushed)
 float g_grade_push[12] = {};       // extras::hdr_gt_grade_push for this frame
 bool g_sharp_draw = false;       // [hdr] sharpen: the sharpen pass runs kFefwSharpenFrag (alpha-test layout, g_sharp_push pushed)
-float g_sharp_push[4] = {1, 1, 0, 0};   // scene gain (per draw), strength multiplier, compare
+float g_sharp_push[4] = {1, 1, 0, 0};   // scene gain (per draw), strength multiplier, compare split (per draw)
 bool g_sharp_on = false;         // ... and whether the setting is not neutral (or compare is on)
+bool g_compare = false;          // [hdr] compare this frame
+// [hdr] compare: the split position for the grade and sharpen replacements, half the draw's colour target width in pixels (gl_FragCoord
+// counts target pixels; the sampled scene may be smaller when it is upscaled); 0 = no split.
+float compare_half_width(const GState& st) {
+    if (!g_compare || st.ncolor == 0 || !st.color_tex[0]) return 0.0f;
+    const uint32_t w = static_cast<uint32_t>(st.color_tex[0]->b.width) >> st.color_level[0];
+    return 0.5f * static_cast<float>(w ? w : 1);
+}
 bool g_bloom_draw = false;       // [hdr] bloom: the bloom composite draw runs its scaled variant (alpha-test layout, g_bloom_gain pushed)
 float g_bloom_gain = 1.0f;       // [hdr] bloom for this frame
 bool g_post_draw = false;        // [hdr] motion_blur, vignette: the draw runs its strength variant (alpha-test layout, g_post_val pushed)
@@ -3315,6 +3323,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             pl = ap;
             g_sharp_draw = true;
             g_sharp_push[0] = gain_wanted ? g_ui_gain : 1.0f;
+            g_sharp_push[2] = compare_half_width(S);
             if (gain_wanted) g_gain_frame = true;
         }
     } else if (gain_wanted && hdr_gain_shader(S.stage[kFragment])) {
@@ -3322,8 +3331,8 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         if (ap != pl) { pl = ap; g_gain_draw = g_gain_frame = true; }
     } else if (g_grade_on && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && extras::hdr_scene_active() &&
                hdr_gt_shader(S.stage[kFragment])) {
-        const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range, 32 bytes
-        if (ap != pl) { pl = ap; g_grade_draw = true; }
+        const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range, 48 bytes
+        if (ap != pl) { pl = ap; g_grade_draw = true; g_grade_push[8] = compare_half_width(S); }
     } else if (g_bloom_gain != 1.0f && S.stage[kFragment] && !S.stage[kTessCtl] && !g_xfb_active && S.ncolor > 0 && bloom_shader(S.stage[kFragment])) {
         const ProgLayout* ap = alpha_layout_cached(*pl);   // the same push constant range carries the bloom factor
         if (ap != pl) { pl = ap; g_bloom_draw = true; }
@@ -5695,7 +5704,7 @@ void replay_frame_presented(bool again) {
     g_post_strength[2] = static_cast<float>(hset.vignette);
     g_post_strength[3] = static_cast<float>(hset.depth_of_field);
     g_sharp_push[1] = static_cast<float>(hset.sharpen);
-    g_sharp_push[2] = hset.compare ? 1.0f : 0.0f;
+    g_compare = hset.compare;   // the split position is set per draw from its target (compare_half_width)
     g_sharp_on = hset.sharpen != 1.0 || hset.compare;
 }
 
