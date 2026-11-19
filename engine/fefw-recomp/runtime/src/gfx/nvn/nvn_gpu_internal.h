@@ -247,6 +247,13 @@ float tex_scale_wanted(Texture* t);
 // Remakes the image at scale `to`, content blitted over (a render target made unscaled, storage use, a pass mixing scales). Going to 1 is
 // for good. No render pass open.
 bool tex_rescale(Texture* t, Frame& f, float to, const char* why);
+// [gfx] float16_scene: an R11G11B10F image (image flag only) is remade as RGBA16F, its content copied, before a shader first stores to it
+// (render thread, outside a pass). tex_f16_on_store: it is still waiting for that; tex_f16_keep: a shader stores to it as r11f_g11f_b10f, it stays.
+bool tex_f16_promote(Texture* t, Frame& f);
+bool tex_f16_on_store(Texture* t);
+void tex_f16_keep(Texture* t);
+// A buffer copy into (to_texture) or out of a promoted image, through an image of the NVN format: false when t is not one (copy directly).
+bool tex_copy_buffer_promoted(Texture* t, Frame& f, VkBuffer buf, const VkBufferImageCopy& c, bool to_texture);
 // Records an upload when the texture's memory was not yet uploaded or the CPU wrote it since (and the GPU did not render it).
 // Must be called with no render pass open on `f.cb`. Leaves the image in SHADER_READ_ONLY_OPTIMAL after an upload.
 void tex_ensure_current(Texture* t, Frame& f);
