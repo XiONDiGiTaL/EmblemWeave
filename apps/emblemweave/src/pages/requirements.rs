@@ -77,12 +77,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 );
                 ui.label(RichText::new(deps::summary(&rows)).size(12.5).color(p.body));
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // A fixed-height slot keeps this right-aligned action from taking the remaining page height and
+            // pushing the missing-tool rows and manual instructions below the fold.
+            let width = ui.available_width();
+            ui.allocate_ui_with_layout(egui::vec2(width, 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can_install = !missing_lines.is_empty() && crate::engine::have_winget();
                 if !all_ready
                     && widgets::primary_button(ui, &p, "Install what is missing", can_install)
                         .on_hover_text(if crate::engine::have_winget() {
-                            format!("Runs these in a new window, one after another:\n{}", missing_lines.join("\n"))
+                            if missing_lines.is_empty() {
+                                "The remaining tool needs the manual step below.".to_string()
+                            } else {
+                                format!("Runs these in a new window, one after another:\n{}", missing_lines.join("\n"))
+                            }
                         } else {
                             "winget is not available on this PC. Install App Installer from the Microsoft Store, then check again.".to_string()
                         })
@@ -105,11 +112,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let text = deps::summary(&rows);
                 app.notify(text, if deps::blocking(&rows).is_empty() { Tone::Ok } else { Tone::Warn });
             }
+            if !app.config.onboarding.completed && widgets::button(ui, &p, if app.config.onboarding.dismissed { "Resume setup guide" } else { "Open setup guide" }, true)
+                .on_hover_text("Continue from the step you stopped at; the guide reads the same live tool checks.")
+                .clicked()
+            {
+                app.config.onboarding.dismissed = false;
+                app.config.onboarding.step = 2;
+            }
             ui.label(RichText::new("Checks happen in the background; this page updates itself.").size(10.5).color(p.muted));
         });
         for line in &manual {
             ui.add_space(3.0);
             ui.label(RichText::new(format!("• {line}")).size(11.5).color(p.body));
+        }
+        if deps::row(&rows, "sdk").is_some_and(|r| r.blocking()) {
+            ui.add_space(2.0);
+            ui.hyperlink_to("Open the Windows SDK download page", deps::WINDOWS_SDK_URL);
         }
     });
 
@@ -219,7 +237,12 @@ fn row_view(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, row: &Row) {
                             }
                         }
                     } else {
-                        ui.label(RichText::new("Manual step").size(10.0).color(p.warn)).on_hover_text(install.line());
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("Manual step").size(10.0).color(p.warn)).on_hover_text(install.line());
+                            if row.dep.key == "sdk" {
+                                ui.hyperlink_to("Download page", deps::WINDOWS_SDK_URL);
+                            }
+                        });
                     }
                 });
             }

@@ -42,6 +42,31 @@ that compiles the translator from source.
 `EmblemWeave.exe --check-toolchain` runs the same checks in a console (exit 0 ready, 1 missing something, 2 the check
 itself could not run), and `EmblemWeave.exe --print-requirements` prints the table above.
 
+### The setup stops at 8 of 9 tools
+
+The nine required entries are Visual Studio C++ tools, the Windows 10/11 SDK, LLVM, CMake, Ninja, Python, `zbic`, a C
+compiler, and the shader translator. The launcher can install seven downloadable tools automatically: Visual Studio's C++
+tools, LLVM, CMake, Ninja, Python, `zbic` and the C compiler. The release ships the translator bundled, so it is carried
+rather than installed. That leaves the Windows 10/11 SDK as the one entry the launcher cannot add by itself.
+
+**A fresh Visual Studio install includes the SDK.** The launcher's Build Tools command installs the C++ workload with
+its recommended components, and the Windows 11 SDK is one of them. Let that install finish, restart the launcher, and
+press **Check again** before adding anything by hand.
+
+**An existing Build Tools install may not have the SDK.** Having the C++ workload does not guarantee that the SDK was
+installed, and the launcher will not modify an existing Visual Studio installation. Add it through Visual Studio
+Installer:
+
+1. Open **Visual Studio Installer**.
+2. Beside **Visual Studio Build Tools 2022**, choose **Modify**.
+3. Open **Individual components**, search for **Windows 11 SDK**, tick the newest one, and choose **Modify**.
+4. Close the installer, return to **Requirements**, and press **Check again**. If the launcher is still open while the
+   SDK finishes installing, reopening it is the surest way to pick up the new environment.
+
+If Build Tools is not listed, install the standalone SDK from
+[Microsoft's Windows SDK page](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/) instead. The optional rows in
+the table (NASM, Git, PowerShell 7, uv, .NET) do not count toward the nine and do not block the build.
+
 ## Running straight from a `.nup`
 
 **Game Setup > Choose .nup…** takes the package as it is: the ExeFS is copied out once (it is small) and the RomFS is read in place, so nothing has to be unpacked into a folder first. The engine serves reads and module loads straight from the package.
