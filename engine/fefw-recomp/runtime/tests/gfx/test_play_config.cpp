@@ -972,6 +972,35 @@ using nxrt::extras::HdrMode;
 using nxrt::extras::LatencyMode;
 using nxrt::extras::UpscaleMode;
 
+NXTEST(npc_distance_defaults_parses_and_round_trips) {
+    // 1 = the game's own hub crowd limits, written out so the key shows up in a fresh controls file.
+    const Settings d = default_settings();
+    CHECK(d.display.npc_distance == 1.0);
+    CHECK(format_settings(d).find("npc_distance = 1\n") != std::string::npos);
+
+    Settings s;
+    std::string err;
+    for (double k : {1.0, 1.5, 2.0, 3.0, 4.0}) {
+        Settings w = default_settings();
+        w.display.npc_distance = k;
+        const std::string text = format_settings(w);
+        REQUIRE_MSG(parse_settings(text, &s, &err), err);
+        CHECK(s.display.npc_distance == k);
+        CHECK_EQ(format_settings(s), text);
+    }
+    Settings w = default_settings();
+    w.display.npc_distance = 2.0 / 3.0 + 1.0;   // a custom value written by hand needs every digit to read back exactly
+    REQUIRE_MSG(parse_settings(format_settings(w), &s, &err), err);
+    CHECK(s.display.npc_distance == w.display.npc_distance);
+
+    const char* const bad[] = {"[display]\nnpc_distance = 0.5\n", "[display]\nnpc_distance = 4.5\n", "[display]\nnpc_distance = far\n"};
+    for (const char* text : bad) {
+        Settings r;
+        CHECK(!parse_settings(text, &r, &err));
+        CHECK_MSG(starts_with(err, "line 2: npc_distance must be"), err);
+    }
+}
+
 namespace {
 // Every key of the three sections, with values that differ from the defaults.
 const char* const kExtrasFile =

@@ -973,8 +973,40 @@ void live_status_group() {
     if (s.fg_dlss && s.status) ImGui::TextDisabled(tr("Streamline status %u"), s.status);
 }
 
+// [display] npc_distance (fefw_crowd.cpp): the hub crowd's model limit, display distance and draw budget
+constexpr const char* kNpcNames[] = {"Console (the game's own)", "1.5x", "2x", "3x", "4x"};
+constexpr double kNpcVals[] = {1.0, 1.5, 2.0, 3.0, 4.0};
+
+std::string npc_name(double k) {
+    for (size_t i = 0; i < std::size(kNpcVals); ++i)
+        if (std::fabs(k - kNpcVals[i]) < 1e-6) return tr(kNpcNames[i]);
+    char b[32];
+    std::snprintf(b, sizeof b, "%.2fx", k);
+    return b;
+}
+
+void detail_group(UiHost& host, Menu& m) {
+    section("Detail");
+    if (!begin_rows("detail")) return;
+    row(m, "NPC limit", When::Restart,
+        "How many townspeople a town shows. The game keeps at most 70 different NPC models loaded, shows them within 80 m and under a "
+        "draw budget; past those limits townspeople are hidden, even close by, and pop in as you walk. This multiplies all three. "
+        "More memory and CPU work. Console = exactly the game's behaviour.");
+    int nidx = -1;
+    for (int i = 0; i < static_cast<int>(std::size(kNpcVals)); ++i)
+        if (std::fabs(m.edit.display.npc_distance - kNpcVals[i]) < 1e-6) nidx = i;
+    const std::string nother = std::string(tr("Custom")) + ": " + npc_name(m.edit.display.npc_distance);
+    if (combo(m, "##npclimit", &nidx, kNpcNames, static_cast<int>(std::size(kNpcNames)), nother.c_str(), true)) {
+        m.edit.display.npc_distance = kNpcVals[nidx];
+        apply(host, m);
+    }
+    pending_note(std::fabs(m.edit.display.npc_distance - npc_distance_applied()) > 1e-6, npc_name(npc_distance_applied()));
+    end_rows();
+}
+
 void graphics_page(UiHost& host, Menu& m) {
     resolution_group(m);
+    detail_group(host, m);
     upscaler_group(m);
     live_status_group();
     hdr_group(host, m);
@@ -1557,6 +1589,7 @@ std::string pending_list(Menu& m) {
     if (e.extras.latency.mode != b.extras.latency.mode) add("low latency");
     if (e.extras.latency.log_timings != b.extras.latency.log_timings) add("latency log");
     if (e.audio.device != b.audio.device) add("audio device");
+    if (std::fabs(e.display.npc_distance - npc_distance_applied()) > 1e-6) add("NPC limit");
     return s;
 }
 

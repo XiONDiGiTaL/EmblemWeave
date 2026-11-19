@@ -54,6 +54,10 @@ void settings_menu(play::UiHost& host, gfx::Overlay& overlay);
 void res_install(uint64_t base);
 // The render-target pool's allocator was given room past the pool ([fefw] rt_pool_overflow_mb): renders above half of a 2160p output fit.
 bool res_rt_pool_extended();
+// fefw_crowd.cpp: [display] npc_distance (controls file; [fefw] npc_distance in the ini wins) scales the hub crowd's NPC model limit,
+// display distance and draw budget. Installed from play_install.
+void crowd_install(uint64_t base, double npc_distance);
+double npc_distance_applied();  // the hub NPC factor in force since the start (1 = the game's own)
 
 // fefw_wide.cpp: outputs wider than 16:9 ([fefw] ultrawide; hooks after Kompas9's ultrawide patch). res_install calls wide_install with
 // the output it gives the game; nothing is installed unless that output is wider than 16:9.

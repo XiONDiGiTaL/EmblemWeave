@@ -63,3 +63,18 @@ inline 0x71017d90b0
 # (vtable + 0x110); the midhook draws, puts the viewport back and returns
 inline 0x7101904b5c
 midhook 0x7101904c20
+# hub NPCs (runtime games/fefw/fefw_crowd.cpp, [display] npc_distance): the crowd update (map::zv crowd, 0x1041880).
+# model limit: before `str w8, [x19, #16]`, w8 = the game parameter "hub character model hash limit" (how many distinct NPC models the
+# crowd keeps loaded; at the limit an NPC whose model is not loaded yet is not shown, even close by)
+inline 0x7101041b18
+# display distance: after s8 = the game parameter "hub character display distance" (an int, metres) and before `fmul s0, s8, s8`; the
+# update stores R^2, R^2, (R + 40)^2 and (R + 100)^2 as the crowd's show / hide distances
+inline 0x7101041c54
+# draw budget: after each of the update's three `fmov s9, #1.0` (the limit of max(cost / 600000, count / 80); once reached, every
+# further townsperson that frame is hidden)
+inline 0x7101042680
+inline 0x7101042898
+inline 0x7101042c20
+# [fefw] npc_log: the update's reference position (v2) and the character show / hide call (x0 chara, w1 mode)
+inline 0x7101041d7c
+entryhook 0x7100d039e0
