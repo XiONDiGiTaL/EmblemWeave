@@ -107,6 +107,9 @@ pub struct Dep {
     pub note: &'static str,
 }
 
+/// Where a person installs the Windows SDK when the Visual Studio installer did not bring it.
+pub const WINDOWS_SDK_URL: &str = "https://learn.microsoft.com/en-us/windows/apps/windows-sdk/";
+
 /// The registry. Order is the order the Requirements page and the docs show:
 /// the toolchain first, then the build's own helpers, then what decoding and
 /// the translator need.

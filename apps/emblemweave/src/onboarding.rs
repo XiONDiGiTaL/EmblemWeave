@@ -128,6 +128,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     }
                     Some(rows) => {
                         let blocking_rows = crate::deps::blocking(rows);
+                        let install_lines = crate::deps::install_lines(rows);
+                        let manual = crate::deps::manual_fixes(rows);
                         if blocking_rows.is_empty() {
                             widgets::status_line(ui, &p, Tone::Ok, "Build tools ready", "Every dependency this configuration needs is installed.");
                         } else {
@@ -144,9 +146,27 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 });
                             }
                         }
+                        if !manual.is_empty() {
+                            ui.add_space(7.0);
+                            ui.label(RichText::new("Manual step").font(theme::semibold(11.5)).color(p.warn));
+                            for line in &manual {
+                                ui.add(egui::Label::new(RichText::new(format!("• {line}")).size(11.0).color(p.body)).wrap());
+                            }
+                            if crate::deps::row(rows, "sdk").is_some_and(|r| r.blocking()) {
+                                ui.hyperlink_to("Open the Windows SDK download page", crate::deps::WINDOWS_SDK_URL);
+                            }
+                        }
                         ui.add_space(9.0);
+                        let can_install = !install_lines.is_empty() && crate::engine::have_winget();
                         ui.horizontal_wrapped(|ui| {
-                            if widgets::primary_button(ui, &p, "Install missing tools", !blocking_rows.is_empty() && crate::engine::have_winget()).clicked() {
+                            if widgets::primary_button(ui, &p, "Install missing tools", can_install)
+                                .on_hover_text(if install_lines.is_empty() {
+                                    "The remaining tool needs the manual step above.".to_string()
+                                } else {
+                                    format!("Runs these in a new window, one after another:\n{}", install_lines.join("\n"))
+                                })
+                                .clicked()
+                            {
                                 action.set(Some(Action::Install));
                             }
                             if widgets::button(ui, &p, "Check again", true).clicked() {

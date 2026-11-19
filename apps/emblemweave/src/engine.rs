@@ -779,6 +779,9 @@ pub fn start_install() -> Result<PathBuf, String> {
         return Err("winget is not available on this PC, so the installer cannot be started. Install App Installer from the Microsoft Store, or follow the install lines in docs/TROUBLESHOOTING.md.".into());
     }
     let lines = install_lines_for(&missing_tools());
+    if lines.is_empty() {
+        return Err("The remaining build tool needs a manual install. Follow the steps on Requirements, then press Check again.".into());
+    }
     start_install_lines(&lines)
 }
 
