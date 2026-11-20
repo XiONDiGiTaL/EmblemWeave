@@ -200,6 +200,8 @@ pub struct App {
     nav_last: Option<Page>,
     /// A Play succeeded and the launcher should minimize once this frame is done.
     minimize_after_play: bool,
+    /// When the last redraw started, for the frame cap in `update`.
+    last_frame: Instant,
 }
 
 fn clock() -> String {
@@ -316,6 +318,7 @@ impl App {
             activity_hover_until: None,
             nav_last: None,
             minimize_after_play: false,
+            last_frame: Instant::now(),
         };
         match repaired {
             Some(Ok(n)) if n > 0 => app.note(
@@ -1061,8 +1064,22 @@ impl App {
     }
 }
 
+/// The launcher's redraw ceiling. egui asks for the next frame the moment a
+/// hover animation is live, and with no vsync that runs the window at the
+/// monitor's refresh rate (144 frames a second here) for a 2D interface that
+/// has nothing to show between 60 and 144. Sleeping out the rest of a 60 Hz
+/// interval costs at most one frame of input latency and takes the interactive
+/// CPU cost down with it. A frame that already took longer than the interval
+/// is never delayed further.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let since = self.last_frame.elapsed();
+        if since < FRAME_INTERVAL {
+            std::thread::sleep(FRAME_INTERVAL - since);
+        }
+        self.last_frame = Instant::now();
         // The native caption is installed by title rather than by a viewport
         // command: a command runs after egui's frame, which is the one-frame
         // catch-up slide the title bar used to have.

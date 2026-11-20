@@ -130,6 +130,7 @@ pub fn adopt_portable_on_first_run() -> Option<std::path::PathBuf> {
     let data = exe_dir.join("data");
     std::fs::create_dir_all(&data).ok()?;
     std::fs::write(exe_dir.join(PORTABLE_MARKER), b"").ok()?;
+    forget_data_root();
     Some(data)
 }
 
@@ -140,7 +141,10 @@ pub fn set_portable(exe_dir: &std::path::Path, on: bool) -> Result<Option<std::p
     let marker = exe_dir.join(PORTABLE_MARKER);
     if !on {
         match std::fs::remove_file(&marker) {
-            Ok(()) => return Ok(None),
+            Ok(()) => {
+                forget_data_root();
+                return Ok(None);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("removing {}: {e}", marker.display())),
         }
@@ -148,6 +152,8 @@ pub fn set_portable(exe_dir: &std::path::Path, on: bool) -> Result<Option<std::p
     let data = exe_dir.join("data");
     std::fs::create_dir_all(&data).map_err(|e| format!("creating {}: {e}", data.display()))?;
     std::fs::write(&marker, b"").map_err(|e| format!("writing {}: {e}", marker.display()))?;
+    // The resolved folder is cached for the session; the marker just changed it.
+    forget_data_root();
     // The saves are the part a player cannot get back, so they follow the switch; a copy that cannot be made does not undo it. The
     // settings come too (theme, chosen folders, save profiles), and so do installed mods: a mod the player added is their own file, and
     // making them find and install it again after pressing a button is not "everything in this folder".
@@ -178,7 +184,38 @@ pub fn exe_dir() -> Option<std::path::PathBuf> {
 }
 
 /// `data_root_from` against this process's environment, unless this copy is portable.
+///
+/// The answer is resolved once and remembered. Every page asks for it through
+/// `Config::dir()` and `run_dir()`, several times a frame, and resolving it
+/// costs a process-path call plus a directory listing of the launcher's folder
+/// to look for the portable marker. That listing was most of what the top bar
+/// and the navigation rail spent their time on during a redraw.
 pub fn data_root() -> Option<std::path::PathBuf> {
+    let mut slot = data_root_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if !slot.0 {
+        slot.1 = resolve_data_root();
+        slot.0 = true;
+    }
+    slot.1.clone()
+}
+
+/// The resolved folder, and whether it has been resolved yet. `None` is a real
+/// answer (no profile folder on this machine), so it needs the flag to be told
+/// apart from "not asked yet".
+fn data_root_cache() -> &'static std::sync::Mutex<(bool, Option<std::path::PathBuf>)> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(bool, Option<std::path::PathBuf>)>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new((false, None)))
+}
+
+/// Forget the resolved data folder. Switching portable mode moves it, and the
+/// About page can do that while the launcher runs.
+pub fn forget_data_root() {
+    let mut slot = data_root_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *slot = (false, None);
+}
+
+fn resolve_data_root() -> Option<std::path::PathBuf> {
     if let Some(dir) = exe_dir().and_then(|d| portable_root(&d)) {
         return Some(dir);
     }

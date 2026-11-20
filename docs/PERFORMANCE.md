@@ -140,6 +140,71 @@ the table uses only the runs whose rect tracked the cursor.
 
 No gameplay FPS number is claimed: this pass changes the launcher frame, not the engine.
 
+## This pass: the interface's own per-frame cost
+
+With the move loop fixed, the launcher still cost most of a core while the pointer moved across it. A temporary
+probe that timed each part of `update` (top bar, status strip, rail, page, overlays) put the page at 14.3 ms and
+each 40-pixel strip at about 2 ms, for a 20.6 ms frame at 61 frames a second: layout work, not the GPU. Two of
+those costs were filesystem calls disguised as getters.
+
+`engine::root()` (through `engine::ready()`) read `engine.txt`, walked the executable's ancestors and stat-ed a
+dozen candidate folders. `platform::data_root()` (through `Config::dir()` and `run_dir()`) called `current_exe`
+and then *listed* the launcher's folder to look for `portable.txt`. Both were called several times per frame by
+the top bar's build chip, the status strip's readiness line and the Overview, so every redraw repeated the same
+forty-odd filesystem operations. Each answer is now resolved once per process and invalidated when it can
+change (`remember_root` after picking a checkout, `set_portable` after switching storage).
+
+The rest of the frame was redundant work:
+
+* `widgets::tracked` laid out **every character separately** to add letter spacing. It is now one `LayoutJob`
+  with `extra_letter_spacing`, shaped and cached once per label.
+* `widgets::backdrop` rebuilt a 400-vertex radial mesh (and, for Arcade, over a thousand grid lines) every
+  frame. The finished shape is cached per size and colourway.
+* The Log page rebuilt its filtered row list — up to 50,000 lines, with a lower-case copy of each while
+  searching — on every frame. It is rebuilt only when new lines arrive or a filter changes.
+* The Controls page asked for a frame every 20 ms for a still picture; it now follows the pad at 4 frames a
+  second and only speeds up while a binding is being captured. The Cheats page asks for nothing unless a game is
+  attached, and the About marquee runs at 20 rather than 30 frames a second.
+* egui asks for the next frame as soon as a hover animation is live. With no vsync that ran the window at 151
+  frames a second (the monitor is 144 Hz) for an interface with nothing to show between 60 and 144. `update` now
+  sleeps out the rest of a 16 ms interval. A frame that already took longer is never delayed further.
+
+| Measurement (1440x900) | Before | After | How it was measured |
+| --- | ---: | ---: | --- |
+| Pointer sweep across the Overview, launcher CPU | 97.3% of one core | 15.9% and 24.9% in two runs | `work/launcher_cpu_probe.ps1`, 6 s of `SendInput` moves on a 25 ms step around the page centre |
+| Time to build one frame of UI | 20.6 ms | 2.7 ms | same probe's temporary per-section instrumentation, 370 then 908 frames |
+| Game Log idle, no game running | 52.8% | 0.0% | `-Page Log`, 6 s with no pointer movement |
+| Game Log after a sweep settles | 29.2% | 0.0% | 4 s after the sweep, tooltips gone |
+| Game Log pointer sweep | 98.6% | 22.3% | same sweep as the Overview row |
+| Windows drawn per second during the sweep | 61 | 49 | frames counted by the probe; the 16 ms cap plus the monitor's vsync grid settles just under 60 |
+
+Idle CPU with nothing animating was already 0% once the start-up tool check finished, before and after: this pass
+changes the cost of drawing, not the decision to stop drawing. The two sweep figures for the Overview are the same
+binary measured twice; the spread is background work (the build-tool check running at start-up), and both are far
+below the 97% before it. The 49 frames a second figure is the deliberate trade for that: hover transitions still
+run well above the rate at which a 0.18 s fade can look stepped.
+
+No GPU-side claim is made. The probe measures the launcher's process CPU time, not frame presentation, and it ran
+on the development PC, not the reporter's machine.
+
+## This pass: the Yenilume typefaces and a softer surface
+
+The launcher's type came from whichever Segoe UI a machine had. It now carries its own pair, the one the xiØN
+front end (Yenilume) sets its pages in: **Baloo 2** for display — titles, the wordmark, card values — and
+**Nunito** for everything read at length. Both are bundled as TrueType (converted from the Google Fonts release),
+SIL Open Font License 1.1, with `OFL.txt` beside them; Segoe stays behind them for glyphs neither face carries, and
+Chinese and Japanese keep their own fallback chain. The look no longer depends on the machine.
+
+With the new faces came the rest of that design language: card corners at 18 px and controls at 11 px instead of
+16 and 10 (Yenilume's panels use 28 px; a desktop window reads better a step tighter), the product name set in
+Baloo 2 rather than spaced capitals, and page and dialog titles given the slight negative tracking the site uses
+so a heading reads as one phrase. Body text moved up half a point, because Nunito runs smaller than Segoe at the
+same size.
+
+The result was checked in the launcher's own `--screenshot` output at 1440x900, on the Overview, Appearance and
+Controls pages. Nothing was checked at another DPI or in another language; the bundled faces carry Latin, Latin
+Extended and Cyrillic, and the CJK and symbol fallbacks are the system's as before.
+
 ## This pass: the adaptive controller and the XiØN interface
 
 The controller (`runtime/src/gfx/perf.cpp`) is a measurement and policy layer over systems that already existed. It

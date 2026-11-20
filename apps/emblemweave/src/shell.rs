@@ -147,7 +147,13 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                 let c = mark.center();
                 let diamond = vec![c + Vec2::new(0.0, -5.5), c + Vec2::new(5.5, 0.0), c + Vec2::new(0.0, 5.5), c + Vec2::new(-5.5, 0.0)];
                 ui.painter().add(egui::Shape::convex_polygon(diamond, p.accent, Stroke::new(1.0_f32, alpha(Color32::WHITE, 170))));
-                widgets::tracked(ui, "EMBLEMWEAVE", 10.0, p.ink, 2.6);
+                // The wordmark is the display face, not spaced capitals: it is
+                // the one place the launcher signs its own name.
+                ui.label(
+                    crate::i18n::text("EmblemWeave")
+                        .font(theme::display_bold(15.0))
+                        .color(p.ink),
+                );
                 ui.add_space(3.0);
                 let (div, _) = ui.allocate_exact_size(Vec2::new(1.0, 14.0), Sense::hover());
                 ui.painter().vline(div.center().x, div.y_range(), Stroke::new(1.0_f32, p.line_strong));

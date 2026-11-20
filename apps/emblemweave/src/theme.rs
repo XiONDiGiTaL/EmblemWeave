@@ -26,10 +26,12 @@ pub const SPACE_S: f32 = 8.0;
 pub const SPACE_M: f32 = 14.0;
 pub const SPACE_L: f32 = 20.0;
 pub const SPACE_XL: f32 = 30.0;
-/// Corner radii: compact 10 pixel controls and 16 pixel cards, the modern
-/// dashboard proportions rather than the old fully round pills.
-pub const RADIUS_S: u8 = 10;
-pub const RADIUS_M: u8 = 16;
+/// Corner radii: 11 pixel controls and 18 pixel cards. The launcher's own site
+/// (Yenilume) uses a generous 28 pixel radius on its panels; a desktop window
+/// reads better a step tighter, but the softer corner is the same idea, not the
+/// old fully round pill.
+pub const RADIUS_S: u8 = 11;
+pub const RADIUS_M: u8 = 18;
 /// Width of the navigation rail.
 pub const NAV_WIDTH: f32 = 218.0;
 /// The rail's compact, icon-only width.
@@ -47,7 +49,7 @@ pub const STATUSBAR_HEIGHT: f32 = 40.0;
 pub const CONTENT_MAX: f32 = 1120.0;
 /// The radius of buttons and navigation rows. Chips keep their own 255 in
 /// `widgets::pill`; controls are softly rounded rectangles now, not pills.
-pub const RADIUS_PILL: u8 = 10;
+pub const RADIUS_PILL: u8 = 11;
 /// A card: one soft radius on all four corners, so the dashboard reads level.
 pub const CARD: egui::CornerRadius = egui::CornerRadius::same(RADIUS_M);
 /// Letter spacing for the small-caps labels, as the reference launcher sets it.
@@ -342,6 +344,10 @@ pub fn semibold_family() -> FontFamily {
 pub fn display(size: f32) -> FontId {
     FontId::new(size, display_family())
 }
+/// Baloo 2 at its boldest: the wordmark and a page's first line.
+pub fn display_bold(size: f32) -> FontId {
+    FontId::new(size, display_bold_family())
+}
 /// Semibold sans for labels and buttons.
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, semibold_family())
@@ -350,13 +356,57 @@ pub fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
 }
 
-/// Install the launcher's typefaces from the fonts the system already has.
-/// Each family falls back to egui's bundled faces, so a missing system font
-/// changes the look, never the ability to render.
+/// A display line with the slight negative tracking the xiØN site sets its
+/// headings in: at 24 points and up, default spacing makes a two-word title
+/// read as two words rather than one phrase. `ui.label` cannot carry letter
+/// spacing, so this lays the line out itself.
+pub fn headline(ui: &mut egui::Ui, text: &str, size: f32, colour: Color32) -> egui::Response {
+    let mut job = egui::text::LayoutJob::single_section(
+        crate::i18n::tr(text),
+        egui::TextFormat {
+            font_id: display(size),
+            color: colour,
+            extra_letter_spacing: -size * 0.012,
+            ..Default::default()
+        },
+    );
+    job.wrap.max_width = ui.available_width().max(1.0);
+    ui.add(egui::Label::new(ui.fonts(|f| f.layout_job(job))))
+}
+
+// ---- the launcher's own typefaces ------------------------------------------
+
+/// Baloo 2 and Nunito, the pair the xiØN front end (Yenilume) sets its pages
+/// in: a rounded display face for titles and the wordmark, and a soft humanist
+/// sans for everything read at length. Carried in the binary, so the look does
+/// not depend on which fonts a machine has installed; both are SIL Open Font
+/// License 1.1 (the `OFL.txt` beside them is the licence text).
+const BALOO_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Baloo2-600.ttf");
+const BALOO_BOLD: &[u8] = include_bytes!("../assets/fonts/Baloo2-700.ttf");
+const NUNITO: &[u8] = include_bytes!("../assets/fonts/Nunito-400.ttf");
+const NUNITO_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Nunito-600.ttf");
+const NUNITO_BOLD: &[u8] = include_bytes!("../assets/fonts/Nunito-700.ttf");
+
+/// Install the launcher's typefaces. The bundled faces come first in every
+/// family; the system faces after them are fallbacks for glyphs Baloo 2 and
+/// Nunito do not carry, and for a machine whose data needs a script neither
+/// covers. A missing system font changes the look, never the ability to render.
 pub fn configure_fonts(ctx: &egui::Context, language: crate::i18n::Language) {
     let mut fonts = egui::FontDefinitions::default();
     let base_prop = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let base_mono = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
+
+    for (key, bytes) in [
+        ("baloo_semibold", BALOO_SEMIBOLD),
+        ("baloo_bold", BALOO_BOLD),
+        ("nunito", NUNITO),
+        ("nunito_semibold", NUNITO_SEMIBOLD),
+        ("nunito_bold", NUNITO_BOLD),
+    ] {
+        fonts
+            .font_data
+            .insert(key.to_owned(), std::sync::Arc::new(egui::FontData::from_static(bytes)));
+    }
 
     let mut load = |key: &str, candidates: &[&str]| -> Option<String> {
         let bytes = candidates.iter().find_map(|p| std::fs::read(p).ok())?;
@@ -364,13 +414,10 @@ pub fn configure_fonts(ctx: &egui::Context, language: crate::i18n::Language) {
         Some(key.to_owned())
     };
     let win = |f: &str| format!(r"C:\Windows\Fonts\{f}");
-    // Display type is the same humanist sans as the site (Sora on the web,
-    // Segoe's semibold locally), not the old book serif: headings, cards and
-    // the hero now share one modern face.
-    let display_semi = load("display_semi", &[&win("seguisb.ttf"), &win("segoeuib.ttf"), &win("segoeui.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]);
-    let display_bold = load("display_bold_face", &[&win("segoeuib.ttf"), &win("seguisb.ttf"), &win("segoeui.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]);
+    // Segoe stays behind the bundled faces for the symbols neither Baloo 2 nor
+    // Nunito draws (arrows, box glyphs, Georgian and the like), and the mono
+    // face is still the system's: a wordmark is display type, an address is not.
     let sans = load("sans", &[&win("segoeui.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]);
-    let sans_semi = load("sans_semi", &[&win("seguisb.ttf"), &win("segoeuib.ttf")]);
     let mono = load("mono", &[&win("CascadiaMono.ttf"), &win("consola.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]);
 
     // CJK, last in every family. The game's own names (units, items, classes)
@@ -392,12 +439,12 @@ pub fn configure_fonts(ctx: &egui::Context, language: crate::i18n::Language) {
     let chain = |first: Option<String>, rest: &[String]| -> Vec<String> {
         first.into_iter().chain(rest.iter().cloned()).collect()
     };
-    let prop = chain(sans.clone(), &base_prop);
+    let prop = chain(Some("nunito".to_owned()), &chain(sans.clone(), &base_prop));
     fonts.families.insert(FontFamily::Proportional, prop.clone());
     fonts.families.insert(FontFamily::Monospace, chain(mono, &base_mono));
-    fonts.families.insert(display_family(), chain(display_semi, &prop));
-    fonts.families.insert(display_bold_family(), chain(display_bold, &prop));
-    fonts.families.insert(semibold_family(), chain(sans_semi.or(sans), &prop));
+    fonts.families.insert(display_family(), chain(Some("baloo_semibold".to_owned()), &chain(Some("nunito_semibold".to_owned()), &prop)));
+    fonts.families.insert(display_bold_family(), chain(Some("baloo_bold".to_owned()), &chain(Some("baloo_semibold".to_owned()), &prop)));
+    fonts.families.insert(semibold_family(), chain(Some("nunito_semibold".to_owned()), &chain(Some("nunito".to_owned()), &prop)));
     ctx.set_fonts(fonts);
 }
 
@@ -457,10 +504,13 @@ pub fn apply(ctx: &egui::Context, scheme: Scheme) {
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_PILL);
     style.spacing.slider_width = 220.0;
-    style.text_styles.insert(TextStyle::Heading, display(19.0));
-    style.text_styles.insert(TextStyle::Body, FontId::new(14.0, FontFamily::Proportional));
+    // Nunito is a little smaller on the body than Segoe at the same size, so
+    // the reading styles go up half a point; headings are Baloo 2, which needs
+    // no help at all.
+    style.text_styles.insert(TextStyle::Heading, display(20.0));
+    style.text_styles.insert(TextStyle::Body, FontId::new(14.5, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Button, FontId::new(14.0, FontFamily::Proportional));
-    style.text_styles.insert(TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));
+    style.text_styles.insert(TextStyle::Small, FontId::new(12.5, FontFamily::Proportional));
     style.text_styles.insert(TextStyle::Monospace, mono(12.5));
     style.animation_time = 0.18;
     ctx.set_style(style);

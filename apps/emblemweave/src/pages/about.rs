@@ -302,7 +302,9 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
         }
         offset %= span;
         ui.ctx().data_mut(|d| d.insert_temp(id, offset));
-        ui.ctx().request_repaint_after(Duration::from_millis(33));
+        // A slow marquee at 20 frames a second reads as smoothly as at 30 and
+        // leaves the CPU alone while it scrolls.
+        ui.ctx().request_repaint_after(Duration::from_millis(50));
 
         let painter = ui.painter();
         let radius = egui::CornerRadius::same(10);

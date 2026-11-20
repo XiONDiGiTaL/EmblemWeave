@@ -14,7 +14,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     // The pad as it is this frame: the page follows it while it is open.
     let live = pad::poll();
-    ui.ctx().request_repaint_after(Duration::from_millis(20));
+    // The pad readout follows the controller while a binding is being captured;
+    // at rest a quarter second is enough to see a press, and the page no longer
+    // redraws fifty times a second just to hold a still picture.
+    let pace = if app.capture.is_some() { 20 } else { 250 };
+    ui.ctx().request_repaint_after(Duration::from_millis(pace));
 
     widgets::pending_note(
         ui,

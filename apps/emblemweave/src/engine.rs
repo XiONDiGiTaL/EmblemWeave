@@ -51,6 +51,34 @@ fn remembered() -> Option<PathBuf> {
 /// folder. One whose game is already built wins; otherwise the first that
 /// exists. The choice is remembered for next time.
 pub fn root() -> Option<PathBuf> {
+    // The answer is resolved once per process. Every page asks where the engine
+    // is through `ready()` and `game_folder()`, several times a frame, and the
+    // lookup reads `engine.txt`, walks the executable's ancestors and stats a
+    // dozen candidate folders. That was most of a redraw's cost. Picking a
+    // different checkout calls `remember_root`, which clears this.
+    let mut slot = root_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if !slot.0 {
+        slot.1 = resolve_root();
+        slot.0 = true;
+    }
+    slot.1.clone()
+}
+
+/// The resolved checkout, and whether it has been resolved yet. `None` is a
+/// real answer (this copy has no engine), so the flag tells it apart from "not
+/// asked yet".
+fn root_cache() -> &'static std::sync::Mutex<(bool, Option<PathBuf>)> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(bool, Option<PathBuf>)>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new((false, None)))
+}
+
+/// Clear the remembered engine checkout, after the chosen one changed.
+fn forget_root() {
+    let mut slot = root_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *slot = (false, None);
+}
+
+fn resolve_root() -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     if let Some(e) = std::env::var_os("EW_ENGINE") {
         found.push(PathBuf::from(e));
@@ -137,6 +165,7 @@ pub(crate) fn remember_in(file: &Path, picked: &Path) -> Result<PathBuf, String>
     }
     std::fs::write(&file, root.display().to_string())
         .map_err(|e| format!("writing {}: {e}", file.display()))?;
+    forget_root();
     Ok(root)
 }
 

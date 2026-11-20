@@ -132,7 +132,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.cheats_ui.runner = Some(cheats::start());
     }
     let game = cheats::game();
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    // Live values only exist while the game runs; with no game attached the
+    // page is a still list and needs no frames of its own.
+    if game.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    }
 
     match &game {
         Some(g) => widgets::status_line(ui, &p, Tone::Ok, "Game running", &format!("Attached to {} (process {}). Switched-on codes are applied about 60 times a second.", cheats::GAME_EXE, g.pid)),

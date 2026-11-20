@@ -29,30 +29,36 @@ impl Tone {
 }
 
 /// Letter-spaced small caps, as the reference launcher sets its labels.
+///
+/// Letter spacing is a property of the layout job, so this is one shaped
+/// galley per label, cached by egui. Drawing glyph by glyph meant laying out
+/// every character separately, on every frame, for every eyebrow and rail
+/// heading: on the Overview that was hundreds of small text layouts a frame.
 pub fn tracked(ui: &mut egui::Ui, text: &str, size: f32, colour: Color32, tracking: f32) -> egui::Response {
     let text = crate::i18n::tr(text);
-    let font = theme::semibold(size);
-    let chars: Vec<char> = text.chars().collect();
-    let widths: Vec<f32> = chars
-        .iter()
-        .map(|c| ui.fonts(|f| f.layout_no_wrap(c.to_string(), font.clone(), colour).size().x))
-        .collect();
-    // A tracked label is drawn glyph by glyph, so it would happily paint past the panel it lives in (the navigation
-    // rail's wordmark at a narrow width). Clamp the row to what is actually available and stop before a glyph that
-    // would spill: a shortened label is right, an overflowing one is not.
+    let mut job = egui::text::LayoutJob::single_section(
+        text,
+        egui::TextFormat {
+            font_id: theme::semibold(size),
+            color: colour,
+            extra_letter_spacing: tracking,
+            ..Default::default()
+        },
+    );
+    job.wrap.max_width = f32::INFINITY;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    // A tracked label must not paint past the panel it lives in (the rail's
+    // wordmark at a narrow width), so the row is clamped to what is available
+    // and the glyphs beyond it are clipped rather than spilling.
     let room = ui.available_width().max(1.0);
-    let natural = widths.iter().sum::<f32>() + tracking * chars.len().saturating_sub(1) as f32;
-    let total = natural.min(room);
+    let total = galley.size().x.min(room);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(total.max(1.0), size * 1.7), Sense::hover());
-    let mut x = rect.left();
-    let painter = ui.painter();
-    for (c, w) in chars.iter().zip(&widths) {
-        if x + w > rect.right() + 0.5 {
-            break;
-        }
-        painter.text(Pos2::new(x, rect.center().y), egui::Align2::LEFT_CENTER, c, font.clone(), colour);
-        x += w + tracking;
-    }
+    let clip = rect.intersect(ui.clip_rect());
+    ui.painter().with_clip_rect(clip).galley(
+        Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        colour,
+    );
     response
 }
 
@@ -90,7 +96,7 @@ pub fn glass_panel(ui: &egui::Ui, rect: Rect, p: &Palette, radius: CornerRadius)
 /// a quiet eyebrow that names the section of the app.
 pub fn page_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
     ui.add_space(theme::SPACE_M);
-    ui.label(crate::i18n::text(title).font(theme::display(24.0)).color(p.ink));
+    theme::headline(ui, title, 25.0, p.ink);
     ui.add_space(2.0);
     ui.label(crate::i18n::text(subtitle).size(12.5).color(p.body));
     ui.add_space(theme::SPACE_S);
@@ -552,7 +558,7 @@ pub fn modal(
                 ui.vertical(|ui| {
                     eyebrow(ui, p, "EmblemWeave");
                     ui.add_space(1.0);
-                    ui.label(crate::i18n::text(title).font(theme::display(20.0)).color(p.ink));
+                    theme::headline(ui, title, 21.0, p.ink);
                     if !subtitle.is_empty() {
                         ui.label(crate::i18n::text(subtitle).size(11.5).color(p.body));
                     }
@@ -737,6 +743,29 @@ impl<'a> Slider<'a> {
 /// The page backdrop: a radial accent glow from the top, and for the arcade
 /// scheme a 32 pixel neon grid, fading out away from the glow.
 pub fn backdrop(painter: &egui::Painter, rect: Rect, p: &Palette) {
+    // The backdrop is identical every frame: a 400-vertex radial glow and, for
+    // the arcade scheme, a grid of over a thousand line segments. Rebuilding
+    // that at sixty frames a second was pure waste, so the finished shape is
+    // cached per size and colourway and only cloned while the window holds
+    // still. A resize changes the key, which builds one new shape.
+    let key = egui::Id::new((
+        "backdrop",
+        [rect.min.x.round() as i32, rect.min.y.round() as i32, rect.width().round() as i32, rect.height().round() as i32],
+        p.grid,
+        p.accent.to_array(),
+        p.electric.to_array(),
+    ));
+    let ctx = painter.ctx();
+    let shape = ctx.data(|d| d.get_temp::<std::sync::Arc<egui::Shape>>(key)).unwrap_or_else(|| {
+        let shape = std::sync::Arc::new(backdrop_shape(rect, p));
+        ctx.data_mut(|d| d.insert_temp(key, shape.clone()));
+        shape
+    });
+    painter.add((*shape).clone());
+}
+
+fn backdrop_shape(rect: Rect, p: &Palette) -> egui::Shape {
+    let mut shapes: Vec<egui::Shape> = Vec::new();
     let focus = Pos2::new(rect.left() + rect.width() * 0.40, rect.top());
     let reach = rect.width().max(rect.height()) * 0.9;
     if p.grid {
@@ -751,8 +780,8 @@ pub fn backdrop(painter: &egui::Painter, rect: Rect, p: &Palette) {
                 let a = (13.0 * (1.0 - d).powi(2)) as u8;
                 if a > 0 {
                     let line = Stroke::new(1.0_f32, alpha(p.electric, a));
-                    painter.line_segment([Pos2::new(x, y), Pos2::new(x, y + step)], line);
-                    painter.line_segment([Pos2::new(x, y), Pos2::new(x + step, y)], line);
+                    shapes.push(egui::Shape::line_segment([Pos2::new(x, y), Pos2::new(x, y + step)], line));
+                    shapes.push(egui::Shape::line_segment([Pos2::new(x, y), Pos2::new(x + step, y)], line));
                 }
                 y += step;
             }
@@ -784,7 +813,8 @@ pub fn backdrop(painter: &egui::Painter, rect: Rect, p: &Palette) {
             mesh.add_triangle(b, d, c);
         }
     }
-    painter.add(egui::Shape::mesh(mesh));
+    shapes.push(egui::Shape::mesh(mesh));
+    egui::Shape::Vec(shapes)
 }
 
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {

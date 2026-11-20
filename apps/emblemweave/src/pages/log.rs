@@ -43,6 +43,16 @@ pub struct Ui {
     show_error: bool,
     follow: bool,
     last_poll: std::time::Instant,
+    /// The indices that pass the filters, and the filters they were built for.
+    /// A log keeps up to 50,000 lines, and walking all of them (with a
+    /// lower-case copy each while searching) on every frame cost more than
+    /// everything else the page draws. The list is rebuilt only when a new
+    /// chunk arrives or a filter changes.
+    shown_rows: Vec<usize>,
+    filter: Option<(bool, bool, bool, String)>,
+    counts: (usize, usize),
+    /// New lines or a reset since the filter was last built.
+    stale: bool,
 }
 
 impl Default for Ui {
@@ -59,6 +69,10 @@ impl Default for Ui {
             show_error: true,
             follow: true,
             last_poll: std::time::Instant::now() - std::time::Duration::from_secs(5),
+            shown_rows: Vec::new(),
+            filter: None,
+            counts: (0, 0),
+            stale: true,
         }
     }
 }
@@ -82,6 +96,36 @@ impl Ui {
         self.lines.clear();
         self.read_to = 0;
         self.partial.clear();
+        self.stale = true;
+    }
+
+    /// Rebuild the visible rows and the warning and error counts: on a new
+    /// chunk of log, a changed filter, or a cleared view, never per frame.
+    fn refresh(&mut self) {
+        let filter = (self.show_info, self.show_warn, self.show_error, self.search.clone());
+        if !self.stale && self.filter.as_ref() == Some(&filter) {
+            return;
+        }
+        let needle = self.search.to_lowercase();
+        self.counts = (0, 0);
+        self.shown_rows.clear();
+        for (i, l) in self.lines.iter().enumerate() {
+            match l.level {
+                Level::Warn => self.counts.0 += 1,
+                Level::Error => self.counts.1 += 1,
+                Level::Info => {}
+            }
+            let level_shown = match l.level {
+                Level::Info => self.show_info,
+                Level::Warn => self.show_warn,
+                Level::Error => self.show_error,
+            };
+            if level_shown && (needle.is_empty() || l.text.to_lowercase().contains(&needle)) {
+                self.shown_rows.push(i);
+            }
+        }
+        self.filter = Some(filter);
+        self.stale = false;
     }
 
     /// Read what was added to the log since the last look. A file that got
@@ -121,14 +165,11 @@ impl Ui {
             self.lines.pop_front();
         }
         self.partial = rest;
+        self.stale = true;
     }
 
     fn counts(&self) -> (usize, usize) {
-        self.lines.iter().fold((0, 0), |(w, e), l| match l.level {
-            Level::Warn => (w + 1, e),
-            Level::Error => (w, e + 1),
-            Level::Info => (w, e),
-        })
+        self.counts
     }
 }
 
@@ -141,6 +182,7 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
         s.poll();
     }
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    s.refresh();
     let (warns, errors) = s.counts();
     ui.horizontal_wrapped(|ui| {
         for (w, label) in [(Which::Current, "This run"), (Which::Previous, "Previous run")] {
@@ -176,14 +218,16 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
         }
         if widgets::button(ui, &p, "Clear view", !s.lines.is_empty()).clicked() {
             s.lines.clear();
+            s.stale = true;
         }
         if !in_window && widgets::button(ui, &p, "↗ Pop out", true).on_hover_text(crate::i18n::tr("Open the log in a window of its own")).clicked() {
             s.popped = true;
         }
     });
     ui.add_space(6.0);
-    let f = s.search.to_lowercase();
-    let rows: Vec<usize> = s.lines.iter().enumerate().filter(|(_, l)| shown(l, s.show_info, s.show_warn, s.show_error, &f)).map(|(i, _)| i).collect();
+    // The filter may have changed in the row above; rebuild before drawing.
+    s.refresh();
+    let rows = &s.shown_rows;
     if s.lines.is_empty() {
         ui.label(crate::i18n::text("The log is empty. It fills in while the game runs (the game writes fefw.log in its run folder).").color(p.muted));
         return;
