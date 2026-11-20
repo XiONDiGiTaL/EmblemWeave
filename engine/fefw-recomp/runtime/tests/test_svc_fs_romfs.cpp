@@ -838,12 +838,23 @@ NXTEST(packed_cache_evicts_lru_and_skips_oversize_entries) {
     CHECK(cache.get(5) == nullptr);
     CHECK_EQ(st.peak, 12u);
 
-    // Reserving room for an entry that cannot be retained drops the old buffers before decoding it.
+    // Reserving room for an entry that cannot be retained keeps every retained entry: it is served from its own decode and never
+    // added, so evicting them would only make the next read of each file pay its decode again (one large audio bank used to clear the
+    // whole cache on every read).
     cache.make_room(5);
+    st = cache.stats();
+    CHECK_EQ(st.entries, 3u);
+    CHECK_EQ(st.bytes, 12u);
+    CHECK_EQ(st.evictions, 1u);
+    CHECK(cache.get(1) != nullptr);
+    CHECK(cache.get(3) != nullptr);
+    CHECK(cache.get(4) != nullptr);
+
+    // An entry that big is decoded once, beside the cache, and that would double the peak: it clears the cache first, as before.
+    cache.make_room((1ull << 30) + 1);
     st = cache.stats();
     CHECK_EQ(st.entries, 0u);
     CHECK_EQ(st.bytes, 0u);
-    CHECK_EQ(st.evictions, 4u);
 }
 
 // A packed audio entry is named `audio.elf.zst` in the real packages. The extension is not special to the reader, but this checks its

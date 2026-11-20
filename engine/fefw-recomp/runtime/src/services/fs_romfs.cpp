@@ -722,8 +722,9 @@ struct OpenSlot {
 
 struct RomfsImage::Impl {
     Layout l;
-    mutable std::mutex mu;                  // guards cache, tick and read_seen
+    mutable std::mutex mu;                  // guards cache, tick, read_seen and unretained_warned
     mutable std::vector<uint8_t> read_seen; // per file: read at least once (the game's loads, in the log and the crash report)
+    mutable std::vector<uint8_t> unretained_warned;   // per file: the oversize warning was logged
     void note_read(uint32_t idx) const {
         {
             std::lock_guard<std::mutex> lk(mu);
@@ -733,6 +734,18 @@ struct RomfsImage::Impl {
         const std::string& path = l.files[idx].path;
         NXLOG_D("fs", "romfs: first read of %s", path.c_str());
         diag_note_file("rom", path.c_str());
+    }
+    // A packed entry over the per-entry cap is decoded again on every read: say it once per file, because it is slow and the log is
+    // where a stutter report is read.
+    void note_unretained(uint32_t idx) const {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (idx >= unretained_warned.size() || unretained_warned[idx]) return;
+            unretained_warned[idx] = 1;
+        }
+        NXLOG_W("fs", "romfs: %s is %llu MiB decoded, over the packed cache's per-file cap: it is not kept, so every read decodes the "
+                       "whole file (a folder build serves it without decoding)",
+                l.files[idx].path.c_str(), static_cast<unsigned long long>(l.files[idx].size >> 20));
     }
     mutable std::vector<OpenSlot> cache;    // at most kOpenFiles entries
     mutable uint64_t tick = 0;
@@ -754,7 +767,7 @@ struct RomfsImage::Impl {
             return nullptr;
         }
         auto box = std::make_shared<const std::vector<uint8_t>>(std::move(data));
-        packed_cache.put(idx, box);
+        if (!packed_cache.put(idx, box)) note_unretained(idx);
         return box;
     }
 
@@ -843,6 +856,7 @@ bool RomfsImage::build(const std::string& host_dir, std::string* err, const std:
     p_->packed_cache.clear();
     p_->l = ok ? std::move(fresh) : Layout{};
     p_->read_seen.assign(p_->l.files.size(), 0);
+    p_->unretained_warned.assign(p_->l.files.size(), 0);
     return ok;
 }
 

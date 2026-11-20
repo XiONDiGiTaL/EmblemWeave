@@ -2,7 +2,8 @@
 // Bounded LRU for decompressed zstd entries of a .nup package. A zstd entry is one frame for the whole file, so the RomFS reader decodes
 // it whole and serves ranges from memory. Keeping every entry until a fixed budget is exceeded makes a large audio bank pin the budget
 // and then drops every entry at once; this cache evicts the least recently used entry individually, and a file larger than the per-file
-// cap is not retained at all.
+// cap is not retained at all. An unretainable entry also reserves no room: it is served from its own decode and dropped, so reading it
+// must not evict the entries that are retained (one large bank otherwise threw away every other decompressed file on every read).
 #pragma once
 
 #include <algorithm>
@@ -35,13 +36,13 @@ public:
         return it->second.data;
     }
 
-    // Drops the least recently used entries until `size` fits. An entry that cannot be retained also drops every cached entry, so
-    // decoding a large audio bank does not hold the old cache alongside its output; readers that still hold a buffer keep only their
-    // own reference.
+    // Drops the least recently used entries until `size` fits. An entry that cannot be retained needs no room at all: it is served from
+    // the decode's own buffer and is never added, so nothing is evicted for it. The exception is an entry so large that decoding it
+    // beside the retained cache would double the peak: that one still clears the cache first (see kNoEvictCeiling).
     void make_room(uint64_t size) {
         std::lock_guard<std::mutex> lk(mu_);
         if (size > entry_cap_ || size > budget_) {
-            drop_all();
+            if (size > kNoEvictCeiling) drop_all();
             return;
         }
         while (bytes_ + size > budget_) drop_lru();
@@ -85,6 +86,11 @@ public:
     }
 
 private:
+    // An unretainable entry up to this size is decoded without evicting the cache (a several-hundred-MB audio bank would otherwise make
+    // every read throw away up to the whole budget and pay each decode again). Above it, the decode is big enough that holding it beside
+    // the retained entries would meaningfully raise the process peak, so the old clear-first behavior stays.
+    static constexpr uint64_t kNoEvictCeiling = 1ull << 30;
+
     struct Entry {
         std::shared_ptr<const std::vector<uint8_t>> data;
         uint64_t used = 0;
