@@ -1168,10 +1168,11 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
                 let mut pct = (app.config.audio.master * 100.0).round();
                 if widgets::Slider::new(&mut pct, 0.0..=200.0).suffix(" %").show(ui, &p).changed() {
                     if pct > 100.0 && app.config.audio.master <= 1.0 {
-                        // Do not store the boost until the player has accepted the warning. The dialog's
-                        // confirmation writes the value it remembers here.
+                        // Do not store the boost until the player has accepted the warning. Remember the
+                        // previous value so Cancel or closing the dialog restores it instead of leaving 100%.
+                        let previous = app.config.audio.master;
                         app.config.audio.master = 1.0;
-                        app.confirm = Some(crate::Confirm::AudioBoost(pct.round() as u32));
+                        app.confirm = Some(crate::Confirm::AudioBoost { pct: pct.round() as u32, previous });
                     } else {
                         app.config.audio.master = (pct / 100.0).clamp(0.0, 2.0);
                     }

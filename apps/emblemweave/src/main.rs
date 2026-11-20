@@ -122,9 +122,22 @@ pub enum Confirm {
     SafeGraphics,
     RestoreGraphics,
     CancelJob(JobKind),
-    /// The player moved the master volume above 100%. The value is the
-    /// percentage they asked for; it is applied only after "I know the risks".
-    AudioBoost(u32),
+    /// The player moved the master volume above 100%. The percentage is applied only after
+    /// "I know the risks"; cancelling restores the previous master volume.
+    AudioBoost {
+        pct: u32,
+        previous: f32,
+    },
+}
+
+/// The master volume to keep after an above-100% warning: the requested boost when accepted,
+/// otherwise the value from before the warning opened.
+fn audio_boost_master(pct: u32, previous: f32, accepted: bool) -> f32 {
+    if accepted {
+        (pct as f32 / 100.0).clamp(0.0, 2.0)
+    } else {
+        previous
+    }
 }
 
 pub struct App {
@@ -880,13 +893,17 @@ impl App {
                     "Restore",
                 ),
                 Confirm::CancelJob(k) => ("Stop this task?", k.title(), "Stop"),
-                Confirm::AudioBoost(_) => (
+                Confirm::AudioBoost { .. } => (
                     "Enable boost above 100%?",
                     "This raises the master volume above 100%, up to 200% (about +6 dB). Sustained loud output can damage speakers, headphones or your hearing. The engine's limiter prevents digital clipping, but it does not make a loud signal safe for your ears or your equipment. Start low and turn it up only as far as you need.",
                     "I know the risks",
                 ),
             };
-            let cancel_label = if matches!(confirm, Confirm::AudioBoost(_)) { "Cancel" } else { "Keep" };
+            let cancel_label = if matches!(confirm, Confirm::AudioBoost { .. }) {
+                "Cancel"
+            } else {
+                "Keep"
+            };
             let decision = std::cell::Cell::new(None::<bool>);
             let shown = widgets::modal(
                 ctx,
@@ -938,17 +955,35 @@ impl App {
                                 j.request_cancel();
                             }
                         }
-                        Some(Confirm::AudioBoost(pct)) => {
-                            self.config.audio.master = (pct as f32 / 100.0).clamp(0.0, 2.0);
+                        Some(Confirm::AudioBoost { pct, previous }) => {
+                            self.config.audio.master = audio_boost_master(pct, previous, true);
                             self.notify("Master volume boost enabled. The next Play writes it; keep the level sensible.", Tone::Warn);
                         }
                         None => {}
                     }
+                } else if let Some(Confirm::AudioBoost { pct, previous }) = &self.confirm {
+                    self.config.audio.master = audio_boost_master(*pct, *previous, false);
                 }
                 self.confirm = None;
             }
         }
         crate::onboarding::show(self, ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::audio_boost_master;
+
+    #[test]
+    fn cancelling_the_above_100_warning_restores_the_previous_master_volume() {
+        let previous = 0.73;
+        let kept = audio_boost_master(175, previous, false);
+        assert_eq!(
+            kept, previous,
+            "Cancel must restore the volume from before the warning, not leave 100%"
+        );
+        assert_eq!(audio_boost_master(175, previous, true), 1.75);
     }
 }
 
