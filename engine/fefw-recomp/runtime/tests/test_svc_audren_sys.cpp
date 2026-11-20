@@ -470,3 +470,15 @@ NXTEST(session_plays_pcm16_voice_to_device_sink) {
     // Restore the default sink for later tests in the same process.
     nxrt::audio::set_sink(std::make_shared<nxrt::audio::NullSink>());
 }
+
+// #70: the guest enables voice dropping for the console's DSP, whose frame is a fixed 5.76 ms, and the command estimator is calibrated to
+// that DSP. On a PC the estimate can call a frame too long while the host has time to spare; dropping on the estimate alone mutes
+// dialogue in a busy cutscene, so the renderer drops voices only when its processor really fell behind (the previous command list was
+// still waiting). The four cases are the whole policy: only both together may mute a voice.
+NXTEST(voices_are_dropped_only_when_the_host_dsp_is_behind) {
+    using nxrt::audren::AudioRenderSystem;
+    CHECK(!AudioRenderSystem::MayDropVoices(false, false));   // the guest never asked for voice dropping
+    CHECK(!AudioRenderSystem::MayDropVoices(false, true));    // the host is behind, but the guest did not ask
+    CHECK(!AudioRenderSystem::MayDropVoices(true, false));    // the console estimate alone must not mute a voice
+    CHECK(AudioRenderSystem::MayDropVoices(true, true));      // both: shed voices as the guest intends
+}

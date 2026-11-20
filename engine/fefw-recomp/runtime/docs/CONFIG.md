@@ -471,6 +471,8 @@ The EQ is not a second output stack: `sink()` wraps the chosen sink (`XAudio2`, 
 
 While a sink is active, a line `sink <name>: queue avg A ms (min..max ms), underruns +N (total), dropped +D, written F frames/s (rate R)` is logged every `stats_interval` seconds. The queue is the audio waiting in the device, which is the output latency; `written` should match the rate (lower: the game is starved or the stream is stretched). When a sink closes, it writes one line to the log with its counters: frames written, accepted, dropped, underruns (times the device ran out of audio after playback had started) and the largest number of buffers queued at once.
 
+The game can ask audren to drop voices when its DSP runs out of time (`voice_drop_enabled` in the renderer's configuration); the host honours that request but only drops when its own processor is actually behind, because the command estimate is calibrated to the console's DSP (a fixed 5.76 ms frame) and can call a busy frame too long on a PC that has time to spare. The `OpenAudioRenderer` line says whether the game asked for it, and the periodic `audren-use` line separates `dropped voices` (the engine muted them) from `starved voices` (a started voice that had already played and then had no wave buffer left to play, so its stream ran dry): the first is a timing decision, the second is a data or guest-side problem. A voice the game has only just started and not fed yet is not counted, because that is a normal first frame, not starvation.
+
 ## Fortune's Weave graphics presets (`fefw.ini`, `[fefw]`)
 
 A preset is not a key of its own. Picking one (launcher **Graphics > Preset**, or F1 **Graphics > Graphics preset**) writes the seven keys

@@ -133,6 +133,14 @@ class AudioRenderSystem {
     // Ticks of the system clock (C# GetSystemTicks: TickSource.ElapsedSeconds * TargetTimerFrequency). Defined in AudioRendererManager.h.
     uint64_t GetSystemTicks();
 
+  public:
+    // Whether this frame may drop voices. The guest enables dropping because the console's DSP has a fixed 5.76 ms frame; the
+    // estimator below is calibrated to that DSP, so on a PC it can call a frame too long while the host has time to spare. Dropping on
+    // the estimate alone mutes voices in busy scenes (dialogue in a crowded cutscene, #70) although nothing is overloaded, so the host
+    // drops only when the processor really fell behind: the previous command list was still waiting for it.
+    static bool MayDropVoices(bool guest_enabled, bool dsp_running_behind) { return guest_enabled && dsp_running_behind; }
+
+  private:
     // C# ComputeVoiceDrop. Returns the count of voices dropped for this frame.
     uint32_t ComputeVoiceDrop(CommandBuffer& commandBuffer, uint32_t voicesEstimatedTime, int64_t deltaTimeDsp) {
         CommandList& commandList = commandBuffer.CommandList;
@@ -206,12 +214,17 @@ class AudioRenderSystem {
 
         auto commandList = std::make_unique<CommandList>(_mixBuffer, _sampleCount, _sampleRate, _mixBufferCount, _voiceChannelCountMax);
 
-        if (_performanceManager != nullptr) {
-            _performanceManager->TapFrame(_isDspRunningBehind, _voiceDropCount, _renderingStartTick);
+        // What the previous frame reported. Reset every frame, with or without a performance manager: the flag used to latch after one
+        // slow frame when the game asked for no performance metrics, which then let every later frame drop voices.
+        const bool dspBehind = _isDspRunningBehind;
+        const uint32_t droppedLastFrame = _voiceDropCount;
+        const uint64_t renderingStartTick = _renderingStartTick;
+        _isDspRunningBehind = false;
+        _voiceDropCount = 0;
+        _renderingStartTick = 0;
 
-            _isDspRunningBehind = false;
-            _voiceDropCount = 0;
-            _renderingStartTick = 0;
+        if (_performanceManager != nullptr) {
+            _performanceManager->TapFrame(dspBehind, droppedLastFrame, renderingStartTick);
         }
 
         CommandBuffer commandBuffer(*commandList, *_commandProcessingTimeEstimator);
@@ -232,7 +245,7 @@ class AudioRenderSystem {
 
         uint32_t totalEstimatedTime = static_cast<uint32_t>(_voiceDropParameter * static_cast<float>(commandBuffer.EstimatedProcessingTime));
 
-        if (_voiceDropEnabled) {
+        if (MayDropVoices(_voiceDropEnabled, dspBehind)) {
             int64_t maxDspTime = GetMaxAllocatedTimeForDsp();
 
             // C# computes this difference in uint (it wraps) and widens it to long afterwards.
@@ -582,14 +595,41 @@ class AudioRenderSystem {
         uint32_t channel_mask = 0;                         // bit n set: a voice with n channels was playing
         uint32_t effect_type_mask = 0;                     // bit n set: an enabled effect of EffectType n
         uint64_t drop_flag_voices = 0;
+        uint64_t starved_voice_updates = 0;                // started voices that had played and then had nothing left to play
     } _usage;
+
+    // A started voice whose primary channel has nothing queued but has already played or consumed a buffer: the DSP ran dry. A voice the
+    // game has only just started and not fed yet fails the second half, so it is not starvation. The state read is the CPU copy that
+    // WriteOutStatus reads in the same update (refreshed once per generated frame), so it lags the audio processor by at most one frame.
+    bool RanDry(const VoiceInfo& v) const {
+        if (v.ChannelsCount == 0) {
+            return false;
+        }
+        const int32_t channelId = v.ChannelResourceIds[0];
+        if (channelId < 0 || static_cast<uint32_t>(channelId) >= _voiceContext.GetCount()) {
+            return false;
+        }
+        const VoiceState& state = _voiceContext.GetUpdateStateForCpu(channelId)[0];
+        for (uint32_t i = 0; i < VoiceWaveBufferCount; i++) {
+            if (state.is_wave_buffer_valid[i]) {
+                return false;  // something is still queued to play
+            }
+        }
+        return state.played_sample_count != 0 || state.wave_buffer_consumed != 0;
+    }
 
     void TrackUsage() {
         _usage.updates++;
         uint32_t active = 0;
         for (uint32_t i = 0; i < _voiceContext.GetCount(); i++) {
             VoiceInfo& v = _voiceContext.GetState(static_cast<int32_t>(i));
-            if (!v.InUse || v.PlayState != server::PlayState::Started || v.WaveBuffersCount == 0) {
+            if (!v.InUse || v.PlayState != server::PlayState::Started) {
+                continue;
+            }
+            if (v.WaveBuffersCount == 0) {
+                if (RanDry(v)) {
+                    _usage.starved_voice_updates++;
+                }
                 continue;
             }
             active++;
@@ -640,12 +680,14 @@ class AudioRenderSystem {
         }
         NXLOG_I("audren-use",
                 "updates %llu: max playing voices %u (of %u), voice-updates by format pcm8=%llu pcm16=%llu pcm24/32=%llu float=%llu adpcm=%llu, by rate:%s, channel counts mask 0x%x, "
-                "max enabled effects %u, effect type mask 0x%x (1 BufferMix 2 Aux 3 Delay 4 Reverb 5 Reverb3d 6 Biquad 7 Limiter 8 Capture 9 Compressor), dropped voices %llu",
+                "max enabled effects %u, effect type mask 0x%x (1 BufferMix 2 Aux 3 Delay 4 Reverb 5 Reverb3d 6 Biquad 7 Limiter 8 Capture 9 Compressor), dropped voices %llu, "
+                "starved voices %llu (played, then nothing left to play)",
                 static_cast<unsigned long long>(_usage.updates), _usage.max_active_voices, _voiceContext.GetCount(),
                 static_cast<unsigned long long>(_usage.format_voice_updates[1]), static_cast<unsigned long long>(_usage.format_voice_updates[2]),
                 static_cast<unsigned long long>(_usage.format_voice_updates[3] + _usage.format_voice_updates[4]),
                 static_cast<unsigned long long>(_usage.format_voice_updates[5]), static_cast<unsigned long long>(_usage.format_voice_updates[6]), rates, _usage.channel_mask, _usage.max_active_effects,
-                _usage.effect_type_mask >> 1, static_cast<unsigned long long>(_usage.drop_flag_voices));
+                _usage.effect_type_mask >> 1, static_cast<unsigned long long>(_usage.drop_flag_voices),
+                static_cast<unsigned long long>(_usage.starved_voice_updates));
     }
 
     // C# Update(output, performanceOutput, input). Applies the user's request, in the C# order.

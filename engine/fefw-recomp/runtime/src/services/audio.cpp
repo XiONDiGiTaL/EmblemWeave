@@ -360,8 +360,9 @@ uint32_t open_renderer(Request& req, Response& rsp, bool manual) {
                 cfg.mix_buffer_count);
         return static_cast<uint32_t>(rc);
     }
-    NXLOG_I("audren", "OpenAudioRenderer: rate %u, samples %u, mixbuffers %u, voices %u, sinks %u, effects %u, revision REV%d", cfg.sample_rate,
-            cfg.sample_count, cfg.mix_buffer_count, cfg.voice_count, cfg.sink_count, cfg.effect_count, audren::BehaviourInfo::GetRevisionNumber(cfg.revision));
+    NXLOG_I("audren", "OpenAudioRenderer: rate %u, samples %u, mixbuffers %u, voices %u, sinks %u, effects %u, revision REV%d, voice drop %s", cfg.sample_rate,
+            cfg.sample_count, cfg.mix_buffer_count, cfg.voice_count, cfg.sink_count, cfg.effect_count, audren::BehaviourInfo::GetRevisionNumber(cfg.revision),
+            cfg.voice_drop_enabled ? "on (host sheds voices only when its own processor falls behind)" : "off");
     rsp.push_object(std::make_shared<AudioRendererObj>(std::move(sys), std::move(mgr)));
     return 0;
 }
