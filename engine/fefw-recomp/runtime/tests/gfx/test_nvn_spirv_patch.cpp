@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "nvn_shaders.h"
+#include "nvn_pipeline.h"
 #include "nvn_spirv_patch.h"
+#include "nxrt/log.h"
 #include "spirv_val.h"
 #include "test_framework.h"
 #include "project_root.h"
@@ -165,6 +167,98 @@ std::vector<uint32_t> synthetic_fragment_shader() {
     emit(OpFunctionEnd, {});
     return w;
 }
+
+// A complete, valid Vulkan 1.3 compute shader with the exact double shape the Iris Xe auto-exposure shaders use: a double variable,
+// FConvert both ways, PackDouble2x32 of a constant uvec2, Fma/Floor on double, and ConvertFToU/ConvertUToF. spirv_lower_f64 must turn
+// all of it into 32-bit float and remove the Float64 capability.
+std::vector<uint32_t> synthetic_double_compute_shader() {
+    enum : uint32_t {
+        OpCapability = 17, OpMemoryModel = 14, OpEntryPoint = 15, OpExecutionMode = 16, OpExtInstImport = 11,
+        OpTypeVoid = 19, OpTypeInt = 21, OpTypeFloat = 22, OpTypeVector = 23, OpTypePointer = 32, OpTypeFunction = 33,
+        OpConstant = 43, OpConstantComposite = 44, OpVariable = 59, OpFunction = 54, OpLabel = 248, OpStore = 62, OpLoad = 61,
+        OpExtInst = 12, OpFMul = 133, OpConvertFToU = 109, OpConvertUToF = 112, OpFConvert = 115, OpReturn = 253, OpFunctionEnd = 56,
+    };
+    std::vector<uint32_t> w = {0x07230203u, 0x00010300u, 0u, 31u, 0u};
+    auto emit = [&](uint32_t op, std::initializer_list<uint32_t> body) {
+        w.push_back((static_cast<uint32_t>(body.size()) + 1) << 16 | op);
+        w.insert(w.end(), body.begin(), body.end());
+    };
+    emit(OpCapability, {1u});                                             // Shader
+    emit(OpCapability, {10u});                                            // Float64
+    emit(OpExtInstImport, {19u, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0u});   // GLSL.std.450
+    emit(OpMemoryModel, {0u, 1u});                                        // Logical GLSL450
+    emit(OpEntryPoint, {5u, 18u, 0x6e69616du, 0u});                       // GLCompute main "main"
+    emit(OpExecutionMode, {18u, 17u, 1u, 1u, 1u});                        // LocalSize 1 1 1
+    emit(OpTypeVoid, {1u});
+    emit(OpTypeFunction, {2u, 1u});
+    emit(OpTypeFloat, {3u, 32u});
+    emit(OpTypeFloat, {4u, 64u});
+    emit(OpTypeInt, {5u, 32u, 0u});
+    emit(OpTypeVector, {6u, 5u, 2u});
+    emit(OpTypePointer, {7u, 7u, 3u});                                    // Function pointer to float
+    emit(OpTypePointer, {8u, 7u, 4u});                                    // Function pointer to double
+    emit(OpConstant, {3u, 9u, 0x3f800000u});                              // 1.0f
+    emit(OpConstant, {5u, 10u, 0u});
+    emit(OpConstant, {5u, 11u, 0xbff00000u});                             // -1.0 as the high half of a double
+    emit(OpConstantComposite, {6u, 12u, 10u, 11u});
+    emit(OpFunction, {1u, 18u, 0u, 2u});
+    emit(OpLabel, {20u});
+    emit(OpVariable, {8u, 21u, 7u});                                     // Function double variable
+    emit(OpFConvert, {4u, 22u, 9u});                                     // 1.0f -> double
+    emit(OpStore, {21u, 22u});
+    emit(OpLoad, {4u, 23u, 21u});
+    emit(OpExtInst, {4u, 24u, 19u, 59u, 12u});                           // PackDouble2x32
+    emit(OpFMul, {4u, 25u, 24u, 23u});
+    emit(OpExtInst, {4u, 26u, 19u, 50u, 25u, 24u, 23u});                 // Fma
+    emit(OpExtInst, {4u, 27u, 19u, 8u, 26u});                            // Floor
+    emit(OpConvertFToU, {5u, 28u, 27u});
+    emit(OpConvertUToF, {4u, 29u, 28u});
+    emit(OpFConvert, {3u, 30u, 29u});                                    // double -> float
+    emit(OpReturn, {});
+    emit(OpFunctionEnd, {});
+    return w;
+}
+
+// The same shader with one type this rewrite deliberately refuses: a vector of doubles. It is a valid type declaration, so a
+// lowering that only looks at the values (and not at every type that can contain a double) would leave a reference behind.
+std::vector<uint32_t> synthetic_double_vector_shader() {
+    std::vector<uint32_t> w = synthetic_double_compute_shader();
+    size_t at = 5;
+    while (at < w.size()) {
+        const uint32_t len = w[at] >> 16, op = w[at] & 0xffff;
+        if (!len || at + len > w.size() || op == 43) break;   // before the constants
+        at += len;
+    }
+    const uint32_t id = w[3]++;
+    const uint32_t type_vector[] = {(4u << 16) | 23u, id, 4u, 2u};   // OpTypeVector %id %double 2
+    w.insert(w.begin() + static_cast<std::ptrdiff_t>(at), std::begin(type_vector), std::end(type_vector));
+    return w;
+}
+
+struct CapturedLog {
+    struct Line {
+        nxrt::LogLevel level;
+        std::string text;
+    };
+    std::vector<Line> lines;
+    nxrt::LogLevel saved_level = nxrt::log_level();
+    static void sink(nxrt::LogLevel level, const char* line, void* user) {
+        static_cast<CapturedLog*>(user)->lines.push_back({level, line});
+    }
+    CapturedLog() {
+        nxrt::log_set_level(nxrt::LogLevel::Info);
+        nxrt::log_set_sink(&sink, this);
+    }
+    ~CapturedLog() {
+        nxrt::log_set_sink(nullptr, nullptr);
+        nxrt::log_set_level(saved_level);
+    }
+    bool has(const std::string& text, nxrt::LogLevel level) const {
+        for (const Line& l : lines)
+            if (l.level == level && l.text.find(text) != std::string::npos) return true;
+        return false;
+    }
+};
 
 }  // namespace
 
@@ -835,4 +929,96 @@ NXTEST(push_scale_cb_binding_filter) {
     CHECK_EQ(push_census(out).fmul, push_census(in).fmul + 1);
     check_valid(out, "push_scale_binding");
     CHECK(!gpu::spirv_push_scale_cb(in, 1, 0, 0, out, 24));   // no buffer at that binding
+}
+
+NXTEST(lower_f64_rewrites_double_math) {
+    const std::vector<uint32_t> in = synthetic_double_compute_shader();
+    const std::vector<uint32_t> before = in;
+    std::vector<uint32_t> out;
+    REQUIRE(gpu::spirv_lower_f64(in, out));
+    CHECK(in == before);
+    int float64_types = 0, float64_caps = 0, fconverts = 0, packs = 0, copies = 0;
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t len = out[i] >> 16, op = out[i] & 0xffff;
+        REQUIRE(len && i + len <= out.size());
+        if (op == 22 && out[i + 2] == 64) ++float64_types;
+        if (op == 17 && out[i + 1] == 10) ++float64_caps;
+        if (op == 115) ++fconverts;
+        if (op == 12 && len >= 6 && out[i + 4] == 59) ++packs;
+        if (op == 83) ++copies;
+        i += len;
+    }
+    CHECK_EQ(float64_types, 0);
+    CHECK_EQ(float64_caps, 0);
+    CHECK_EQ(fconverts, 0);
+    CHECK_EQ(packs, 0);
+    CHECK_EQ(copies, 3);   // two FConverts and the PackDouble2x32
+    check_valid(out, "lower_f64_synthetic");
+}
+
+NXTEST(lower_f64_leaves_modules_without_double_untouched) {
+    std::vector<uint32_t> out = {7};
+    CHECK(!gpu::spirv_lower_f64(synthetic_fragment_shader(), out));
+    CHECK_EQ(out.size(), size_t(1));
+}
+
+// An unsupported double shape must not be half-rewritten, and the create_module fallback must say why it kept the original.
+NXTEST(lower_f64_refuses_vector_of_doubles_and_logs_fallback) {
+    const std::vector<uint32_t> in = synthetic_double_vector_shader();
+    const std::vector<uint32_t> before = in;
+    const std::vector<uint32_t> keep = {0xdeadbeefu, 7u};
+    std::vector<uint32_t> out = keep;
+    CHECK(!gpu::spirv_lower_f64(in, out));
+    CHECK(in == before);
+    CHECK(out == keep);
+
+    CapturedLog log;
+    const char* what = "test_unsupported_f64_vector";
+    out = keep;
+    CHECK(!gpu::lower_f64_for_module(in, what, out));
+    CHECK(out == keep);
+    CHECK(log.has(std::string(what) + " uses 64-bit floats", nxrt::LogLevel::Warn));
+    CHECK(log.has("shape the 32-bit lowering does not cover", nxrt::LogLevel::Warn));
+}
+
+NXTEST(lower_f64_real_auto_exposure_shaders) {
+    const char* hashes[] = {"09b666147b1b1593", "98acab991e64f3ba", "5f55a1c6d53b8f42", "729c628ae2cf96d0"};
+    const fs::path dir = nxtest::project_path("work/shaders/spirv");
+    for (const char* h : hashes) {
+        const fs::path p = dir / (std::string(h) + ".spv");
+        std::error_code ec;
+        if (!fs::exists(p, ec)) {
+            nxtest::skip("double shader cache absent (work/shaders/spirv)");
+            return;
+        }
+        std::vector<uint32_t> in;
+        REQUIRE(load_words(p, in));
+        std::set<uint32_t> f64_type_ids;
+        for (size_t i = 5; i < in.size();) {
+            const uint32_t len = in[i] >> 16, op = in[i] & 0xffff;
+            REQUIRE(len && i + len <= in.size());
+            if (op == 22 && in[i + 2] == 64) f64_type_ids.insert(in[i + 1]);
+            i += len;
+        }
+        REQUIRE(!f64_type_ids.empty());
+        std::vector<uint32_t> out;
+        REQUIRE(gpu::spirv_lower_f64(in, out));
+        int float64_types = 0, float64_caps = 0, packs = 0, fconverts = 0;
+        for (size_t i = 5; i < out.size();) {
+            const uint32_t len = out[i] >> 16, op = out[i] & 0xffff;
+            REQUIRE(len && i + len <= out.size());
+            if (op == 22 && out[i + 2] == 64) ++float64_types;
+            if (op == 17 && out[i + 1] == 10) ++float64_caps;
+            if (op == 12 && len >= 6 && out[i + 4] == 59) ++packs;
+            if (op == 115) ++fconverts;
+            i += len;
+        }
+        CHECK_EQ(float64_types, 0);
+        CHECK_EQ(float64_caps, 0);
+        CHECK_EQ(packs, 0);
+        CHECK_EQ(fconverts, 0);
+        for (uint32_t word : out) CHECK_MSG(!f64_type_ids.count(word), "the lowered module still names a double type id");
+        const std::string tag = std::string("lower_f64_") + h;
+        check_valid(out, tag.c_str());
+    }
 }

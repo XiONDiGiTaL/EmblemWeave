@@ -3,9 +3,12 @@
 #include "nvn_spirv_patch.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <iterator>
 #include <map>
+#include <set>
+#include <string>
 
 namespace nxrt::nvn::be::gpu {
 namespace {
@@ -123,7 +126,263 @@ bool spirv_add_outputs(const std::vector<uint32_t>& in, const std::vector<SpvOut
 }  // namespace nxrt::nvn::be::gpu
 
 namespace nxrt::nvn::be::gpu {
+namespace {
 
+enum : uint32_t {
+    OpCapabilityL = 17, OpMemoryModelL = 14, OpEntryPointL = 15, OpSourceL = 3, OpSourceContinuedL = 2,
+    OpSourceExtensionL = 4, OpExtensionL = 10, OpModuleProcessedL = 330,
+    OpTypeVoidL = 19, OpTypeIntL = 21, OpTypeFloatL = 22, OpTypeVectorL = 23, OpTypeMatrixL = 24, OpTypeImageL = 25,
+    OpTypeSampledImageL = 27, OpTypeArrayL = 28, OpTypeRuntimeArrayL = 29, OpTypeStructL = 30, OpTypePointerL = 32,
+    OpTypeFunctionL = 33, OpTypeForwardPointerL = 39,
+    OpConstantL = 43, OpConstantCompositeL = 44, OpCompositeConstructL = 80, OpCopyObjectL = 83,
+    OpExtInstImportL = 11, OpExtInstL = 12, OpFConvertL = 115, OpBitcastL = 124, OpFunctionL = 54,
+    OpNameL = 5, OpMemberNameL = 6, OpDecorateL = 71, OpMemberDecorateL = 72,
+    CapabilityFloat64L = 10, StorageFunctionL = 7, GlslPackDouble2x32L = 59, GlslUnpackDouble2x32L = 60,
+};
+
+struct LowerInst {
+    size_t at;
+    uint32_t op, len;
+};
+
+bool is_type(uint32_t op) { return op >= OpTypeVoidL && op <= OpTypeForwardPointerL; }
+bool is_annotation(uint32_t op) { return op == OpNameL || op == OpMemberNameL || op == OpDecorateL || op == OpMemberDecorateL; }
+bool is_literal_first(uint32_t op) {
+    return op == OpCapabilityL || op == OpMemoryModelL || op == OpEntryPointL || op == OpSourceL || op == OpSourceContinuedL ||
+           op == OpSourceExtensionL || op == OpExtensionL || op == OpModuleProcessedL;
+}
+
+// Whether a type declaration names a double or a pointer to one. Only the fields that are type ids are inspected: the
+// widths, counts and storage classes in these instructions are literals and must not be mistaken for small type ids.
+bool type_uses_f64(const LowerInst& n, const uint32_t* w, const std::set<uint32_t>& f64_types, const std::set<uint32_t>& f64_ptrs) {
+    auto hit = [&](uint32_t id) { return f64_types.count(id) || f64_ptrs.count(id); };
+    switch (n.op) {
+        case OpTypeVectorL:
+        case OpTypeMatrixL:
+        case OpTypeImageL:
+        case OpTypeArrayL:
+        case OpTypeRuntimeArrayL:
+        case OpTypeSampledImageL:
+            return n.len >= 3 && hit(w[2]);
+        case OpTypeStructL:
+        case OpTypeFunctionL:
+            for (uint32_t j = 2; j < n.len; ++j)
+                if (hit(w[j])) return true;
+            return false;
+        case OpTypeForwardPointerL:
+            return n.len >= 2 && f64_ptrs.count(w[1]);
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+bool spirv_lower_f64(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    if (in.size() < 5) return false;
+    std::vector<LowerInst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+
+    std::set<uint32_t> type_ids, f32_types, f64_types, u32_types, glsl_sets;
+    bool has_float64_capability = false;
+    for (const LowerInst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (is_type(n.op) && n.len >= 2) type_ids.insert(w[1]);
+        if (n.op == OpTypeFloatL && n.len >= 3) {
+            if (w[2] == 32) f32_types.insert(w[1]);
+            else if (w[2] == 64) f64_types.insert(w[1]);
+        } else if (n.op == OpTypeIntL && n.len == 4 && w[2] == 32 && w[3] == 0) {
+            u32_types.insert(w[1]);
+        } else if (n.op == OpCapabilityL && n.len >= 2 && w[1] == CapabilityFloat64L) {
+            has_float64_capability = true;
+        } else if (n.op == OpExtInstImportL && n.len >= 3) {
+            std::string name;
+            for (uint32_t j = 2; j < n.len; ++j) {
+                const char* s = reinterpret_cast<const char*>(&w[j]);
+                for (int k = 0; k < 4 && s[k]; ++k) name.push_back(s[k]);
+            }
+            if (name == "GLSL.std.450") glsl_sets.insert(w[1]);
+        }
+    }
+    if (f32_types.empty() || f64_types.empty() || !has_float64_capability) return false;
+    const uint32_t f32 = *f32_types.begin();
+
+    struct Pointer {
+        uint32_t id, storage, pointee;
+    };
+    std::vector<Pointer> pointers;
+    std::set<uint32_t> f64_ptrs;
+    std::map<uint32_t, uint32_t> f32_ptr;   // storage class -> existing pointer to float
+    for (const LowerInst& n : insts) {
+        if (n.op != OpTypePointerL || n.len != 4) continue;
+        const uint32_t* w = &in[n.at];
+        pointers.push_back({w[1], w[2], w[3]});
+        if (f32_types.count(w[3]) && !f32_ptr.count(w[2])) f32_ptr[w[2]] = w[1];
+    }
+    for (const Pointer& p : pointers) {
+        if (!f64_types.count(p.pointee)) continue;
+        // A scalar double is only safe to shorten when it is local to a function. A uniform, storage, workgroup or
+        // interface pointer describes memory whose layout the host and the game also know, and must not change size.
+        if (p.storage != StorageFunctionL) return false;
+        f64_ptrs.insert(p.id);
+    }
+    for (const Pointer& p : pointers)
+        if (f64_ptrs.count(p.pointee)) return false;   // pointer to a pointer to double
+    for (const LowerInst& n : insts) {
+        if (!is_type(n.op) || n.op == OpTypePointerL) continue;
+        const uint32_t* w = &in[n.at];
+        if (type_uses_f64(n, w, f64_types, f64_ptrs)) return false;
+    }
+
+    // Constants of a 64-bit type are not rounded: the four auto-exposure shaders only build a double constant through
+    // PackDouble2x32 of a constant uvec2, which is folded below. A scalar constant or null would need a policy of its own.
+    std::map<uint32_t, uint32_t> u32_values, f32_values;   // constant id -> value / value bits -> constant id
+    for (const LowerInst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if (n.op >= OpConstantL && n.op <= 52 && n.len >= 2 && f64_types.count(w[1])) return false;
+        if (n.op == OpConstantL && n.len == 4) {
+            if (u32_types.count(w[1])) u32_values[w[2]] = w[3];
+            if (f32_types.count(w[1])) f32_values[w[3]] = w[2];
+        }
+    }
+
+    std::map<uint32_t, uint32_t> value_type;   // value id -> its declared type
+    std::map<uint32_t, const LowerInst*> definition;
+    for (const LowerInst& n : insts) {
+        if (is_type(n.op) || is_annotation(n.op) || is_literal_first(n.op) || n.len < 3) continue;
+        const uint32_t* w = &in[n.at];
+        if (!type_ids.count(w[1])) continue;
+        value_type[w[2]] = w[1];
+        definition[w[2]] = &n;
+    }
+
+    std::map<uint32_t, uint32_t> remap;   // f64 type / removed pointer type -> 32-bit type
+    std::set<uint32_t> removed_ptrs;
+    for (uint32_t t : f64_types) remap[t] = f32;
+    for (const Pointer& p : pointers) {
+        if (!f64_types.count(p.pointee)) continue;
+        auto existing = f32_ptr.find(p.storage);
+        if (existing != f32_ptr.end()) {
+            remap[p.id] = existing->second;
+            removed_ptrs.insert(p.id);
+        } else {
+            f32_ptr[p.storage] = p.id;   // keep this declaration and retype its pointee below
+        }
+    }
+
+    uint32_t bound = in[3];
+    std::vector<uint32_t> new_constants;
+    auto float_constant = [&](uint32_t bits) -> uint32_t {
+        auto it = f32_values.find(bits);
+        if (it != f32_values.end()) return it->second;
+        const uint32_t id = bound++;
+        f32_values[bits] = id;
+        new_constants.insert(new_constants.end(), {(4u << 16) | OpConstantL, f32, id, bits});
+        return id;
+    };
+
+    std::vector<uint32_t> result;
+    result.reserve(in.size() + 16);
+    result.insert(result.end(), in.begin(), in.begin() + 5);
+    size_t first_function = 0;
+    for (const LowerInst& n : insts) {
+        const uint32_t* w = &in[n.at];
+        if ((n.op == OpCapabilityL && n.len >= 2 && w[1] == CapabilityFloat64L) ||
+            (n.op == OpTypeFloatL && n.len >= 3 && w[2] == 64) ||
+            (n.op == OpTypePointerL && n.len == 4 && removed_ptrs.count(w[1])))
+            continue;
+        if (is_annotation(n.op) && n.len >= 2 && (f64_types.count(w[1]) || removed_ptrs.count(w[1]))) continue;
+
+        std::vector<uint32_t> q(w, w + n.len);
+        if (is_annotation(n.op)) {
+            result.insert(result.end(), q.begin(), q.end());
+            continue;
+        }
+        if (n.op == OpTypePointerL) {
+            if (q[3] != 0 && f64_types.count(q[3])) q[3] = f32;
+        } else if (n.op == OpFConvertL && n.len == 4) {
+            const bool result64 = f64_types.count(w[1]) != 0;
+            auto operand_type = value_type.find(w[3]);
+            const bool operand64 = operand_type != value_type.end() && f64_types.count(operand_type->second);
+            if (result64 || operand64) {
+                const bool result32 = f32_types.count(w[1]) != 0;
+                const bool operand32 = operand_type != value_type.end() && f32_types.count(operand_type->second);
+                if (!((result64 && operand32) || (result32 && operand64))) return false;
+                q = {(4u << 16) | OpCopyObjectL, f32, w[2], w[3]};
+            }
+        } else if (n.op == OpExtInstL && n.len >= 6 && glsl_sets.count(w[3])) {
+            if (w[4] == GlslUnpackDouble2x32L) return false;
+            if (w[4] == GlslPackDouble2x32L && f64_types.count(w[1])) {
+                auto d = definition.find(w[5]);
+                if (d == definition.end()) return false;
+                const LowerInst* comp = d->second;
+                if ((comp->op != OpCompositeConstructL && comp->op != OpConstantCompositeL) || comp->len != 5) return false;
+                const uint32_t* cw = &in[comp->at];
+                auto lo = u32_values.find(cw[3]);
+                auto hi = u32_values.find(cw[4]);
+                if (lo == u32_values.end() || hi == u32_values.end()) return false;
+                const uint64_t bits = static_cast<uint64_t>(lo->second) | (static_cast<uint64_t>(hi->second) << 32);
+                const float lowered = static_cast<float>(std::bit_cast<double>(bits));
+                q = {(4u << 16) | OpCopyObjectL, f32, w[2], float_constant(std::bit_cast<uint32_t>(lowered))};
+            }
+        } else if (n.op == OpExtInstL && n.len >= 5 && !glsl_sets.count(w[3])) {
+            if (f64_types.count(w[1])) return false;
+            for (uint32_t j = 5; j < n.len; ++j) {
+                auto t = value_type.find(w[j]);
+                if (t != value_type.end() && f64_types.count(t->second)) return false;
+            }
+        } else if (n.op == OpBitcastL && n.len == 4) {
+            auto t = value_type.find(w[3]);
+            if (f64_types.count(w[1]) || (t != value_type.end() && f64_types.count(t->second))) return false;
+        }
+
+        // Only the instruction that defines this result id has a result type in word 1. A literal in OpEntryPoint or
+        // OpCapability can equal a small type id, so the definition lookup is what makes the rewrite exact.
+        if (n.len >= 3) {
+            auto def = definition.find(w[2]);
+            if (def != definition.end() && def->second == &n) {
+                auto r = remap.find(q[1]);
+                if (r != remap.end()) q[1] = r->second;
+            }
+        }
+        if (n.op == OpFunctionL && !first_function) first_function = result.size();
+        result.insert(result.end(), q.begin(), q.end());
+    }
+    if (!first_function) return false;
+    if (!new_constants.empty()) result.insert(result.begin() + static_cast<std::ptrdiff_t>(first_function), new_constants.begin(), new_constants.end());
+    result[3] = bound;
+
+    // No double type or replaced pointer type may remain. This checks type declarations and the result type of every
+    // value that had a type before the rewrite; it does not read literal fields such as an execution model.
+    for (size_t i = 5; i < result.size();) {
+        const uint32_t len = result[i] >> 16, op = result[i] & 0xffff;
+        if (!len || i + len > result.size()) return false;
+        const uint32_t* w = &result[i];
+        if ((op == OpCapabilityL && len >= 2 && w[1] == CapabilityFloat64L) ||
+            (op == OpTypeFloatL && len >= 3 && w[2] == 64) ||
+            (op == OpTypePointerL && len == 4 && (f64_types.count(w[3]) || removed_ptrs.count(w[3]))))
+            return false;
+        if (is_type(op) && op != OpTypePointerL && type_uses_f64({i, op, len}, w, f64_types, removed_ptrs)) return false;
+        if (len >= 3) {
+            auto t = value_type.find(w[2]);
+            if (t != value_type.end() && (f64_types.count(t->second) || removed_ptrs.count(t->second)) &&
+                (f64_types.count(w[1]) || removed_ptrs.count(w[1])))
+                return false;
+        }
+        i += len;
+    }
+    out = std::move(result);
+    return true;
+}
+
+}  // namespace nxrt::nvn::be::gpu
+
+namespace nxrt::nvn::be::gpu {
 bool spirv_dual_source_output(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
     if (in.size() < 5) return false;
     std::vector<Inst> insts;

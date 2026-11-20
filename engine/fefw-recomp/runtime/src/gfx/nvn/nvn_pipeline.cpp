@@ -216,10 +216,27 @@ uint64_t GraphicsKey::hash() const {
     return h;
 }
 
+bool lower_f64_for_module(const std::vector<uint32_t>& words, const char* what, std::vector<uint32_t>& lowered) {
+    const char* name = what ? what : "shader";
+    static std::mutex mu;
+    static std::unordered_set<std::string> warned;
+    std::lock_guard<std::mutex> lk(mu);
+    const bool first = warned.size() < 32 && warned.insert(name).second;
+    if (spirv_lower_f64(words, lowered)) {
+        if (first) NXLOG_I(kTag, "shader %s uses 64-bit floats; lowered them to 32-bit for this GPU (no shaderFloat64, issue #72)", name);
+        return true;
+    }
+    if (first)
+        NXLOG_W(kTag, "shader %s uses 64-bit floats, which this GPU does not support (no shaderFloat64); it may hang the GPU. "
+                       "The module has a shape the 32-bit lowering does not cover; run Set up with FEFW_NO_FLOAT64=1", name);
+    return false;
+}
+
 // A module for SPIR-V words. The translator declares OpCapability Float64 in every module although no module uses a 64-bit float;
 // devices without shaderFloat64 (Intel iGPUs) reject that, so the capability is dropped when no OpTypeFloat 64 exists.
 static VkShaderModule create_module(const std::vector<uint32_t>& words, const char* what) {
     std::vector<uint32_t> fixed;
+    std::vector<uint32_t> lowered;
     const std::vector<uint32_t>* code = &words;
     {
         const auto& w = words;
@@ -237,14 +254,9 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
             fixed.erase(fixed.begin() + static_cast<std::ptrdiff_t>(cap_at), fixed.begin() + static_cast<std::ptrdiff_t>(cap_at) + 2);
             code = &fixed;
         } else if (uses64 && !device().features().shader_float64) {
-            // GitHub issue #45: the Arc A770 has no shaderFloat64 and lost the device right after such a module was made. The shader
-            // translator lowers 64-bit floats to 32-bit with --no-float64 (the launcher passes it on Intel GPUs, or FEFW_NO_FLOAT64=1); name it once.
-            static std::mutex mu;
-            static std::unordered_set<std::string> warned;
-            std::lock_guard<std::mutex> lk(mu);
-            if (warned.size() < 32 && warned.insert(what).second)
-                NXLOG_W(kTag, "shader %s uses 64-bit floats, which this GPU does not support (no shaderFloat64); it may hang the GPU. "
-                              "Set up lowers them to 32-bit when it finds an Intel GPU; run Set up again (or with FEFW_NO_FLOAT64=1 set)", what);
+            // GitHub issues #45 and #72: a GPU without shaderFloat64 (the Arc A770, Intel Iris Xe) lost the device right after such a
+            // module was made. The translator's --no-float64 does not reach shaders already in the cache; lower them here as well.
+            if (lower_f64_for_module(words, what, lowered)) code = &lowered;
         }
     }
     // Every Location output of a vertex / tessellation evaluation / geometry shader starts at (0,0,0,1) as on the console: a component the

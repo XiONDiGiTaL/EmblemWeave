@@ -158,7 +158,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 | A build stops with the compiler killed, or Windows becomes unresponsive while it runs | Too many compiler processes for the memory actually free; one lifted translation unit can need well over a gigabyte | The launcher now budgets 1.5 GiB per compiler and leaves 2 GiB for Windows, so a normal build chooses fewer jobs on a small machine. If it still happens, close other memory-heavy programs and set `NX_JOBS` to a lower number before starting the launcher (for example `$env:NX_JOBS = 4`). The job log's `build jobs:` line says what was chosen and why |
 | `could not download … after 4 attempts` or `… is incomplete (no CMakeLists.txt); discarding it and fetching again` | A dependency fetch failed or was interrupted; the fetcher never keeps anything it could not verify | Nothing: press Build the game again. The message names the URL and the last error, and the half-written folder was already removed |
 | The window closes at once | Usually the Vulkan driver | The launcher now watches the first minute of every launch: a run that exits early, or that has played sound for 90 s without presenting one frame, is reported in the window with the GPU it picked. Read `%APPDATA%\EmblemWeave\play\fefw.log`; update the graphics driver, try Windowed or Borderless, and a Vulkan 1.3 device is required |
-| `GPU DEVICE LOST` in the first seconds on Intel graphics, with `present mode immediate` in the same report | Intel's Windows driver can reset the device on the immediate present path (issue #72). It is not a missing game file | The engine guards against it automatically (mailbox, else FIFO, on Intel GPUs that are not discrete). Install the newest Intel graphics driver, and see [The graphics device was lost on Intel graphics](#the-graphics-device-was-lost-on-intel-graphics-72) for the setting that forces the guard on every GPU, and for the rebuild a launcher update needs |
+| `GPU DEVICE LOST` in the first seconds on Intel graphics, with `present mode immediate` or `fifo` in the same report | Two Intel driver paths can reset the device: immediate present, and a shader that uses 64-bit floats on a GPU without `shaderFloat64` (issue #72). The second one hangs the GPU and Windows resets it; changing the present mode does not help. It is not a missing game file | The engine guards the present mode automatically (mailbox, else FIFO, on Intel GPUs that are not discrete) and lowers cached 64-bit-float shaders to 32-bit when the device has no `shaderFloat64`. Install the newest Intel graphics driver and rebuild the game; see [The graphics device was lost on Intel graphics](#the-graphics-device-was-lost-on-intel-graphics-72) for the log lines and the remaining fallback |
 | Some cinematics drop frames and the voices cut out, while effects keep playing | The usual cause is an incomplete merged RomFS: the base dump or a partial update has the movie and voice files the specific scene reads, but not all of them (issue #70). A `.nup` build derives both halves from one package; a folder build does not | Rebuild from a `.nup` (**Game Setup > Choose .nup…**) if you have one. To compare an extracted folder with a `.nup` without building or playing, run `EmblemWeave.exe --compare-data <game.nup> <folder> report.json`; exit 0 means every ExeFS and RomFS path, size and SHA-256 matches, and exit 2 lists what differs. A complete merged folder has 252,686 files, 82 `Movie/Product/*.webm` files and a populated `Sound/stream` folder. If those counts match and a scene still fails, attach `report.json` and the `movie`/`audio` lines around it to #70 |
 | The picture stays black while the sound plays | The shader cache is incomplete, so no draw is recorded and the present pass copies an untouched (black) texture. It ran at 60 fps and the audio worked, which is why this read as a driver problem (issues #12 and #15). Since 0.1.16 the log says so instead of leaving it to be guessed: `nvnProgramSetShaders: no translated shader for block …` for the first few blocks, then one `more programs than this log lists have no translated shader` naming the shader folder | Press **Build the game**: it reports the blocks the corpus expects and the cache holds (`shader_report`), translates only the missing ones (`--only-missing`), and stops with the counts and the first hashes if it still cannot. A cache holding a few files and no `results.tsv` is a translation that was interrupted, not one that finished |
 | `N of M shaders still have no SPIR-V (first: …)` | The build checked the corpus (`corpus/unique.tsv`) against the translation report (`spirv/results.tsv`), translated what was missing, and N blocks still have none: every program that uses one fails to link and its draws are skipped | The line names the first five hashes and `spirv/results.tsv`; the `engine` log has the translator's own output. Send both with a diagnostics report |
@@ -181,27 +181,43 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 ## The graphics device was lost on Intel graphics (#72)
 
-`GPU DEVICE LOST` in the first seconds of a launch, with `present mode immediate` in the same report and an Intel GPU
-(Iris Xe, UHD, Core Ultra or Arc), is Intel's Windows driver resetting the device on the immediate present path. It is
-not a missing game file.
+`GPU DEVICE LOST` in the first seconds of a launch on an Intel GPU (Iris Xe, UHD, Core Ultra or Arc) has two known
+causes. It is not a missing game file. The report's `present mode` line does not decide between them: issue #72 first
+looked like the immediate present path, but a reporter reproduced the reset with FIFO as well.
 
-The engine guards against it: on an Intel GPU that is not discrete, an immediate request becomes mailbox (or FIFO when
-mailbox is unavailable), and `fefw.log` says so:
+1. **Immediate present on Intel's Windows driver.** The engine guards against it: on an Intel GPU that is not discrete,
+   an immediate request becomes mailbox (or FIFO when mailbox is unavailable), and `fefw.log` says so:
 
-```
-gfx: the present-mode guard replaced immediate with mailbox: that path can reset the driver (issue #72). ...
-```
+   ```
+   gfx: the present-mode guard replaced immediate with mailbox: that path can reset the driver (issue #72). ...
+   ```
 
-If it still resets:
+2. **A translated shader that uses 64-bit floats on a GPU without `shaderFloat64`.** In Fortune's Weave this is the
+   auto-exposure histogram: four compute shaders do their percentile math in `double`. The driver cannot run them
+   without the feature, the dispatch never finishes, and Windows resets the device (TDR). The present mode makes no
+   difference here. Since the fix, `create_module()` lowers such a module to 32-bit floats when the device reports no
+   `shaderFloat64`: `OpTypeFloat 64` and the `Float64` capability are removed, the float conversions become copies, and
+   a constant `PackDouble2x32` becomes the equivalent float constant. `fefw.log` names each lowered shader:
+
+   ```
+   nvn.pipe: shader 09b666147b1b1593 uses 64-bit floats; lowered them to 32-bit for this GPU (no shaderFloat64, issue #72)
+   ```
+
+   A module with a shape the lowering does not cover (a vector or struct of doubles, a non-constant
+   `PackDouble2x32`, `UnpackDouble2x32`) is left unchanged and the log says so. Rebuild the game after updating, so the
+   new `fefw.exe` carries the lowering; a launcher update alone does not replace a built game.
+
+If it still resets after the rebuild:
 
 1. Install the newest Intel graphics driver.
-2. Choose **Graphics > Display > Present mode safeguard > Always on**. This asks for the guard on every GPU, which also
-   covers an Intel Arc (whose driver reports it as discrete) or a driver that names the wrong type. **Automatic** is the
-   engine's own rule; **Off** lets immediate back in.
-3. Or set `[gfx] present_guard = on` in `%APPDATA%\EmblemWeave\play\fefw.ini` (portable installs: `data\play\fefw.ini`),
+2. Read the start of `fefw.log` for `64-bit floats; lowered them to 32-bit` or for the warning that the module has an
+   uncovered shape. In the second case run **Set up** again with `FEFW_NO_FLOAT64=1` set, which makes the translator
+   emit 32-bit floats for the shaders it translates.
+3. If the report is on the immediate-present path, choose **Graphics > Display > Present mode safeguard > Always on**.
+   This asks for the guard on every GPU, which also covers an Intel Arc (whose driver reports it as discrete) or a
+   driver that names the wrong type. **Automatic** is the engine's own rule; **Off** lets immediate back in. You can also
+   set `[gfx] present_guard = on` in `%APPDATA%\EmblemWeave\play\fefw.ini` (portable installs: `data\play\fefw.ini`),
    or `present_mode = mailbox`. A hand-written `present_mode = immediate` still wins over the guard.
-4. A launcher update replaces the engine sources but not the built game: press **Rebuild** once on Overview, or the
-   running `fefw.exe` keeps the old engine.
 
 If it still resets, attach `fefw.log` and the crash report from the run folder to the issue.
 

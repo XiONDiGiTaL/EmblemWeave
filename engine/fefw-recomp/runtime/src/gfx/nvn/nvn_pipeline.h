@@ -295,6 +295,10 @@ using PrepareResult = nxrt::nvn::ShaderPrepareResult;
 bool gpl_prepare(const PrepareOptions& o, PrepareResult* r);       // false: nothing could be done (see r->error)
 void module_cache_clear();                                          // destroys every cached shader module and variant (nothing may be creating pipelines)
 
+// create_module's fallback for a device without shaderFloat64: lowers a scalar-double module to 32-bit and logs the
+// one-time outcome for `what`. False (lowered untouched) when the module has an unsupported double shape.
+bool lower_f64_for_module(const std::vector<uint32_t>& words, const char* what, std::vector<uint32_t>& lowered);
+
 void pipeline_shutdown();
 size_t pipeline_count();
 

@@ -131,4 +131,12 @@ bool spirv_add_xfb(const std::vector<uint32_t>& in, std::vector<uint32_t>& out, 
 // one pass. Returns the number of loops rewritten (0: out untouched).
 int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
+// A GPU without shaderFloat64 (Intel iGPUs) cannot run the translated shaders that use double: the driver resets the device. This lowers
+// the scalar double shape those shaders use: OpTypeFloat 64 and the Float64 capability go, a Function pointer to double is retyped to
+// float, OpFConvert becomes OpCopyObject, and a PackDouble2x32 of two constant 32-bit halves becomes the equivalent float constant. Other
+// double results are retyped to float. Returns false (out untouched) for a module without double or with a shape this does not cover:
+// a composite, image, array or function type or non-Function pointer that keeps a double, a double constant, a non-constant
+// PackDouble2x32, UnpackDouble2x32, or an OpBitcast of a double value. The caller keeps the original then.
+bool spirv_lower_f64(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+
 }  // namespace nxrt::nvn::be::gpu
