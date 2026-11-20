@@ -367,7 +367,11 @@ fn file_len(p: &Path) -> Option<u64> {
 /// written out as files once, into the folder the game reads as `[fs] romfs_overlay` over the package. Returns how many files were written
 /// and how many bytes. A file already at its full size is left alone, so a run of the same package resumes where it stopped; the caller
 /// is what guarantees a destination folder only ever holds the package its identity names. `say` gets progress.
-pub fn unpack_packed_romfs(
+///
+/// Each file is written into `<dest>/.emblemweave-parts` and renamed into place, so a file at its final path is always complete and the
+/// length check below is a safe resume test. The staging folder lives inside the folder being written: it is covered by the same
+/// ownership decision that let the write touch `dest` at all, so it can never collide with a sibling of a user-named destination.
+fn unpack_packed_romfs(
     nup_path: &Path,
     dest: &Path,
     say: &mut dyn FnMut(String),
@@ -379,10 +383,12 @@ pub fn unpack_packed_romfs(
         .ok_or("the .nup holds no base game or update")?;
     let entries = nup.walk(pkg.romfs);
     std::fs::create_dir_all(dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
-    // Each file is written beside the overlay and renamed in. A file at its final path is therefore always complete, which is what makes
-    // the length check below a safe resume test: a run that stopped mid-file leaves nothing the next run could accept as finished.
-    let staging = dest.with_extension("parts");
-    let _ = std::fs::remove_dir_all(&staging);
+    let staging = dest.join(".emblemweave-parts");
+    if let Err(e) = std::fs::remove_dir_all(&staging) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("clearing {}: {e}", staging.display()));
+        }
+    }
     let (mut written, mut bytes) = (0usize, 0u64);
     for (n, (rel, index)) in entries.iter().enumerate() {
         let file = &nup.files[*index as usize];
@@ -393,14 +399,14 @@ pub fn unpack_packed_romfs(
         if std::fs::metadata(&out).map(|m| m.len()).ok() == Some(file.size) {
             continue;
         }
+        let data = nup
+            .read(*index)
+            .map_err(|e| format!("reading {rel} from {}: {e}", nup_path.display()))?;
         let staged = staging.join(rel);
         if let Some(parent) = staged.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
-        let data = nup
-            .read(*index)
-            .map_err(|e| format!("reading {rel} from {}: {e}", nup_path.display()))?;
         std::fs::write(&staged, &data).map_err(|e| format!("writing {}: {e}", staged.display()))?;
         // `rename` refuses an existing target on Windows, so a file left at the destination goes first.
         match std::fs::remove_file(&out) {
@@ -568,6 +574,41 @@ pub fn write_romfs_overlay(
         written_bytes,
         reused: false,
     })
+}
+
+/// `--unpack-romfs`: write the same overlay the launcher serves, with the same identity marker and staging, so a folder that held an
+/// older package is rebuilt instead of resumed by matching sizes, and paths the older package packed are cleared.
+///
+/// The overlay writer clears `dest` when the package's identity changes. That is safe for the launcher's own `<engine-root>/work/...`
+/// folder, but not for a folder the user names on the command line. A folder counts as the launcher's only when it is empty or carries
+/// an overlay marker (`.source` or `.written`); anything else is refused rather than cleared.
+pub fn unpack_romfs_command(
+    nup_path: &Path,
+    dest: &Path,
+    say: &mut dyn FnMut(String),
+) -> Result<OverlayWrite, String> {
+    if dest.exists() {
+        if !dest.is_dir() {
+            return Err(format!(
+                "refusing to write {}: it exists and is not a folder",
+                dest.display()
+            ));
+        }
+        let managed = dest.join(OVERLAY_SOURCE).is_file() || dest.join(OVERLAY_WRITTEN).is_file();
+        if !managed {
+            let mut entries =
+                std::fs::read_dir(dest).map_err(|e| format!("reading {}: {e}", dest.display()))?;
+            if entries.next().is_some() {
+                return Err(format!(
+                    "refusing to write {}: it is not empty and has no EmblemWeave overlay marker (.source or .written), so it may \
+                     be a folder EmblemWeave did not write; clearing it for this package would delete its files. Point --unpack-romfs \
+                     at a new or empty folder, or remove that folder yourself first",
+                    dest.display()
+                ));
+            }
+        }
+    }
+    write_romfs_overlay(nup_path, dest, say)
 }
 
 /// A file name from a container is data, not a path: reject `..`, a drive
@@ -2256,6 +2297,102 @@ mod tests {
             "the old package's movie stayed in the overlay"
         );
         assert!(dest.join(OVERLAY_WRITTEN).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--unpack-romfs` takes a folder the user names. A dotted name used to produce `dest.with_extension("parts")`, which was then
+    /// deleted, so an unrelated sibling folder could disappear; the tool now keeps its staging inside the destination and touches
+    /// nothing beside it.
+    #[test]
+    fn unpacking_to_a_dotted_folder_does_not_touch_its_sibling() {
+        let dir = std::env::temp_dir().join(format!("ew-unpack-dotted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICE\n")]);
+        // `out.rel` used to map to this folder through with_extension("parts").
+        let sibling = dir.join("out.parts");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("keep.txt"), b"user data").unwrap();
+
+        let dest = dir.join("out.rel");
+        let write = unpack_romfs_command(&nup, &dest, &mut |_| {}).unwrap();
+        assert_eq!((write.written, write.written_bytes), (1, 6));
+        assert!(!write.reused);
+        assert_eq!(std::fs::read(dest.join("voice.bin")).unwrap(), b"VOICE\n");
+        assert_eq!(
+            std::fs::read(sibling.join("keep.txt")).unwrap(),
+            b"user data",
+            "a folder beside the destination was modified"
+        );
+        assert!(!sibling.join("voice.bin").exists());
+        assert!(dest.join(OVERLAY_WRITTEN).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The overlay writer clears `dest` when the package identity changes. The command must not do that to a non-empty folder it
+    /// cannot prove the launcher wrote.
+    #[test]
+    fn the_command_refuses_a_folder_it_did_not_write() {
+        let dir = std::env::temp_dir().join(format!("ew-unpack-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICE\n")]);
+        let dest = dir.join("user-folder");
+        std::fs::create_dir_all(dest.join("sub")).unwrap();
+        std::fs::write(dest.join("keep.txt"), b"user data").unwrap();
+
+        let err = unpack_romfs_command(&nup, &dest, &mut |_| {}).unwrap_err();
+        assert!(
+            err.contains("no EmblemWeave overlay marker") && err.contains("new or empty folder"),
+            "the refusal did not say why: {err}"
+        );
+        assert_eq!(std::fs::read(dest.join("keep.txt")).unwrap(), b"user data");
+        assert!(!dest.join(OVERLAY_SOURCE).exists());
+        assert!(!dest.join("voice.bin").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--unpack-romfs` used to resume into an existing folder by matching file sizes, so a replaced package with the same packed count
+    /// and total bytes was served from the old files, and paths the old package packed were never removed.
+    #[test]
+    fn the_command_clears_orphans_and_rebuilds_a_replaced_package() {
+        let dir = std::env::temp_dir().join(format!("ew-unpack-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        let dest = dir.join("romfs-unpacked");
+
+        write_overlay_nup(
+            &nup,
+            &[("voice.bin", b"VOICE\n"), ("movie.bin", b"MOVIE\n")],
+        );
+        let first = unpack_romfs_command(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!first.reused);
+        assert_eq!(first.written, 2);
+        assert!(dest.join("movie.bin").is_file());
+
+        // Fewer packed files: the old movie path must not survive and shadow the package.
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICE\n")]);
+        let second = unpack_romfs_command(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!second.reused);
+        assert!(
+            !dest.join("movie.bin").exists(),
+            "the old package's movie stayed in the overlay"
+        );
+
+        // Same count and bytes, different content: the old file must be replaced, not reused by its size.
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICX\n")]);
+        assert_eq!(packed_romfs(&nup), Some((1, 6)));
+        let third = unpack_romfs_command(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!third.reused);
+        assert_eq!(third.written, 1);
+        assert_eq!(std::fs::read(dest.join("voice.bin")).unwrap(), b"VOICX\n");
+
+        // The same package again is a finished overlay and is reused.
+        let fourth = unpack_romfs_command(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(fourth.reused);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

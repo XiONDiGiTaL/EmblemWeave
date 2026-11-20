@@ -94,9 +94,13 @@ user points at.
   time, and a SHA-256 over every packed entry’s path, decompressed size and entry
   hash. `work/romfs-overlay/.source` records the identity the folder was written
   for and `.written` that the write finished.
-- `unpack_packed_romfs` writes each file to `work/romfs-overlay.parts` and renames
+- The overlay writer stages each file in `<overlay>/.emblemweave-parts` and renames
   it into place, so a file at its final path is complete; a destination at the
   package entry’s decompressed size is then a safe resume test within one identity.
+  `--unpack-romfs` uses that same writer and identity, so rerunning clears orphans
+  and a replaced package is rebuilt. It refuses a non-empty folder without the
+  launcher’s `.source`/`.written` marker instead of clearing a folder the launcher
+  did not write.
 - A different identity clears `work/romfs-overlay` before the write, so a path the
   old package packed cannot survive as an orphan over the current package.
 - `ini_text` writes:

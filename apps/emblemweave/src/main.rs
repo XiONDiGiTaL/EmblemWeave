@@ -1614,16 +1614,21 @@ fn main() -> eframe::Result<()> {
             .get(i + 2)
             .cloned()
             .unwrap_or_else(|| "romfs-unpacked".to_string());
-        let r = gamedata::unpack_packed_romfs(
+        let r = gamedata::unpack_romfs_command(
             std::path::Path::new(&src),
             std::path::Path::new(&dest),
             &mut |m| println!("{m}"),
         );
         match r {
-            Ok((files, bytes)) => {
+            Ok(write) if write.reused => {
+                println!("the overlay in {dest} is already up to date");
+                std::process::exit(0);
+            }
+            Ok(write) => {
                 println!(
-                    "{files} files, {:.1} GB written to {dest}",
-                    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                    "{} files, {:.1} GB written to {dest}",
+                    write.written,
+                    write.written_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
                 );
                 std::process::exit(0);
             }
