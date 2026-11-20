@@ -102,6 +102,28 @@ NXTEST(gpu_setting_selects_the_adapter) {
     nxrt::config_clear();
 }
 
+// The launcher writes the chosen adapter's full Vulkan name to [gfx] gpu. A full name can be a prefix of
+// another adapter's name, so the engine must prefer the exact name over a substring match regardless of
+// the order Vulkan enumerates the devices in.
+NXTEST(gpu_setting_full_device_name_selects_that_exact_adapter) {
+    const GpuCandidate longer{"AMD Radeon RX 7900 XTX", 2, 24ull << 30};
+    const GpuCandidate chosen{"AMD Radeon RX 7900 XT", 2, 20ull << 30};
+
+    nxrt::config_load_string("[gfx]\ngpu = AMD Radeon RX 7900 XT\n");
+    const std::string want = nxrt::config_get_str("gfx", "gpu", "");
+    CHECK_EQ(want, "AMD Radeon RX 7900 XT");
+    bool matched = false;
+    CHECK_EQ(pick_gpu({longer, chosen}, want.c_str(), &matched), 1u);
+    CHECK(matched);
+
+    // The exact-name comparison is case-insensitive, as the partial match already is.
+    nxrt::config_load_string("[gfx]\ngpu = amd radeon rx 7900 xt\n");
+    const std::string lower = nxrt::config_get_str("gfx", "gpu", "");
+    CHECK_EQ(pick_gpu({longer, chosen}, lower.c_str(), &matched), 1u);
+    CHECK(matched);
+    nxrt::config_clear();
+}
+
 NXTEST(default_device_is_the_discrete_gpu) {
     auto dev = make_device();
     REQUIRE(dev != nullptr);

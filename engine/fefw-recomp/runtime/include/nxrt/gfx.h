@@ -38,8 +38,9 @@ struct GpuCandidate {
     uint64_t vram_bytes = 0;     // device-local memory, breaks ties between devices of the same type
 };
 // want: "" = default (discrete GPU with the most video memory, else integrated, virtual, other, cpu), "discrete",
-// "integrated", an index (1-2 digits), or a case-insensitive part of the device name. An override that matches nothing falls
-// back to the default and sets *matched = false. Returns an index into gpus (0 for an empty list).
+// "integrated", an index (1-2 digits), or a case-insensitive part of the device name; an exact full name wins over a
+// substring match. An override that matches nothing falls back to the default and sets *matched = false. Returns an index
+// into gpus (0 for an empty list).
 size_t pick_gpu(const std::vector<GpuCandidate>& gpus, const char* want, bool* matched = nullptr);
 
 struct GpuInfo {

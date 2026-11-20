@@ -210,6 +210,10 @@ size_t pick_gpu(const std::vector<GpuCandidate>& gpus, const char* want, bool* m
         const unsigned long n = std::strtoul(w.c_str(), &end, 10);
         if (end && !*end && n < gpus.size()) k = static_cast<size_t>(n);
     } else {
+        // A full device name can be a prefix of another adapter's name (Radeon RX 7900 XT / XTX), so an
+        // exact case-insensitive name wins over a substring match regardless of enumeration order.
+        for (size_t i = 0; i < gpus.size() && k == SIZE_MAX; ++i)
+            if (lower(gpus[i].name) == w) k = i;
         for (size_t i = 0; i < gpus.size() && k == SIZE_MAX; ++i)
             if (lower(gpus[i].name).find(w) != std::string::npos) k = i;
     }
