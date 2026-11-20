@@ -19,7 +19,8 @@ uv pip install --python tools\.venv -r recomp\requirements.txt
 :: 2. your dump's ExeFS into game\dump\exefs (main written uncompressed; the dump itself is only read)
 tools\.venv\Scripts\python -I tools\nso\prepare_exefs.py --exefs D:\dumps\fefw\updates\131072\exefs
 
-:: 3. lift and compile the six modules into work\build\fefw (NX_JOBS = compile processes, default 20)
+:: 3. lift and compile the six modules into work\build\fefw
+::    (NX_JOBS = compile processes; EmblemWeave chooses from CPU and free RAM, a direct call uses CPUs - 2, at most 16)
 recomp\scripts\build_game.cmd fefw
 
 :: 4. texture transcoder sources (optional, recommended), then fefw.exe

@@ -55,9 +55,9 @@ Requirements are listed under [System requirements](REQUIREMENTS.md); failures a
 
 - Vulkan 1.3 NVN shell, HDR output, swap-chain management, shader translation with a disk cache, GPU texture transcoding
   (BC, ASTC) and frame pacing.
-- Upscaling: built-in TAAU, FSR 1, NVIDIA Image Scaling, FSR 3.1, DLSS / DLAA and XeSS, each with its own availability
+- Upscaling: built-in TAAU, FSR 1, NVIDIA Image Scaling, MAKO, FSR 4.1.2 / 3.1, DLSS / DLAA and XeSS, each with its own availability
   check. **FSR 3 frame generation works**: with the FidelityFX SDK 1.1.4 DLLs, the engine turns 60 rendered fps into 120
-  presented fps on an RX 7900 XT. The Graphics page has a one-press AMD preset for FSR 3.1 + frame generation.
+  presented fps on an RX 7900 XT. The Graphics page has a one-press AMD preset: it selects FSR 4.1.2 when AMD's SDK 2.4 loader pair is installed, FSR 3.1 otherwise, plus FSR 3 frame generation when its v1.1.4 DLL is present.
 - Optional **ReShade**, verified end to end with the Add-on build of 6.8.0: the layer loads into the game, the overlay
   opens with `Home`, and the launcher's switch keeps it out of the game process. The launcher detects the 64-bit Vulkan
   layer, checks this build in `ReShadeApps.ini`, opens the official setup for `fefw.exe` with Vulkan preselected, and
@@ -66,7 +66,7 @@ Requirements are listed under [System requirements](REQUIREMENTS.md); failures a
   Expand **ReShade (optional)** on Graphics, press **Set up ReShade…**, select the Add-on build if you use add-ons, and
   install the effect packs you want. Put presets, shader packs and `.addon64` files beside `fefw.exe`; press `Home` in
   game for the overlay. The **Load ReShade** switch disables the layer for this game without uninstalling it.
-- The evaluation of further options (FSR 4, OptiScaler, vkBasalt) and their status are in
+- The evaluation of further options (the DX12 FSR 4 shader overrides, OptiScaler, vkBasalt) and their status are in
   [GRAPHICS.md](GRAPHICS.md).
 
 ## Audio
@@ -103,7 +103,7 @@ and are not on the shipping path.
 ## Known limitations
 
 - Encrypted retail `.xci` images are not decrypted: EmblemWeave reads plaintext/decrypted `.xci` files, and names the first encrypted NCA instead of unpacking garbage. A plaintext `.xci` is accepted like a plaintext `.nsp`; a folder, `.nsp`, `.nx` or `.nup` also works.
-- FSR 4 is not integrated. The FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader.
+- FSR 4.1.2 is integrated through the SDK 2.4 Vulkan FidelityFX provider on supported Radeon GPUs (verified on the RX 7900 XT, Adrenalin 26.10.1). The loader selects FSR 3.1 when the driver does not expose 4.x; the DX12 shader-override builds and OptiScaler do not apply.
 - FSR 3 frame generation is validated on the RX 7900 XT; other AMD GPUs and drivers still need a run. DLSS Frame Generation
   is implemented but has not been tested on RTX 40 hardware in this project.
 - ReShade's layer, allowlist, overlay key and disable switch are verified with 6.8.0 Add-on on Vulkan. Individual shader

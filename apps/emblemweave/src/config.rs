@@ -6,6 +6,7 @@
 //! first and are renamed into place, so a crash mid-write cannot leave a
 //! truncated config behind.
 
+use crate::i18n::Language;
 use crate::theme::Scheme;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -98,6 +99,14 @@ pub struct Graphics {
     pub astc_quality: String,
     /// `[gfx] gpu`: which Vulkan device the engine picks.
     pub gpu: String,
+    /// `[gfx] present_guard`: whether the engine replaces the immediate present path that can reset Intel's Windows
+    /// driver (#72). "Automatic" (its own rule: Intel GPUs that are not discrete), "Always on" or "Off".
+    pub present_guard: String,
+    /// `[media] movie_decoder`: the engine's AV1 decoder for cutscene movies. "dav1d (CPU)" is built in;
+    /// "FFmpeg (libavcodec)" loads the player-supplied avcodec/avutil/swresample DLLs and can use D3D11VA.
+    pub video_decoder: String,
+    /// `[media] movie_hwaccel`: ask FFmpeg for D3D11VA instead of its software decoder. Ignored by dav1d.
+    pub video_hwaccel: bool,
     /// Threads the engine may use to compile shader parts while playing; 0 leaves the engine's own
     /// `min(4, cpus / 6)`.
     pub compile_threads: u32,
@@ -127,12 +136,125 @@ impl Default for Graphics {
             dlss_upscaler: "Automatic".into(),
             astc_quality: "High".into(),
             gpu: "Automatic".into(),
+            present_guard: "Automatic".into(),
+            video_decoder: "dav1d (CPU)".into(),
+            video_hwaccel: true,
             // Two workers, below idle and in efficiency mode: a laptop stays a laptop. Players who want the
             // fastest first draw can raise this on Graphics.
             compile_threads: 2,
             compile_priority: "Idle".into(),
             compile_eco: true,
         }
+    }
+}
+
+/// The engine's optimization policy, written to `fefw.ini` before Play and
+/// edited live from the F1 menu. Defaults are the working systems' own defaults:
+/// adding this section to an older config changes nothing until a switch is
+/// moved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Performance {
+    /// `[perf] enabled`: measure frames and classify the bottleneck.
+    pub controller: bool,
+    /// Automatic, Conservative, Balanced, Aggressive or Manual.
+    pub mode: String,
+    /// The controller's frame-time budget, not a frame limiter.
+    pub target_fps: u32,
+    /// `[perf] stability`: hold reductions through a spike and record them.
+    pub stability: bool,
+    /// `[perf] scene_profiles`: classify the workload shape.
+    pub scene_profiles: bool,
+    /// Auto, Exploration, Crowded, Combat, Cinematic, Menu or Loading.
+    pub scene_override: String,
+    /// `[perf] adaptive_mip`: the only live visual action the controller owns.
+    pub adaptive_mip: bool,
+    pub max_mip_bias: f32,
+    /// `[nvn] staging_ring_mb`: persistent upload ring size.
+    pub staging_ring_mb: u32,
+    /// `[nvn] pool_upload_ms`: render-thread upload budget per frame.
+    pub pool_upload_ms: u32,
+    /// `[nvn] tex_prep`: prepare compressed textures on workers.
+    pub tex_prep: bool,
+    /// `[nvn] tex_prep_threads`: 0 chooses a third of the hardware threads.
+    pub tex_prep_threads: u32,
+    /// `[nvn] tex_prep_mb`: memory finished/queued preparations may hold.
+    pub tex_prep_mb: u32,
+    /// `[gfx] residency`: Automatic, On or Off.
+    pub residency: String,
+    /// `[gfx] residency_percent`: VRAM budget share that starts demotion.
+    pub residency_percent: u32,
+    /// `[nvn] lean_draws`: existing lean-replay path.
+    pub lean_draws: bool,
+    /// `[nvn] prewarm`: build recorded pipelines on workers.
+    pub prewarm: bool,
+    /// `[nvn] gpl`: background shader-part compilation.
+    pub gpl: bool,
+    /// Write the XiØN palette into ReShade.ini's supported `[STYLE]` keys when
+    /// Play starts. ReShade remains a third-party overlay; this never patches
+    /// its binaries.
+    pub reshade_theme: bool,
+}
+
+impl Default for Performance {
+    fn default() -> Self {
+        Performance {
+            controller: true,
+            mode: "Automatic".into(),
+            target_fps: 60,
+            stability: true,
+            scene_profiles: true,
+            scene_override: "Auto".into(),
+            adaptive_mip: false,
+            max_mip_bias: 0.75,
+            staging_ring_mb: 256,
+            pool_upload_ms: 6,
+            tex_prep: true,
+            tex_prep_threads: 0,
+            tex_prep_mb: 1024,
+            residency: "Automatic".into(),
+            residency_percent: 80,
+            lean_draws: true,
+            prewarm: true,
+            gpl: true,
+            reshade_theme: false,
+        }
+    }
+}
+
+impl Performance {
+    pub fn normalize(&mut self) {
+        const MODES: [&str; 5] = ["Automatic", "Conservative", "Balanced", "Aggressive", "Manual"];
+        const SCENES: [&str; 7] = ["Auto", "Exploration", "Crowded", "Combat", "Cinematic", "Menu", "Loading"];
+        const RESIDENCY: [&str; 3] = ["Automatic", "On", "Off"];
+        if !MODES.iter().any(|m| m.eq_ignore_ascii_case(&self.mode)) {
+            self.mode = "Automatic".into();
+        } else {
+            let i = MODES.iter().position(|m| m.eq_ignore_ascii_case(&self.mode)).unwrap_or(0);
+            self.mode = MODES[i].into();
+        }
+        if !SCENES.iter().any(|s| s.eq_ignore_ascii_case(&self.scene_override)) {
+            self.scene_override = "Auto".into();
+        } else {
+            let i = SCENES.iter().position(|s| s.eq_ignore_ascii_case(&self.scene_override)).unwrap_or(0);
+            self.scene_override = SCENES[i].into();
+        }
+        if !RESIDENCY.iter().any(|r| r.eq_ignore_ascii_case(&self.residency)) {
+            self.residency = "Automatic".into();
+        } else {
+            let i = RESIDENCY.iter().position(|r| r.eq_ignore_ascii_case(&self.residency)).unwrap_or(0);
+            self.residency = RESIDENCY[i].into();
+        }
+        self.target_fps = self.target_fps.clamp(24, 360);
+        if !self.max_mip_bias.is_finite() {
+            self.max_mip_bias = 0.75;
+        }
+        self.max_mip_bias = self.max_mip_bias.clamp(0.25, 2.0);
+        self.staging_ring_mb = self.staging_ring_mb.min(1024);
+        self.pool_upload_ms = self.pool_upload_ms.min(24);
+        self.tex_prep_threads = self.tex_prep_threads.min(8);
+        self.tex_prep_mb = self.tex_prep_mb.clamp(128, 4096);
+        self.residency_percent = self.residency_percent.clamp(50, 100);
     }
 }
 
@@ -145,6 +267,18 @@ pub struct Audio {
     pub effects: f32,
     pub voice: f32,
     pub buffer_ms: u32,
+    /// The engine's software EQ on the final mix (`[audio] eq`). The F1 menu can
+    /// change it live; this is the value written before the next start.
+    pub eq: bool,
+    /// A preset name from [`EQ_PRESETS`], or `custom` when the bands were moved
+    /// by hand in the game's F1 menu.
+    pub eq_preset: String,
+    /// Ten gains in dB, 31 Hz through 16 kHz, matching the engine's band table.
+    pub eq_bands: Vec<f32>,
+    /// The preset's extra preamp. `None` leaves the game's existing
+    /// `eq_preamp` alone, so adding this field to old configs does not reset a
+    /// preamp tuned in the F1 menu.
+    pub eq_preamp: Option<f32>,
 }
 
 impl Default for Audio {
@@ -156,8 +290,85 @@ impl Default for Audio {
             effects: 1.0,
             voice: 1.0,
             buffer_ms: 40,
+            eq: false,
+            eq_preset: "flat".into(),
+            eq_bands: vec![0.0; EQ_BAND_COUNT],
+            eq_preamp: None,
         }
     }
+}
+
+impl Audio {
+    /// Keep an older `config.json` (or a hand-edited one) from writing a key the
+    /// engine would reject: always a known preset key or `custom`, always ten
+    /// finite band gains, and a master volume inside 0..200%.
+    pub fn normalize(&mut self) {
+        self.master = if self.master.is_finite() { self.master.clamp(0.0, 2.0) } else { 1.0 };
+        let key = self.eq_preset.trim().to_ascii_lowercase().replace(' ', "-").replace('_', "-");
+        self.eq_preset = if key.is_empty() {
+            "flat".into()
+        } else if key == "custom" || eq_preset_label(&key) != "Custom" {
+            key
+        } else {
+            "custom".into()
+        };
+        if self.eq_bands.len() != EQ_BAND_COUNT {
+            self.eq_bands = eq_preset_bands(&self.eq_preset).to_vec();
+        }
+        for db in &mut self.eq_bands {
+            *db = if db.is_finite() { db.clamp(-12.0, 12.0) } else { 0.0 };
+        }
+        if let Some(db) = self.eq_preamp {
+            self.eq_preamp = Some(if db.is_finite() { db.clamp(-12.0, 12.0) } else { 0.0 });
+        }
+    }
+}
+
+/// The ten slider positions the engine's EQ exposes: 31, 62, 125, 250, 500,
+/// 1k, 2k, 4k, 8k and 16k Hz. Kept in step with `nxrt/audio_eq.h`.
+pub const EQ_BAND_COUNT: usize = 10;
+
+pub type EqCurve = [f32; EQ_BAND_COUNT];
+
+/// `(key, label, curve, preamp)`. Keys are what `[audio] eq_preset` stores; the
+/// labels are what the Audio page shows. The curves and preamps match the
+/// engine's presets.
+pub const EQ_PRESETS: [(&str, &str, EqCurve, f32); 8] = [
+    ("flat", "Flat", [0.0; EQ_BAND_COUNT], 0.0),
+    ("bass", "Bass", [7.0, 6.0, 5.0, 3.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0], 0.0),
+    ("treble", "Treble", [-3.0, -2.0, -1.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0, 7.0], 0.0),
+    ("vocal", "Vocal", [-4.0, -2.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0], 0.0),
+    ("warm", "Warm", [3.0, 2.0, 1.0, 1.0, 0.0, 0.0, -1.0, -1.0, -2.0, -3.0], 0.0),
+    ("v-shape", "V-Shape", [6.0, 5.0, 3.0, 0.0, -2.0, -2.0, 0.0, 3.0, 5.0, 6.0], 0.0),
+    ("night", "Night", [-6.0, -4.0, -2.0, 0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 1.0], 0.0),
+    (
+        "headphones-boost",
+        "Headphones Boost",
+        [9.5, 6.0, 5.0, -2.5, 1.0, 0.0, -1.0, 7.0, 5.0, 9.5],
+        -12.0,
+    ),
+];
+
+/// The curve for a preset key, or a flat one for `custom`/an unknown key.
+pub fn eq_preset_bands(key: &str) -> EqCurve {
+    let key = key.trim().to_ascii_lowercase().replace(' ', "-").replace('_', "-");
+    EQ_PRESETS
+        .iter()
+        .find(|(name, _, _, _)| *name == key)
+        .map(|(_, _, curve, _)| *curve)
+        .unwrap_or([0.0; EQ_BAND_COUNT])
+}
+
+
+/// The page label for a preset key. An unknown key is shown as Custom, which is
+/// what the F1 menu writes after a band is moved by hand.
+pub fn eq_preset_label(key: &str) -> &'static str {
+    let key = key.trim().to_ascii_lowercase().replace(' ', "-").replace('_', "-");
+    EQ_PRESETS
+        .iter()
+        .find(|(name, _, _, _)| *name == key)
+        .map(|(_, label, _, _)| *label)
+        .unwrap_or("Custom")
 }
 
 /// One action the game understands and the host keys and buttons bound to it.
@@ -233,21 +444,19 @@ impl Default for Updates {
     }
 }
 
-/// Discord Rich Presence while the game runs. The client id is the public
-/// application id from Discord's Developer Portal; it is not a secret and no
-/// token is stored.
+/// Discord Rich Presence while the launcher or game runs. The application id is
+/// built into the launcher; this only stores whether the player wants presence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Discord {
     pub enabled: bool,
-    pub client_id: String,
 }
 
 impl Default for Discord {
     fn default() -> Self {
         Discord {
-            enabled: false,
-            client_id: String::new(),
+            // On by default. Presence is a no-op when Discord is not running.
+            enabled: true,
         }
     }
 }
@@ -256,18 +465,13 @@ impl Default for Discord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hud {
-    /// The frame rate chip in the top bar.
-    pub fps: bool,
     /// The frame-time graph on the Diagnostics page.
     pub graph: bool,
 }
 
 impl Default for Hud {
     fn default() -> Self {
-        Hud {
-            fps: false,
-            graph: true,
-        }
+        Hud { graph: true }
     }
 }
 
@@ -379,9 +583,13 @@ pub struct Config {
     pub system: System,
     pub runtime: Runtime,
     pub graphics: Graphics,
+    pub performance: Performance,
     pub audio: Audio,
     pub input: Input,
     pub theme: Scheme,
+    /// The launcher's own language. The game's text and voice language is
+    /// `system.language`, reported to the runtime through nn::oe.
+    pub ui_language: Language,
     pub updates: Updates,
     pub discord: Discord,
     pub graphics_preset: GraphicsPreset,
@@ -454,6 +662,12 @@ impl Config {
                 match serde_json::from_str::<Config>(&text) {
                                         Ok(mut cfg) => {
                         apply_saved_mode(&text, &mut cfg);
+                        cfg.audio.normalize();
+                        cfg.performance.normalize();
+                        // The DLSS replacement's FidelityFX entry was called "FSR 3" before it named the provider it runs.
+                        if cfg.graphics.dlss_upscaler == "FSR 3" {
+                            cfg.graphics.dlss_upscaler = "FSR 4 / 3 (FidelityFX)".into();
+                        }
                         (cfg, None)
                     }
                     Err(e) => {
@@ -544,7 +758,26 @@ mod tests {
         let cfg: Config = serde_json::from_str(r#"{"theme":"emblem"}"#).unwrap();
         assert_eq!(cfg.theme, Scheme::Fe);
         assert_eq!(cfg.system.language, "en-US");
+        assert_eq!(cfg.ui_language, Language::English);
         assert_eq!(cfg.input.bindings.len(), default_bindings().len());
+    }
+
+    #[test]
+    fn audio_eq_normalizes_old_and_hand_edited_values() {
+        let mut a = Audio::default();
+        a.master = 5.0;
+        a.eq_preset = " BASS ".into();
+        a.eq_bands.clear();
+        a.normalize();
+        assert_eq!(a.master, 2.0);
+        assert_eq!(a.eq_preset, "bass");
+        assert_eq!(a.eq_bands, eq_preset_bands("bass").to_vec());
+
+        a.eq_preset = "something_else".into();
+        a.eq_bands = vec![99.0; EQ_BAND_COUNT];
+        a.normalize();
+        assert_eq!(a.eq_preset, "custom");
+        assert!(a.eq_bands.iter().all(|db| *db == 12.0));
     }
 
     #[test]
@@ -553,10 +786,12 @@ mod tests {
         cfg.system.user_name = "XiØN".into();
         cfg.graphics.frame_limit = 120;
         cfg.interface_mode = InterfaceMode::Advanced;
+        cfg.ui_language = Language::Japanese;
         let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back.system.user_name, "XiØN");
         assert_eq!(back.graphics.frame_limit, 120);
         assert_eq!(back.interface_mode, InterfaceMode::Advanced);
+        assert_eq!(back.ui_language, Language::Japanese);
     }
 
     #[test]

@@ -25,7 +25,7 @@ research runtime, a different renderer or an emulator.
   semaphores, descriptor indexing/buffer device address where the device
   reports them, pipeline caches, graphics pipeline libraries and background
   pipeline work.
-- FSR 1, FSR 3.1, DLSS/DLAA, XeSS, NVIDIA Image Scaling, frame generation
+- FSR 1, FSR 4.1.2 / FSR 3.1, DLSS/DLAA, XeSS, NVIDIA Image Scaling, MAKO (spatial), frame generation
   (DLSS-G / FSR 3), Reflex and AMD Anti-Lag 2.
 - HDR output, wide gamut, tone mapping, grading, bloom, sharpen, motion blur,
   depth of field, vignette, dithering, and the merged HDR texture promotion.
@@ -150,7 +150,7 @@ decoded-PCM growth was found.
 
 | Project | License | Relevant work | Decision |
 | --- | --- | --- | --- |
-| [MAKO](https://github.com/eugeniosegala/MAKO) | GPL-3.0-or-later | Linux Vulkan layer, LSFG frame generation (user-supplied Lossless Scaling), LS1/MAKO scaling, vkBasalt effects, adaptive/display-aware pacing, profiles, experimental HDR. | **Study only.** Windows/Linux layer architecture does not fit this native Vulkan runtime; its pacing ideas are already represented by the frame limiter, VRR cap and `framegen_pace`. Do not ship a second layer. |
+| [MAKO](https://github.com/eugeniosegala/MAKO) | GPL-3.0-or-later | Linux Vulkan layer, LSFG frame generation (user-supplied Lossless Scaling), LS1/MAKO scaling, vkBasalt effects, adaptive/display-aware pacing, profiles, experimental HDR. | **Scaler integrated.** Its single-pass spatial shader is ported as the optional `mako` upscaler (`extras/mako_spatial.cpp`); the layer, LSFG and pacing remain unintegrated, and its pacing ideas are already represented by the frame limiter, VRR cap and `framegen_pace`. Do not ship a second layer. |
 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | MIT | Suballocation, budgets, defragmentation. | Evaluate only with a memory profile; the runtime already has pool mirrors and a budget path. |
 | [Volk](https://github.com/zeux/volk) | MIT | Meta-loader for Vulkan entry points. | Optional loader cleanup; no measured frame-time benefit. |
 | [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) / glslang | Apache-2.0 / BSD | SPIR-V validation and optimization. | Useful in the build/validation path, not the frame loop. |
@@ -161,10 +161,12 @@ decoded-PCM growth was found.
 | DXVK / VKD3D-Proton / Wine / Proton | Zlib / LGPL / LGPL | D3D translation and compatibility. | Not applicable: the engine is native Vulkan, not D3D. |
 | Filament / Granite / The Forge / Godot / vkQuake | Apache-2.0 / MIT / proprietary / MIT / GPL | Scene/resource/pipeline architecture. | Reference only; no source copied. |
 
-MAKO's GPL-3.0-or-later licence would permit code reuse in this GPL-3.0
-engine, but its layer targets Linux swapchains and a different frame-generation
-model. Copying it would add a dependency and a second owner of presentation,
-not remove a measured bottleneck.
+MAKO's GPL-3.0-or-later licence permits reuse in this GPL-3.0 engine. Its layer
+targets Linux swapchains and a different frame-generation model, so porting the
+whole layer would add a dependency and a second owner of presentation; only its
+single-pass spatial shader is adapted, as the optional `mako` upscaler. Its
+frame-generation model is not integrated: the engine already has FSR 3 and DLSS
+frame generation and this game does not provide the motion vectors MAKO needs.
 
 ## D. Bottleneck report
 

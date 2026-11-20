@@ -87,6 +87,24 @@ pub fn root() -> Option<PathBuf> {
     Some(pick)
 }
 
+/// Delete the old standalone upstream launcher from an install made by an
+/// earlier release. It is not part of this product and is large; the engine
+/// sources beside it stay. Only a folder carrying the upstream launcher's
+/// markers is removed, so an unrelated folder named `launcher` is left alone.
+/// Failures are silent: cleanup must never hold up or break startup.
+pub fn remove_legacy_launcher() {
+    if let Some(root) = root() {
+        remove_legacy_launcher_at(&root);
+    }
+}
+
+fn remove_legacy_launcher_at(root: &Path) {
+    let legacy = root.join("launcher");
+    if legacy.join("src-tauri").is_dir() || legacy.join("package.json").is_file() {
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
+}
+
 /// Remember `picked` as the engine checkout, so every later lookup uses it instead of looking beside the launcher. Accepts the
 /// checkout (`…\engine\fefw-recomp`) or a folder that holds it, such as an older EmblemWeave copy. Returns the checkout.
 ///
@@ -2386,6 +2404,75 @@ fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
     text
 }
 
+/// Available physical memory, for choosing a build concurrency the machine can
+/// actually feed. `None` when the platform has no cheap answer.
+#[cfg(windows)]
+fn available_memory_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: the structure is zeroed, its length is set, and Windows writes only
+    // into that structure. The call has no other effect.
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.ullAvailPhys)
+}
+
+#[cfg(not(windows))]
+fn available_memory_bytes() -> Option<u64> {
+    None
+}
+
+/// How many compiler processes the engine build may run.
+///
+/// The old rule used every logical CPU but two. That is reasonable on a large
+/// desktop and a good way to make an 8 GB machine swap: one lifted translation
+/// unit can take well over a gigabyte, while the linker, Windows and the
+/// launcher still need memory. This budgets 1.5 GiB per compiler and leaves
+/// 2 GiB for the rest of the machine, then never exceeds the CPU limit. The
+/// budget is based on memory *available at the start*; a build started while
+/// another game is running is therefore conservative rather than optimistic.
+///
+/// `NX_JOBS` is the explicit override. It is used as written (1 to 64); an
+/// invalid value is logged and ignored instead of silently becoming zero.
+fn build_jobs() -> (usize, String) {
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    let raw = std::env::var("NX_JOBS").ok();
+    let override_jobs = raw
+        .as_deref()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| (1..=64).contains(n));
+    let (jobs, mut why) = choose_jobs(logical, available_memory_bytes(), override_jobs);
+    if raw.is_some() && override_jobs.is_none() {
+        why = format!("NX_JOBS is not a number from 1 to 64, so it was ignored; {why}");
+    }
+    (jobs, why)
+}
+
+/// The decision behind [`build_jobs`], with the machine passed in so the
+/// low-memory and override cases can be tested without a second PC.
+fn choose_jobs(logical: usize, available: Option<u64>, override_jobs: Option<usize>) -> (usize, String) {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let logical = logical.max(1);
+    if let Some(jobs) = override_jobs.filter(|n| (1..=64).contains(n)) {
+        return (jobs, format!("NX_JOBS override; {logical} logical CPUs"));
+    }
+    let cpu_limit = logical.saturating_sub(2).max(1).min(32);
+    let Some(bytes) = available else {
+        return (cpu_limit, format!("{logical} logical CPUs; available memory unknown"));
+    };
+    let usable = bytes.saturating_sub(2 * GIB);
+    let memory_limit = (usable / (3 * GIB / 2)).max(1).min(32) as usize;
+    let jobs = cpu_limit.min(memory_limit).max(1);
+    let gib = bytes as f64 / GIB as f64;
+    (
+        jobs,
+        format!(
+            "{logical} logical CPUs, {gib:.1} GiB available; 1.5 GiB per compiler, 2 GiB left for Windows"
+        ),
+    )
+}
+
 /// The build job's work: every step in order.
 pub fn build(
     ctx: &Ctx,
@@ -2621,10 +2708,9 @@ pub fn build(
         ));
         crate::toolchain::clear_cache(&game_build);
     }
-    let jobs = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(2).max(1))
-        .unwrap_or(8)
-        .to_string();
+    let (jobs, jobs_why) = build_jobs();
+    let jobs = jobs.to_string();
+    ctx.log(format!("build jobs: {jobs} ({jobs_why})"));
     // The engine's scripts look for `vcvars64.bat` through vswhere, and their
     // `%ProgramFiles(x86)%` path breaks inside cmd's `for /f` parentheses, so
     // every build logged "'vswhere.exe' is not recognized". The path is already
@@ -3130,8 +3216,10 @@ pub fn build(
 pub fn upscale_mode(label: &str) -> &'static str {
     match label {
         "FSR 1.0" => "fsr1",
+        "FSR 4.1.2" => "fsr4",
         "FSR 3.1" => "fsr3",
         "NVIDIA Image Scaling" => "nis",
+        "MAKO (spatial)" => "mako",
         "DLSS" => "dlss",
         "DLAA" => "dlaa",
         "XeSS" => "xess",
@@ -3205,6 +3293,8 @@ pub struct Sdk {
     pub dlss: Option<PathBuf>,
     /// `upscalers\xess`: Intel's `libxess.dll`.
     pub xess: Option<PathBuf>,
+    /// `upscalers\ffmpeg`: the FFmpeg 8.x shared DLLs for the optional movie decoder.
+    pub ffmpeg: Option<PathBuf>,
 }
 
 impl Sdk {
@@ -3213,6 +3303,15 @@ impl Sdk {
         self.fsr3
             .as_ref()
             .is_some_and(|d| d.join("amd_fidelityfx_vk.dll").is_file())
+    }
+
+    /// FSR 4.1.2 is exposed by the SDK 2.4 loader pair. The single v1.1.4 DLL is FSR 3.1 only, so it must not make
+    /// the AMD preset claim FSR 4.
+    pub fn fsr4(&self) -> bool {
+        self.fsr3.as_ref().is_some_and(|d| {
+            d.join("amd_fidelityfx_loader_vk.dll").is_file()
+                && d.join("amd_fidelityfx_upscaler_vk.dll").is_file()
+        })
     }
 
     /// DLSS Frame Generation needs five more files beside the four DLSS ones, from the same Streamline release.
@@ -3298,6 +3397,16 @@ fn sdk_in(dirs: &[PathBuf], folders: &[&str], needed: &[&str], every: bool) -> O
 }
 
 /// A complete FSR layout: the SDK 2.x loader and upscaler, or the single v1.1.4 DLL. A lone loader is not enough.
+/// A complete FFmpeg shared layout for the movie decoder: libavcodec 62 needs libavutil 60 and swresample 6.
+fn sdk_ffmpeg(dirs: &[PathBuf]) -> Option<PathBuf> {
+    sdk_in(
+        dirs,
+        &["ffmpeg", ""],
+        &["avcodec-62.dll", "avutil-60.dll", "swresample-6.dll"],
+        true,
+    )
+}
+
 fn sdk_fsr(dirs: &[PathBuf]) -> Option<PathBuf> {
     let folders = ["fsr", "fsr3"];
     sdk_in(
@@ -3320,6 +3429,7 @@ pub fn sdk() -> Sdk {
         fsr3: sdk_fsr(&dirs),
         dlss: sdk_in(&dirs, &["streamline"], DLSS_FILES, true),
         xess: sdk_in(&dirs, &["xess"], XESS_FILES, true),
+        ffmpeg: sdk_ffmpeg(&dirs),
     }
 }
 
@@ -3462,7 +3572,7 @@ pub fn adopt_upscaler_files() -> Result<String, String> {
     let mut have: Vec<&str> = Vec::new();
     let mut lack: Vec<String> = Vec::new();
     if sdk.fsr3.is_some() {
-        have.push("FSR 3.1");
+        have.push("FSR 4.1.2 / FSR 3.1");
         if sdk.fsr_framegen() {
             have.push("FSR 3 frame generation");
         }
@@ -3615,8 +3725,10 @@ fn sharpen_label(value: &str) -> Option<&'static str> {
 pub fn upscale_label(mode: &str) -> &'static str {
     match mode {
         "fsr1" | "spatial" => "FSR 1.0",
+        "fsr4" => "FSR 4.1.2",
         "fsr3" => "FSR 3.1",
         "nis" => "NVIDIA Image Scaling",
+        "mako" => "MAKO (spatial)",
         "dlss" => "DLSS",
         "dlaa" => "DLAA",
         _ => "Off",
@@ -3763,7 +3875,7 @@ pub fn brand_game() -> Result<bool, String> {
     Ok(false)
 }
 
-/// The FSR 3.1 DLL the engine should load, whichever SDK layout is installed.
+/// The FSR DLL the engine should load, whichever SDK layout is installed.
 fn fsr_dll(sdk: &Sdk) -> Option<PathBuf> {
     let d = sdk.fsr3.as_ref()?;
     ["amd_fidelityfx_loader_vk.dll", "amd_fidelityfx_vk.dll"]
@@ -3803,12 +3915,24 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     // folder is created by this launcher, so it is the one place they can be,
     // and a mode the engine cannot load is a black picture with working sound.
     let mode = match upscale_mode(&g.upscaling) {
+        "fsr4" if !sdk.fsr4() => {
+            if fsr_dll(&sdk).is_some() {
+                "fsr3"
+            } else {
+                "fsr1"
+            }
+        }
         "fsr3" if fsr_dll(&sdk).is_none() => "fsr1",
         "dlss" | "dlaa" if sdk.dlss.is_none() => "off",
         "xess" if sdk.xess.is_none() => "fsr1",
         other => other,
     };
     d.insert("upscale.mode".into(), mode.into());
+    d.insert("media.movie_decoder".into(), video_decoder_word(&g.video_decoder).into());
+    d.insert(
+        "media.movie_hwaccel".into(),
+        if g.video_hwaccel { "1" } else { "0" }.into(),
+    );
     d.insert(
         "upscale.sharpness".into(),
         sharpen_value(&g.sharpening).into(),
@@ -3855,6 +3979,9 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     if let Some(dir) = &sdk.xess {
         d.insert("upscale.xess_dll".into(), fwd(dir));
     }
+    if let Some(dir) = &sdk.ffmpeg {
+        d.insert("media.ffmpeg_dir".into(), fwd(dir));
+    }
     // The rest of the Rendering page: the preset the temporal upscalers scale by, the scene buffer's
     // share of the output, and what makes the frames between two rendered ones.
     d.insert(
@@ -3875,6 +4002,10 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
         g.astc_quality.to_ascii_lowercase(),
     );
     d.insert("gfx.gpu".into(), gpu_word(&g.gpu).into());
+    d.insert(
+        "gfx.present_guard".into(),
+        present_guard_word(&g.present_guard).into(),
+    );
     // Shader work while playing is three pools: whole pipelines built at a draw, recorded pipelines prewarmed at boot, and
     // shader parts compiled in the background. The page's one number caps all three; before this it only reached the parts
     // pool, so a player who chose 2 still had four prewarm workers and six preload readers fighting the game (#10).
@@ -3898,8 +4029,18 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     );
     d.insert(
         "audio.volume".into(),
-        format!("{:.2}", a.master.clamp(0.0, 1.0)),
+        format!("{:.2}", a.master.clamp(0.0, 2.0)),
     );
+    d.insert("audio.eq".into(), if a.eq { "1" } else { "0" }.into());
+    d.insert("audio.eq_preset".into(), a.eq_preset.clone());
+    let bands = (0..crate::config::EQ_BAND_COUNT)
+        .map(|i| format!("{:.1}", a.eq_bands.get(i).copied().unwrap_or(0.0)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    d.insert("audio.eq_bands".into(), bands);
+    if let Some(preamp) = a.eq_preamp {
+        d.insert("audio.eq_preamp".into(), format!("{:.1}", preamp.clamp(-12.0, 12.0)));
+    }
     d
 }
 
@@ -3943,11 +4084,27 @@ fn frame_gen_label(word: &str) -> Option<&'static str> {
     })
 }
 
+/// The page's label for the engine's `[media] movie_decoder`.
+fn video_decoder_word(label: &str) -> &'static str {
+    match label {
+        "FFmpeg (libavcodec)" => "ffmpeg",
+        _ => "dav1d",
+    }
+}
+
+fn video_decoder_label(word: &str) -> Option<&'static str> {
+    Some(match word.trim().to_ascii_lowercase().as_str() {
+        "ffmpeg" => "FFmpeg (libavcodec)",
+        "dav1d" | "dav1d_cpu" | "cpu" => "dav1d (CPU)",
+        _ => return None,
+    })
+}
+
 fn dlss_upscaler_word(label: &str) -> &'static str {
     match label {
         "TAAU" => "taau",
         "DLSS" => "dlss",
-        "FSR 3" => "fsr3",
+        "FSR 3" | "FSR 4 / 3 (FidelityFX)" => "fsr3",
         "XeSS" => "xess",
         "Bilinear" => "bilinear",
         _ => "auto",
@@ -3959,7 +4116,7 @@ fn dlss_upscaler_label(word: &str) -> Option<&'static str> {
         "auto" | "" => "Automatic",
         "taau" => "TAAU",
         "dlss" => "DLSS",
-        "fsr3" => "FSR 3",
+        "fsr3" => "FSR 4 / 3 (FidelityFX)",
         "xess" => "XeSS",
         "bilinear" => "Bilinear",
         _ => return None,
@@ -3979,6 +4136,24 @@ fn gpu_label(word: &str) -> Option<&'static str> {
         "" | "auto" | "automatic" => "Automatic",
         "discrete" => "Discrete",
         "integrated" => "Integrated",
+        _ => return None,
+    })
+}
+
+/// The engine's `[gfx] present_guard` word for the page's label (#72).
+fn present_guard_word(label: &str) -> &'static str {
+    match label {
+        "Always on" => "on",
+        "Off" => "off",
+        _ => "auto",
+    }
+}
+
+fn present_guard_label(word: &str) -> Option<&'static str> {
+    Some(match word.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" => "Automatic",
+        "on" | "1" | "true" | "yes" | "force" => "Always on",
+        "off" | "0" | "false" | "no" => "Off",
         _ => return None,
     })
 }
@@ -4130,6 +4305,19 @@ fn adopt_from(
             changed |= put(&mut g.gpu, label.to_string());
         }
     }
+    if let Some(v) = take_back(desired, applied, on_file, "gfx.present_guard") {
+        if let Some(label) = present_guard_label(v) {
+            changed |= put(&mut g.present_guard, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "media.movie_decoder") {
+        if let Some(label) = video_decoder_label(v) {
+            changed |= put(&mut g.video_decoder, label.to_string());
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "media.movie_hwaccel") {
+        changed |= put(&mut g.video_hwaccel, matches!(v, "1" | "true" | "on" | "yes"));
+    }
     if let Some(v) = take_back(desired, applied, on_file, "display.vsync") {
         changed |= put(&mut g.vsync, matches!(v, "1" | "true" | "on" | "yes"));
     }
@@ -4163,7 +4351,134 @@ fn adopt_from(
     }
     if let Some(v) = take_back(desired, applied, on_file, "audio.volume") {
         if let Ok(vol) = v.parse::<f32>() {
-            changed |= put(&mut a.master, vol.clamp(0.0, 1.0));
+            changed |= put(&mut a.master, vol.clamp(0.0, 2.0));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "audio.eq") {
+        changed |= put(&mut a.eq, matches!(v, "1" | "true" | "on" | "yes"));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "audio.eq_preset") {
+        changed |= put(&mut a.eq_preset, v.to_string());
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "audio.eq_bands") {
+        let parsed: Option<Vec<f32>> = v
+            .split(',')
+            .map(|part| part.trim().parse::<f32>().ok())
+            .collect();
+        if let Some(mut bands) = parsed {
+            if bands.len() == crate::config::EQ_BAND_COUNT {
+                for db in &mut bands {
+                    *db = db.clamp(-12.0, 12.0);
+                }
+                changed |= put(&mut a.eq_bands, bands);
+            }
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "audio.eq_preamp") {
+        if let Ok(db) = v.parse::<f32>() {
+            changed |= put(&mut a.eq_preamp, Some(db.clamp(-12.0, 12.0)));
+        }
+    }
+    changed
+}
+
+/// The Performance page's half of `adopt`: same rule as Graphics, so a switch
+/// changed in the F1 menu is not overwritten by the next Play.
+fn adopt_performance(
+    p: &mut crate::config::Performance,
+    desired: &Values,
+    applied: &Values,
+    on_file: &Values,
+) -> bool {
+    let mut changed = false;
+    let b = |v: &str| matches!(v, "1" | "true" | "on" | "yes");
+    if let Some(v) = take_back(desired, applied, on_file, "perf.enabled") {
+        changed |= put(&mut p.controller, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.stability") {
+        changed |= put(&mut p.stability, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.scene_profiles") {
+        changed |= put(&mut p.scene_profiles, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.adaptive_mip") {
+        changed |= put(&mut p.adaptive_mip, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.tex_prep") {
+        changed |= put(&mut p.tex_prep, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.lean_draws") {
+        changed |= put(&mut p.lean_draws, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.prewarm") {
+        changed |= put(&mut p.prewarm, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.gpl") {
+        changed |= put(&mut p.gpl, b(v));
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.mode") {
+        let label = match v.to_ascii_lowercase().as_str() {
+            "conservative" => "Conservative",
+            "balanced" => "Balanced",
+            "aggressive" => "Aggressive",
+            "manual" => "Manual",
+            _ => "Automatic",
+        };
+        changed |= put(&mut p.mode, label.into());
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.scene_override") {
+        let label = match v.to_ascii_lowercase().as_str() {
+            "exploration" => "Exploration",
+            "crowded" => "Crowded",
+            "combat" => "Combat",
+            "cinematic" => "Cinematic",
+            "menu" => "Menu",
+            "loading" => "Loading",
+            _ => "Auto",
+        };
+        changed |= put(&mut p.scene_override, label.into());
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "gfx.residency") {
+        let label = match v.to_ascii_lowercase().as_str() {
+            "on" => "On",
+            "off" => "Off",
+            _ => "Automatic",
+        };
+        changed |= put(&mut p.residency, label.into());
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.target_fps") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut p.target_fps, n.clamp(24, 360));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "perf.max_mip_bias") {
+        if let Ok(n) = v.trim().parse::<f32>() {
+            changed |= put(&mut p.max_mip_bias, n.clamp(0.25, 2.0));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.staging_ring_mb") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut p.staging_ring_mb, n.min(1024));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.pool_upload_ms") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut p.pool_upload_ms, n.min(24));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.tex_prep_threads") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut p.tex_prep_threads, n.min(8));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "nvn.tex_prep_mb") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut p.tex_prep_mb, n.clamp(128, 4096));
+        }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "gfx.residency_percent") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            changed |= put(&mut p.residency_percent, n.clamp(50, 100));
         }
     }
     changed
@@ -4171,7 +4486,11 @@ fn adopt_from(
 
 /// Take the values the game's own F1 menu changed back into the pages, so they
 /// show what the next start will use instead of only naming it.
-pub fn adopt(g: &mut crate::config::Graphics, a: &mut crate::config::Audio) -> bool {
+pub fn adopt(
+    g: &mut crate::config::Graphics,
+    a: &mut crate::config::Audio,
+    p: &mut crate::config::Performance,
+) -> bool {
     // The pages are drawn many times a second; the files change at human speed.
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = std::time::SystemTime::now()
@@ -4183,9 +4502,12 @@ pub fn adopt(g: &mut crate::config::Graphics, a: &mut crate::config::Audio) -> b
     }
     LAST.store(now, std::sync::atomic::Ordering::Relaxed);
     let Some(live) = live() else { return false };
-    let desired = desired_values(g, a);
+    let mut desired = desired_values(g, a);
+    desired.extend(crate::performance::values(p));
     let applied = applied_values();
-    adopt_from(g, a, &desired, &applied, &live.values)
+    let mut changed = adopt_from(g, a, &desired, &applied, &live.values);
+    changed |= adopt_performance(p, &desired, &applied, &live.values);
+    changed
 }
 
 /// Write the Graphics and Audio values the game can act on, but only the ones
@@ -4201,6 +4523,7 @@ fn write_settings(
     dir: &Path,
     g: &crate::config::Graphics,
     a: &crate::config::Audio,
+    p: &crate::config::Performance,
     applied: &mut Values,
 ) -> Result<bool, String> {
     let fefw_path = dir.join("fefw.ini");
@@ -4221,12 +4544,14 @@ fn write_settings(
         fefw = set_ini_key(&fefw, "fs", "mods", &mods);
         touched = true;
     }
-    for (id, value) in desired_values(g, a) {
+    let mut desired = desired_values(g, a);
+    desired.extend(crate::performance::values(p));
+    for (id, value) in desired {
         let (section, key) = id.split_once('.').unwrap_or(("", ""));
         let (in_fefw, in_ctl) = match section {
             "fefw" => (true, false),
             "display" | "audio" => (false, true),
-            "nvn" | "dlss" | "gfx" => (true, false),
+            "nvn" | "dlss" | "gfx" | "media" | "perf" => (true, false),
             _ => (true, true),
         };
         let current = if in_fefw {
@@ -4454,6 +4779,7 @@ It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card
 pub fn play(
     graphics: &crate::config::Graphics,
     audio: &crate::config::Audio,
+    performance: &crate::config::Performance,
 ) -> Result<(), String> {
     let root = root().ok_or("the engine was not found")?;
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
@@ -4516,8 +4842,14 @@ pub fn play(
     // settings the game can act on today; it reads them from its own ini files
     // at start. A file that cannot be written must not stop the game starting.
     let mut applied = applied_values();
-    if write_settings(&dir, graphics, audio, &mut applied).is_ok() {
+    if write_settings(&dir, graphics, audio, performance, &mut applied).is_ok() {
         save_applied(&applied);
+    }
+    // ReShade is a third-party overlay; this writes only its documented custom
+    // style keys and never patches a binary. A missing ReShade.ini is not a
+    // reason to refuse to start the game.
+    if performance.reshade_theme {
+        let _ = crate::performance::apply_reshade_theme();
     }
     let log = dir.join("fefw.log");
     let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
@@ -4576,6 +4908,30 @@ mod tests {
             std::fs::read_to_string(&file).unwrap().trim(),
             checkout.display().to_string()
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_old_launcher_folder_is_removed_but_an_unrelated_one_is_kept() {
+        let dir = std::env::temp_dir().join(format!("ew-legacy-launcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("engine").join("fefw-recomp");
+        let old = root.join("launcher");
+        std::fs::create_dir_all(old.join("src-tauri")).unwrap();
+        std::fs::write(old.join("src-tauri").join("tauri.conf.json"), "{}").unwrap();
+        std::fs::write(old.join("package.json"), "{}").unwrap();
+        std::fs::write(root.join("keep.txt"), "engine").unwrap();
+
+        remove_legacy_launcher_at(&root);
+        assert!(!old.exists(), "the old upstream launcher folder is gone");
+        assert!(root.join("keep.txt").is_file(), "the engine sources stay");
+
+        // A folder that only happens to be called launcher is not ours to delete.
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("notes.txt"), "not the upstream launcher").unwrap();
+        remove_legacy_launcher_at(&root);
+        assert!(old.join("notes.txt").is_file());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5064,7 +5420,7 @@ mod tests {
         let xess = root.join("upscaler").join("xess").join("bin");
         std::fs::create_dir_all(&xess).unwrap();
         std::fs::write(xess.join("libxess.dll"), "").unwrap();
-        assert_eq!(sdk_fsr(&[root.clone()]), Some(fsr));
+        assert_eq!(sdk_fsr(&[root.clone()]), Some(fsr.clone()));
         assert_eq!(
             sdk_in(&[root.clone()], &["xess"], XESS_FILES, true),
             Some(xess)
@@ -5080,6 +5436,17 @@ mod tests {
         assert_eq!(sdk_fsr(&[root.join("partial")]), None);
         std::fs::write(partial.join("amd_fidelityfx_upscaler_vk.dll"), "").unwrap();
         assert_eq!(sdk_fsr(&[root.join("partial")]), Some(partial));
+        // The loader pair, not the v1.1.4 DLL, is what enables FSR 4.1.2. The E install has all three files.
+        let found = Sdk {
+            fsr3: Some(fsr.clone()),
+            ..Default::default()
+        };
+        assert!(!found.fsr4(), "the v1.1.4 DLL alone is FSR 3.1");
+        std::fs::write(fsr.join("amd_fidelityfx_loader_vk.dll"), "").unwrap();
+        assert!(!found.fsr4(), "a loader without the upscaler is not a complete SDK 2.4 layout");
+        std::fs::write(fsr.join("amd_fidelityfx_upscaler_vk.dll"), "").unwrap();
+        assert!(found.fsr4(), "the SDK 2.4 loader pair enables FSR 4.1.2");
+        assert!(found.fsr_framegen(), "the v1.1.4 DLL beside the pair still enables FSR 3 frame generation");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5526,8 +5893,10 @@ add_dependencies(lift probe)
 
     #[test]
     fn the_labels_name_the_engine_modes() {
+        assert_eq!(upscale_mode("FSR 4.1.2"), "fsr4");
         assert_eq!(upscale_mode("FSR 3.1"), "fsr3");
         assert_eq!(upscale_mode("NVIDIA Image Scaling"), "nis");
+        assert_eq!(upscale_mode("MAKO (spatial)"), "mako");
         assert_eq!(upscale_mode("DLAA"), "dlaa");
         // Values saved by an older build, and anything unknown, mean off.
         assert_eq!(upscale_mode("Bilinear"), "off");
@@ -5652,6 +6021,12 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(
             d.get("nvn.shader_preload_threads").map(String::as_str),
             Some("2")
+        );
+        assert_eq!(d.get("audio.eq").map(String::as_str), Some("0"));
+        assert_eq!(d.get("audio.eq_preset").map(String::as_str), Some("flat"));
+        assert_eq!(
+            d.get("audio.eq_bands").map(String::as_str),
+            Some("0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0")
         );
 
         g.upscale_quality = "Performance".into();
@@ -5963,7 +6338,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         };
         let mut applied = Values::new();
         assert!(
-            write_settings(&dir, &g, &a, &mut applied).unwrap(),
+            write_settings(&dir, &g, &a, &crate::config::Performance::default(), &mut applied).unwrap(),
             "the first start writes"
         );
 
@@ -6025,13 +6400,15 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
             ..crate::config::Graphics::default()
         };
         assert!(
-            write_settings(&dir, &g, &crate::config::Audio::default(), &mut applied).unwrap(),
+            write_settings(&dir, &g, &crate::config::Audio::default(), &crate::config::Performance::default(), &mut applied).unwrap(),
             "a changed setting is written"
         );
         let text = std::fs::read_to_string(&game).unwrap();
         assert!(text.contains("output = console"));
         assert!(text.contains("mode = off"));
-        assert_eq!(text.matches("mode =").count(), 1);
+        let upscale = text.split("[upscale]").nth(1).unwrap_or_default();
+        let upscale = upscale.split("\n[").next().unwrap_or(upscale);
+        assert_eq!(upscale.matches("mode =").count(), 1, "[upscale] mode is replaced, not repeated");
         let text = std::fs::read_to_string(&controls).unwrap();
         assert!(
             text.contains("render_width = 0"),
@@ -6131,7 +6508,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let patched = original.replace("window_mode = borderless", "window_mode = exclusive");
         std::fs::write(&controls, &patched).unwrap();
         assert!(
-            !write_settings(&dir, &g, &crate::config::Audio::default(), &mut applied).unwrap(),
+            !write_settings(&dir, &g, &crate::config::Audio::default(), &crate::config::Performance::default(), &mut applied).unwrap(),
             "nothing to write"
         );
         let text = std::fs::read_to_string(&controls).unwrap();
@@ -6210,6 +6587,18 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert!(lock.exists());
         drop(held);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_jobs_leave_memory_for_a_small_machine_and_use_the_cpu_on_a_large_one() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(choose_jobs(16, Some(8 * GIB), None).0, 4);
+        assert_eq!(choose_jobs(16, Some(64 * GIB), None).0, 14);
+        assert_eq!(choose_jobs(16, Some(2 * GIB), None).0, 1);
+        assert_eq!(choose_jobs(8, None, None).0, 6);
+        assert_eq!(choose_jobs(16, Some(2 * GIB), Some(12)).0, 12);
+        assert_eq!(choose_jobs(16, Some(64 * GIB), Some(0)).0, 14);
+        assert!(choose_jobs(16, Some(8 * GIB), None).1.contains("1.5 GiB per compiler"));
     }
 
     #[test]

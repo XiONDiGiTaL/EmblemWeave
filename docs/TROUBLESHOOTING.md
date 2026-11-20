@@ -155,8 +155,11 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `lld-link.exe is missing beside …` | LLVM's `bin` folder is incomplete, so every link step would fail | Reinstall LLVM |
 | `the toolchain cannot build the smallest test file: compile with … failed` | The pieces were all found but disagree: a header from one install with libraries from another, or an SDK that is only half installed. It is reported before the recompile, not twenty minutes into it | The message carries the compiler's own error line and the `INCLUDE` list it used; adding "Desktop development with C++" or updating LLVM fixes the usual cases |
 | `another EmblemWeave build is already running (process N)` | Two builds would compile into the same folders and unpack the same sources | Wait for the other one. If no build is open, end that process, or delete `engine\fefw-recomp\work\build\.build.lock` |
+| A build stops with the compiler killed, or Windows becomes unresponsive while it runs | Too many compiler processes for the memory actually free; one lifted translation unit can need well over a gigabyte | The launcher now budgets 1.5 GiB per compiler and leaves 2 GiB for Windows, so a normal build chooses fewer jobs on a small machine. If it still happens, close other memory-heavy programs and set `NX_JOBS` to a lower number before starting the launcher (for example `$env:NX_JOBS = 4`). The job log's `build jobs:` line says what was chosen and why |
 | `could not download … after 4 attempts` or `… is incomplete (no CMakeLists.txt); discarding it and fetching again` | A dependency fetch failed or was interrupted; the fetcher never keeps anything it could not verify | Nothing: press Build the game again. The message names the URL and the last error, and the half-written folder was already removed |
 | The window closes at once | Usually the Vulkan driver | The launcher now watches the first minute of every launch: a run that exits early, or that has played sound for 90 s without presenting one frame, is reported in the window with the GPU it picked. Read `%APPDATA%\EmblemWeave\play\fefw.log`; update the graphics driver, try Windowed or Borderless, and a Vulkan 1.3 device is required |
+| `GPU DEVICE LOST` in the first seconds on Intel graphics, with `present mode immediate` in the same report | Intel's Windows driver can reset the device on the immediate present path (issue #72). It is not a missing game file | The engine guards against it automatically (mailbox, else FIFO, on Intel GPUs that are not discrete). Install the newest Intel graphics driver, and see [The graphics device was lost on Intel graphics](#the-graphics-device-was-lost-on-intel-graphics-72) for the setting that forces the guard on every GPU, and for the rebuild a launcher update needs |
+| Some cinematics drop frames and the voices cut out, while effects keep playing | The usual cause is an incomplete merged RomFS: the base dump or a partial update has the movie and voice files the specific scene reads, but not all of them (issue #70). A `.nup` build derives both halves from one package; a folder build does not | Rebuild from a `.nup` (**Game Setup > Choose .nup…**) if you have one. To compare an extracted folder with a `.nup` without building or playing, run `EmblemWeave.exe --compare-data <game.nup> <folder> report.json`; exit 0 means every ExeFS and RomFS path, size and SHA-256 matches, and exit 2 lists what differs. A complete merged folder has 252,686 files, 82 `Movie/Product/*.webm` files and a populated `Sound/stream` folder. If those counts match and a scene still fails, attach `report.json` and the `movie`/`audio` lines around it to #70 |
 | The picture stays black while the sound plays | The shader cache is incomplete, so no draw is recorded and the present pass copies an untouched (black) texture. It ran at 60 fps and the audio worked, which is why this read as a driver problem (issues #12 and #15). Since 0.1.16 the log says so instead of leaving it to be guessed: `nvnProgramSetShaders: no translated shader for block …` for the first few blocks, then one `more programs than this log lists have no translated shader` naming the shader folder | Press **Build the game**: it reports the blocks the corpus expects and the cache holds (`shader_report`), translates only the missing ones (`--only-missing`), and stops with the counts and the first hashes if it still cannot. A cache holding a few files and no `results.tsv` is a translation that was interrupted, not one that finished |
 | `N of M shaders still have no SPIR-V (first: …)` | The build checked the corpus (`corpus/unique.tsv`) against the translation report (`spirv/results.tsv`), translated what was missing, and N blocks still have none: every program that uses one fails to link and its draws are skipped | The line names the first five hashes and `spirv/results.tsv`; the `engine` log has the translator's own output. Send both with a diagnostics report |
 | ``extract_corpus: no shader archive under …`` | The shader corpus was about to be built from a path that holds no `*.bfsha`/`*.ptcl`/`*.arc`/`*.sarc`/`*.bnsh` archive, which is what a `.nup`/`.nsp` file looks like to a folder walk | Nothing: **Build the game** copies the archives out of the package and builds the corpus from that folder. The message only appears if that copy found none |
@@ -175,6 +178,32 @@ A bug report with the failing task's log attached is worth more than any descrip
 | `Title metadata: control.nacp not found` | The dump has no `control.nacp`, so the title name and display version are unknown. The build and the game do not need it | Nothing to fix unless you want the version line: extracted `.nsp` dumps keep it at `data\control\control.nacp` |
 
 | `main.npdm is compressed in the .nup`, `... is compressed in the .nup; the game reads RomFS files in place`, or the game exits two seconds after Play | 0.1.19 and older refused any `.nup` that packs some of its files with zstd (#24) | 0.1.20 and newer write those files into `engine\fefw-recomp\work\romfs-overlay` and the engine reads them from there: press Play, which writes them first and then starts the game, or **Check my game folder** on Game Setup if you would rather not start it yet. Neither compiles anything. A compressed ExeFS no longer matters at all |
+
+## The graphics device was lost on Intel graphics (#72)
+
+`GPU DEVICE LOST` in the first seconds of a launch, with `present mode immediate` in the same report and an Intel GPU
+(Iris Xe, UHD, Core Ultra or Arc), is Intel's Windows driver resetting the device on the immediate present path. It is
+not a missing game file.
+
+The engine guards against it: on an Intel GPU that is not discrete, an immediate request becomes mailbox (or FIFO when
+mailbox is unavailable), and `fefw.log` says so:
+
+```
+gfx: the present-mode guard replaced immediate with mailbox: that path can reset the driver (issue #72). ...
+```
+
+If it still resets:
+
+1. Install the newest Intel graphics driver.
+2. Choose **Graphics > Display > Present mode safeguard > Always on**. This asks for the guard on every GPU, which also
+   covers an Intel Arc (whose driver reports it as discrete) or a driver that names the wrong type. **Automatic** is the
+   engine's own rule; **Off** lets immediate back in.
+3. Or set `[gfx] present_guard = on` in `%APPDATA%\EmblemWeave\play\fefw.ini` (portable installs: `data\play\fefw.ini`),
+   or `present_mode = mailbox`. A hand-written `present_mode = immediate` still wins over the guard.
+4. A launcher update replaces the engine sources but not the built game: press **Rebuild** once on Overview, or the
+   running `fefw.exe` keeps the old engine.
+
+If it still resets, attach `fefw.log` and the crash report from the run folder to the issue.
 
 ## Updating without rebuilding the game (#56)
 

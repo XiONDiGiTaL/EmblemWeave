@@ -99,6 +99,9 @@ std::shared_ptr<AudioSink> sink() {
         if (!chosen) chosen = std::make_shared<NullSink>();
         const std::string wav = config_get_str("audio", "wav_dump", "");
         if (!wav.empty()) chosen = make_wav_tee(chosen, wav);
+        // The EQ sits outside the WAV tee, so a dump records what the player hears (equalized and limited), and it is always present so
+        // the menu can switch it live. Disabled or flat, it is a pass-through.
+        chosen = make_eq_sink(chosen);
         g_sink = chosen;
         NXLOG_I("audio", "host audio sink: %s", g_sink->name());
     }

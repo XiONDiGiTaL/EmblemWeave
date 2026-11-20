@@ -910,6 +910,7 @@ const VkPipelineDynamicStateCreateInfo* pipeline_dynamic_state() {
 
 // A constant bank read past its bound size gives zero on the console; translated shaders index banks with values read from them (the
 // light loops of the game's lighting compute shaders run past their 896-byte block), and without robust access those reads go anywhere.
+// The per-pipeline extension is preferred; without it vk_device.cpp enables the core robustBufferAccess feature instead (level 3).
 const void* ubo_robustness() {
     auto make = [](VkPipelineRobustnessBufferBehaviorEXT ubo) {
         VkPipelineRobustnessCreateInfoEXT r = {VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT};
@@ -922,6 +923,8 @@ const void* ubo_robustness() {
                                                    v2 = make(VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT);
     static const bool on = nxrt::config_get_bool("nvn", "robust_ubo", true);
     const int level = on ? device().features().ubo_robustness : 0;
+    // 3 is the core robustBufferAccess device feature enabled by vk_device.cpp on GPUs without VK_EXT_pipeline_robustness; it needs no
+    // per-stage pNext (and there is no VkPipelineRobustnessCreateInfoEXT for it).
     return level == 2 ? &v2 : level == 1 ? &v1 : nullptr;
 }
 

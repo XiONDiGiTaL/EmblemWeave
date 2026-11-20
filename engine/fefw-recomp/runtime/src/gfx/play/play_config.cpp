@@ -108,14 +108,14 @@ bool pick_word(const std::string& k, const std::string& v, const std::vector<con
 // The words the file uses for the display extras enums, indexed by the enum value (the first word of each list is the default's).
 const std::vector<const char*> kHdrModeWords = {"off", "auto", "on", "native"};
 const std::vector<const char*> kHdrFormatWords = {"auto", "hdr10", "scrgb"};
-const std::vector<const char*> kUpscaleWords = {"off", "fsr1", "fsr3", "dlss", "xess", "nis", "dlaa"};
+const std::vector<const char*> kUpscaleWords = {"off", "fsr1", "fsr3", "dlss", "xess", "nis", "dlaa", "mako", "fsr4"};
 const std::vector<const char*> kUpscaleQualityWords = {"native", "quality", "balanced", "performance", "ultra_performance", "custom"};
 const std::vector<const char*> kLatencyWords = {"off", "auto", "on", "boost"};
 // The upscale words accepted when reading (spatial is an alias of fsr1) and the enum value each one means.
-const std::vector<const char*> kUpscaleReadWords = {"off", "fsr1", "spatial", "fsr3", "dlss", "xess", "nis", "dlaa"};
+const std::vector<const char*> kUpscaleReadWords = {"off", "fsr1", "spatial", "fsr3", "dlss", "xess", "nis", "dlaa", "mako", "fsr4"};
 const extras::UpscaleMode kUpscaleFromWord[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Fsr1,
                                                 extras::UpscaleMode::Fsr3, extras::UpscaleMode::Dlss, extras::UpscaleMode::Xess, extras::UpscaleMode::Nis,
-                                                extras::UpscaleMode::Dlaa};
+                                                extras::UpscaleMode::Dlaa, extras::UpscaleMode::Mako, extras::UpscaleMode::Fsr4};
 
 // Splits on '\n'. Line i of the result is line i+1 of the file (for error messages).
 std::vector<std::string> split_lines(const std::string& text) {
@@ -131,6 +131,34 @@ std::vector<std::string> split_lines(const std::string& text) {
         pos = nl + 1;
     }
     return lines;
+}
+
+// The ten comma-separated gains of [audio] eq_bands. Every value must be a finite number in -12..12; anything else names the
+// position that is wrong, which is more useful than silently accepting a curve of the wrong length.
+bool parse_eq_bands(const std::string& v, double out[audio::kEqBandCount], std::string* msg) {
+    const std::string bad = "eq_bands must be " + std::to_string(audio::kEqBandCount) + " comma-separated numbers from -12 to 12";
+    size_t at = 0;
+    for (int i = 0; i < audio::kEqBandCount; ++i) {
+        const size_t comma = v.find(',', at);
+        if (i + 1 < audio::kEqBandCount && comma == kNpos) {
+            *msg = bad + " (found " + std::to_string(i) + ")";
+            return false;
+        }
+        if (i + 1 == audio::kEqBandCount && comma != kNpos) {
+            *msg = bad + " (more than " + std::to_string(audio::kEqBandCount) + ")";
+            return false;
+        }
+        const std::string part = trim(v.substr(at, comma == kNpos ? kNpos : comma - at));
+        double db = 0.0;
+        if (!to_double(part, &db) || db < -12.0 || db > 12.0) {
+            *msg = bad + " (band " + std::to_string(i + 1) + " is '" + part + "')";
+            return false;
+        }
+        out[i] = db;
+        if (comma == kNpos) return true;
+        at = comma + 1;
+    }
+    return true;
 }
 
 // Cuts a trailing comment: a '#' or ';' that follows a space or tab.
@@ -515,6 +543,30 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                 if (w == "5.1" || w == "surround" || w == "6") { s->audio.channels = 6; return true; }
                 *msg = k + " must be 2 (stereo) or 6 (5.1 surround), got '" + v + "'";
                 return false;
+            }
+            if (k == "eq") return set_bool(&s->audio.eq_enabled);
+            if (k == "eq_preamp") return set_real(-12.0, 12.0, &s->audio.eq_preamp);
+            if (k == "eq_preset") {
+                const std::string name = lower(v);
+                const int preset = name == "custom" ? audio::kEqPresetCustom : audio::eq_preset_from_name(v.c_str());
+                if (preset < 0 && name != "custom") {
+                    *msg = "eq_preset must be flat, bass, treble, vocal, warm, v-shape, night or custom, got '" + v + "'";
+                    return false;
+                }
+                s->audio.eq_preset = preset >= 0 ? audio::eq_preset_name(preset) : std::string("custom");
+                // A named preset carries its curve. eq_bands is written after this line, so an explicit curve still wins.
+                if (const float* db = audio::eq_preset_db(preset)) {
+                    for (int i = 0; i < audio::kEqBandCount; ++i) s->audio.eq_bands[i] = db[i];
+                }
+                return true;
+            }
+            if (k == "eq_bands") {
+                std::string why;
+                if (!parse_eq_bands(v, s->audio.eq_bands, &why)) {
+                    *msg = why;
+                    return false;
+                }
+                return true;
             }
             break;
         case Sec::Hdr: {
@@ -1003,6 +1055,15 @@ std::string format_settings(const Settings& s) {
     kv("volume", num_exact(s.audio.volume));
     kv("mute_unfocused", flag(s.audio.mute_unfocused));
     kv("device", s.audio.device.empty() ? std::string("default") : s.audio.device);
+    kv("eq", flag(s.audio.eq_enabled));
+    kv("eq_preset", s.audio.eq_preset.empty() ? std::string("custom") : lower(s.audio.eq_preset));
+    kv("eq_preamp", num_exact(s.audio.eq_preamp));
+    std::string bands;
+    for (int i = 0; i < audio::kEqBandCount; ++i) {
+        if (i) bands += ", ";
+        bands += num_exact(s.audio.eq_bands[i]);
+    }
+    kv("eq_bands", bands);
     kv("channels", s.audio.channels == 6 ? std::string("6") : std::string("2"));
 
     o += "\n[hdr]\n";

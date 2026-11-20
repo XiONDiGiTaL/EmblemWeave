@@ -77,8 +77,8 @@ typedef struct NxModFile {
 } NxModFile;
 typedef void (*NxModFileFn)(const NxModFile* file, void* user);
 
-/* (version 4) A mod's panel in the Mods window ([gfx] mods_key, default F8). The window lists every mod's panel as a section that folds
- * open; the panel function draws the section's contents with these widgets, each frame the window is open.
+/* (version 4) A mod's panel in the F1 menu's Mods tab. The tab lists every mod's panel as a section that folds
+ * open; the panel function draws the section's contents with these widgets, each frame the tab is open.
  *
  * The panel function runs on the thread that presents frames, NOT the game's main thread, while the game keeps running. It may read
  * guest memory (check is_mapped first) and change the mod's own variables, but it must not call call_guest or change game state that
@@ -180,12 +180,12 @@ typedef struct NxModApi {
 
     /* ---- version 4 (check api->version >= 4 before use) ---- */
 
-    /* Adds a section titled `title` to the Mods window (see NxModUi): fn(ui, user) draws its contents each frame the window is open
+    /* Adds a section titled `title` to the F1 menu's Mods tab (see NxModUi): fn(ui, user) draws its contents each frame the tab is open
      * and the section is unfolded. From nxmod_init or later. Returns 1, 0 when an argument is missing. Without an overlay (headless
      * runs, or the overlay switched off) the panel is never drawn. */
     int (*add_panel)(const char* title, NxModPanelFn fn, void* user);
 
-    /* 1 while the Mods window is on screen (the game gets no input meanwhile). Any thread. */
+    /* 1 while the Mods tab is on screen (the game gets no input meanwhile). Any thread. */
     int (*panel_visible)(void);
 } NxModApi;
 

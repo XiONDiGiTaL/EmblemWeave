@@ -225,7 +225,7 @@ pub fn low_memory(g: &Graphics) -> Graphics {
         // absent; it fills the smaller picture without a vendor file.
         n.upscaling = "FSR 1.0".into();
     }
-    if matches!(n.upscaling.as_str(), "FSR 3.1" | "DLSS" | "DLAA" | "XeSS") {
+    if matches!(n.upscaling.as_str(), "FSR 4.1.2" | "FSR 3.1" | "DLSS" | "DLAA" | "XeSS") {
         n.upscale_quality = "Performance".into();
     }
     n.frame_gen = "Off".into();

@@ -15,6 +15,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "nxrt/input_source.h"
+#include "play/play_audio_ui.h"
 #include "play/play_ui.h"
 
 NXTEST_GROUP(play_ui)
@@ -146,6 +147,73 @@ NXTEST(default_settings_draw_20_frames) {
     run_frames(host, 20);
     CHECK_EQ(host.applies, 0);   // drawing never applies by itself
     CHECK_EQ(host.begins, 0);
+}
+
+// The floating panel is a window of its own drawn while the settings window is current; this catches a Begin/End or
+// table/draw-list mistake without a renderer.
+NXTEST(audio_enhancements_panel_draws_beside_the_settings_page) {
+    Headless ui;
+    play::Settings settings = play::default_settings();
+    settings.audio.eq_enabled = true;
+    settings.audio.eq_bands[0] = 6.0;
+    play::audio_ui::State state;
+    state.eq_open = true;
+    for (int i = 0; i < 3; ++i) {
+        ImGui::NewFrame();
+        ImGui::Begin("Controls");
+        const play::audio_ui::Edit edit = play::audio_ui::enhancements_window(settings.audio, state);
+        CHECK(edit == play::audio_ui::Edit::None);
+        ImGui::End();
+        ImGui::Render();
+    }
+    CHECK(state.eq_open);
+}
+
+NXTEST(audio_volume_can_return_above_100_after_lowering_from_a_boost) {
+    play::AudioSettings a;
+    a.volume = 2.0;
+    play::audio_ui::State state;
+    CHECK(play::audio_ui::apply_volume(a, state, 100.0));
+    CHECK(a.volume == 1.0);
+    CHECK(!state.boost_warning);
+    CHECK(play::audio_ui::apply_volume(a, state, 150.0));
+    CHECK(a.volume == 1.5);
+    CHECK(!state.boost_warning);
+    CHECK(play::audio_ui::apply_volume(a, state, 200.0));
+    CHECK(a.volume == 2.0);
+}
+
+NXTEST(audio_volume_gate_requires_the_boost_confirmation) {
+    play::AudioSettings a;
+    play::audio_ui::State state;
+    CHECK(!play::audio_ui::apply_volume(a, state, 150.0));
+    CHECK(state.boost_warning);
+    CHECK(a.volume == 1.0);
+    // What the modal's "I know the risks" button does before the next drag.
+    a.volume = state.boost_pending / 100.0;
+    CHECK(a.volume == 1.5);
+    state.boost_warning = false;
+    CHECK(play::audio_ui::apply_volume(a, state, 175.0));
+    CHECK(a.volume == 1.75);
+    CHECK(play::audio_ui::apply_volume(a, state, 200.0));
+    CHECK(a.volume == 2.0);
+}
+
+NXTEST(audio_boost_warning_draws_in_the_settings_window) {
+    Headless ui;
+    play::Settings settings = play::default_settings();
+    play::audio_ui::State state;
+    state.boost_warning = true;
+    state.boost_pending = 150.0;
+    for (int i = 0; i < 3; ++i) {
+        ImGui::NewFrame();
+        ImGui::Begin("Controls");
+        CHECK(!play::audio_ui::boost_warning(settings.audio, state));
+        ImGui::End();
+        ImGui::Render();
+    }
+    CHECK(state.boost_warning);
+    CHECK(settings.audio.volume == 1.0);
 }
 
 NXTEST(every_tab_draws_with_default_settings) {

@@ -7,9 +7,33 @@
 #include <mutex>
 #include <set>
 
+#include "nxrt/movie_vdec.h"
 #include "test_framework.h"
 
 NXTEST_GROUP(media_vdec)   // outside the #if: CMake registers the group from this line whether or not dav1d is built
+
+// A packet held while DecodeAsync waits for room belongs to the stream generation captured at entry. Backpressure alone must keep it; a Flush
+// (new generation) or Stop must discard it, or a seek would feed an old non-keyframe into the new stream.
+NXTEST(held_packet_is_invalidated_only_by_flush_or_stop) {
+    using namespace nxrt::media;
+    CHECK(movie_held_packet_is_valid(7, 7, false));    // normal backpressure: generation unchanged
+    CHECK(!movie_held_packet_is_valid(7, 8, false));   // Flush: new queue generation
+    CHECK(!movie_held_packet_is_valid(7, 7, true));    // Stop
+    CHECK(!movie_held_packet_is_valid(7, 8, true));
+}
+
+// The input queue bound that stopped the opening movie's 3301-packet backlog (issue #29) and the byte cap that keeps large packets from
+// taking the same room as hundreds of small ones. The real DecodeAsync waits on exactly this predicate.
+NXTEST(movie_packet_queue_is_bounded) {
+    using namespace nxrt::media;
+    CHECK(movie_packet_queue_has_room(0, 0, 1));
+    CHECK(movie_packet_queue_has_room(kMovieMaxQueuedPackets - 1, 0, 1));
+    CHECK(!movie_packet_queue_has_room(kMovieMaxQueuedPackets, 0, 1));
+    CHECK(movie_packet_queue_has_room(1, kMovieMaxQueuedBytes - 10, 10));
+    CHECK(!movie_packet_queue_has_room(1, kMovieMaxQueuedBytes - 9, 10));
+    // One packet larger than the byte cap is let in when the queue is empty, rather than making the movie unable to start.
+    CHECK(movie_packet_queue_has_room(0, 0, kMovieMaxQueuedBytes + 1));
+}
 
 #if __has_include(<dav1d/dav1d.h>)
 #include <dav1d/dav1d.h>

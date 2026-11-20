@@ -19,9 +19,11 @@ mod engine;
 #[cfg(windows)]
 mod exe_icon;
 mod gamedata;
+mod i18n;
 mod ingame;
 mod jobs;
 mod logo;
+mod manifest;
 mod memory;
 mod mods;
 mod onboarding;
@@ -29,6 +31,7 @@ mod pad;
 mod pages;
 mod patches;
 mod perf;
+mod performance;
 mod platform;
 mod portable;
 mod portraits;
@@ -44,7 +47,7 @@ mod updater;
 mod widgets;
 
 use config::Config;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use gamedata::GameData;
 use jobs::{Job, JobKind, JobResult};
 use pages::Page;
@@ -106,6 +109,10 @@ impl ToastAction {
             ToastAction::InstallUpdate => "Update now",
         }
     }
+
+    fn translated_label(self) -> String {
+        crate::i18n::tr(self.label())
+    }
 }
 
 /// A question the user must answer before an action runs.
@@ -114,6 +121,9 @@ pub enum Confirm {
     SafeGraphics,
     RestoreGraphics,
     CancelJob(JobKind),
+    /// The player moved the master volume above 100%. The value is the
+    /// percentage they asked for; it is applied only after "I know the risks".
+    AudioBoost(u32),
 }
 
 pub struct App {
@@ -189,8 +199,13 @@ fn clock() -> String {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
-        theme::configure_fonts(&cc.egui_ctx);
         let (mut config, warning) = Config::load();
+        i18n::set_language(config.ui_language);
+        theme::configure_fonts(&cc.egui_ctx, config.ui_language);
+        // An older release carried the upstream Tauri launcher beside the engine.
+        // The updated launcher removes that folder in the background; the engine
+        // sources beside it are left untouched.
+        std::thread::spawn(crate::engine::remove_legacy_launcher);
         if !config.onboarding.introduced {
             config.onboarding.introduced = true;
             // A configuration with game paths belongs to someone who used the
@@ -215,6 +230,9 @@ impl App {
                 crate::engine::root().unwrap_or_else(|| install.join("engine").join("fefw-recomp"));
             Some(crate::updater::finish_interrupted_update(&install, &engine))
         });
+        // The previous build is kept in `backups\`; one an older version wrote beside the launcher moves in here, so
+        // the install root never collects `.old` files.
+        crate::updater::migrate_legacy_backup();
         // The game's taskbar icon comes from fefw.exe, which a build or the
         // engine can replace: make it ours again at every start, off the render
         // thread because the executable is rewritten on disk.
@@ -329,6 +347,9 @@ impl App {
             }
         }
         let _ = last_boot;
+        if app.config.discord.enabled {
+            app.discord.start_launcher();
+        }
         if let Some(w) = warning {
             app.notify(w, Tone::Warn);
         }
@@ -351,7 +372,7 @@ impl App {
     }
 
     pub fn note(&mut self, text: impl Into<String>, tone: Tone) {
-        let text = text.into();
+        let text = crate::i18n::tr(&text.into());
         // The crash report carries the last few of these.
         crate::crash::note(&text);
         self.activity.push(Activity {
@@ -473,7 +494,7 @@ impl App {
             self.start(JobKind::Repair);
             return;
         }
-        match engine::play(&self.config.graphics, &self.config.audio) {
+        match engine::play(&self.config.graphics, &self.config.audio, &self.config.performance) {
             Ok(()) => {
                 self.minimize_after_play = self.config.minimize_on_play;
                 self.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok);
@@ -814,10 +835,10 @@ impl App {
                             .inner_margin(egui::Margin::symmetric(14, 10))
                             .show(ui, |ui| {
                                 ui.set_max_width(420.0);
-                                ui.label(RichText::new(&t.text).size(13.5).color(p.ink));
+                                ui.label(crate::i18n::text(&t.text).size(13.5).color(p.ink));
                                 if let Some(action) = t.action {
                                     ui.add_space(theme::SPACE_XS);
-                                    if widgets::button(ui, &p, action.label(), true).clicked() {
+                                    if widgets::button(ui, &p, &action.translated_label(), true).clicked() {
                                         clicked = Some(action);
                                     }
                                 }
@@ -858,7 +879,13 @@ impl App {
                     "Restore",
                 ),
                 Confirm::CancelJob(k) => ("Stop this task?", k.title(), "Stop"),
+                Confirm::AudioBoost(_) => (
+                    "Enable boost above 100%?",
+                    "This raises the master volume above 100%, up to 200% (about +6 dB). Sustained loud output can damage speakers, headphones or your hearing. The engine's limiter prevents digital clipping, but it does not make a loud signal safe for your ears or your equipment. Start low and turn it up only as far as you need.",
+                    "I know the risks",
+                ),
             };
+            let cancel_label = if matches!(confirm, Confirm::AudioBoost(_)) { "Cancel" } else { "Keep" };
             let decision = std::cell::Cell::new(None::<bool>);
             let shown = widgets::modal(
                 ctx,
@@ -868,14 +895,14 @@ impl App {
                 "This action is applied to the current configuration.",
                 480.0,
                 |ui| {
-                    ui.label(RichText::new(body).color(p.body));
+                    ui.label(crate::i18n::text(body).color(p.body));
                 },
                 |ui| {
                     ui.horizontal(|ui| {
                         if widgets::button(ui, &p, action, true).clicked() {
                             decision.set(Some(true));
                         }
-                        if widgets::button(ui, &p, "Keep", true).clicked() {
+                        if widgets::button(ui, &p, cancel_label, true).clicked() {
                             decision.set(Some(false));
                         }
                     });
@@ -909,6 +936,10 @@ impl App {
                             {
                                 j.request_cancel();
                             }
+                        }
+                        Some(Confirm::AudioBoost(pct)) => {
+                            self.config.audio.master = (pct as f32 / 100.0).clamp(0.0, 2.0);
+                            self.notify("Master volume boost enabled. The next Play writes it; keep the level sensible.", Tone::Warn);
                         }
                         None => {}
                     }
@@ -1020,7 +1051,11 @@ impl eframe::App for App {
         }
         // The game's F1 menu is the other place its display and audio settings
         // are changed: take those back so the pages show what it will use.
-        if crate::engine::adopt(&mut self.config.graphics, &mut self.config.audio) {
+        if crate::engine::adopt(
+            &mut self.config.graphics,
+            &mut self.config.audio,
+            &mut self.config.performance,
+        ) {
             ctx.request_repaint();
         }
         if self.boot_on_start
@@ -1045,11 +1080,6 @@ impl eframe::App for App {
         if self.update.restart {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
-        }
-        if self.config.hud.fps {
-            // An indicator that only moves when something else does measures
-            // nothing: draw every frame while it is up.
-            ctx.request_repaint();
         }
         self.shortcuts(ctx);
         shell::top_bar(self, ctx);
@@ -1263,7 +1293,7 @@ fn shell_control(
     }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tip)
+        .on_hover_text(crate::i18n::tr(tip))
 }
 
 /// A line with round caps, matching the softened corners of the painted box.
@@ -1455,9 +1485,39 @@ problem: {e}"
 
 fn main() -> eframe::Result<()> {
     crash::install();
+    let args: Vec<String> = std::env::args().collect();
+    // Read-only evidence for issue #70: hash the effective ExeFS and RomFS from
+    // a `.nup` and from an extracted folder, write both manifests and the
+    // per-path differences as JSON, and exit 2 when they differ. This does not
+    // build, play, write the overlay, or change any runtime setting. It runs
+    // before first-run setup or a tool fetch so the comparison itself only
+    // reads the two trees and writes its report.
+    if let Some(i) = args.iter().position(|a| a == "--compare-data") {
+        let nup = args.get(i + 1).cloned().unwrap_or_default();
+        let folder = args.get(i + 2).cloned().unwrap_or_default();
+        if nup.is_empty() || folder.is_empty() {
+            eprintln!("usage: EmblemWeave.exe --compare-data <game.nup> <folder> [report.json]");
+            std::process::exit(1);
+        }
+        let out = args
+            .get(i + 3)
+            .filter(|arg| !arg.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| "data-compare.json".to_string());
+        match manifest::compare_data_cli(
+            std::path::Path::new(&nup),
+            std::path::Path::new(&folder),
+            std::path::Path::new(&out),
+        ) {
+            Ok(report) => std::process::exit(if report.equal { 0 } else { 2 }),
+            Err(e) => {
+                eprintln!("compare-data: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     // Before anything reads the settings: a fresh copy keeps its data beside the program, so the first run writes its config there.
     platform::adopt_portable_on_first_run();
-    let args: Vec<String> = std::env::args().collect();
     // A copy without `tools\bin` carries the toolchain into it on first run, in the background; the Requirements page
     // reports the pieces as Carried once they land. `--fetch-tools` does the same in the foreground.
     portable::auto_start();

@@ -78,6 +78,8 @@ Put "$root\runtime\third_party\renhdrum\NOTICE" 'licenses\NOTICE.RenHDrum.txt'
 Put "$root\runtime\third_party\renhdrum\SHA256SUMS" 'licenses\RenHDrum.SHA256SUMS.txt'
 Put (Join-Path $RtDir 'fefw_rt.dll') 'fefw_rt.dll'
 Put (Join-Path $RtDir 'fonts\DejaVuSans.ttf') 'fonts\DejaVuSans.ttf'
+Put (Join-Path $RtDir 'fonts\Sora.ttf') 'fonts\Sora.ttf'
+Put "$root\runtime\assets\fonts\OFL-Sora.txt" 'licenses\OFL.Sora.txt'
 Get-ChildItem $RtDir -Filter 'astcdec-*-shared.dll' -ErrorAction SilentlyContinue | ForEach-Object { Put $_.FullName $_.Name }
 Put (Join-Path $RtDir 'fefw_rt.lib') 'tools\build\sdk\fefw_rt.lib'
 foreach ($f in 'fefw_rt_api.h', 'fefw_stub.cpp', 'fefw_fma.c') { Put "$root\game-build\fefw\src\$f" "tools\build\sdk\$f" }

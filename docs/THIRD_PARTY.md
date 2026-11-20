@@ -40,6 +40,23 @@ race fix (ObeliskChamber issue 81, fixed in PR 93) is reimplemented in EmblemWea
 | --- | --- |
 | `engine/fefw-recomp/runtime/src/mem/write_watch.cpp` | the late heap-write retry for a page released while an import freeze was ending, reimplemented for EmblemWeave's handler |
 
+## MAKO
+
+MAKO by Eugenio Segala and contributors, GPL-3.0-or-later. Its single-pass spatial scaler (`spatial_scaling.comp`) is
+adapted as EmblemWeave's optional `mako` upscaler, a sharpened-cubic reconstruction with contrast-aware anti-ringing and
+bounded local sharpening. The engine's version is a Vulkan compute port that shares the runtime's HDR pre-scaling and
+output-pass plumbing; it is not MAKO's frame-generation or layer code.
+
+| EmblemWeave file | Adapted from |
+| --- | --- |
+| `engine/fefw-recomp/runtime/src/gfx/extras/mako_spatial.cpp`, `mako_spatial.h` | `engine/mako-render/src/shaders/spatial_scaling.comp` at MAKO commit `504611d42b73d33320456911e9bf92215dbb8cbf`, restructured as an nxrt `SpatialUpscaler` |
+| `engine/fefw-recomp/runtime/scripts/gen_mako_shaders.py` | the adapted shader source and the build/validation convention of `gen_nis_shaders.py`; it writes `src/gfx/extras/mako_shaders.inc` |
+
+MAKO is GPL-3.0-or-later; the adapted files are used under GPL-3.0, whose text is the repository-root `LICENSE`. Source:
+https://github.com/eugeniosegala/MAKO, Copyright (C) 2025-2026 Eugenio Segala and contributors. The adaptation keeps the
+algorithm's structure (clamped Catmull-Rom weights, anti-ringing, local sharpening) and changes the buffer and push-constant
+layout to nxrt's.
+
 ## Eglantine
 
 Eglantine by the Eglantine Community, GPL-3.0-or-later. Its renderer, texture-cache and upscaler work was reviewed for

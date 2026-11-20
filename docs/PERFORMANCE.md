@@ -36,13 +36,17 @@ anchors on an intermediate frame, so the first pointer movement jumped the windo
 `SetWindowPlacement` build). The launcher now clears `WS_MAXIMIZE` and sets the rect with `SetWindowPos`
 directly, which has no transition, and asks DWM to disable its transitions for the window. The borderless edges
 start in `WM_NCHITTEST`, the same pass as the caption, instead of waiting for `ViewportCommand::BeginResize`
-after the frame; Windows owns the sizing loop and the resize cursors.
+after the frame; Windows owns the sizing loop and the resize cursors. The caption band is measured from the
+shell each frame instead of fixed at 270/330 px: at 1440 wide the old band covered the Game/Build/Tools chips
+and the right-hand actions, so a press there could start a window move. The band is now the non-interactive
+logo/title strip after the rail toggle and the empty strip between the chips and the right-hand actions.
 
 | Change | Before | After | How it was measured |
 | --- | --- | --- | --- |
 | Maximized caption press | 182,182 -> 307,0 -> 321,0 -> 328,0 over ~50 ms with no pointer movement (the OS restore animation) | 301,0 1440x900 as the drag starts, with no transition frame | scripted Win32 probe, `GetWindowRect` with the launcher forced to the foreground |
+| Caption hit-test band | 270-1110 px at 1440 wide, covering the chips and right actions | 44-240 px (logo/title) and 572-896 px (centre) at 1440 wide; the rail toggle, the chips through x=568 and the right actions at 900-1432 are client | `WM_NCHITTEST` scan every 4 px at y=20 against the installed launcher |
 | Dragging on from that same press | 14 px jump when the move loop anchored on an intermediate `SetWindowPlacement` frame | 0 px settled lag over 80 one-pixel steps | the same probe, 1 px steps with a 20 ms settle |
-| Restored caption drag | an injected event of catch-up in the old probe | 0 px settled lag over 80 one-pixel steps | the same probe, 1 px steps with a 20 ms settle |
+| Restored caption drag | an injected event of catch-up in the old probe | 0 px settled lag over 40 one-pixel steps, from the brand strip (x=100) and the centre (x=700) | the same probe, 1 px steps with a 20 ms settle |
 | Left and right borderless edges | `BeginResize` was sent after the frame that saw the press | 0-1 px settled lag; the left edge 300->200 grew the window 1440->1540 and stayed there; a second run 340->280 grew it 1440->1500; the right edge tracked to 1620 | the same probe, 1 px steps with a 20 ms settle |
 | Resize cursors | egui set its own icon | Windows' hit-test cursors: WE on left/right, NS on top/bottom, NWSE/NESW on the corners | `GetCursorInfo` after moving the real pointer to each band |
 | Hit-test codes | caption only | caption 2; left 10, right 11, top 12, bottom 15, top-left 13, bottom-right 17 | `WM_NCHITTEST` sent at each band |
@@ -50,10 +54,83 @@ after the frame; Windows owns the sizing loop and the resize cursors.
 A minimize/restore after a dragged restore came back at the same rect with the placement at normal (`showCmd` 1),
 so clearing `WS_MAXIMIZE` did not leave a maximized placement behind.
 
-The probe uses synthetic Win32 input, so it measures the window manager's response, not a physical mouse.
-Snapped and half-screen window states were not exercised.
+The earlier pass's probe uses synthetic Win32 input, so it measures the window manager's response, not a physical
+mouse. The section below covers the released-drag test that found the remaining glide.
+
+## This pass: an injected window-arrangement mod, not launcher interpolation
+
+The remaining post-release glide was not in EmblemWeave. A caller stack captured in
+`WM_WINDOWPOSCHANGING` during a controlled release named the mover:
+
+```
+USER32.dll <- COMCTL32.dll <- COMCTL32.dll <- slick-window-arrangement_1.0.2_229520.dll
+<- COMCTL32.dll <- COMCTL32.dll <- USER32.dll <- USER32.dll <- USER32.dll <- ntdll.dll
+```
+
+That DLL is Windhawk's **Slick Window Arrangement 1.0.2**, injected into every process. Its
+`WM_EXITSIZEMOVE` handler computes the release velocity and starts a 10 ms timer that calls `SetWindowPos` for up to
+50 frames, which is exactly the observed glide. The launcher's own move is the native `DefWindowProc` loop; it does no
+window-position interpolation. Reapplying `DwmSetWindowAttribute(DWMWA_TRANSITIONS_FORCEDISABLED)` to the visible
+HWND and bypassing winit's dummy `WM_MOUSEMOVE` both left the glide in place, because neither is the mover.
+
+`platform.rs` now registers the mod's own `Windhawk_Unsubclass_slick-window-arrangement` message and sends it to the
+launcher HWND when `WM_ENTERSIZEMOVE` arrives. The mod removes only this window's subclass for that drag; Windows' native
+move loop, `WS_THICKFRAME`, hit testing, restore path, DPI handling and Snap behavior are not replaced. If the mod is
+absent, the message is an inert registered message.
+
+| Measurement | Before | After | How it was measured |
+| --- | ---: | ---: | --- |
+| Restored drag, post-release drift | `472 -> 487 -> 500 -> 511 -> 521 -> 535 -> 541 -> 554` over ~800 ms (82 px) | `862` at release and `862` through 800 ms (0 px) | `work/drag-callers.csv` and `work/final-drag-restored.csv`, `GetWindowRect` every 16–100 ms after the synthetic button-up |
+| Short drag (`1,2,4,8` px) | not previously measured after release | window left follows each pointer step 1:1; `870` at release and `870` through 800 ms | `work/final-drag-short.csv`, physical-mouse shield installed |
+| Rapid drag (`5,25,80,180` px) | not previously measured after release | same 1:1 tracking; `1050` at release and `1050` through 800 ms | `work/final-drag-rapid.csv` |
+| Slow drag (40 steps of 4 px) | not previously measured after release | 1:1 tracking throughout; `1006` at release and `1006` through 800 ms | `work/drag-slow.csv`, same fixed build |
+| Maximized caption press | restore transition and post-release motion | first 2 px stay maximized; the 5 px sample restores under the pointer, then tracks 1:1; `206` at release and `206` through 800 ms | `work/final-drag-maximize.csv` |
+| DWM transitions | `DwmSetWindowAttribute` result was not recorded | `hr=0x00000000 (success)` for `DWMWA_TRANSITIONS_FORCEDISABLED`, and `0x00000000` for the corner preference | `target/release/data/logs/launcher.log` written at install |
+| Content versus HWND | — | a 240×28 client-relative top-bar crop before and after a 40 px drag had `mean_abs_rgb=0.00`, `0/6720` changed pixels while the HWND moved `206 -> 246` | screen capture with `CopyFromScreen`, same client-relative coordinates |
+
+`DwmGetWindowAttribute` returns `0x80070057` for `DWMWA_TRANSITIONS_FORCEDISABLED` on this system; the probe reports
+that query but it is not a useful success signal. The install log records the actual `DwmSetWindowAttribute` result.
+
+The final runs used synthetic `SendInput` with a low-level hook that blocks physical pointer motion, not a physical
+mouse. The short, rapid, slow and restored samples all tracked 1:1 at the sampled positions. A true Windows-arranged
+state could not be produced on this host: `SnapAssist=0` and `IsWindowArranged` stayed false after the tested keyboard
+and edge-drag attempts, so the snapped-state check remains unverified rather than passed. No launcher style or native
+Snap handling was changed, but that is a code-preservation argument, not a snapped-state measurement.
 
 No gameplay FPS number is claimed: this pass changes the launcher frame, not the engine.
+
+## This pass: the adaptive controller and the XiØN interface
+
+The controller (`runtime/src/gfx/perf.cpp`) is a measurement and policy layer over systems that already existed. It
+classifies CPU, GPU, VRAM, streaming, shader, scheduling and synchronization pressure from a 300-frame ring, reports
+P50/P95/P99 and both lows, selects a workload-shaped scene profile, and writes a once-a-second `perf_status.json`
+for the launcher. The only visual setting it changes live is a sampler LOD offset (`lod_bias_auto`), and only when
+Adaptive texture detail is explicitly enabled. It never rewrites the user's `[nvn] lod_bias`; disabling the switch
+releases the offset to zero.
+
+The optimization controls are mappings onto working subsystems, not duplicates: `tex_prep`/`tex_prep_threads`/
+`tex_prep_mb` (background texture preparation), `staging_ring_mb` (reusable upload ring), `pool_upload_ms` (per-frame
+upload budget), `residency`/`residency_percent` (VRAM demotion), `lean_draws`, `prewarm`/`prewarm_threads` and
+`gpl`/`gpl_threads` (pipeline work), and `[perf]` (controller policy). The F1 menu and launcher share the same keys.
+
+| Area | Result | Evidence |
+| --- | --- | --- |
+| Controller measurement | 300-frame ring; P50/P95/P99, 1 % and 0.1 % lows, CPU/GPU/upload/replay split, bottleneck and scene classification | `gfx_perf` tests: percentiles, every bottleneck class, scene override, mip-offset rise/release, manual and menu hold |
+| Mip-bias action | applied only under GPU/VRAM pressure, stepped, capped, released when pressure ends | `gfx_perf` tests read both the controller status and `gfx::tuning().lod_bias_auto` |
+| Launcher/F1 mapping | one key map (`src/performance.rs`), adopted back from `fefw.ini` | launcher tests cover keys, labels and clamping; engine tests cover the write/adopt path |
+| ReShade overlay | supported `[STYLE]` custom style only (`StyleIndex=4`, `Col*` keys), with a `.xion-backup` | inspected ReShade's `runtime_gui.cpp` style switch; no binary modification |
+| XiØN UI | shared `nxrt/ui_theme.h`; Sora ships as the Latin face; F1 has 9 tabs and all native overlays use the same tokens | runtime targets compile; visual inspection through the game was **not** performed in this pass |
+
+**No gameplay FPS improvement is claimed for this pass.** The controller's effect is conditional by design, and no
+representative scene capture (crowded city, village, colosseum, combat, dungeon, cinematic, transitions) was run here.
+The correct A/B procedure is the one below: same scene, alternating windows, `[perf] adaptive_mip` on and off, with
+the reported 1 % low and P99 as the primary numbers. Until those runs exist, the controller is infrastructure and
+visibility, not a promised speedup.
+
+Geometry LOD, GPU occlusion culling, adaptive shadow/effect resizing, dynamic resolution, GPU-driven indirect draws
+and object batching are marked unsupported in the F1/launcher pages. The game chooses render targets, shadow maps
+and scene traversal before the replay path can see a draw; changing them live would be a renderer rewrite. Dynamic
+resolution remains a start-up render-scale choice, distinct from the upscaler.
 
 ## What the engine already does
 

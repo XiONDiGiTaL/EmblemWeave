@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Temporal upscaling / anti-aliasing on the HDR scene before the game's tone map: AMD FSR 3.1 (FidelityFX API, temporal_ffx.cpp), NVIDIA DLSS /
+// Temporal upscaling / anti-aliasing on the HDR scene before the game's tone map: AMD FSR 4.1.2 / 3.1 (FidelityFX API, temporal_ffx.cpp), NVIDIA DLSS /
 // DLAA (Streamline, temporal_dlss.cpp) and Intel XeSS (libxess.dll, temporal_xess.cpp). The SDKs are loaded at run time; nothing is linked.
 //
 // Inputs (docs/S14.md, "Temporal upscaling"):
@@ -75,6 +75,7 @@ TemporalBackend* temporal_dlss(void* gfx_device, bool dlaa);
 TemporalBackend* temporal_xess(void* gfx_device);   // Intel XeSS (temporal_xess.cpp); null unless the device was made for it at start
 // True when the backend's DLLs can be found (for the F1 page; does not load anything).
 bool temporal_ffx_available();
+bool temporal_ffx_fsr4();   // the current FidelityFX context runs an FSR 4 provider (FSR 4.1.2), not FSR 3.1
 bool temporal_dlss_available();
 bool temporal_xess_available();   // libxess.dll is found
 bool temporal_xess_ready();       // libxess.dll is loaded and the Vulkan instance and device were made with what XeSS needs

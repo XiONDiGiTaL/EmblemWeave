@@ -275,6 +275,7 @@ TemporalImage as_input(const Target& t) {
 
 const char* mode_name(UpscaleMode m) {
     switch (m) {
+        case UpscaleMode::Fsr4: return "FSR 4";
         case UpscaleMode::Fsr3: return "FSR 3";
         case UpscaleMode::Dlss: return "DLSS";
         case UpscaleMode::Dlaa: return "DLAA";
@@ -377,9 +378,9 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
         }
         return VK_NULL_HANDLE;
     }
-    TemporalBackend* be = mode == UpscaleMode::Fsr3   ? temporal_ffx(gfx_device)
-                        : mode == UpscaleMode::Xess ? temporal_xess(gfx_device)
-                                                    : temporal_dlss(gfx_device, mode == UpscaleMode::Dlaa);
+    TemporalBackend* be = mode == UpscaleMode::Fsr4 || mode == UpscaleMode::Fsr3 ? temporal_ffx(gfx_device)
+                        : mode == UpscaleMode::Xess                             ? temporal_xess(gfx_device)
+                                                                                : temporal_dlss(gfx_device, mode == UpscaleMode::Dlaa);
     if (!be) return VK_NULL_HANDLE;
     if (!ensure(s, s.color, render, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal colour") || !ensure(s, s.depth, render, VK_FORMAT_R32_SFLOAT, "temporal depth") ||
         !ensure(s, s.motion, render, VK_FORMAT_R16G16_SFLOAT, "temporal motion") || !ensure(s, s.output, out, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal output"))

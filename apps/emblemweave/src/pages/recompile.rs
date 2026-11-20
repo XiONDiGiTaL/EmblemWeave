@@ -4,7 +4,7 @@ use crate::jobs::{JobKind, Stage, StageStatus, PIPELINE_STAGES};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
@@ -20,14 +20,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let ready = app.game.decoded.is_some() && app.game.segments.iter().all(|s| s.ok());
             if widgets::primary_button(ui, &p, if running { "Running…" } else { "Run pipeline" }, ready && !running)
-                .on_disabled_hover_text("Decode the main module on Game Setup first")
+                .on_disabled_hover_text(crate::i18n::tr("Decode the main module on Game Setup first"))
                 .clicked()
             {
                 app.start(JobKind::Pipeline);
             }
             ui.add_space(theme::SPACE_M);
             ui.vertical(|ui| {
-                ui.label(RichText::new("Functions to recover").font(theme::semibold(13.0)).color(p.ink));
+                ui.label(crate::i18n::text("Functions to recover").font(theme::semibold(13.0)).color(p.ink));
                 let mut lift = app.lift_limit as f32;
                 if widgets::Slider::new(&mut lift, 500.0..=40_000.0).logarithmic(true).enabled(!running).show(ui, &p).changed() {
                     app.lift_limit = lift.round() as usize;
@@ -57,7 +57,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         widgets::stage_list(ui, &p, &stages);
         if !running && app.last_pipeline.is_some() {
-            ui.label(RichText::new("The last completed run is summarised below.").size(12.5).color(p.muted));
+            ui.label(crate::i18n::text("The last completed run is summarised below.").size(12.5).color(p.muted));
         }
     });
 
@@ -86,7 +86,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if let Some(out) = &s.output {
                 ui.horizontal(|ui| {
                     widgets::kv(ui, &p, "Output", &out.display().to_string());
-                    if ui.link("Open folder").clicked() {
+                    if ui.link(crate::i18n::text("Open folder")).clicked() {
                         let _ = std::process::Command::new("explorer").arg(out).spawn();
                     }
                 });
@@ -98,12 +98,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         widgets::section(ui, &p, "Log", |ui| {
             if let Some(path) = &app.last_job_log_path {
                 ui.label(
-                    RichText::new(format!("Written to {}", path.display())).size(12.0).color(p.muted),
+                    crate::i18n::text(format!("Written to {}", path.display())).size(12.0).color(p.muted),
                 );
             }
             egui::ScrollArea::vertical().max_height(crate::widgets::list_height(ui, 0.24)).stick_to_bottom(true).show(ui, |ui| {
                 for line in &app.last_job_log {
-                    ui.label(RichText::new(line).font(theme::mono(12.0)).color(p.body));
+                    ui.label(crate::i18n::text(line).font(theme::mono(12.0)).color(p.body));
                 }
             });
         });
@@ -111,6 +111,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn metric(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &str) {
-    ui.label(RichText::new(value).font(theme::display(22.0)).color(p.ink));
-    ui.label(RichText::new(label).size(12.0).color(p.muted));
+    ui.label(crate::i18n::text(value).font(theme::display(22.0)).color(p.ink));
+    ui.label(crate::i18n::text(label).size(12.0).color(p.muted));
 }

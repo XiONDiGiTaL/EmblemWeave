@@ -5,7 +5,7 @@ use crate::cheats::{self, Code, Entry, Memory, Table};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -132,10 +132,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut enabled_changed = false;
     widgets::section(ui, &p, "Cheat codes (Atmosphere format)", |ui| {
         if app.cheats_ui.files.is_empty() {
-            ui.label(RichText::new("No cheat files yet. Add codes below or import a .txt from a cheats folder.").color(p.muted));
+            ui.label(crate::i18n::text("No cheat files yet. Add codes below or import a .txt from a cheats folder.").color(p.muted));
         }
         for f in &app.cheats_ui.files {
-            ui.label(RichText::new(&f.name).font(theme::semibold(14.0)).color(p.ink));
+            ui.label(crate::i18n::text(&f.name).font(theme::semibold(14.0)).color(p.ink));
             if let Some(e) = &f.error {
                 widgets::status_line(ui, &p, Tone::Bad, "Could not read it", e);
             }
@@ -145,7 +145,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.add_space(12.0);
                     if c.master {
                         widgets::pill(ui, &p, "master", Tone::Accent);
-                        ui.label(RichText::new(&c.name).color(p.body)).on_hover_text("Runs whenever any code of this file is on");
+                        ui.label(crate::i18n::text(&c.name).color(p.body)).on_hover_text(crate::i18n::tr("Runs whenever any code of this file is on"));
                         return;
                     }
                     let mut is_on = on.contains(&c.name);
@@ -157,8 +157,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         }
                         enabled_changed = true;
                     }
-                    ui.label(RichText::new(&c.name).color(p.ink));
-                    ui.label(RichText::new(format!("{} words", c.words.len())).size(12.0).color(p.muted));
+                    ui.label(crate::i18n::text(&c.name).color(p.ink));
+                    ui.label(crate::i18n::text(format!("{} words", c.words.len())).size(12.0).color(p.muted));
                 });
             }
             ui.horizontal(|ui| {
@@ -170,14 +170,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(6.0);
         }
         ui.separator();
-        ui.label(RichText::new("Add codes").font(theme::semibold(14.0)).color(p.ink));
+        ui.label(crate::i18n::text("Add codes").font(theme::semibold(14.0)).color(p.ink));
         ui.label(
-            RichText::new("Paste codes as they are shared for Atmosphere: a [Name] line, then the code's hex words. Several codes can go in one paste.")
+            crate::i18n::text("Paste codes as they are shared for Atmosphere: a [Name] line, then the code's hex words. Several codes can go in one paste.")
                 .size(12.5)
                 .color(p.muted),
         );
         ui.horizontal(|ui| {
-            ui.label("File name");
+            ui.label(crate::i18n::text("File name"));
             ui.add(egui::TextEdit::singleline(&mut app.cheats_ui.new_name).hint_text("my-codes").desired_width(200.0));
         });
         ui.add(egui::TextEdit::multiline(&mut app.cheats_ui.new_codes).font(egui::TextStyle::Monospace).desired_rows(6).desired_width(f32::INFINITY).hint_text("[Max gold]\n04100000 01234567 0098967F"));
@@ -203,7 +203,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             if let Err(e) = &parsed {
                 if !app.cheats_ui.new_codes.trim().is_empty() {
-                    ui.label(RichText::new(e).color(p.bad));
+                    ui.label(crate::i18n::text(e).color(p.bad));
                 }
             }
             if widgets::button(ui, &p, "Import .txt…", true).clicked() {
@@ -224,7 +224,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.label(
-            RichText::new("Codes that patch the game's instructions do nothing here (the code is compiled ahead of time); codes that change data, follow pointers or test buttons work. Button tests read the first controller.")
+            crate::i18n::text("Codes that patch the game's instructions do nothing here (the code is compiled ahead of time); codes that change data, follow pointers or test buttons work. Button tests read the first controller.")
                 .size(12.5)
                 .color(p.muted),
         );
@@ -247,12 +247,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.label(
-            RichText::new("Switch on a script entry to find its pattern in the game's memory; the values below it then show live. Type a value and press Enter to write it, or tick Freeze to hold it.")
+            crate::i18n::text("Switch on a script entry to find its pattern in the game's memory; the values below it then show live. Type a value and press Enter to write it, or tick Freeze to hold it.")
                 .size(12.5)
                 .color(p.muted),
         );
         for (ti, t) in app.cheats_ui.tables.iter_mut().enumerate() {
-            egui::CollapsingHeader::new(RichText::new(&t.table.name).font(theme::semibold(14.0)).color(p.ink)).id_salt(("table", ti)).default_open(true).show(ui, |ui| {
+            egui::CollapsingHeader::new(crate::i18n::text(&t.table.name).font(theme::semibold(14.0)).color(p.ink)).id_salt(("table", ti)).default_open(true).show(ui, |ui| {
                 let entries = t.table.entries.clone();
                 for e in &entries {
                     entry(ui, &p, t, e, None, game.as_ref(), &mut message);
@@ -308,12 +308,12 @@ fn entry(ui: &mut egui::Ui, p: &crate::theme::Palette, t: &mut TableState, e: &E
         ui.horizontal(|ui| {
             let mut on = t.active.contains(&e.id) || t.pending.contains_key(&e.id);
             let r = widgets::toggle(ui, p, &mut on);
-            ui.label(RichText::new(&e.description).font(theme::semibold(13.5)).color(p.ink));
+            ui.label(crate::i18n::text(&e.description).font(theme::semibold(13.5)).color(p.ink));
             if e.unsupported_script {
-                ui.label(RichText::new("uses script commands EmblemWeave cannot run").size(12.0).color(p.warn));
+                ui.label(crate::i18n::text("uses script commands EmblemWeave cannot run").size(12.0).color(p.warn));
             }
             if let Some(n) = t.notes.get(&e.id) {
-                ui.label(RichText::new(n).size(12.0).color(p.muted));
+                ui.label(crate::i18n::text(n).size(12.0).color(p.muted));
             }
             if r.changed() {
                 if on {
@@ -351,12 +351,12 @@ fn entry(ui: &mut egui::Ui, p: &crate::theme::Palette, t: &mut TableState, e: &E
         addr = cheats::resolve(&e.address, parent, &t.symbols);
         ui.horizontal(|ui| {
             ui.add_space(if parent.is_some() { 24.0 } else { 0.0 });
-            ui.label(RichText::new(&e.description).color(p.body));
+            ui.label(crate::i18n::text(&e.description).color(p.body));
             match (addr, game) {
                 (Some(a), Some(g)) => {
                     let mut buf = vec![0u8; var.size()];
                     let value = if g.read(a, &mut buf) { var.format(&buf, e.signed) } else { "??".into() };
-                    ui.label(RichText::new(&value).font(theme::mono(13.0)).color(p.ink)).on_hover_text(format!("{a:#x}"));
+                    ui.label(crate::i18n::text(&value).font(theme::mono(13.0)).color(p.ink)).on_hover_text(format!("{a:#x}"));
                     let text = t.edits.entry(e.id.clone()).or_default();
                     let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text("new value"));
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -374,7 +374,7 @@ fn entry(ui: &mut egui::Ui, p: &crate::theme::Palette, t: &mut TableState, e: &E
                         text.clear();
                     }
                     let mut frozen = t.frozen.contains_key(&e.id);
-                    if ui.checkbox(&mut frozen, "Freeze").changed() {
+                    if ui.checkbox(&mut frozen, crate::i18n::text("Freeze")).changed() {
                         if frozen {
                             t.frozen.insert(e.id.clone(), (a, buf));
                         } else {
@@ -383,10 +383,10 @@ fn entry(ui: &mut egui::Ui, p: &crate::theme::Palette, t: &mut TableState, e: &E
                     }
                 }
                 (None, _) => {
-                    ui.label(RichText::new("switch on the entry above").size(12.0).color(p.muted));
+                    ui.label(crate::i18n::text("switch on the entry above").size(12.0).color(p.muted));
                 }
                 (Some(_), None) => {
-                    ui.label(RichText::new("game not running").size(12.0).color(p.muted));
+                    ui.label(crate::i18n::text("game not running").size(12.0).color(p.muted));
                 }
             }
         });
@@ -435,12 +435,12 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
     let game = cheats::game();
     widgets::section(ui, &p, "Units on the map", |ui| {
         ui.label(
-            RichText::new("Finds the units in the game's memory by the layout their records share (experimental: results may include units not on the map). Search once a map is loaded, and again on the next map.")
+            crate::i18n::text("Finds the units in the game's memory by the layout their records share (experimental: results may include units not on the map). Search once a map is loaded, and again on the next map.")
                 .size(12.5)
                 .color(p.muted),
         );
         ui.label(
-            RichText::new("Each unit has three switches: Infinite HP (HP held at max, even from 0), Quick level-up (one level every quarter second, to 40) and Max stats (max HP and every stat set to 200). The in-game menu's Quick tab (F10) has the same switches.")
+            crate::i18n::text("Each unit has three switches: Infinite HP (HP held at max, even from 0), Quick level-up (one level every quarter second, to 40) and Max stats (max HP and every stat set to 200). The in-game menu's Quick tab (F10) has the same switches.")
                 .size(12.5)
                 .color(p.body),
         );
@@ -457,7 +457,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                 app.cheats_ui.searching = Some(slot);
             }
             if game.is_none() {
-                ui.label(RichText::new("Start the game first.").color(p.muted));
+                ui.label(crate::i18n::text("Start the game first.").color(p.muted));
             }
         });
         if let Some(done) = app.cheats_ui.searching.as_ref().and_then(|s| s.lock().unwrap().take()) {
@@ -469,7 +469,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
         egui::Grid::new("quick-units").num_columns(6).spacing([12.0, 6.0]).striped(true).show(ui, |ui| {
             if !app.cheats_ui.units.is_empty() {
                 for h in ["Slot", "Lv", "HP", QUICK[0].0, QUICK[1].0, QUICK[2].0] {
-                    ui.label(RichText::new(h).font(theme::semibold(12.0)).color(p.muted));
+                    ui.label(crate::i18n::text(h).font(theme::semibold(12.0)).color(p.muted));
                 }
                 ui.end_row();
             }
@@ -482,7 +482,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                 let hp = u16::from_le_bytes([b[0x20], b[0x21]]);
                 let level = b[cheats::unit::LEVEL as usize];
                 let on = app.cheats_ui.unit_cheats.entry(a).or_default();
-                ui.label(RichText::new(format!("{}", n + 1)).color(p.ink)).on_hover_text(format!("record at {a:#x}"));
+                ui.label(crate::i18n::text(format!("{}", n + 1)).color(p.ink)).on_hover_text(format!("record at {a:#x}"));
                 ui.label(format!("{level}"));
                 ui.label(format!("{hp} / {max_hp}"));
                 for (i, (_, help)) in QUICK.iter().enumerate() {
@@ -491,7 +491,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
-        ui.label(RichText::new("\"Unit can move again\" is not available yet: where the game keeps a unit's moved flag has not been found.").size(12.0).color(p.muted));
+        ui.label(crate::i18n::text("\"Unit can move again\" is not available yet: where the game keeps a unit's moved flag has not been found.").size(12.0).color(p.muted));
     });
     // The cheat thread holds each switched-on cheat every tick, so they keep
     // applying while the menu is closed and to a unit that has just died.
@@ -507,7 +507,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
         s.freezes.retain(|(a, _)| !app.cheats_ui.units.iter().any(|u| *a >= *u && *a < *u + cheats::unit::LEN as u64));
         if s.rejected > 0 {
             let n = s.rejected;
-            ui.label(RichText::new(format!("{n} writes were refused by the game: the record may have moved (find units again).")).size(12.0).color(p.warn));
+            ui.label(crate::i18n::text(format!("{n} writes were refused by the game: the record may have moved (find units again).")).size(12.0).color(p.warn));
         }
     }
 }

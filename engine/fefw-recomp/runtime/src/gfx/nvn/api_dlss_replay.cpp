@@ -3,7 +3,7 @@
 // host upscaler of [dlss] upscaler, then copies the result into the output texture (a blit: any colour format, any resolution scale).
 //   taau      the built-in temporal upscaler (extras/taau.h), default: jitter, motion vectors, depth, the bias mask and the reset are used
 //   bilinear  the input at its unjittered position, no history (a reference, and what Eden showed before its tensor fix)
-//   fsr3      AMD FSR 3.1 through the FidelityFX DLLs (extras/temporal_ffx.cpp), else taau
+//   fsr3      AMD FidelityFX through the SDK 2.4 DLLs (FSR 4.1.2 or 3.1, extras/temporal_ffx.cpp), else taau
 //   dlss      NVIDIA DLSS through Streamline (extras/temporal_dlss.cpp; Streamline is started before the Vulkan instance), else taau
 //   xess      Intel XeSS Super Resolution through libxess.dll (extras/temporal_xess.cpp; the device is made for it at start), else taau
 //   auto      dlss when Streamline started, else xess when libxess.dll was found and the device was made for it, else fsr3 when its DLLs
@@ -74,7 +74,7 @@ const char* upscaler_name(Upscaler u) {
     switch (u) {
         case Upscaler::Taau: return "taau (built-in temporal)";
         case Upscaler::Bilinear: return "bilinear";
-        case Upscaler::Fsr3: return "FSR 3";
+        case Upscaler::Fsr3: return extras::temporal_ffx_fsr4() ? "FidelityFX (FSR 4.1.2)" : "FidelityFX (FSR 3.1)";
         case Upscaler::Dlss: return "DLSS (Streamline)";
         case Upscaler::Xess: return "XeSS";
         default: return "auto";
@@ -86,7 +86,7 @@ render_status::Backend status_backend(Upscaler u) {
     switch (u) {
         case Upscaler::Taau: return render_status::Backend::Taau;
         case Upscaler::Bilinear: return render_status::Backend::Bilinear;
-        case Upscaler::Fsr3: return render_status::Backend::Fsr3;
+        case Upscaler::Fsr3: return extras::temporal_ffx_fsr4() ? render_status::Backend::Fsr4 : render_status::Backend::Fsr3;
         case Upscaler::Dlss: return render_status::Backend::Dlss;
         case Upscaler::Xess: return render_status::Backend::Xess;
         default: return render_status::Backend::Auto;
@@ -532,7 +532,8 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
     History& h = n.hist;
 
     Upscaler u = s.upscaler;
-    const render_status::Backend configured = status_backend(s.upscaler);
+    render_status::Backend configured = status_backend(s.upscaler);
+    if (s.upscaler == Upscaler::Fsr3 && extras::upscale_mode() == extras::UpscaleMode::Fsr4) configured = render_status::Backend::Fsr4;
     if (u == Upscaler::Auto)
         u = extras::temporal_dlss_started() ? Upscaler::Dlss
           : extras::temporal_xess_ready()   ? Upscaler::Xess
@@ -637,7 +638,17 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
             h.valid = false;   // the built-in history is not kept meanwhile
             ++n.evals;
             g_in_use.store(static_cast<int>(u), std::memory_order_relaxed);
-            render_status::set_upscaler(configured, status_backend(u), static_cast<int>(in_img.width), static_cast<int>(in_img.height),
+            // For FidelityFX, the provider that ran decides the name (FSR 4.1.2 or 3.1); the Upscaling mode says which one was asked for.
+            // Before the first context the same query says FSR 3.1, so read it only here, after run_sdk made the context.
+            const render_status::Backend ran = status_backend(u);
+            render_status::Backend asked = ran;
+            if (u == Upscaler::Fsr3) {
+                const extras::UpscaleMode m = extras::upscale_mode();
+                asked = m == extras::UpscaleMode::Fsr4 ? render_status::Backend::Fsr4
+                      : m == extras::UpscaleMode::Fsr3 ? render_status::Backend::Fsr3 : ran;
+            }
+            if (s.upscaler == Upscaler::Auto) asked = render_status::Backend::Auto;
+            render_status::set_upscaler(asked, ran, static_cast<int>(in_img.width), static_cast<int>(in_img.height),
                                         static_cast<int>(out_img.width), static_cast<int>(out_img.height));
             maybe_dump(f, n, *e, c, rm, n.sdk[3].img);
             feed_framegen(f, n, prep, in_img, tf.jitter, sdk_reset, tf.depth_inverted, true);

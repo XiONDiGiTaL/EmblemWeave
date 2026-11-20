@@ -58,6 +58,9 @@ jobs:
           echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
           echo "preparing $version (dry run: $dry)"
 
+      - name: Check every release pointer names this version
+        run: python tools/check_release.py
+
   windows:
     needs: prepare
     runs-on: windows-latest
@@ -173,7 +176,9 @@ jobs:
           ls -lh dist
           python tools/verify_archive.py "dist/EmblemWeave-v${VERSION}-windows-x64.zip" \
             --require "EmblemWeave-v${VERSION}/EmblemWeave.exe" \
-            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt"
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/ffmpeg/include/libavcodec/avcodec.h" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/ffmpeg/COPYING.LGPLv2.1"
           python tools/verify_archive.py "dist/EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" --require linux-x64/spirv_harness
           sha256sum dist/*
       - name: Write the notes

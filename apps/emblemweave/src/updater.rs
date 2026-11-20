@@ -9,7 +9,7 @@
 //! data, built game and fetched tools stay where they are. A running executable
 //! cannot be overwritten on Windows, but it can be replaced after exit: the new
 //! binary is staged as `EmblemWeave.exe.new`, the current one is kept as
-//! `EmblemWeave.exe.old`, and a short script swaps them and starts the new one.
+//! `backups\EmblemWeave.exe.old`, and a short script swaps them and starts the new one.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -205,9 +205,48 @@ pub fn current_exe() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
-/// Where the build replaced by the last update is kept.
+/// Where the build replaced by the last update is kept: `backups\EmblemWeave.exe.old` beside the launcher, so an
+/// update never leaves an `.old` file in the install root.
+///
+/// Only one previous build is kept, however many times this copy updates.
 pub fn backup_exe() -> Option<PathBuf> {
-    current_exe().map(|p| PathBuf::from(format!("{}.old", p.display())))
+    current_exe().map(|exe| backups_dir(&exe).join(BACKUP_FILE))
+}
+
+/// The folder beside the launcher that keeps the previous build.
+fn backups_dir(exe: &Path) -> PathBuf {
+    exe.with_file_name("backups")
+}
+
+/// The one previous build the updater keeps, in `backups\`.
+const BACKUP_FILE: &str = "EmblemWeave.exe.old";
+
+/// Move the `EmblemWeave.exe.old` an earlier version wrote beside the launcher into `backups\`, so the install root is
+/// clear again after the first start of this build.
+pub fn migrate_legacy_backup() {
+    if let Some(exe) = current_exe() {
+        migrate_backup(&exe);
+    }
+}
+
+fn migrate_backup(exe: &Path) {
+    // EmblemWeave.exe becomes EmblemWeave.exe.old.
+    let legacy = exe.with_extension("exe.old");
+    if !legacy.is_file() {
+        return;
+    }
+    let dir = backups_dir(exe);
+    let kept = dir.join(BACKUP_FILE);
+    if kept.is_file() {
+        // Restore offers the newest previous build, which `kept` already holds; this older one is only clutter.
+        let _ = std::fs::remove_file(&legacy);
+        return;
+    }
+    // A move keeps the install from holding two copies of the same build; if it fails the file stays put and the next
+    // start tries again.
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::rename(&legacy, &kept);
+    }
 }
 
 pub fn has_backup() -> bool {
@@ -351,11 +390,10 @@ pub fn install(
     release_tag: &str,
 ) -> Result<(), String> {
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
-    let backup = backup_exe().ok_or("the launcher's own path is unknown")?;
     let staged = install_into(
         new_exe,
         &target,
-        &backup,
+        &backups_dir(&target),
         crate::engine::run_dir().as_deref(),
         engine_root,
         keep_previous,
@@ -371,7 +409,7 @@ pub fn install(
 fn install_into(
     new_exe: &Path,
     target: &Path,
-    backup: &Path,
+    backups: &Path,
     play: Option<&Path>,
     engine_root: Option<&Path>,
     keep_previous: bool,
@@ -399,9 +437,14 @@ fn install_into(
         crate::engine::mark_build_carried_in(&engine, play, &version_text(release_tag));
     }
     if keep_previous {
+        // The backup lives in `backups\`; the folder does not exist yet on an install that has never updated.
+        if let Err(e) = std::fs::create_dir_all(backups) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("creating the backups folder: {e}"));
+        }
         // Copying a running executable is allowed; replacing it is not. Do it only once the release is known to be
         // complete, so a failed update does not overwrite the version Restore would go back to.
-        if let Err(e) = std::fs::copy(&target, &backup) {
+        if let Err(e) = std::fs::copy(&target, backups.join(BACKUP_FILE)) {
             let _ = std::fs::remove_file(&staged);
             return Err(format!("keeping the current version: {e}"));
         }
@@ -710,7 +753,7 @@ mod tests {
         let staged = install_into(
             &release.join("EmblemWeave.exe"),
             &install.join("EmblemWeave.exe"),
-            &install.join("EmblemWeave.exe.old"),
+            &install.join("backups"),
             Some(&play),
             Some(&engine),
             true,
@@ -734,10 +777,53 @@ mod tests {
         assert_eq!(read(&install.join("docs/PACKAGE.md")), "release manifest");
         assert_eq!(read(&staged), "new launcher");
         assert_eq!(read(&install.join("EmblemWeave.exe")), "old launcher");
-        assert_eq!(read(&install.join("EmblemWeave.exe.old")), "old launcher");
+        // The backup goes in `backups\`, which the update creates; nothing is written beside the launcher.
+        assert_eq!(
+            read(&install.join("backups/EmblemWeave.exe.old")),
+            "old launcher"
+        );
+        assert!(!install.join("EmblemWeave.exe.old").exists());
         // The player's data is not part of the release overlay.
         assert_eq!(read(&install.join("data/config.json")), "player settings");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The build an older version kept beside the launcher is moved into `backups\`, so upgrading does not leave the
+    /// install root with an `.old` file after the update that starts using the folder.
+    #[test]
+    fn a_backup_beside_the_launcher_moves_into_the_backups_folder() {
+        let root = std::env::temp_dir().join(format!("ew-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe = root.join("EmblemWeave.exe");
+        write(&exe, "current launcher");
+        write(&root.join("EmblemWeave.exe.old"), "previous launcher");
+
+        migrate_backup(&exe);
+
+        assert!(!root.join("EmblemWeave.exe.old").exists());
+        assert_eq!(
+            read(&root.join("backups/EmblemWeave.exe.old")),
+            "previous launcher"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The root copy an older version left behind is older than the one the last update kept: the kept backup wins and
+    /// the root file is removed instead of replacing it.
+    #[test]
+    fn an_older_backup_beside_the_launcher_does_not_replace_the_kept_one() {
+        let root = std::env::temp_dir().join(format!("ew-migrate-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe = root.join("EmblemWeave.exe");
+        write(&exe, "current launcher");
+        write(&root.join("EmblemWeave.exe.old"), "older");
+        write(&root.join("backups/EmblemWeave.exe.old"), "kept");
+
+        migrate_backup(&exe);
+
+        assert!(!root.join("EmblemWeave.exe.old").exists());
+        assert_eq!(read(&root.join("backups/EmblemWeave.exe.old")), "kept");
         let _ = std::fs::remove_dir_all(root);
     }
 

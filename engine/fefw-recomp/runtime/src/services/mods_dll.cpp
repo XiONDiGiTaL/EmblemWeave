@@ -77,7 +77,7 @@ struct Editor {
     std::string owner_name;      // a runtime edit's owner, for the log
 };
 
-// A panel a mod added to the Mods window (add_panel, version 4)
+// A panel a mod added to the Mods tab (add_panel, version 4)
 struct Panel {
     std::string title;
     NxModPanelFn fn;
@@ -367,7 +367,7 @@ int64_t api_zstd_compress(const void* src, uint64_t src_size, void* dst, uint64_
     return st().codec.zstd_compress && (src || !src_size) ? st().codec.zstd_compress(src, src_size, dst, cap, level) : -1;
 }
 
-// ---- version 4: panels in the overlay's Mods window ---------------------------------------------------------------------------------
+// ---- version 4: panels in the overlay's Mods tab ---------------------------------------------------------------------------------
 std::atomic<bool> g_panel_visible{false};
 
 int api_add_panel(const char* title, NxModPanelFn fn, void* user) {
@@ -522,6 +522,15 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
 
 }  // namespace
 
+bool site_list_known() { return lifted_sites().known; }
+
+bool site_in_build(uint64_t main_base, const char* kind, uint64_t addr) {
+    if (!addr || !main_base || addr < main_base || addr >= main_base + 0x400000000ull) return true;
+    const SiteList& l = lifted_sites();
+    if (!l.known) return true;
+    return l.sites.count({kind, addr}) != 0;
+}
+
 int sites_missing(const std::string& mod_dir) {
     namespace stdfs = std::filesystem;
     const SiteList& l = lifted_sites();
@@ -645,7 +654,7 @@ void load_dll_mods(uint64_t base, uint64_t frame_update) {
     else NXLOG_W(kTag, "the game names no frame boundary: code mods are loaded but never started");
 }
 
-// ---- the Mods window's panels (mod API version 4) ----
+// ---- the Mods tab's panels (mod API version 4) ----
 std::vector<PanelInfo> panels() {
     std::lock_guard<std::mutex> lk(st().mu);
     std::vector<PanelInfo> out;

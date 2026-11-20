@@ -9,6 +9,7 @@ namespace nxrt::gfx {
 struct Tuning {
     std::atomic<int> anisotropy{0};        // 0 = what the game's samplers ask for; 2, 4, 8, 16 = at least this much on every filtering sampler
     std::atomic<float> lod_bias{0.0f};     // added to the LOD bias of every sampler (negative = sharper)
+    std::atomic<float> lod_bias_auto{0.0f};  // the adaptive controller's offset, added on top of lod_bias
     std::atomic<float> render_scale{0.0f};  // the NVN back end's resolution scale from the game's play settings ([display] render_scale); 0 = not set
     // A game's live scale on some floats of one fragment shader's uniform block (Pokopia: the fog strength on its height-fog pass). When the
     // scale is not 1, that block is bound from a copy in the upload ring with the chosen floats multiplied; the game's memory is left alone.

@@ -5,7 +5,7 @@ use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::{logo, updater, App, UpdateState};
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::time::Duration;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -14,14 +14,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         logo::show_lockup(ui, &p, 460.0_f32.min(ui.available_width()));
         ui.label(
-            RichText::new("A native PC recompilation of Fire Emblem: Fortune's Weave")
+            crate::i18n::text("A native PC recompilation of Fire Emblem: Fortune's Weave")
                 .size(15.0)
                 .color(p.body),
         );
         ui.horizontal(|ui| {
-            ui.label(RichText::new("by").color(p.muted));
+            ui.label(crate::i18n::text("by").color(p.muted));
             ui.hyperlink_to(
-                RichText::new("XiØN")
+                crate::i18n::text("XiØN")
                     .font(theme::semibold(15.0))
                     .color(p.accent_hi),
                 "https://github.com/XiONDiGiTaL",
@@ -47,7 +47,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         widgets::section(&mut cols[1], &p, "Project", |ui| {
             ui.label(
-                RichText::new(
+                crate::i18n::text(
                     "EmblemWeave is an independent project by XiØN. The source and every release live on GitHub; the other \
                      links above are mirrors and a fallback for when the main site or GitHub is unavailable.",
                 )
@@ -60,7 +60,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             widgets::kv(ui, &p, "Fallback", "emblemweave.xiondigital.workers.dev");
             ui.add_space(theme::SPACE_S);
             ui.label(
-                RichText::new("The tiles at the top of this page open each one in your browser. No account is needed to read the mirror or the fallback.")
+                crate::i18n::text("The tiles at the top of this page open each one in your browser. No account is needed to read the mirror or the fallback.")
                     .size(12.5)
                     .color(p.muted),
             );
@@ -69,7 +69,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "Legal", |ui| {
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "EmblemWeave is an independent project by XiØN. It is not affiliated with, endorsed by, or supported by \
                  Nintendo or Intelligent Systems. It contains no game code, no game assets, no firmware and no keys, and it \
                  downloads none. You must supply data from your own legally obtained copy of the game; EmblemWeave only \
@@ -87,7 +87,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 fn links(ui: &mut egui::Ui, p: &theme::Palette) {
     widgets::section(ui, p, "Links", |ui| {
         ui.label(
-            RichText::new("The project site, the source, its mirrors, and a fallback if the domain cannot be reached.")
+            crate::i18n::text("The project site, the source, its mirrors, and a fallback if the domain cannot be reached.")
                 .size(13.0)
                 .color(p.body),
         );
@@ -142,7 +142,7 @@ fn links(ui: &mut egui::Ui, p: &theme::Palette) {
         });
         ui.add_space(theme::SPACE_XS);
         ui.label(
-            RichText::new("Each tile opens in your browser. The mirrors carry the same source and releases, and none of them need an account.")
+            crate::i18n::text("Each tile opens in your browser. The mirrors carry the same source and releases, and none of them need an account.")
                 .size(12.0)
                 .color(p.muted),
         );
@@ -224,7 +224,7 @@ fn link_tile(
 fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
     widgets::section(ui, p, "Credits", |ui| {
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "A project is never one person. This is everyone whose work EmblemWeave stands on.",
             )
             .size(13.0)
@@ -345,11 +345,11 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
         }
         ui.add_space(theme::SPACE_XS);
         ui.label(
-            RichText::new("Hover over the credit line to pause it.")
+            crate::i18n::text("Hover over the credit line to pause it.")
                 .size(11.5)
                 .color(p.muted),
         );
-        response.on_hover_text("Pause the credits");
+        response.on_hover_text(crate::i18n::tr("Pause the credits"));
     });
 }
 
@@ -385,7 +385,7 @@ fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         if portable {
             ui.add_space(theme::SPACE_S);
             ui.label(
-                RichText::new(
+                crate::i18n::text(
                     "Move or copy this whole folder to take the saves and the game with it.",
                 )
                 .size(13.0)
@@ -410,7 +410,7 @@ fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             }
         });
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "Everything then lives in a `data` folder beside the program, so the whole thing can be moved, copied or kept on a stick, \
                  and no other copy on this PC sees its saves. The game folder that is already built stays where it was, and is built again \
                  inside this folder on the next build; nothing in the old profile is deleted. An unpacked release zip is portable from the \
@@ -422,46 +422,35 @@ fn storage(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     });
 }
 
-/// Discord Rich Presence while the game is running. The application id is
-/// public; no Discord token is stored or needed.
+/// Discord Rich Presence while the launcher or game is running. The
+/// application is built in; the player only chooses whether to show it.
 fn discord(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     widgets::section(ui, p, "Discord Rich Presence", |ui| {
         let mut enabled = app.config.discord.enabled;
         ui.horizontal(|ui| {
             if widgets::toggle(ui, p, &mut enabled).changed() {
                 app.config.discord.enabled = enabled;
+                if enabled {
+                    app.discord.start_launcher();
+                } else {
+                    app.discord.stop();
+                }
             }
             ui.label(
-                RichText::new(
-                    "Show \"Playing Fire Emblem: Fortune's Weave\" in Discord while the game runs",
+                crate::i18n::text(
+                    "Show EmblemWeave in Discord while the launcher or game runs",
                 )
                 .color(p.body),
             );
         });
         ui.add_space(theme::SPACE_S);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Application ID").size(12.5).color(p.muted));
-            ui.add(
-                egui::TextEdit::singleline(&mut app.config.discord.client_id)
-                    .hint_text("e.g. 123456789012345678")
-                    .desired_width(230.0)
-                    .font(theme::mono(12.0)),
-            );
-            ui.hyperlink_to("Create one", "https://discord.com/developers/applications");
-        });
-        ui.add_space(2.0);
-        let note = if enabled && app.config.discord.client_id.trim().is_empty() {
-            "Paste the Application ID from Discord's Developer Portal. It is public; the launcher stores no token. Presence appears after the next game start."
-        } else {
-            "The ID comes from your own Discord application; Rich Presence is not a bot and needs no token. The game's name is shown only while it runs."
-        };
-        ui.label(RichText::new(note).size(11.5).color(
-            if enabled && app.config.discord.client_id.trim().is_empty() {
-                p.warn
-            } else {
-                p.muted
-            },
-        ));
+        ui.label(
+            crate::i18n::text(
+                "Built in: no application ID, token, or Discord setup is needed. Discord must be running on this PC. It shows \"In the launcher\" here and \"Playing the campaign\" while the game runs.",
+            )
+            .size(11.5)
+            .color(p.muted),
+        );
     });
 }
 
@@ -474,7 +463,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             if widgets::toggle(ui, p, &mut check).changed() {
                 app.config.updates.check = check;
             }
-            ui.label(RichText::new("Check for updates when the launcher starts").color(p.body));
+            ui.label(crate::i18n::text("Check for updates when the launcher starts").color(p.body));
         });
         let busy = matches!(
             app.update.state,
@@ -483,7 +472,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         if !app.config.updates.skipped.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new(format!("{} is skipped.", app.config.updates.skipped))
+                    crate::i18n::text(format!("{} is skipped.", app.config.updates.skipped))
                         .size(12.0)
                         .color(p.muted),
                 );
@@ -500,7 +489,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             }
             if updater::has_backup()
                 && widgets::button(ui, p, "Restore the previous launcher", !busy)
-                    .on_hover_text("Puts back the launcher file the last update replaced, and restarts. Engine sources are not rolled back; the built game and your data are unchanged")
+                    .on_hover_text(crate::i18n::tr("Puts back the launcher file the last update replaced, and restarts. Engine sources are not rolled back; the built game and your data are unchanged"))
                     .clicked()
             {
                 match updater::restore_previous() {
@@ -508,14 +497,14 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                     Err(e) => app.notify(e, Tone::Bad),
                 }
             }
-            ui.hyperlink_to("All releases", format!("https://github.com/{}/releases", updater::REPO));
+            ui.hyperlink_to(crate::i18n::text("All releases"), format!("https://github.com/{}/releases", updater::REPO));
         });
         ui.add_space(theme::SPACE_S);
 
         match app.update.state.clone() {
             UpdateState::Idle => {
                 ui.label(
-                    RichText::new(
+                    crate::i18n::text(
                         "The launcher checks GitHub for a newer release and installs it in place. It replaces the launcher, the docs and the \
                          engine sources; your data, saves, built game, fetched tools and portable-storage choice are kept.",
                     )
@@ -590,7 +579,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                         app.install_update();
                     }
                     if !rel.page.is_empty() {
-                        ui.hyperlink_to("Release notes", &rel.page);
+                        ui.hyperlink_to(crate::i18n::text("Release notes"), &rel.page);
                     }
                     if widgets::button(ui, p, "Skip this version", true).clicked() {
                         app.config.updates.skipped = rel.tag.clone();
@@ -600,7 +589,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 });
                 if rel.asset.is_none() {
                     ui.label(
-                        RichText::new(
+                        crate::i18n::text(
                             "That release has no Windows download; use the release page.",
                         )
                         .size(12.0)
@@ -613,7 +602,7 @@ fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                         .id_salt("release-notes")
                         .max_height(crate::widgets::list_height(ui, 0.22))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(&rel.notes).size(12.5).color(p.body));
+                            ui.label(crate::i18n::text(&rel.notes).size(12.5).color(p.body));
                         });
                 }
             }

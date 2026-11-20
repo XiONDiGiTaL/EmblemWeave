@@ -667,8 +667,14 @@ void maybe_log_stats() {
 bool enabled() { return g_q != nullptr && g_running; }
 
 void install() {
-    // read once; the back end may be brought up again (tests): the wrappers go in again whenever volk loaded fresh entry points
-    static const int threads = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "replay_threads", 1), 1, 2));
+    // Read once; the back end may be brought up again (tests): the wrappers go in again whenever volk loaded fresh entry points. 0 is
+    // auto: one worker on a CPU with at least 8 logical processors, the render thread alone below that. Measured on the Dagsion street
+    // (#29): 16 threads, render work p50 17.8 -> 13.0 ms and 55 -> 77 presented frames a second with the worker; a 4-thread CPU has no
+    // spare core for it. An explicit 1 or 2 always wins.
+    const int64_t requested = config_get_int("nvn", "replay_threads", 0);
+    const unsigned hw = std::thread::hardware_concurrency();
+    static const int threads = requested >= 1 ? static_cast<int>(std::clamp<int64_t>(requested, 1, 2))
+                                              : (hw >= 8 ? 2 : 1);
     g_threads = threads;
     if (g_threads < 2 || g_running) return;
     if (!vkCmdDraw || !vkUpdateDescriptorSets || !vkEndCommandBuffer) {
@@ -706,8 +712,8 @@ void install() {
     q.stop.store(false);
     q.th = std::thread(worker_main);
     g_running = true;
-    NXLOG_I(kTag, "[nvn] replay_threads = 2: the render thread's Vulkan calls are made by a worker thread (nvn-rec), %zu MB queue",
-            kRingBytes >> 20);
+    NXLOG_I(kTag, "[nvn] replay_threads = 2%s: the render thread's Vulkan calls are made by a worker thread (nvn-rec), %zu MB queue",
+            requested < 1 ? " (auto: 8+ logical processors)" : "", kRingBytes >> 20);
 }
 
 void shutdown() {

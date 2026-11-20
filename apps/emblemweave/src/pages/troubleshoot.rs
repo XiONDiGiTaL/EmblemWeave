@@ -10,7 +10,7 @@ use crate::report;
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::path::PathBuf;
 
 #[derive(Default)]
@@ -46,8 +46,8 @@ fn row(ui: &mut egui::Ui, p: &theme::Palette, tone: Tone, title: &str, detail: &
     ui.horizontal_top(|ui| {
         widgets::status_dot(ui, p, tone);
         ui.vertical(|ui| {
-            ui.label(RichText::new(title).font(theme::semibold(13.5)).color(p.ink));
-            ui.label(RichText::new(detail).size(12.5).color(p.body));
+            ui.label(crate::i18n::text(title).font(theme::semibold(13.5)).color(p.ink));
+            ui.label(crate::i18n::text(detail).size(12.5).color(p.body));
         });
         if let Some(label) = action {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -129,7 +129,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     widgets::section(ui, &p, "Common fixes", |ui| {
         ui.horizontal_wrapped(|ui| {
             if widgets::button(ui, &p, "Check the build tools again", true)
-                .on_hover_text("Runs the same checks as Requirements; a newly installed tool is found without reopening the launcher.")
+                .on_hover_text(crate::i18n::tr("Runs the same checks as Requirements; a newly installed tool is found without reopening the launcher."))
                 .clicked()
             {
                 let rows = deps::refresh();
@@ -141,7 +141,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 && (app.game.romfs.is_some() || app.game.nup.is_some())
                 && app.running(JobKind::Engine).is_none();
             if widgets::button(ui, &p, "Repair the game build", can_repair)
-                .on_hover_text("Clears the compiled game folder and builds it again from your dump. Saves, mods and game files are not touched.")
+                .on_hover_text(crate::i18n::tr("Clears the compiled game folder and builds it again from your dump. Saves, mods and game files are not touched."))
                 .clicked()
             {
                 match crate::engine::clean_runtime_build() {
@@ -150,7 +150,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             if widgets::button(ui, &p, "Reset graphics to safe defaults", true)
-                .on_hover_text("Returns resolution, upscaler, frame limit and shader settings to the defaults. Your saves and game files are not touched. This is the first thing to try for a black screen.")
+                .on_hover_text(crate::i18n::tr("Returns resolution, upscaler, frame limit and shader settings to the defaults. Your saves and game files are not touched. This is the first thing to try for a black screen."))
                 .clicked()
             {
                 app.confirm = Some(crate::Confirm::SafeGraphics);
@@ -170,7 +170,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.add_space(theme::SPACE_S);
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "A black screen with working sound is almost always a shader cache or graphics setting problem. A build error is almost always a missing or mixed toolchain. The Requirements and Diagnostics pages name both.",
             )
             .size(12.5)
@@ -178,9 +178,41 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
+    widgets::section(ui, &p, "The graphics device was lost at startup (#72)", |ui| {
+        ui.label(
+            crate::i18n::text(
+                "If the game stops in its first seconds and the report says GPU DEVICE LOST with present mode immediate, and the GPU is an Intel one (Iris Xe, UHD, Core Ultra or Arc), Intel's Windows driver reset the device on the immediate present path. It is not a missing game file: the engine avoids that path on Intel graphics that share system memory. Install the newest Intel graphics driver, and press Rebuild once after a launcher update so the built game carries the fix.",
+            )
+            .size(12.5)
+            .color(p.body),
+        );
+        ui.add_space(theme::SPACE_S);
+        let safe = app.config.graphics.present_guard == "Always on";
+        ui.horizontal_wrapped(|ui| {
+            if widgets::button(ui, &p, if safe { "Safe present mode is on" } else { "Use the safe present mode" }, !safe)
+                .on_hover_text(crate::i18n::tr("Uses mailbox instead of immediate presentation on every GPU. The same switch is on Graphics > Display > Present mode safeguard; Off puts immediate back."))
+                .clicked()
+            {
+                app.config.graphics.present_guard = "Always on".into();
+                app.note("Safe present mode is on: the next start avoids the immediate present path", Tone::Ok);
+            }
+            if widgets::button(ui, &p, "Open Graphics", true).clicked() {
+                app.open(Page::Graphics);
+            }
+        });
+        ui.add_space(theme::SPACE_S);
+        ui.label(
+            crate::i18n::text(
+                "By hand, `[gfx] present_guard = on` in fefw.ini (or present_mode = mailbox) does the same. The game log line `the present-mode guard replaced immediate with ...` says when the engine acted.",
+            )
+            .size(12.0)
+            .color(p.muted),
+        );
+    });
+
     widgets::section(ui, &p, "Long sessions and memory", |ui| {
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "The engine reserves a large guest heap (12 GiB on this title) and stops itself at its host-memory limit (16 GiB by default). On a 16 GB PC, a long session followed by a scene that opens many voice banks can reach Windows' commit limit before the guard can write its own report. That is one plausible reading of the 0-frames freeze reported after about two hours of play; the attached freeze log did not contain a memory figure, so it is not proven yet.",
             )
             .size(12.5)
@@ -188,7 +220,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         );
         ui.add_space(theme::SPACE_S);
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "This release makes the next report answer the question: the engine's freeze file now records private commit, working set, the host memory guard's footprint and limit, system RAM/commit, and presented frames. If it happens again, create a report below. Do not delete fefw_freeze.txt: it is copied into the bundle automatically.",
             )
             .size(12.5)
@@ -208,7 +240,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "Report an issue", |ui| {
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "Write what happened. Create the bundle, then attach the generated .zip to the GitHub issue. The bundle includes your launcher settings, the newest task logs, the game log and any freeze or crash report; it is not uploaded until you attach it yourself.",
             )
             .size(12.5)
@@ -223,7 +255,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(theme::SPACE_S);
         ui.horizontal_wrapped(|ui| {
             if widgets::primary_button(ui, &p, "Create report bundle", true)
-                .on_hover_text("Writes a timestamped .zip under the launcher's data/reports folder. Nothing is sent anywhere.")
+                .on_hover_text(crate::i18n::tr("Writes a timestamped .zip under the launcher's data/reports folder. Nothing is sent anywhere."))
                 .clicked()
             {
                 match report::bundle(app, &app.trouble_ui.note) {
@@ -250,7 +282,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             let can_open = !app.trouble_ui.note.trim().is_empty();
             if widgets::button(ui, &p, "Open a GitHub issue", can_open)
-                .on_hover_text("Opens the repository's new-issue page with your description and build details prefilled. The report is not attached automatically; drag the .zip into the issue after it opens.")
+                .on_hover_text(crate::i18n::tr("Opens the repository's new-issue page with your description and build details prefilled. The report is not attached automatically; drag the .zip into the issue after it opens."))
                 .clicked()
             {
                 if app.trouble_ui.report.is_none() {
@@ -270,17 +302,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(theme::SPACE_S);
             ui.horizontal_wrapped(|ui| {
                 widgets::status_dot(ui, &p, report::tone(path));
-                ui.label(RichText::new(report::describe(path)).size(12.5).color(p.body));
+                ui.label(crate::i18n::text(report::describe(path)).size(12.5).color(p.body));
             });
         } else {
             ui.add_space(theme::SPACE_S);
-            ui.label(RichText::new("No report has been created in this session.").size(12.0).color(p.muted));
+            ui.label(crate::i18n::text("No report has been created in this session.").size(12.0).color(p.muted));
         }
     });
 
     widgets::section(ui, &p, "Still stuck?", |ui| {
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "The issue tracker is the right place for a reproducible bug. Include the report bundle and the exact step that fails. Do not open an issue for game data you do not own, and do not upload game files, keys or saves that contain personal information.",
             )
             .size(12.5)

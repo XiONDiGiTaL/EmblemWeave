@@ -112,6 +112,12 @@ bool same_settings(const Settings& a, const Settings& b) {
           da.chromatic_aberration == db.chromatic_aberration && da.fast_gpu_memory == db.fast_gpu_memory &&
           da.fewer_gpu_waits == db.fewer_gpu_waits))
         return false;
+    const AudioSettings &aa = a.audio, &ab = b.audio;
+    if (!(aa.volume == ab.volume && aa.mute_unfocused == ab.mute_unfocused && aa.device == ab.device && aa.eq_enabled == ab.eq_enabled &&
+          aa.eq_preset == ab.eq_preset && aa.eq_preamp == ab.eq_preamp))
+        return false;
+    for (int i = 0; i < nxrt::audio::kEqBandCount; ++i)
+        if (aa.eq_bands[i] != ab.eq_bands[i]) return false;
     const nxrt::extras::Settings &ea = a.extras, &eb = b.extras;
     if (!(ea.hdr.mode == eb.hdr.mode && ea.hdr.format == eb.hdr.format && ea.hdr.peak_nits == eb.hdr.peak_nits &&
           ea.hdr.paper_white_nits == eb.hdr.paper_white_nits && ea.hdr.highlight_boost == eb.hdr.highlight_boost))
@@ -713,8 +719,8 @@ NXTEST(unknown_keys_and_sections_warn) {
 NXTEST(format_has_sections_in_order) {
     const nxrt::play::test::PlayTestGame play_game;
     const std::string text = format_settings(default_settings());
-    const char* order[] = {"[mouse]", "[pad]", "[timing]", "[display]", "[hdr]", "[upscale]", "[latency]", "[prompts]", "[switch]", "[bindings.all]", "[bindings.gameplay]",
-                           "[bindings.morph]", "[bindings.map]", "[bindings.menu]", "[bindings.scan]"};
+    const char* order[] = {"[mouse]", "[pad]", "[timing]", "[display]", "[audio]", "[hdr]", "[upscale]", "[latency]", "[prompts]", "[switch]", "[bindings.all]",
+                           "[bindings.gameplay]", "[bindings.morph]", "[bindings.map]", "[bindings.menu]", "[bindings.scan]"};
     size_t at = 0;
     for (const char* h : order) {
         const size_t p = text.find(h, at);
@@ -809,6 +815,72 @@ NXTEST(format_parse_round_trip_modified) {
     REQUIRE_MSG(parse_settings(text, &r, &err), err);
     CHECK(same_settings(s, r));
     CHECK_EQ(format_settings(r), text);
+}
+
+NXTEST(audio_settings_round_trip_including_eq) {
+    Settings s = default_settings();
+    s.audio.volume = 1.75;
+    s.audio.mute_unfocused = true;
+    s.audio.device = "Speakers (USB Audio)";
+    s.audio.eq_enabled = true;
+    s.audio.eq_preset = "bass";
+    s.audio.eq_preamp = -3.5;
+    const float* bass = nxrt::audio::eq_preset_db(1);
+    REQUIRE(bass != nullptr);
+    for (int i = 0; i < nxrt::audio::kEqBandCount; ++i) s.audio.eq_bands[i] = bass[i];
+
+    const std::string text = format_settings(s);
+    CHECK(text.find("[audio]\nvolume = 1.75\nmute_unfocused = 1\ndevice = Speakers (USB Audio)\neq = 1\neq_preset = bass\neq_preamp = -3.5\n") != std::string::npos);
+    Settings r;
+    std::string err;
+    REQUIRE_MSG(parse_settings(text, &r, &err), err);
+    CHECK(same_settings(s, r));
+    CHECK_EQ(format_settings(r), text);
+}
+
+NXTEST(audio_eq_preset_fills_bands_and_bands_override_it) {
+    Settings s;
+    std::string err;
+    REQUIRE_MSG(parse_settings("[audio]\neq = 1\neq_preset = treble\n", &s, &err), err);
+    CHECK(s.audio.eq_enabled);
+    CHECK_EQ(s.audio.eq_preset, std::string("treble"));
+    const float* treble = nxrt::audio::eq_preset_db(2);
+    REQUIRE(treble != nullptr);
+    for (int i = 0; i < nxrt::audio::kEqBandCount; ++i) CHECK(s.audio.eq_bands[i] == treble[i]);
+
+    // eq_bands is written after the preset, so a hand-tuned curve survives a load.
+    REQUIRE_MSG(parse_settings("[audio]\neq_preset = bass\neq_bands = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10\n", &s, &err), err);
+    CHECK_EQ(s.audio.eq_bands[0], 1.0);
+    CHECK_EQ(s.audio.eq_bands[9], 10.0);
+}
+
+NXTEST(audio_eq_bands_and_preset_errors_are_named) {
+    struct Case {
+        const char* text;
+        const char* start;
+    };
+    const Case bad[] = {
+        {"[audio]\neq_bands = 0, 0, 0\n", "line 2: eq_bands must be 10 comma-separated numbers"},
+        {"[audio]\neq_bands = 0, 0, 0, 0, 0, 0, 0, 0, 0, 13\n", "line 2: eq_bands must be 10 comma-separated numbers"},
+        {"[audio]\neq_preset = loud\n", "line 2: eq_preset must be flat, bass, treble, vocal, warm, v-shape, night or custom"},
+        {"[audio]\neq_preamp = 13\n", "line 2: eq_preamp must be"},
+    };
+    for (const Case& c : bad) {
+        Settings s;
+        std::string err;
+        CHECK(!parse_settings(c.text, &s, &err));
+        CHECK_MSG(starts_with(err, c.start), err);
+    }
+}
+
+NXTEST(audio_volume_reaches_two_hundred_percent) {
+    Settings s;
+    std::string err;
+    REQUIRE_MSG(parse_settings("[audio]\nvolume = 2\n", &s, &err), err);
+    CHECK_EQ(s.audio.volume, 2.0);
+    CHECK(!parse_settings("[audio]\nvolume = 2.01\n", &s, &err));
+    const std::string text = format_settings(default_settings());
+    CHECK(text.find("[audio]\nvolume = 1\n") != std::string::npos);
 }
 
 NXTEST(empty_bindings_stay_empty_after_round_trip) {
@@ -1196,7 +1268,7 @@ NXTEST(extras_bad_enum_words_name_the_allowed_ones) {
     const Case bad[] = {
         {"[hdr]\nmode = maybe\n", "line 2: mode must be off, auto, on or native, got 'maybe'"},
         {"[hdr]\nformat = hdr12\n", "line 2: format must be auto, hdr10 or scrgb, got 'hdr12'"},
-        {"[upscale]\nmode = taa\n", "line 2: mode must be off, fsr1, spatial, fsr3, dlss, xess, nis or dlaa, got 'taa'"},
+        {"[upscale]\nmode = taa\n", "line 2: mode must be off, fsr1, spatial, fsr3, dlss, xess, nis, dlaa, mako or fsr4, got 'taa'"},
         {"[latency]\nmode = fast\n", "line 2: mode must be off, auto, on or boost, got 'fast'"},
         {"[latency]\nlog_timings = maybe\n", "line 2: log_timings must be 1/0"},
         {"[upscale]\nframe_generation = x\n", "line 2: frame_generation must be 1/0"},
@@ -1219,6 +1291,8 @@ NXTEST(extras_upscale_modes_round_trip) {
     const Case cases[] = {
         {"off", UpscaleMode::Off, "off"},   {"fsr1", UpscaleMode::Fsr1, "fsr1"}, {"spatial", UpscaleMode::Fsr1, "fsr1"},
         {"fsr3", UpscaleMode::Fsr3, "fsr3"}, {"dlss", UpscaleMode::Dlss, "dlss"}, {"xess", UpscaleMode::Xess, "xess"},
+        {"nis", UpscaleMode::Nis, "nis"},     {"dlaa", UpscaleMode::Dlaa, "dlaa"}, {"mako", UpscaleMode::Mako, "mako"},
+        {"fsr4", UpscaleMode::Fsr4, "fsr4"},
     };
     for (const Case& c : cases) {
         Settings s;

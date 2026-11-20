@@ -81,6 +81,11 @@ std::shared_ptr<AudioSink> make_paced_sink(double skew_ppm = 0.0);
 // src/services/audio_wav.cpp.
 std::shared_ptr<AudioSink> make_wav_tee(std::shared_ptr<AudioSink> inner, const std::string& path);
 
+// The software equalizer (nxrt/audio_eq.h) on top of `inner`: ten bands, a preamp and a limiter on the final int16 mix. The wrapper is
+// always installed by sink() so the F1 menu can turn the EQ on while audio is playing; while it is off or flat, write() forwards the
+// original frames untouched. src/services/audio_eq.cpp.
+std::shared_ptr<AudioSink> make_eq_sink(std::shared_ptr<AudioSink> inner);
+
 // Writes 16-bit PCM WAV files. Stereo is WAVE_FORMAT_PCM; 6 channels is WAVE_FORMAT_EXTENSIBLE with channel mask 0x3F.
 // The header sizes are kept valid while the file is open, so a process that dies without close() still leaves a readable file.
 class WavWriter {

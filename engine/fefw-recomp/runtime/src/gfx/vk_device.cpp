@@ -845,11 +845,19 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     a11.pNext = &a12; a12.pNext = &a13; a13.pNext = chain;
     VkPhysicalDeviceFeatures2 avail = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &a11};
     vkGetPhysicalDeviceFeatures2(physical_, &avail);
-    // the same chain, as it was filled in, enables everything that is available (minus robustness, which costs speed)
+    // The same chain, as it was filled in, enables everything that is available. Robust image access stays off (it costs speed and nothing
+    // here needs it). Buffer access: pipeline robustness is per-shader and free for everything else, but AMD's driver does not expose
+    // VK_EXT_pipeline_robustness (the log then said uboRobustness 0). The game's lighting compute shaders index past their 896-byte uniform
+    // block, and without any robustness that read whatever followed it in the pool - distance-dependent local-light patches (#29). So where
+    // the pipeline extension is unavailable, the core feature is enabled instead; it bounds every buffer access, which costs some speed but
+    // is the correctness the console's zero-filled constant bank gives. [nvn] robust_ubo = false turns both paths off.
+    const bool pipeline_robust = x_prb && aprb.pipelineRobustness;
+    const bool core_robust_supported = avail.features.robustBufferAccess == VK_TRUE;
+    const bool robust_wanted = config_get_bool("nvn", "robust_ubo", true);
     a13.dynamicRendering = VK_TRUE;
     a13.synchronization2 = VK_TRUE;
     a13.robustImageAccess = VK_FALSE;
-    avail.features.robustBufferAccess = VK_FALSE;
+    avail.features.robustBufferAccess = robust_wanted && !pipeline_robust && core_robust_supported;
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
     features_.bc = af.textureCompressionBC;
@@ -915,14 +923,17 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.present_id = x_pid && apid.presentId;
     features_.low_latency2 = x_ll2 && features_.present_id;
     features_.anti_lag = x_aal && aal.antiLag;
-    features_.ubo_robustness = (x_prb && aprb.pipelineRobustness) ? (rba2 ? 2 : 1) : 0;   // robustBufferAccess itself is a required feature
+    // 3: the core robustBufferAccess device feature (no pipeline pNext); 2/1: VK_EXT_pipeline_robustness, with/without robustness2;
+    // 0: neither (the device refuses both, or [nvn] robust_ubo = false).
+    features_.ubo_robustness = pipeline_robust ? (rba2 ? 2 : 1) : (avail.features.robustBufferAccess ? 3 : 0);
     NXLOG_I(kTag, "texture compression on this GPU: BC %s, ASTC-LDR %s, ETC2 %s", features_.bc ? "yes" : "no",
             features_.astc_ldr ? "yes" : "no", features_.etc2 ? "yes" : "no");
-    NXLOG_I(kTag, "features: geometry %d float64 %d int64 %d dualSrc %d logicOp %d multiViewport %d drawParams %d descIndexing %d interlock %d depthClipControl %d customBorder %d hostMemImport %d pushDesc %d uboRobustness %d",
+    NXLOG_I(kTag, "features: geometry %d float64 %d int64 %d dualSrc %d logicOp %d multiViewport %d drawParams %d descIndexing %d interlock %d depthClipControl %d customBorder %d hostMemImport %d pushDesc %d uboRobustness %d (%s)",
             features_.geometry_shader, features_.shader_float64, features_.shader_int64, features_.dual_src_blend, features_.logic_op,
             features_.multi_viewport, features_.shader_draw_parameters, features_.descriptor_indexing, features_.fragment_shader_interlock,
             features_.depth_clip_control, features_.custom_border_color, features_.external_memory_host, features_.push_descriptor,
-            features_.ubo_robustness);
+            features_.ubo_robustness, features_.ubo_robustness == 3 ? "core" : features_.ubo_robustness == 2 ? "pipeline, robustness2"
+                                                               : features_.ubo_robustness == 1 ? "pipeline" : "off");
     {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT xh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
         VkPhysicalDeviceVulkan11Properties p11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES, features_.external_memory_host ? &xh : nullptr};

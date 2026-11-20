@@ -1,4 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# FFmpeg 8.1 public headers (LGPL-2.1-or-later, third_party/ffmpeg) for the optional libavcodec AV1 backend
+# (src/media/movie_ffmpeg.cpp). Only headers are vendored; the avcodec/avutil (and their swresample) DLLs are loaded at
+# run time and are not linked. No FFmpeg binary is redistributed.
+target_include_directories(nxrt SYSTEM PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../third_party/ffmpeg/include")
+
 # libvpx (BSD-3-Clause; x86inc macros ISC) for the host nn::codec VP9/VP8 decoders (src/media/video_codec.cpp).
 # libvpx builds with its own configure script, not CMake, so it is taken prebuilt from vcpkg, static with the static MSVC runtime (/MT)
 # like everything else here:

@@ -10,6 +10,7 @@ pub mod log;
 pub mod media;
 pub mod mods;
 pub mod overview;
+pub mod performance;
 pub mod recompile;
 pub mod requirements;
 pub mod saves;
@@ -29,6 +30,7 @@ pub enum Page {
     Cheats,
     Recompile,
     Graphics,
+    Performance,
     Audio,
     Controls,
     Appearance,
@@ -42,7 +44,7 @@ pub enum Page {
 impl Page {
     /// Shortcut order. Kept stable so Ctrl+1..9 keep opening the same pages
     /// even though the sidebar now groups them differently.
-    pub const ALL: [Page; 15] = [
+    pub const ALL: [Page; 16] = [
         Page::Overview,
         Page::Setup,
         Page::Saves,
@@ -50,6 +52,7 @@ impl Page {
         Page::Cheats,
         Page::Recompile,
         Page::Graphics,
+        Page::Performance,
         Page::Audio,
         Page::Controls,
         Page::Appearance,
@@ -69,6 +72,7 @@ impl Page {
             Page::Cheats => "Cheats",
             Page::Recompile => "Recompilation",
             Page::Graphics => "Graphics",
+            Page::Performance => "Performance",
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Appearance => "Appearance",
@@ -145,6 +149,12 @@ impl Page {
                 painter.rect_stroke(Rect::from_min_max(p(-6.0, -5.0), p(6.0, 3.0)), egui::CornerRadius::same(1), s, StrokeKind::Middle);
                 painter.line_segment([p(0.0, 3.0), p(0.0, 5.5)], s);
                 painter.line_segment([p(-3.5, 5.5), p(3.5, 5.5)], s);
+            }
+            Page::Performance => {
+                painter.circle_stroke(p(0.0, 1.0), 5.8, s);
+                painter.line_segment([p(0.0, 1.0), p(3.4, -2.4)], Stroke::new(1.6_f32, colour));
+                painter.circle_filled(p(0.0, 1.0), 1.2, colour);
+                painter.line_segment([p(-4.2, 5.0), p(4.2, 5.0)], s);
             }
             Page::Audio => {
                 painter.add(egui::Shape::line(vec![p(-5.5, -2.0), p(-2.5, -2.0), p(1.5, -5.0), p(1.5, 5.0), p(-2.5, 2.0), p(-5.5, 2.0), p(-5.5, -2.0)], s));
@@ -237,7 +247,13 @@ impl NavGroup {
             NavGroup::Home => &[Page::Overview],
             NavGroup::Game => &[Page::Setup, Page::Requirements],
             NavGroup::Library => &[Page::Saves, Page::Mods, Page::Cheats],
-            NavGroup::Runtime => &[Page::Recompile, Page::Graphics, Page::Audio, Page::Controls],
+            NavGroup::Runtime => &[
+                Page::Recompile,
+                Page::Graphics,
+                Page::Performance,
+                Page::Audio,
+                Page::Controls,
+            ],
             NavGroup::System => &[Page::Diagnostics, Page::Troubleshoot, Page::Log],
             NavGroup::Settings => &[Page::Appearance, Page::About],
         }
@@ -260,6 +276,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::Cheats => cheats::show(app, ui),
         Page::Recompile => recompile::show(app, ui),
         Page::Graphics => media::graphics(app, ui),
+        Page::Performance => performance::show(app, ui),
         Page::Audio => media::audio(app, ui),
         Page::Controls => controls::show(app, ui),
         Page::Appearance => appearance::show(app, ui),

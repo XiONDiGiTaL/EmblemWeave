@@ -5,7 +5,7 @@
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
@@ -144,19 +144,19 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
     let (warns, errors) = s.counts();
     ui.horizontal_wrapped(|ui| {
         for (w, label) in [(Which::Current, "This run"), (Which::Previous, "Previous run")] {
-            if ui.selectable_label(s.which == w, label).clicked() && s.which != w {
+            if ui.selectable_label(s.which == w, crate::i18n::text(label)).clicked() && s.which != w {
                 s.which = w;
                 s.reset();
                 s.poll();
             }
         }
         ui.separator();
-        ui.checkbox(&mut s.show_info, "Info");
-        ui.checkbox(&mut s.show_warn, RichText::new(format!("Warnings ({warns})")).color(p.warn));
-        ui.checkbox(&mut s.show_error, RichText::new(format!("Errors ({errors})")).color(p.bad));
+        ui.checkbox(&mut s.show_info, crate::i18n::text("Info"));
+        ui.checkbox(&mut s.show_warn, crate::i18n::text(format!("Warnings ({warns})")).color(p.warn));
+        ui.checkbox(&mut s.show_error, crate::i18n::text(format!("Errors ({errors})")).color(p.bad));
         ui.separator();
         ui.add(egui::TextEdit::singleline(&mut s.search).hint_text("search").desired_width(180.0));
-        ui.checkbox(&mut s.follow, "Follow");
+        ui.checkbox(&mut s.follow, crate::i18n::text("Follow"));
     });
     ui.horizontal(|ui| {
         if widgets::button(ui, &p, "Copy shown", !s.lines.is_empty()).clicked() {
@@ -177,7 +177,7 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
         if widgets::button(ui, &p, "Clear view", !s.lines.is_empty()).clicked() {
             s.lines.clear();
         }
-        if !in_window && widgets::button(ui, &p, "↗ Pop out", true).on_hover_text("Open the log in a window of its own").clicked() {
+        if !in_window && widgets::button(ui, &p, "↗ Pop out", true).on_hover_text(crate::i18n::tr("Open the log in a window of its own")).clicked() {
             s.popped = true;
         }
     });
@@ -185,7 +185,7 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
     let f = s.search.to_lowercase();
     let rows: Vec<usize> = s.lines.iter().enumerate().filter(|(_, l)| shown(l, s.show_info, s.show_warn, s.show_error, &f)).map(|(i, _)| i).collect();
     if s.lines.is_empty() {
-        ui.label(RichText::new("The log is empty. It fills in while the game runs (the game writes fefw.log in its run folder).").color(p.muted));
+        ui.label(crate::i18n::text("The log is empty. It fills in while the game runs (the game writes fefw.log in its run folder).").color(p.muted));
         return;
     }
     let row_h = 17.0;
@@ -199,7 +199,7 @@ fn view(app: &mut App, ui: &mut egui::Ui, in_window: bool) {
                     Level::Warn => p.warn,
                     Level::Info => p.body,
                 };
-                ui.add(egui::Label::new(RichText::new(&l.text).font(theme::mono(12.0)).color(c)).extend());
+                ui.add(egui::Label::new(crate::i18n::text(&l.text).font(theme::mono(12.0)).color(c)).extend());
             }
         });
     });

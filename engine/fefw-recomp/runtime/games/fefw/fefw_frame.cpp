@@ -37,6 +37,7 @@
 #include "nxrt/hooks.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
+#include "nxrt/services_api.h"
 
 namespace nxrt::games::fefw {
 namespace {
@@ -335,6 +336,17 @@ void hook_turn_angle(::Ctx* c, uint64_t, void*) {
 void hook_store_gameplay(::Ctx*, uint64_t, void*) { st().native.store(30, std::memory_order_relaxed); }
 void hook_store_menu(::Ctx*, uint64_t, void*) { st().native.store(60, std::memory_order_relaxed); }
 
+// frame_install checks every hook against the site list the game was lifted with (<exe>.sites, written by the game build). A missing site
+// means the callout was not compiled into the lifted code, so its hook would never run; name it instead of leaving a silent hole.
+void check_site(uint64_t base, const char* kind, uint32_t off, const char* what, size_t& checked, size_t& missing) {
+    ++checked;
+    if (services::modapi::site_in_build(base, kind, base + off)) return;
+    ++missing;
+    NXLOG_E(kTag, "frame-rate fixes: %s site 0x%llx is missing from this build's fefw.sites (%s): that hook will never run; rebuild with "
+                  "recomp/games/fefw/main.sites",
+            kind, static_cast<unsigned long long>(base + off), what);
+}
+
 uint32_t parse_skip(const std::string& list) {
     uint32_t m = 0;
     size_t i = 0;
@@ -363,27 +375,47 @@ void frame_install(uint64_t base) {
     s.base = base;
     s.on.store(config_get_bool("fefw", "frame_fixes", true));
     s.skip = parse_skip(config_get_str("fefw", "frame_fixes_skip", ""));
-    size_t n = 0;
-    for (const MovkSite& m : kMovk) n += hook_add_inline(base + m.off + 4, &hook_movk, const_cast<MovkSite*>(&m)) ? 1 : 0;
-    struct { uint32_t off; InlineHookFn fn; } const items[] = {
-        {kClothPhase, hook_cloth_phase}, {kClothBlend, hook_cloth_blend}, {kClothDamp, hook_cloth_damp}, {kClothWind, hook_cloth_wind},
-        {kClothPull, hook_cloth_pull}, {kIllusion, hook_illusion}, {kLookAt, hook_look_at}, {kMapAngle, hook_map_angle},
-        {kMapHeight, hook_map_height}, {kMapTimer, hook_map_timer}, {kSubsteps, hook_substeps}, {kMarqueeSpeed, hook_marquee_speed},
-        {kMarqueeDelay, hook_marquee_delay}, {kMarqueeLerp, hook_marquee_lerp},
-        {kTurnRelease[0], hook_turn_release}, {kTurnRelease[1], hook_turn_release}, {kTurnRelease[2], hook_turn_release}, {kTurnRelease[3], hook_turn_release},
-        {kTurnAngle[0], hook_turn_angle}, {kTurnAngle[1], hook_turn_angle}, {kTurnAngle[2], hook_turn_angle}, {kTurnAngle[3], hook_turn_angle},
-        {kStoreGameplay, hook_store_gameplay}, {kStoreMenuA, hook_store_menu}, {kStoreMenuB, hook_store_menu},
+    size_t n = 0, checked = 0, missing = 0;
+    if (!services::modapi::site_list_known())
+        NXLOG_W(kTag, "frame-rate fixes: no fefw.sites next to the exe, so the frame-fix hook sites cannot be checked against this build");
+    for (const MovkSite& m : kMovk) {
+        check_site(base, "inline", m.off + 4, "per-frame constant", checked, missing);
+        n += hook_add_inline(base + m.off + 4, &hook_movk, const_cast<MovkSite*>(&m)) ? 1 : 0;
+    }
+    struct { uint32_t off; InlineHookFn fn; const char* what; } const items[] = {
+        {kClothPhase, hook_cloth_phase, "cloth wind phase"}, {kClothBlend, hook_cloth_blend, "cloth blend"},
+        {kClothDamp, hook_cloth_damp, "cloth damping"}, {kClothWind, hook_cloth_wind, "cloth wind force"},
+        {kClothPull, hook_cloth_pull, "cloth pull"}, {kIllusion, hook_illusion, "CharacterIllusion period"},
+        {kLookAt, hook_look_at, "CharacterLookAt weight"}, {kMapAngle, hook_map_angle, "map UI angle"},
+        {kMapHeight, hook_map_height, "map marker height"}, {kMapTimer, hook_map_timer, "map timer"},
+        {kSubsteps, hook_substeps, "PhysX substeps"}, {kMarqueeSpeed, hook_marquee_speed, "BGM marquee speed"},
+        {kMarqueeDelay, hook_marquee_delay, "BGM marquee delay"}, {kMarqueeLerp, hook_marquee_lerp, "BGM marquee lerp"},
+        {kTurnRelease[0], hook_turn_release, "avatar turntable release 1"}, {kTurnRelease[1], hook_turn_release, "avatar turntable release 2"},
+        {kTurnRelease[2], hook_turn_release, "avatar turntable release 3"}, {kTurnRelease[3], hook_turn_release, "avatar turntable release 4"},
+        {kTurnAngle[0], hook_turn_angle, "avatar turntable angle 1"}, {kTurnAngle[1], hook_turn_angle, "avatar turntable angle 2"},
+        {kTurnAngle[2], hook_turn_angle, "avatar turntable angle 3"}, {kTurnAngle[3], hook_turn_angle, "avatar turntable angle 4"},
+        {kStoreGameplay, hook_store_gameplay, "gameplay target store"}, {kStoreMenuA, hook_store_menu, "menu target store A"},
+        {kStoreMenuB, hook_store_menu, "menu target store B"},
     };
-    for (const auto& it : items) n += hook_add_inline(base + it.off, it.fn) ? 1 : 0;
+    for (const auto& it : items) {
+        check_site(base, "inline", it.off, it.what, checked, missing);
+        n += hook_add_inline(base + it.off, it.fn) ? 1 : 0;
+    }
     // the quake's 30 Hz block needs the lifted rest of its function (the midhook site 0x11eb084 in main.sites), looked up at the first quake:
     // the lifted modules are registered after play mode installs its hooks
+    check_site(base, "midhook", kQuakeStart, "cutscene quake start", checked, missing);
+    check_site(base, "midhook", kQuakeEnd, "cutscene quake rest", checked, missing);
     n += hook_add_mid(base + kQuakeStart, &hook_quake) ? 1 : 0;
+    check_site(base, "entryhook", kTextStep, "dialogue text step", checked, missing);
     n += hook_add_entry(base + kTextStep, &hook_text_step) ? 1 : 0;
+    if (missing)
+        NXLOG_E(kTag, "frame-rate fixes: %zu of %zu hook sites are missing from this build; those fixes are inactive (main.sites and the "
+                      "game build must match)", missing, checked);
     std::string skipped;
     for (int g = 0; g < kGroups; ++g)
         if (s.skip >> g & 1u) skipped += std::string(skipped.empty() ? "" : ", ") + kGroupNames[g];
-    NXLOG_I(kTag, "frame-rate fixes ([fefw] frame_fixes = %d): %zu hooks%s%s", s.on.load() ? 1 : 0, n, skipped.empty() ? "" : ", skipped: ",
-            skipped.c_str());
+    NXLOG_I(kTag, "frame-rate fixes ([fefw] frame_fixes = %d): %zu hooks, %zu sites checked%s%s", s.on.load() ? 1 : 0, n, checked,
+            skipped.empty() ? "" : ", skipped: ", skipped.c_str());
 }
 
 // Once per frame from the time manager's step (main thread): step = the step it takes (frames of 1/59.94 s), target = graphics +0x1dc.

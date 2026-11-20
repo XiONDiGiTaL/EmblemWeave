@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "nxrt/gfx.h"
+#include "nxrt/config.h"
 #include "nxrt/log.h"
 #include "test_framework.h"
 NXTEST_GROUP(gfx_device)
@@ -76,6 +77,29 @@ NXTEST(gpu_rule_on_fake_lists) {
     CHECK(!matched);
     CHECK_EQ(pick_gpu({igpu}, "discrete", &matched), 0u);
     CHECK(!matched);
+}
+
+// A graphics device picker can write [gfx] gpu = <index> into fefw.ini (EmblemWeave's Graphics page,
+// gpu_setting_is_written_to_fefw_ini). This is that text, parsed by the engine, with the same adapter list the scan prints.
+NXTEST(gpu_setting_selects_the_adapter) {
+    EnvOverride no_env("NXRT_GFX_GPU", "");   // the environment wins over the ini; this test is about the ini value
+    nxrt::config_load_string("[gfx]\n; Graphics device, chosen by the player\ngpu = 1\n");
+    const std::string want = nxrt::config_get_str("gfx", "gpu", "");
+    CHECK_EQ(want, "1");
+
+    const GpuCandidate igpu{"Intel(R) Iris(R) Xe Graphics", 1, 16ull << 30};
+    const GpuCandidate dgpu{"NVIDIA GeForce RTX 4080 Laptop GPU", 2, 12ull << 30};
+    bool matched = false;
+    CHECK_EQ(pick_gpu({igpu, dgpu}, want.c_str(), &matched), 1u);
+    CHECK(matched);
+
+    // index 0 is the other adapter, not the default rule (which would pick the discrete one)
+    nxrt::config_load_string("[gfx]\ngpu = 0\n");
+    const std::string first = nxrt::config_get_str("gfx", "gpu", "");
+    CHECK_EQ(first, "0");
+    CHECK_EQ(pick_gpu({igpu, dgpu}, first.c_str(), &matched), 0u);
+    CHECK(matched);
+    nxrt::config_clear();
 }
 
 NXTEST(default_device_is_the_discrete_gpu) {

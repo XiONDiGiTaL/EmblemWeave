@@ -7,7 +7,7 @@
 //   4. turn the host main thread into the guest main thread,
 //   5. enter rtld at offset 0 with x0 = 0, x1 = the main thread handle.
 //
-//   fefw [--exefs DIR] [--main FILE] [--romfs DIR] [--ini FILE] [--log FILE] [--max-seconds N] [--link rtld|host] [--no-nvn] [--headless|--window]
+//   fefw [--exefs DIR] [--main FILE] [--romfs DIR] [--ini FILE] [--log FILE] [--max-seconds N] [--link rtld|host] [--no-nvn] [--headless|--window] [--list-gpus]
 // The dump is read where it is, nothing is copied: [fs] exefs (the update's ExeFS folder), [fs] main (main as an uncompressed NSO: the
 // console's main is ZBIC-compressed, which the runtime's NSO loader cannot read), [fs] romfs (the extracted RomFS folder). Their defaults
 // are set by the build (fefw_paths.h). The ini is --ini, else NXRT_INI, else fefw.ini in the working directory when it exists, else nxrt.ini.
@@ -28,6 +28,7 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/gfx.h"
+#include "nxrt/gfx_probe.h"
 #include "nxrt/input_source.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
@@ -188,6 +189,42 @@ void parse_presses(const std::string& spec) {
     }
 }
 
+// [boot] stick = "0:-32767@40:2500,0:32767@46:2500": left-stick positions (x:y, -32767..32767) at a time, held for ms. Scripted runs use it
+// to walk a character or sweep a camera through a light; it is independent of the button presses above.
+struct ScriptedStick { int x = 0, y = 0; double at = 0; int hold_ms = 1000; };
+std::vector<ScriptedStick> g_sticks;
+DWORD WINAPI stick_thread(LPVOID) {
+    const ULONGLONG t0 = GetTickCount64();
+    for (const ScriptedStick& p : g_sticks) {
+        const ULONGLONG due = t0 + static_cast<ULONGLONG>(p.at * 1000);
+        for (ULONGLONG now = GetTickCount64(); now < due; now = GetTickCount64()) Sleep(static_cast<DWORD>(due - now > 50 ? 50 : due - now));
+        NXLOG_I("boot", "scripted stick %d:%d at %.1f s", p.x, p.y, (GetTickCount64() - t0) / 1000.0);
+        g_pad->set_stick(0, nxrt::hid::StickValue{p.x, p.y}, nxrt::hid::StickValue{});
+        Sleep(p.hold_ms);
+        g_pad->set_stick(0, nxrt::hid::StickValue{}, nxrt::hid::StickValue{});
+    }
+    return 0;
+}
+void parse_sticks(const std::string& spec) {
+    size_t i = 0;
+    while (i < spec.size()) {
+        size_t j = spec.find(',', i);
+        if (j == std::string::npos) j = spec.size();
+        const std::string item = spec.substr(i, j - i);
+        i = j + 1;
+        const size_t at = item.find('@');
+        const size_t xy = item.find(':');
+        if (at == std::string::npos || xy == std::string::npos || xy > at) continue;
+        const size_t hold = item.find(':', at);
+        ScriptedStick sp;
+        sp.x = std::atoi(item.c_str());
+        sp.y = std::atoi(item.c_str() + xy + 1);
+        sp.at = std::atof(item.c_str() + at + 1);
+        sp.hold_ms = hold == std::string::npos ? 1000 : std::atoi(item.c_str() + hold + 1);
+        if (sp.hold_ms > 0) g_sticks.push_back(sp);
+    }
+}
+
 // [boot] screenshot_at / screenshot_every: shot_<n>.png of the presented frame in the working directory.
 DWORD WINAPI shot_thread(LPVOID) {
     const int64_t first = nxrt::config_get_int("boot", "screenshot_at", 0), every = nxrt::config_get_int("boot", "screenshot_every", 0);
@@ -335,7 +372,7 @@ int fefw_run(int argc, char** argv) {
     std::string exefs_arg, main_arg, romfs_arg;
     const char* ini = nullptr;
     const char* logp = nullptr;
-    bool prepare_mode = false, prepare_if_needed = false, prepare_force = false;
+    bool prepare_mode = false, prepare_if_needed = false, prepare_force = false, list_gpus = false;
     std::vector<std::pair<std::string, std::string>> boot_opts;   // [boot] keys from the command line, applied after nxrt::init() loads the ini
     for (int i = 1; i < argc; i++) {
         auto arg = [&](const char* n) { return !std::strcmp(argv[i], n) && i + 1 < argc; };
@@ -347,12 +384,27 @@ int fefw_run(int argc, char** argv) {
         else if (arg("--max-seconds")) boot_opts.emplace_back("max_seconds", argv[++i]);
         else if (arg("--link")) boot_opts.emplace_back("link", argv[++i]);
         else if (!std::strcmp(argv[i], "--prepare-shaders")) { prepare_mode = true; boot_opts.emplace_back("gfx", "headless"); }
+        else if (!std::strcmp(argv[i], "--list-gpus")) list_gpus = true;
         else if (!std::strcmp(argv[i], "--if-needed")) prepare_if_needed = true;
         else if (!std::strcmp(argv[i], "--force")) prepare_force = true;
         else if (!std::strcmp(argv[i], "--no-nvn")) boot_opts.emplace_back("nvn", "0");
         else if (!std::strcmp(argv[i], "--headless")) boot_opts.emplace_back("gfx", "headless");
         else if (!std::strcmp(argv[i], "--window")) boot_opts.emplace_back("gfx", "window");
         else { std::fprintf(stderr, "fefw: unknown argument %s\n", argv[i]); return 2; }
+    }
+    // The launcher's GPU picker: print the devices and leave before the runtime starts. The numbers are the ones [gfx] gpu takes.
+    if (list_gpus) {
+        std::vector<nxrt::gfx::GpuProbe> gpus;
+        std::string probe_err;
+        if (!nxrt::gfx::probe_gpus(&gpus, &probe_err)) {
+            std::printf("GPU error\t%s\n", probe_err.c_str());
+            std::fflush(stdout);
+            return 1;
+        }
+        for (size_t i = 0; i < gpus.size(); ++i)
+            std::printf("GPU %zu\t%s\t%s\t%llu\n", i, gpus[i].name.c_str(), gpus[i].type.c_str(), static_cast<unsigned long long>(gpus[i].vram_bytes));
+        std::fflush(stdout);
+        return 0;
     }
     if (!ini && !std::getenv("NXRT_INI") && file_exists(nxrt::game::info().game_ini)) ini = nxrt::game::info().game_ini;
 
@@ -469,12 +521,16 @@ int fefw_run(int argc, char** argv) {
         nxrt::module_protect_all();
     }
 
-    if (const std::string spec = nxrt::config_get_str("boot", "press", ""); !spec.empty()) {
-        parse_presses(spec);
+    const std::string press_spec = nxrt::config_get_str("boot", "press", "");
+    const std::string stick_spec = nxrt::config_get_str("boot", "stick", "");
+    if (!press_spec.empty() || !stick_spec.empty()) {
+        parse_presses(press_spec);
+        parse_sticks(stick_spec);
         g_pad = std::make_shared<nxrt::hid::ManualInputSource>();
         g_pad->connect(0, nxrt::hid::NpadStyle::FullKey);
         nxrt::hid::set_input_source(g_pad);
-        CreateThread(nullptr, 0, press_thread, nullptr, 0, nullptr);
+        if (!g_presses.empty()) CreateThread(nullptr, 0, press_thread, nullptr, 0, nullptr);
+        if (!g_sticks.empty()) CreateThread(nullptr, 0, stick_thread, nullptr, 0, nullptr);
     }
     if (nxrt::config_get_int("boot", "screenshot_at", 0) > 0) CreateThread(nullptr, 0, shot_thread, nullptr, 0, nullptr);
     if (const int64_t s = nxrt::config_get_int("boot", "max_seconds", 0); s > 0)

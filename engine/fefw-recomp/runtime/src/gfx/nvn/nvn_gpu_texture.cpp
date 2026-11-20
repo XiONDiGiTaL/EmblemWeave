@@ -3134,7 +3134,7 @@ VkSampler reserved_sampler() {
 SamplerInfo tuned_sampler(const SamplerInfo& in) {
     SamplerInfo s = in;
     const int aniso = gfx::tuning().anisotropy.load(std::memory_order_relaxed);
-    const float bias = gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+    const float bias = gfx::tuning().lod_bias.load(std::memory_order_relaxed) + gfx::tuning().lod_bias_auto.load(std::memory_order_relaxed);
     if (s.compare_mode == NVN_COMPARE_MODE_COMPARE_R_TO_TEXTURE) return s;
     const bool mips = min_filter_uses_mips(s.min_filter);
     if (aniso > 1 && mips && vk_min_filter(s.min_filter) == VK_FILTER_LINEAR && vk_mag_filter(s.mag_filter) == VK_FILTER_LINEAR)
@@ -3153,7 +3153,7 @@ VkSampler sampler_for(const SamplerInfo& game_sampler) {
     SamplerLast* last = g_sampler_last;
     unsigned& last_next = g_sampler_last_next;
     const int aniso = gfx::tuning().anisotropy.load(std::memory_order_relaxed);
-    const float bias = gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+    const float bias = gfx::tuning().lod_bias.load(std::memory_order_relaxed) + gfx::tuning().lod_bias_auto.load(std::memory_order_relaxed);
     for (int i = 0; i < 4; ++i) {
         const SamplerLast& l = last[i];
         if (l.out && l.aniso == aniso && l.bias == bias && l.in == game_sampler) {

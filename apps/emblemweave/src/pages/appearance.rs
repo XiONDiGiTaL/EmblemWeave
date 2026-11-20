@@ -5,16 +5,49 @@ use crate::pages::Page;
 use crate::theme::{self, Scheme};
 use crate::widgets::{self, Tone};
 use crate::{logo, App};
-use eframe::egui::{self, RichText, Vec2};
+use eframe::egui::{self, Vec2};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    let header = format!("{} coordinated schemes. Each preview uses its own palette and logo colourway; the choice is saved.", Scheme::ALL.len());
+    let header = crate::i18n::tr("{} coordinated schemes. Each preview uses its own palette and logo colourway; the choice is saved.")
+        .replace("{}", &Scheme::ALL.len().to_string());
     widgets::page_header(ui, &p, "Appearance", &header);
     ui.add_space(2.0);
+    let mut chosen_language = None;
+    widgets::section(ui, &p, "Language", |ui| {
+        ui.label(
+            crate::i18n::text("Choose the language used by the launcher. The game's own text and voice language is set on Game Setup.")
+                .size(12.0)
+                .color(p.body),
+        );
+        ui.add_space(7.0);
+        egui::ComboBox::from_id_salt("ui-language")
+            .selected_text(app.config.ui_language.native_label())
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                for language in crate::i18n::Language::ALL {
+                    if ui
+                        .selectable_label(app.config.ui_language == language, language.native_label())
+                        .clicked()
+                    {
+                        chosen_language = Some(language);
+                    }
+                }
+            });
+    });
+    if let Some(language) = chosen_language {
+        app.config.ui_language = language;
+        crate::i18n::set_language(language);
+        crate::theme::configure_fonts(ui.ctx(), language);
+        app.note(
+            format!("{} {}", crate::i18n::tr("Language set to"), language.native_label()),
+            Tone::Neutral,
+        );
+        ui.ctx().request_repaint();
+    }
     widgets::section(ui, &p, "Interface", |ui| {
         ui.label(
-            RichText::new("Choose how much of the launcher you want to see. Both modes use the same installation, settings, saves and build.")
+            crate::i18n::text("Choose how much of the launcher you want to see. Both modes use the same installation, settings, saves and build.")
                 .size(12.0)
                 .color(p.body),
         );
@@ -30,9 +63,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(4.0);
-        ui.label(RichText::new(app.config.interface_mode.detail()).size(11.0).color(p.muted));
+        ui.label(crate::i18n::text(app.config.interface_mode.detail()).size(11.0).color(p.muted));
         ui.label(
-            RichText::new("Advanced pages are hidden in Standard mode, not removed. Switch back at any time; no setting or installation data changes.")
+            crate::i18n::text("Advanced pages are hidden in Standard mode, not removed. Switch back at any time; no setting or installation data changes.")
                 .size(10.5)
                 .color(p.muted),
         );
@@ -62,7 +95,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             ui.set_width(ui.available_width());
                             ui.set_min_height(196.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(scheme.label()).font(theme::display(16.0)).color(sp.ink));
+                                ui.label(crate::i18n::text(scheme.label()).font(theme::display(16.0)).color(sp.ink));
                                 if active {
                                     widgets::pill(ui, &sp, "Active", Tone::Accent);
                                 }
@@ -76,7 +109,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             ui.add_space(3.0);
                             logo::show_lockup(ui, &sp, (cell - 28.0).min(154.0));
                             ui.add_space(5.0);
-                            ui.add(egui::Label::new(RichText::new(scheme.detail()).size(10.5).color(sp.body)).wrap());
+                            ui.add(egui::Label::new(crate::i18n::text(scheme.detail()).size(10.5).color(sp.body)).wrap());
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 for (name, c) in [

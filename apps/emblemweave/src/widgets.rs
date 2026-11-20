@@ -4,7 +4,7 @@
 
 use crate::jobs::{Stage, StageStatus};
 use crate::theme::{self, alpha, Palette};
-use eframe::egui::{self, Color32, CornerRadius, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Margin, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 /// Status colours with their meaning, so a page never picks a raw colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,7 @@ impl Tone {
 
 /// Letter-spaced small caps, as the reference launcher sets its labels.
 pub fn tracked(ui: &mut egui::Ui, text: &str, size: f32, colour: Color32, tracking: f32) -> egui::Response {
+    let text = crate::i18n::tr(text);
     let font = theme::semibold(size);
     let chars: Vec<char> = text.chars().collect();
     let widths: Vec<f32> = chars
@@ -57,7 +58,7 @@ pub fn tracked(ui: &mut egui::Ui, text: &str, size: f32, colour: Color32, tracki
 
 /// A section's small caps label in the accent colour.
 pub fn eyebrow(ui: &mut egui::Ui, p: &Palette, text: &str) {
-    tracked(ui, &text.to_uppercase(), 10.5, p.accent, theme::TRACK_WIDE);
+    tracked(ui, &crate::i18n::tr(text).to_uppercase(), 10.5, p.accent, theme::TRACK_WIDE);
 }
 
 /// The height a list inside a page takes: a share of the window, floored so it
@@ -89,9 +90,9 @@ pub fn glass_panel(ui: &egui::Ui, rect: Rect, p: &Palette, radius: CornerRadius)
 /// a quiet eyebrow that names the section of the app.
 pub fn page_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
     ui.add_space(theme::SPACE_M);
-    ui.label(RichText::new(title).font(theme::display(24.0)).color(p.ink));
+    ui.label(crate::i18n::text(title).font(theme::display(24.0)).color(p.ink));
     ui.add_space(2.0);
-    ui.label(RichText::new(subtitle).size(12.5).color(p.body));
+    ui.label(crate::i18n::text(subtitle).size(12.5).color(p.body));
     ui.add_space(theme::SPACE_S);
     let r = ui.available_rect_before_wrap();
     ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0_f32, p.line));
@@ -129,6 +130,8 @@ pub fn section_drawer(
     default_open: bool,
     add: impl FnOnce(&mut egui::Ui),
 ) {
+    let title = crate::i18n::tr(title);
+    let summary = crate::i18n::tr(summary);
     let state = egui::Id::new(("section-drawer", id));
     let mut open = ui.ctx().data(|d| d.get_temp::<bool>(state).unwrap_or(default_open));
     let face = ui.painter().add(egui::Shape::Noop);
@@ -186,6 +189,8 @@ pub fn section_drawer(
 /// "is my game ready?" without opening a page, and each one is a shortcut to
 /// the page that can fix it.
 pub fn header_chip(ui: &mut egui::Ui, p: &Palette, label: &str, value: &str, tone: Tone) -> egui::Response {
+    let label = crate::i18n::tr(label);
+    let value = crate::i18n::tr(value);
     let lf = theme::semibold(8.5);
     let vf = theme::semibold(10.5);
     let lw = ui.painter().layout_no_wrap(label.to_uppercase(), lf.clone(), p.muted).size().x;
@@ -218,6 +223,8 @@ pub fn header_chip(ui: &mut egui::Ui, p: &Palette, label: &str, value: &str, ton
 /// the room without a halo or a sheen loop. The sub-label always says what the
 /// press will do.
 pub fn large_action(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str, enabled: bool) -> egui::Response {
+    let title = crate::i18n::tr(title);
+    let subtitle = crate::i18n::tr(subtitle);
     let size = Vec2::new(216.0, 58.0);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(size, sense);
@@ -260,7 +267,8 @@ pub fn large_action(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str,
 /// detail moved into the hover text.
 pub fn shortcut_pill(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, detail: &str, tone: Tone) -> egui::Response {
     let font = theme::semibold(10.5);
-    let label = page.label();
+    let label = crate::i18n::tr(page.label());
+    let detail = crate::i18n::tr(detail);
     let tw = ui.painter().layout_no_wrap(label.to_string(), font.clone(), p.ink).size().x;
     let (rect, response) = ui.allocate_exact_size(Vec2::new((tw + 43.0).ceil(), 29.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -270,17 +278,18 @@ pub fn shortcut_pill(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, d
         painter.rect_stroke(rect, CornerRadius::same(14), Stroke::new(1.0_f32, lerp(p.line, alpha(p.accent_hi, 110), hover)), StrokeKind::Inside);
         let icon = Rect::from_center_size(Pos2::new(rect.left() + 16.0, rect.center().y), Vec2::splat(15.0));
         page.paint_icon(painter, icon, lerp(p.accent_hi, Color32::WHITE, hover * 0.35));
-        painter.text(Pos2::new(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, label, font, p.ink);
+        painter.text(Pos2::new(rect.left() + 28.0, rect.center().y), egui::Align2::LEFT_CENTER, label.as_str(), font, p.ink);
         painter.circle_filled(Pos2::new(rect.right() - 10.0, rect.center().y), 2.4, tone.colour(p));
         if response.has_focus() {
             painter.rect_stroke(rect.expand(1.0), CornerRadius::same(15), Stroke::new(1.0_f32, p.electric), StrokeKind::Outside);
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} · {}", page.label(), detail))
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{} · {}", label, detail))
 }
 
 /// A clickable parent section in the navigation rail.
 pub fn nav_group_header(ui: &mut egui::Ui, p: &Palette, label: &str, open: bool, compact: bool, active: bool) -> egui::Response {
+    let label = crate::i18n::tr(label);
     let (row, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), if compact { 14.0 } else { 28.0 }), Sense::click());
     // Draw inside the panel's own gutter, not the full allocation: the allocation reaches the rail's edge, and a chevron
     // pinned 14 px from that edge sat on the rail's border instead of next to the label it belongs to.
@@ -349,7 +358,7 @@ pub fn pill(ui: &mut egui::Ui, p: &Palette, text: &str, tone: Tone) -> egui::Res
         .stroke(Stroke::new(1.0_f32, alpha(c, 90)))
         .corner_radius(CornerRadius::same(255))
         .inner_margin(Margin::symmetric(11, 4))
-        .show(ui, |ui| ui.label(RichText::new(text).font(theme::semibold(12.0)).color(c)))
+        .show(ui, |ui| ui.label(crate::i18n::text(text).font(theme::semibold(12.0)).color(c)))
         .response
 }
 
@@ -358,8 +367,8 @@ pub fn status_line(ui: &mut egui::Ui, p: &Palette, tone: Tone, label: &str, deta
     ui.horizontal_wrapped(|ui| {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
         ui.painter().circle_filled(r.center(), 4.0, tone.colour(p));
-        ui.label(RichText::new(label).font(theme::semibold(13.5)).color(p.ink));
-        ui.label(RichText::new(detail).size(13.0).color(p.body));
+        ui.label(crate::i18n::text(label).font(theme::semibold(13.5)).color(p.ink));
+        ui.label(crate::i18n::text(detail).size(13.0).color(p.body));
     });
 }
 
@@ -418,6 +427,7 @@ pub fn gradient_shape(rect: Rect, radius: f32, top: Color32, bottom: Color32) ->
 /// surface that brightens on hover. No outer glow, no specular bands: the
 /// dashboard's one bright element should be the action itself.
 fn button_core(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool, primary: bool) -> egui::Response {
+    let text = crate::i18n::tr(text);
     const HEIGHT: f32 = 34.0;
     let font = theme::semibold(13.0);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, p.ink);
@@ -542,9 +552,9 @@ pub fn modal(
                 ui.vertical(|ui| {
                     eyebrow(ui, p, "EmblemWeave");
                     ui.add_space(1.0);
-                    ui.label(RichText::new(title).font(theme::display(20.0)).color(p.ink));
+                    ui.label(crate::i18n::text(title).font(theme::display(20.0)).color(p.ink));
                     if !subtitle.is_empty() {
-                        ui.label(RichText::new(subtitle).size(11.5).color(p.body));
+                        ui.label(crate::i18n::text(subtitle).size(11.5).color(p.body));
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -589,7 +599,10 @@ fn modal_close(ui: &mut egui::Ui, p: &Palette) -> bool {
         ui.painter().line_segment([c + Vec2::new(-4.0, -4.0), c + Vec2::new(4.0, 4.0)], Stroke::new(1.35_f32, ink));
         ui.painter().line_segment([c + Vec2::new(4.0, -4.0), c + Vec2::new(-4.0, 4.0)], Stroke::new(1.35_f32, ink));
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Close").clicked()
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(crate::i18n::tr("Close"))
+        .clicked()
 }
 
 /// A consistent inline error for fields and failed dialog actions.
@@ -601,7 +614,7 @@ pub fn error_note(ui: &mut egui::Ui, p: &Palette, text: &str) {
         .inner_margin(Margin::symmetric(9, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(text).size(11.5).color(p.bad));
+            ui.label(crate::i18n::text(text).size(11.5).color(p.bad));
         });
 }
 
@@ -614,8 +627,8 @@ pub fn empty_note(ui: &mut egui::Ui, p: &Palette, title: &str, body: &str) {
         .inner_margin(Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).font(theme::semibold(12.5)).color(p.ink));
-            ui.label(RichText::new(body).size(11.5).color(p.muted));
+            ui.label(crate::i18n::text(title).font(theme::semibold(12.5)).color(p.ink));
+            ui.label(crate::i18n::text(body).size(11.5).color(p.muted));
         });
 }
 
@@ -821,9 +834,9 @@ pub fn setting_row(ui: &mut egui::Ui, p: &Palette, label: &str, help: &str, cont
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width((ui.available_width() * 0.5).max(220.0));
-            ui.label(RichText::new(label).font(theme::semibold(14.0)).color(p.ink));
+            ui.label(crate::i18n::text(label).font(theme::semibold(14.0)).color(p.ink));
             if !help.is_empty() {
-                ui.label(RichText::new(help).size(12.5).color(p.muted));
+                ui.label(crate::i18n::text(help).size(12.5).color(p.muted));
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
@@ -839,9 +852,9 @@ pub fn kv(ui: &mut egui::Ui, p: &Palette, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(Vec2::new(170.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.set_min_width(170.0);
-            ui.label(RichText::new(key).size(13.0).color(p.muted));
+            ui.label(crate::i18n::text(key).size(13.0).color(p.muted));
         });
-        ui.add(egui::Label::new(RichText::new(value).font(theme::mono(12.5)).color(p.ink)).truncate())
+        ui.add(egui::Label::new(crate::i18n::text(value).font(theme::mono(12.5)).color(p.ink)).truncate())
             .on_hover_text(value);
     });
 }
@@ -855,7 +868,7 @@ pub fn pending_note(ui: &mut egui::Ui, p: &Palette, text: &str) {
         .inner_margin(Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(text).size(13.0).color(p.warn));
+            ui.label(crate::i18n::text(text).size(13.0).color(p.warn));
         });
     ui.add_space(theme::SPACE_M);
 }
@@ -871,23 +884,23 @@ pub fn stage_list(ui: &mut egui::Ui, p: &Palette, stages: &[Stage]) {
             StageStatus::Failed => (Tone::Bad, "✕"),
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{:>2}", i + 1)).font(theme::mono(12.0)).color(p.muted));
-            ui.label(RichText::new(mark).size(15.0).color(tone.colour(p)));
+            ui.label(crate::i18n::text(format!("{:>2}", i + 1)).font(theme::mono(12.0)).color(p.muted));
+            ui.label(crate::i18n::text(mark).size(15.0).color(tone.colour(p)));
             let name_colour = if s.status == StageStatus::Pending { p.body } else { p.ink };
-            ui.label(RichText::new(s.name).font(theme::semibold(14.0)).color(name_colour));
+            ui.label(crate::i18n::text(s.name).font(theme::semibold(14.0)).color(name_colour));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let time = match (s.elapsed, s.started, s.status) {
                     (Some(d), _, _) => format!("{:.2}s", d.as_secs_f32()),
                     (None, Some(t), StageStatus::Active) => format!("{:.1}s", t.elapsed().as_secs_f32()),
                     _ => String::new(),
                 };
-                ui.label(RichText::new(time).font(theme::mono(12.0)).color(p.muted));
+                ui.label(crate::i18n::text(time).font(theme::mono(12.0)).color(p.muted));
             });
         });
         if !s.detail.is_empty() {
             ui.horizontal(|ui| {
                 ui.add_space(46.0);
-                ui.label(RichText::new(&s.detail).size(12.5).color(p.body));
+                ui.label(crate::i18n::text(&s.detail).size(12.5).color(p.body));
             });
         }
         ui.add_space(2.0);
@@ -920,10 +933,12 @@ pub fn nav_item_page(ui: &mut egui::Ui, p: &Palette, page: crate::pages::Page, s
         page.paint_icon(painter, icon, icon_colour);
         if !compact {
             let font = theme::semibold(11.5);
-            painter.text(Pos2::new(bg.left() + 32.0, bg.center().y), egui::Align2::LEFT_CENTER, page.label(), font, ink);
+            painter.text(Pos2::new(bg.left() + 32.0, bg.center().y), egui::Align2::LEFT_CENTER, crate::i18n::tr(page.label()), font, ink);
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if compact { page.label().to_string() } else { format!("{}  ·  {}", page.label(), page.group().label()) })
+    let label = crate::i18n::tr(page.label());
+    let group = crate::i18n::tr(page.group().label());
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(if compact { label } else { format!("{label}  ·  {group}") })
 }
 
 /// A thin progress bar, slanted as the reference launcher's resource bars are.
@@ -1043,7 +1058,7 @@ pub fn demangle_line(line: &str) -> String {
 
 /// A wrapped monospace line, for logs and reports.
 pub fn mono_line(ui: &mut egui::Ui, text: &str, colour: Color32) {
-    ui.add(egui::Label::new(RichText::new(text).font(theme::mono(12.0)).color(colour)).wrap());
+    ui.add(egui::Label::new(crate::i18n::text(text).font(theme::mono(12.0)).color(colour)).wrap());
 }
 
 #[cfg(test)]

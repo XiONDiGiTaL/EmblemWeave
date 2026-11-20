@@ -2,7 +2,7 @@
 # from work\build\fefw). -Target fefw_obj compiles fefw_main.cpp only (a check that needs no lifted libraries). -BuildDir puts the build
 # elsewhere (a path relative to game-build\fefw, or absolute), so that several builds can run side by side.
 param([string]$Config = "Release", [switch]$Clean, [string]$LibDir = $env:FEFW_LIB_DIR, [string]$Target = "fefw",
-      [int]$Jobs = $(if ($env:NX_JOBS) { [int]$env:NX_JOBS } else { 10 }), [string]$CMakeArgs = "", [string]$BuildDir = "")
+      [int]$Jobs = $(if ($env:NX_JOBS) { [int]$env:NX_JOBS } else { [Math]::Max(1, [Math]::Min(16, [Environment]::ProcessorCount - 2)) }), [string]$CMakeArgs = "", [string]$BuildDir = "")
 $ErrorActionPreference = "Stop"
 # A PYTHONPATH or PYTHONHOME left by another Python install is inherited by
 # every Python process this build starts, including the engine's own

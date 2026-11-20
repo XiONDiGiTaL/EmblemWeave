@@ -119,6 +119,12 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         snap_.npad[slot].buttons &= ~buttons;
     }
+    // Scripted runs that sweep a camera or walk a character: both sticks of one pad, under the same lock as the buttons.
+    void set_stick(uint32_t slot, StickValue left, StickValue right) {
+        std::lock_guard<std::mutex> lk(mu_);
+        snap_.npad[slot].left = left;
+        snap_.npad[slot].right = right;
+    }
     void connect(uint32_t slot, NpadStyle style) {
         std::lock_guard<std::mutex> lk(mu_);
         snap_.npad[slot].connected = true;

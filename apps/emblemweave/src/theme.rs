@@ -34,9 +34,14 @@ pub const RADIUS_M: u8 = 16;
 pub const NAV_WIDTH: f32 = 218.0;
 /// The rail's compact, icon-only width.
 pub const NAV_RAIL_WIDTH: f32 = 58.0;
-/// The brand and status strips above and below the pages.
+/// The brand and status strips above and below the pages. The status strip
+/// must be tall enough for the 34 px button it hosts, not just its labels.
 pub const TOPBAR_HEIGHT: f32 = 44.0;
-pub const STATUSBAR_HEIGHT: f32 = 24.0;
+/// Fallback insets for the window's native caption, used until the shell
+/// reports the empty strip between its left chips and right-hand actions.
+pub const TOPBAR_DRAG_LEFT: f32 = 270.0;
+pub const TOPBAR_DRAG_RIGHT: f32 = 330.0;
+pub const STATUSBAR_HEIGHT: f32 = 40.0;
 /// The widest the page column grows; wider windows centre it instead of
 /// stretching the text across the screen.
 pub const CONTENT_MAX: f32 = 1120.0;
@@ -348,7 +353,7 @@ pub fn mono(size: f32) -> FontId {
 /// Install the launcher's typefaces from the fonts the system already has.
 /// Each family falls back to egui's bundled faces, so a missing system font
 /// changes the look, never the ability to render.
-pub fn configure_fonts(ctx: &egui::Context) {
+pub fn configure_fonts(ctx: &egui::Context, language: crate::i18n::Language) {
     let mut fonts = egui::FontDefinitions::default();
     let base_prop = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let base_mono = fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default();
@@ -368,10 +373,21 @@ pub fn configure_fonts(ctx: &egui::Context) {
     let sans_semi = load("sans_semi", &[&win("seguisb.ttf"), &win("segoeuib.ttf")]);
     let mono = load("mono", &[&win("CascadiaMono.ttf"), &win("consola.ttf"), "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]);
 
-    // Japanese, last in every family: the game's own names (units, items,
-    // classes) come from its data in Japanese.
-    let cjk = load("cjk", &[&win("NotoSansJP-Regular.otf"), &win("YuGothM.ttc"), &win("meiryo.ttc"), &win("msgothic.ttc"), "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]);
-    let base_prop: Vec<String> = base_prop.into_iter().chain(cjk.clone()).collect();
+    // CJK, last in every family. The game's own names (units, items, classes)
+    // come from its data in Japanese, and the launcher's Chinese catalog needs
+    // Simplified Chinese glyphs. Put the selected language's face first, then
+    // keep the other as a fallback so mixed game data still renders.
+    let japanese = load("cjk_jp", &[&win("NotoSansJP-Regular.otf"), &win("YuGothM.ttc"), &win("meiryo.ttc"), &win("msgothic.ttc"), "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]);
+    let chinese = load("cjk_zh", &[&win("msyh.ttc"), &win("msyhbd.ttc"), &win("simhei.ttf"), &win("simsun.ttc"), "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"]);
+    let cjk: Vec<String> = match language {
+        crate::i18n::Language::Chinese => [chinese, japanese],
+        crate::i18n::Language::Japanese => [japanese, chinese],
+        _ => [japanese, chinese],
+    }
+    .into_iter()
+    .flatten()
+    .collect();
+    let base_prop: Vec<String> = base_prop.into_iter().chain(cjk.iter().cloned()).collect();
     let base_mono: Vec<String> = base_mono.into_iter().chain(cjk).collect();
     let chain = |first: Option<String>, rest: &[String]| -> Vec<String> {
         first.into_iter().chain(rest.iter().cloned()).collect()

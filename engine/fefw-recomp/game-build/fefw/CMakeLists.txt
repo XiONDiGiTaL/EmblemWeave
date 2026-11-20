@@ -92,7 +92,9 @@ if(FEFW_RT_DLL)
     target_link_options(fefw_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG /PDBALTPATH:fefw_rt.pdb /OPT:REF /OPT:ICF /INCREMENTAL:NO /Brepro)
     target_compile_options(fefw_rt PRIVATE "-clang:-ffile-prefix-map=${FEFW_ROOT}=.")
     add_custom_command(TARGET fefw_rt POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:fefw_rt>/fonts/DejaVuSans.ttf")
+        "${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:fefw_rt>/fonts/DejaVuSans.ttf"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${FEFW_RUNTIME_DIR}/assets/fonts/Sora.ttf" "$<TARGET_FILE_DIR:fefw_rt>/fonts/Sora.ttf")
     foreach(dll ${NXRT_A2B_DLLS})
         add_custom_command(TARGET fefw_rt POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:fefw_rt>")
     endforeach()
@@ -126,6 +128,7 @@ target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG 
 # `cd /D "<build dir>"`, and an `&` in the path splits the command (issue #38).
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fonts")
 configure_file("${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "${CMAKE_CURRENT_BINARY_DIR}/fonts/DejaVuSans.ttf" COPYONLY)
+configure_file("${FEFW_RUNTIME_DIR}/assets/fonts/Sora.ttf" "${CMAKE_CURRENT_BINARY_DIR}/fonts/Sora.ttf" COPYONLY)
 # The processor features this build's lifted libraries need (recomp/games/fefw/CMakeLists.txt FEFW_CPU_VARIANT): the stub passes the
 # them to the runtime, which checks the processor before the first game instruction (fefw_cpu.h). EmblemWeave names the variant in
 # FEFW_CPU_VARIANT (apps/emblemweave/src/cpu.rs): fma (FMA3 + AVX, the default) or compat (SSE4.2 + POPCNT).

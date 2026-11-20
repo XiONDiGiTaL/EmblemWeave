@@ -6,7 +6,7 @@ use crate::pages::{NavGroup, Page};
 use crate::pages::overview::Popup;
 use crate::widgets::{self, Tone};
 use crate::{logo, theme, App};
-use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use std::time::Duration;
 
 /// The one-line answer about game data used by the header and status strip.
@@ -49,6 +49,8 @@ fn tools_state() -> (String, Tone) {
 /// A small, quiet header action. It is a text button with a subtle hover face,
 /// not a second row of primary controls.
 fn header_action(ui: &mut egui::Ui, p: &theme::Palette, text: &str, tip: &str) -> egui::Response {
+    let text = crate::i18n::tr(text);
+    let tip = crate::i18n::tr(tip);
     let font = theme::semibold(9.5);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, p.body);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(galley.size().x + 20.0, 28.0), Sense::click());
@@ -98,7 +100,7 @@ fn rail_toggle(ui: &mut egui::Ui, p: &theme::Palette, compact: bool) -> egui::Re
     }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if compact { "Show navigation labels" } else { "Collapse navigation to icons" })
+                    .on_hover_text(crate::i18n::tr(if compact { "Show navigation labels" } else { "Collapse navigation to icons" }))
 }
 
 /// The application header: identity, page context, live game/build/tool state,
@@ -124,17 +126,11 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                 mesh.add_triangle(0, 3, 4);
                 ui.painter().add(egui::Shape::mesh(mesh));
             }
-            // The title strip is the window's drag handle. Controls, chips and
-            // window buttons are deliberately outside it.
-            let drag_rect = Rect::from_min_max(Pos2::new(strip.left() + 270.0, strip.top()), Pos2::new((strip.right() - 330.0).max(strip.left() + 271.0), strip.bottom()));
-            let drag = ui.interact(drag_rect, ui.id().with("shell-drag"), Sense::click_and_drag());
-            if drag.drag_started() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if drag.double_clicked() {
-                let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-            }
+            // The title strip is the window's native caption. Windows starts
+            // the move in its hit-test pass (platform::install_native_drag),
+            // before egui sees the press, so there is no frame of catch-up
+            // slide. Controls, chips and window buttons stay outside that
+            // native region and keep their normal pointer handling.
 
             let mut goto = None;
             let tools = tools_state();
@@ -146,6 +142,7 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                 if rail_toggle(ui, &p, app.config.nav.rail).clicked() {
                     app.config.nav.rail = !app.config.nav.rail;
                 }
+                let brand_left = ui.min_rect().right() + 3.0;
                 let (mark, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
                 let c = mark.center();
                 let diamond = vec![c + Vec2::new(0.0, -5.5), c + Vec2::new(5.5, 0.0), c + Vec2::new(0.0, 5.5), c + Vec2::new(-5.5, 0.0)];
@@ -155,31 +152,33 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                 let (div, _) = ui.allocate_exact_size(Vec2::new(1.0, 14.0), Sense::hover());
                 ui.painter().vline(div.center().x, div.y_range(), Stroke::new(1.0_f32, p.line_strong));
                 ui.add_space(4.0);
-                widgets::tracked(ui, &app.page.label().to_uppercase(), 8.5, p.accent_hi, theme::TRACK_MID);
+                widgets::tracked(ui, &crate::i18n::tr(app.page.label()).to_uppercase(), 8.5, p.accent_hi, theme::TRACK_MID);
+                let brand_right = ui.min_rect().right() + 3.0;
 
                 ui.add_space(10.0);
                 // Keep the right-hand controls reachable at narrow widths:
                 // the chips are the first thing to go, not the window buttons
                 // or Settings.
                 if width >= 980.0
-                    && widgets::header_chip(ui, &p, "Game", data_text, data_tone).on_hover_text("Game data status · open Game Setup").clicked()
+                    && widgets::header_chip(ui, &p, "Game", data_text, data_tone).on_hover_text(crate::i18n::tr("Game data status · open Game Setup")).clicked()
                 {
                     goto = Some(Page::Setup);
                 }
                 if width >= 1080.0
-                    && widgets::header_chip(ui, &p, "Build", build_text, build_tone).on_hover_text("Compiled game status · open Recompilation").clicked()
+                    && widgets::header_chip(ui, &p, "Build", build_text, build_tone).on_hover_text(crate::i18n::tr("Compiled game status · open Recompilation")).clicked()
                 {
                     goto = Some(Page::Recompile);
                 }
                 if width >= 1250.0
                     && widgets::header_chip(ui, &p, "Tools", &tools.0, tools.1)
-                        .on_hover_text("Build dependency status · open Requirements")
+                        .on_hover_text(crate::i18n::tr("Build dependency status · open Requirements"))
                         .clicked()
                 {
                     goto = Some(Page::Requirements);
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let left_inset = ui.min_rect().right() + 8.0;
+                let right_group = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.add_space(super::SHELL_CONTROL_INSET);
                     if super::shell_control(ui, &p, super::ShellControl::Close, "Close").clicked() {
@@ -196,8 +195,67 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                     }
                     ui.add_space(8.0);
                     if width >= 1040.0 {
-                        ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(9.5)).color(p.muted));
+                        ui.label(crate::i18n::text(concat!("v", env!("CARGO_PKG_VERSION"), " · ", env!("EW_GIT_REV"))).font(theme::mono(9.5)).color(p.muted));
                         ui.add_space(6.0);
+                    }
+                    if width >= 1000.0 {
+                        // The update control is also the update status: it
+                        // checks GitHub when there is nothing ready and opens
+                        // the Overview card once a release has been found.
+                        let (value, tip, target, tone) = match &app.update.state {
+                            crate::UpdateState::Ready(rel) => (
+                                rel.tag.clone(),
+                                "Open the update card on Overview",
+                                Some(Page::Overview),
+                                Tone::Accent,
+                            ),
+                            crate::UpdateState::Checking => (
+                                "checking".to_string(),
+                                "The update check is running",
+                                None,
+                                Tone::Neutral,
+                            ),
+                            crate::UpdateState::Downloading => (
+                                "updating".to_string(),
+                                "The update is downloading and installing",
+                                None,
+                                Tone::Accent,
+                            ),
+                            crate::UpdateState::UpToDate(_) => (
+                                "latest".to_string(),
+                                "You are on the newest release; check again",
+                                None,
+                                Tone::Ok,
+                            ),
+                            crate::UpdateState::Failed(_) => (
+                                "retry".to_string(),
+                                "The update check failed; try again",
+                                None,
+                                Tone::Bad,
+                            ),
+                            crate::UpdateState::InstallFailed(_) => (
+                                "retry".to_string(),
+                                "The update did not finish; try again",
+                                None,
+                                Tone::Bad,
+                            ),
+                            crate::UpdateState::Idle => (
+                                "check".to_string(),
+                                "Check GitHub for a newer release",
+                                None,
+                                Tone::Neutral,
+                            ),
+                        };
+                        if widgets::header_chip(ui, &p, "UPDATE", &value, tone)
+                            .on_hover_text(crate::i18n::tr(tip))
+                            .clicked()
+                        {
+                            match target {
+                                Some(page) => goto = Some(page),
+                                None => app.check_updates(),
+                            }
+                        }
+                        ui.add_space(4.0);
                     }
                     if width >= 900.0 && header_action(ui, &p, "SETTINGS", "Appearance and interface options").clicked() {
                         goto = Some(Page::Appearance);
@@ -212,6 +270,13 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                         goto = Some(Page::Requirements);
                     }
                 });
+                // The native caption is the brand strip and the empty strip
+                // between the chips and the right-hand actions. Reporting the
+                // actual bounds keeps a press on either group in egui instead
+                // of starting a move.
+                let right_inset = (ctx.screen_rect().right() - right_group.response.rect.left() + 8.0).max(0.0);
+                crate::platform::set_brand_caption_bounds(brand_left, brand_right);
+                crate::platform::set_caption_bounds(left_inset, right_inset);
             });
             if let Some(page) = goto {
                 app.open(page);
@@ -312,7 +377,8 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
                         if open {
                             for page in &pages {
                                 let i = Page::ALL.iter().position(|q| q == page).unwrap_or(0);
-                                let tip = if i < 9 { format!("{}  (Ctrl+{})", page.label(), i + 1) } else { page.label().to_string() };
+                                let label = crate::i18n::tr(page.label());
+                                let tip = if i < 9 { format!("{label}  (Ctrl+{})", i + 1) } else { label };
                                 if widgets::nav_item_page(ui, &p, *page, app.page == *page, false).on_hover_text(tip).clicked() {
                                     app.open(*page);
                                 }
@@ -326,7 +392,7 @@ pub fn nav(app: &mut App, ctx: &egui::Context) {
                         ui.add_space(14.0);
                         let (ready, tone) = crate::pages::overview::readiness(app);
                         widgets::status_dot(ui, &p, tone);
-                        ui.label(RichText::new(ready).font(theme::semibold(10.0)).color(tone.colour(&p)));
+                        ui.label(crate::i18n::text(ready).font(theme::semibold(10.0)).color(tone.colour(&p)));
                     });
                 }
             });
@@ -358,17 +424,17 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                         None
                     };
                     ui.add(egui::Spinner::new().size(12.0).color(p.accent));
-                    ui.label(RichText::new(kind.title().to_uppercase()).font(theme::semibold(9.0)).color(p.accent));
+                    ui.label(crate::i18n::text(kind.title().to_uppercase()).font(theme::semibold(9.0)).color(p.accent));
                     let clean = message.split('[').next().unwrap_or(&message).trim();
                     let limit = if ctx.screen_rect().width() < 1000.0 { 30 } else if ctx.screen_rect().width() < 1300.0 { 46 } else { 72 };
                     let clean = if clean.chars().count() > limit { format!("{}…", clean.chars().take(limit).collect::<String>()) } else { clean.to_string() };
-                    ui.label(RichText::new(clean).size(10.5).color(p.body));
+                    ui.label(crate::i18n::text(clean).size(10.5).color(p.body));
                     let frac = fraction.unwrap_or(0.0);
                     if fraction.is_some() {
                         let (bar, _) = ui.allocate_exact_size(Vec2::new(80.0, 5.0), Sense::hover());
                         ui.painter().rect_filled(bar, CornerRadius::same(2), p.panel_hi);
                         ui.painter().rect_filled(Rect::from_min_max(bar.min, Pos2::new(bar.left() + bar.width() * frac, bar.max.y)), CornerRadius::same(2), p.accent);
-                        ui.label(RichText::new(format!("{:.0}%", frac * 100.0)).font(theme::mono(9.5)).color(p.muted));
+                        ui.label(crate::i18n::text(format!("{:.0}%", frac * 100.0)).font(theme::mono(9.5)).color(p.muted));
                     }
                     if widgets::button(ui, &p, "Cancel", true).clicked() {
                         app.confirm = Some(crate::Confirm::CancelJob(kind));
@@ -377,14 +443,22 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                 } else {
                     let (text, tone) = crate::pages::overview::readiness(app);
                     widgets::status_dot(ui, &p, tone);
-                    ui.label(RichText::new(text.to_uppercase()).font(theme::semibold(9.0)).color(tone.colour(&p)));
+                    ui.label(crate::i18n::text(text.to_uppercase()).font(theme::semibold(9.0)).color(tone.colour(&p)));
                     // The readiness line is the one thing the strip must always say. The data state is the first to go
                     // when the window is too narrow to hold it beside the buttons on the right, instead of the two
                     // running into each other.
                     if ui.available_width() > 250.0 {
-                        ui.label(RichText::new("·").size(10.0).color(p.muted));
+                        ui.label(crate::i18n::text("·").size(10.0).color(p.muted));
                         let (data, _) = data_state(app);
-                        ui.label(RichText::new(format!("data {data}")).size(10.0).color(p.muted));
+                        ui.label(
+                            crate::i18n::text(format!(
+                                "{}: {}",
+                                crate::i18n::tr("data"),
+                                crate::i18n::tr(data)
+                            ))
+                            .size(10.0)
+                            .color(p.muted),
+                        );
                     }
                     ui.add_space(10.0);
                 }
@@ -394,8 +468,10 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                     // used to decide from the screen width, which is not the space the strip has: a narrow window drew
                     // the clock on top of LOG. The clock keeps a fixed slot so it cannot jitter as the time changes.
                     if ui.available_width() >= 104.0 {
-                        ui.allocate_ui_with_layout(Vec2::new(80.0, 0.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(super::clock()).font(theme::mono(9.5)).color(p.muted));
+                        // A zero-height slot left the clock hanging below the strip's centre; give it the row's height.
+                        let clock_h = ui.available_height();
+                        ui.allocate_ui_with_layout(Vec2::new(80.0, clock_h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(crate::i18n::text(super::clock()).font(theme::mono(9.5)).color(p.muted));
                         });
                     }
                     if ui.available_width() >= 54.0 && header_action(ui, &p, "LOG", "Open the game log").clicked() {
@@ -408,7 +484,7 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                             (d, a)
                         });
                         if all > 0 {
-                            ui.label(RichText::new(format!("{done}/{all} stages")).font(theme::mono(9.5)).color(p.accent_hi));
+                            ui.label(crate::i18n::text(format!("{done}/{all} stages")).font(theme::mono(9.5)).color(p.accent_hi));
                         }
                     }
                     let hub = activity_hub(ui, &p, &app.jobs, app.show_activity);
@@ -469,11 +545,11 @@ pub fn activity_hub(ui: &mut egui::Ui, p: &theme::Palette, jobs: &[crate::jobs::
     } else {
         painter.circle_filled(c, 1.8, ring);
     }
-    let label = if running { format!("ACTIVITY {count}") } else { "ACTIVITY".to_string() };
+    let label = if running { format!("{} {count}", crate::i18n::tr("ACTIVITY")) } else { crate::i18n::tr("ACTIVITY") };
     painter.text(Pos2::new(rect.left() + 18.0, rect.center().y), egui::Align2::LEFT_CENTER, label, theme::semibold(8.5), if pinned || hover > 0.0 { p.ink } else { p.body });
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if pinned { "Activity is pinned · click to hide" } else { "Background tasks and recent activity · click to pin" })
+        .on_hover_text(crate::i18n::tr(if pinned { "Activity is pinned · click to hide" } else { "Background tasks and recent activity · click to pin" }))
 }
 
 /// The expandable global activity panel. It lists live tasks with their stage
@@ -496,7 +572,7 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
     let mut keep = false;
     let mut cancel = None;
     let area = egui::Area::new(egui::Id::new("activity-panel"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-14.0, -32.0))
+        .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-14.0, -theme::STATUSBAR_HEIGHT - 8.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(fade);
@@ -525,9 +601,9 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
                     let line = ui.available_rect_before_wrap();
                     ui.painter().hline(line.x_range(), line.top(), Stroke::new(1.0_f32, p.line));
                     ui.add_space(7.0);
-                    ui.label(RichText::new("Background operations").font(theme::semibold(11.0)).color(p.ink));
+                    ui.label(crate::i18n::text("Background operations").font(theme::semibold(11.0)).color(p.ink));
                     if app.jobs.iter().all(|j| j.finished()) {
-                        ui.label(RichText::new("Nothing is running right now.").size(10.0).color(p.muted));
+                        ui.label(crate::i18n::text("Nothing is running right now.").size(10.0).color(p.muted));
                     }
                     let list_h = (ctx.screen_rect().height() - 250.0).clamp(120.0, 350.0);
                     egui::ScrollArea::vertical().id_salt("activity-jobs").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -536,9 +612,9 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
                             ui.add_space(5.0);
                             ui.horizontal(|ui| {
                                 ui.add(egui::Spinner::new().size(12.0).color(p.accent));
-                                ui.label(RichText::new(job.kind.title()).font(theme::semibold(11.0)).color(p.ink));
+                                ui.label(crate::i18n::text(job.kind.title()).font(theme::semibold(11.0)).color(p.ink));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(format!("{:.1}s", job.started.elapsed().as_secs_f32())).font(theme::mono(9.5)).color(p.muted));
+                                    ui.label(crate::i18n::text(format!("{:.1}s", job.started.elapsed().as_secs_f32())).font(theme::mono(9.5)).color(p.muted));
                                     if widgets::button(ui, &p, "Stop", true).clicked() {
                                         cancel = Some(job.kind);
                                     }
@@ -547,21 +623,21 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
                             if !stages.is_empty() {
                                 widgets::progress_bar(ui, &p, Some(stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done | crate::jobs::StageStatus::Skipped)).count() as f32 / stages.len() as f32));
                                 for s in stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Active | crate::jobs::StageStatus::Failed)) {
-                                    ui.label(RichText::new(format!("{} · {}", s.name, s.detail)).size(10.0).color(p.body));
+                                    ui.label(crate::i18n::text(format!("{} · {}", s.name, s.detail)).size(10.0).color(p.body));
                                 }
                             }
                         }
                     });
                     ui.add_space(7.0);
-                    ui.label(RichText::new("Recent launcher activity").font(theme::semibold(11.0)).color(p.ink));
+                    ui.label(crate::i18n::text("Recent launcher activity").font(theme::semibold(11.0)).color(p.ink));
                     egui::ScrollArea::vertical().id_salt("activity-log").max_height((list_h * 0.55).max(80.0)).auto_shrink([false, true]).show(ui, |ui| {
                         if app.activity.is_empty() {
-                            ui.label(RichText::new("Nothing yet.").size(10.0).color(p.muted));
+                            ui.label(crate::i18n::text("Nothing yet.").size(10.0).color(p.muted));
                         }
                         for a in app.activity.iter().rev().take(14) {
                             ui.horizontal_top(|ui| {
-                                ui.label(RichText::new(&a.at).font(theme::mono(9.0)).color(p.muted));
-                                ui.add(egui::Label::new(RichText::new(&a.text).size(10.0).color(a.tone.colour(&p))).wrap());
+                                ui.label(crate::i18n::text(&a.at).font(theme::mono(9.0)).color(p.muted));
+                                ui.add(egui::Label::new(crate::i18n::text(&a.text).size(10.0).color(a.tone.colour(&p))).wrap());
                             });
                             ui.add_space(2.0);
                         }

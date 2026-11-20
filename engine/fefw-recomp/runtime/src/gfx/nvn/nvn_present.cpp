@@ -205,7 +205,7 @@ audio plays. The cache is %s: translate it with Build the game (the shader step 
     extras::OutputPass* op = output_pass();
     auto draw_picture = [&](VkImageView from, VkExtent2D from_extent, const int32_t* from_crop, VkImageView to) {   // also frame generation's HUD-less colour (nvn_framegen.h)
         if (op && (hs.scene_hdr || hs.output != extras::OutputKind::Sdr8 || extras::upscale_mode() == extras::UpscaleMode::Fsr1 ||
-                   extras::upscale_mode() == extras::UpscaleMode::Nis || pic.active)) {
+                   extras::upscale_mode() == extras::UpscaleMode::Nis || extras::upscale_mode() == extras::UpscaleMode::Mako || pic.active)) {
             extras::OutputParams prm;
             prm.src = from;
             prm.src_extent = from_extent;
@@ -222,6 +222,7 @@ audio plays. The cache is %s: translate it with Build the game (the shader step 
             prm.scene_gain = prm.paper_white_nits > 0 ? hs.paper_white_nits / prm.paper_white_nits : 1.0f;
             prm.fsr1 = extras::upscale_mode() == extras::UpscaleMode::Fsr1;
             prm.nis = extras::upscale_mode() == extras::UpscaleMode::Nis;
+            prm.mako = extras::upscale_mode() == extras::UpscaleMode::Mako;
             prm.sharpness = extras::upscale_sharpness();
             prm.picture = pic.active;
             prm.pic[0] = pic.contrast;

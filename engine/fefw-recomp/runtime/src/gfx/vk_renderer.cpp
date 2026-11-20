@@ -20,6 +20,7 @@
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
+#include "nxrt/game.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
@@ -163,6 +164,44 @@ VkPresentModeKHR to_vk(PresentMode m) {
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
+// The present-mode guard ([gfx] present_guard): whether an immediate request is replaced because the immediate path can reset the
+// driver (issue #72). Auto guards Intel GPUs that are not discrete (integrated Iris Xe / UHD, Core Ultra, and a type the driver
+// does not name); On guards every GPU (an Arc, or a driver that reports the wrong type); Off guards none.
+PresentGuard parse_present_guard(const char* s) {
+    std::string v;
+    if (s)
+        for (const char* p = s; *p; ++p) v += static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
+    if (v == "on" || v == "1" || v == "true" || v == "yes" || v == "force") return PresentGuard::On;
+    if (v == "off" || v == "0" || v == "false" || v == "no") return PresentGuard::Off;
+    return PresentGuard::Auto;
+}
+
+bool present_guard_applies(PresentGuard guard, uint32_t vendor_id, int device_type) {
+    switch (guard) {
+        case PresentGuard::On: return true;
+        case PresentGuard::Off: return false;
+        case PresentGuard::Auto: break;
+    }
+    return vendor_id == 0x8086 && device_type != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+}
+
+// The presentation rule alone (no GPU or window): the mode to use given what the surface offers. from_ini means a hand-written
+// [gfx] present_mode named exactly this mode, a deliberate override. guard: present_guard_applies() for this device; true turns an
+// immediate request into mailbox, else FIFO. Other requests take the closest supported mode.
+PresentMode choose_present_mode(PresentMode want, bool from_ini, bool guard,
+                                const std::vector<VkPresentModeKHR>& supported) {
+    auto has = [&](PresentMode m) { return std::find(supported.begin(), supported.end(), to_vk(m)) != supported.end(); };
+    if (want == PresentMode::Immediate && !from_ini && guard)
+        want = has(PresentMode::Mailbox) ? PresentMode::Mailbox : PresentMode::Fifo;
+    if (has(want)) return want;
+    switch (want) {
+        case PresentMode::Mailbox: if (has(PresentMode::Immediate)) return PresentMode::Immediate; break;
+        case PresentMode::Immediate: if (has(PresentMode::Mailbox)) return PresentMode::Mailbox; break;
+        default: break;
+    }
+    return PresentMode::Fifo;
+}
+
 // ---- PNG helpers ------------------------------------------------------------------------------------------------------
 std::atomic<int> g_png_writes{0};   // screenshots requested and not yet written to disk
 
@@ -226,6 +265,10 @@ struct Renderer::Impl {
     bool headless = false;
 
     PresentMode requested = PresentMode::Fifo, active = PresentMode::Fifo;
+    bool present_mode_ini = false;        // [gfx] present_mode (or NXRT_GFX_PRESENT_MODE) named a mode: that mode is a deliberate override
+    PresentMode ini_present_mode = PresentMode::Fifo;
+    PresentGuard guard = PresentGuard::Auto;   // [gfx] present_guard: replace the immediate path (issue #72)?
+    mutable bool warned_guard = false;
     std::vector<VkPresentModeKHR> supported_modes;
     bool capture_supported = true;
 
@@ -320,14 +363,19 @@ struct Renderer::Impl {
     // -- present mode resolution
     PresentMode resolve(PresentMode want) const {
         if (headless) return want;
-        auto has = [&](PresentMode m) { return std::find(supported_modes.begin(), supported_modes.end(), to_vk(m)) != supported_modes.end(); };
-        if (has(want)) return want;
-        switch (want) {
-            case PresentMode::Mailbox: if (has(PresentMode::Immediate)) return PresentMode::Immediate; break;
-            case PresentMode::Immediate: if (has(PresentMode::Mailbox)) return PresentMode::Mailbox; break;
-            default: break;
+        const VkPhysicalDeviceProperties& props = dev->properties();
+        const bool from_ini = present_mode_ini && want == ini_present_mode;
+        const bool guarded = present_guard_applies(guard, props.vendorID, static_cast<int>(props.deviceType));
+        const bool immediate_guarded = want == PresentMode::Immediate && !from_ini && guarded;
+        const PresentMode got = choose_present_mode(want, from_ini, guarded, supported_modes);
+        if (immediate_guarded && got != PresentMode::Immediate && !warned_guard) {
+            warned_guard = true;
+            NXLOG_W(kTag,
+                    "the present-mode guard replaced immediate with %s: that path can reset the driver (issue #72). "
+                    "[gfx] present_mode = immediate or present_guard = off keeps it.",
+                    present_mode_name(got));
         }
-        return PresentMode::Fifo;
+        return got;
     }
 
     // Records the swapchain flavour in use; publishes the change.
@@ -613,8 +661,12 @@ struct Renderer::Impl {
         }
         dirty = false;
         st.swapchain_creates++;
+        const bool requested_supported = std::find(supported_modes.begin(), supported_modes.end(), to_vk(requested)) != supported_modes.end();
+        const char* mode_note = active == requested ? ""
+                                : requested_supported ? " (immediate avoided on this Intel GPU, issue #72)"
+                                                      : " (requested mode not available)";
         NXLOG_I(kTag, "swapchain %ux%u, %u images, format %d, color space %d (%s), present mode %s%s", ext.width, ext.height, count, static_cast<int>(format),
-                static_cast<int>(color_space), extras::output_kind_name(kind), present_mode_name(active), active != requested ? " (requested mode not available)" : "");
+                static_cast<int>(color_space), extras::output_kind_name(kind), present_mode_name(active), mode_note);
         {
             const VkPhysicalDeviceProperties& p = dev->properties();
             char c[512];
@@ -733,7 +785,14 @@ std::unique_ptr<Renderer> Renderer::create(Device& dev, const RendererDesc& desc
     s.desc.frames_in_flight = static_cast<uint32_t>(std::clamp<int64_t>(config_get_int("gfx", "frames_in_flight", desc_in.frames_in_flight), 1, 3));
     PresentMode pm = desc_in.present_mode;
     const std::string cfg_pm = config_get_str("gfx", "present_mode", "");
-    if (!cfg_pm.empty() && !parse_present_mode(cfg_pm.c_str(), &pm)) NXLOG_W(kTag, "unknown [gfx] present_mode '%s'", cfg_pm.c_str());
+    if (!cfg_pm.empty()) {
+        if (parse_present_mode(cfg_pm.c_str(), &pm)) {
+            s.present_mode_ini = true;
+            s.ini_present_mode = pm;
+        } else
+            NXLOG_W(kTag, "unknown [gfx] present_mode '%s'", cfg_pm.c_str());
+    }
+    s.guard = parse_present_guard(config_get_str("gfx", "present_guard", "auto").c_str());
     s.requested = pm;
     s.headless = dev.headless();
     s.headless_w = desc_in.headless_width;
@@ -1037,9 +1096,13 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 if (last_ns) {
                     if (!fg || last_fg_total) {
                         const uint64_t previous = fg ? last_fg_total : last_presents;
-                        if (current >= previous)
-                            NXLOG_I(kTag, "fps %.1f, present pass GPU %.3f ms avg", static_cast<double>(current - previous) * 1e9 / static_cast<double>(now - last_ns),
-                                    s.st.gpu_ms_avg);
+                        if (current >= previous) {
+                            const double fps = static_cast<double>(current - previous) * 1e9 / static_cast<double>(now - last_ns);
+                            NXLOG_I(kTag, "fps %.1f, present pass GPU %.3f ms avg", fps, s.st.gpu_ms_avg);
+                            // The title is written by the launcher from this line (ingame::refresh_title). Do
+                            // not call the windowing API from the present thread: SDL_SetWindowTitle can wait
+                            // on the main thread and freeze presentation.
+                        }
                     }
                 }
                 last_ns = now;
@@ -1106,6 +1169,8 @@ void Renderer::set_overlay_hook(std::function<void(const FrameInfo&)> hook) { im
 bool Renderer::set_present_mode(PresentMode m) {
     Impl& s = *impl_;
     s.requested = m;
+    // Not an explicit override: the Display page's vsync-off choice still goes through the Intel guard in resolve(). Only a
+    // [gfx] present_mode entry (or NXRT_GFX_PRESENT_MODE) that names this same mode forces a mode by name.
     int pw = static_cast<int>(s.headless_w), ph = static_cast<int>(s.headless_h);
     if (!s.headless) platform::pixel_size(&pw, &ph);
     if (!s.headless && (pw == 0 || ph == 0)) {   // minimised: applied when the window is back

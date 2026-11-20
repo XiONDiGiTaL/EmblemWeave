@@ -7,7 +7,7 @@ use crate::jobs::JobKind;
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 
 const STEP_BUILD: u8 = 3;
 const STEP_READY: u8 = 4;
@@ -73,16 +73,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         ui.set_min_height(300.0);
         match step {
             0 => {
-                ui.label(RichText::new("A native PC copy, built from your own copy of the game.").font(theme::display(18.0)).color(p.ink));
+                ui.label(crate::i18n::text("A native PC copy, built from your own copy of the game.").font(theme::display(18.0)).color(p.ink));
                 ui.add_space(5.0);
-                ui.label(RichText::new("Nothing is downloaded or run without asking. Your game dump is read where it is; saves, mods and settings stay in the launcher's own folder.").size(12.0).color(p.body));
+                ui.label(crate::i18n::text("Nothing is downloaded or run without asking. Your game dump is read where it is; saves, mods and settings stay in the launcher's own folder.").size(12.0).color(p.body));
                 ui.add_space(14.0);
                 intro_row(ui, &p, 1, "Point at your game files", "Choose the folder that holds exefs and romfs. The guide checks what it can read before it lets you continue.");
                 intro_row(ui, &p, 2, "Install the tools once", "The guide asks Windows to install only what this PC is missing. A release with the bundled shader translator needs no .NET SDK.");
                 intro_row(ui, &p, 3, "Build once, then play", "The first build is the slow one. Later builds only redo what changed, and this guide remembers where you stopped.");
             }
             1 => {
-                ui.label(RichText::new("EmblemWeave reads these files once; it never changes or moves them.").size(12.0).color(p.body));
+                ui.label(crate::i18n::text("EmblemWeave reads these files once; it never changes or moves them.").size(12.0).color(p.body));
                 ui.add_space(9.0);
                 file_row(ui, &p, "Game code (exefs/main)", app.game.exefs.is_some(), app.game.exefs.as_ref());
                 file_row(ui, &p, "Game data (romfs or NSP)", app.game.romfs.is_some() || app.game.nup.is_some(), app.game.romfs.as_ref().or(app.game.nup.as_ref()));
@@ -91,7 +91,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 if detecting {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-                        ui.label(RichText::new("Checking the folder…").size(12.0).color(p.body));
+                        ui.label(crate::i18n::text("Checking the folder…").size(12.0).color(p.body));
                     });
                 } else if data_ready {
                     if let Some((name, version)) = &app.game.title {
@@ -114,16 +114,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     }
                 });
                 ui.add_space(3.0);
-                ui.label(RichText::new("Advanced setup can point at each file separately and decode a packed package.").size(10.5).color(p.muted));
+                ui.label(crate::i18n::text("Advanced setup can point at each file separately and decode a packed package.").size(10.5).color(p.muted));
             }
             2 => {
-                ui.label(RichText::new("Only the tools that block this build are shown. The release's bundled translator removes the .NET SDK requirement on a normal install.").size(12.0).color(p.body));
+                ui.label(crate::i18n::text("Only the tools that block this build are shown. The release's bundled translator removes the .NET SDK requirement on a normal install.").size(12.0).color(p.body));
                 ui.add_space(9.0);
                 match rows.as_deref() {
                     None => {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(14.0).color(p.accent));
-                            ui.label(RichText::new("Checking Visual Studio, LLVM, CMake and the other build tools…").size(12.0).color(p.body));
+                            ui.label(crate::i18n::text("Checking Visual Studio, LLVM, CMake and the other build tools…").size(12.0).color(p.body));
                         });
                     }
                     Some(rows) => {
@@ -139,21 +139,21 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 ui.horizontal_top(|ui| {
                                     widgets::status_dot(ui, &p, Tone::Warn);
                                     ui.vertical(|ui| {
-                                        ui.label(RichText::new(row.dep.name).font(theme::semibold(12.5)).color(p.ink));
+                                        ui.label(crate::i18n::text(row.dep.name).font(theme::semibold(12.5)).color(p.ink));
                                         let detail = row.status.detail();
-                                        ui.add(egui::Label::new(RichText::new(compact_path(&detail)).size(11.0).color(p.muted)).wrap());
+                                        ui.add(egui::Label::new(crate::i18n::text(compact_path(&detail)).size(11.0).color(p.muted)).wrap());
                                     });
                                 });
                             }
                         }
                         if !manual.is_empty() {
                             ui.add_space(7.0);
-                            ui.label(RichText::new("Manual step").font(theme::semibold(11.5)).color(p.warn));
+                            ui.label(crate::i18n::text("Manual step").font(theme::semibold(11.5)).color(p.warn));
                             for line in &manual {
-                                ui.add(egui::Label::new(RichText::new(format!("• {line}")).size(11.0).color(p.body)).wrap());
+                                ui.add(egui::Label::new(crate::i18n::text(format!("• {line}")).size(11.0).color(p.body)).wrap());
                             }
                             if crate::deps::row(rows, "sdk").is_some_and(|r| r.blocking()) {
-                                ui.hyperlink_to("Open the Windows SDK download page", crate::deps::WINDOWS_SDK_URL);
+                                ui.hyperlink_to(crate::i18n::text("Open the Windows SDK download page"), crate::deps::WINDOWS_SDK_URL);
                             }
                         }
                         ui.add_space(9.0);
@@ -173,12 +173,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 action.set(Some(Action::Recheck));
                             }
                             if !blocking_rows.is_empty() && !crate::engine::have_winget() {
-                                ui.label(RichText::new("winget is not available; Requirements lists the manual links.").size(10.5).color(p.warn));
+                                ui.label(crate::i18n::text("winget is not available; Requirements lists the manual links.").size(10.5).color(p.warn));
                             }
                         });
                         if !blocking_rows.is_empty() {
                             ui.add_space(3.0);
-                            ui.label(RichText::new("A tool that was installed while the game is open may only appear after reopening the launcher. The check itself is live.").size(10.5).color(p.muted));
+                            ui.label(crate::i18n::text("A tool that was installed while the game is open may only appear after reopening the launcher. The check itself is live.").size(10.5).color(p.muted));
                         }
                     }
                 }
@@ -192,20 +192,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     widgets::progress_bar(ui, &p, if stages.is_empty() { None } else { Some(done as f32 / stages.len() as f32) });
                     ui.add_space(5.0);
                     if let Some(active) = stages.iter().find(|s| matches!(s.status, crate::jobs::StageStatus::Active)) {
-                        ui.label(RichText::new(active.name).font(theme::semibold(13.0)).color(p.ink));
-                        ui.label(RichText::new(&active.detail).size(11.5).color(p.body));
+                        ui.label(crate::i18n::text(active.name).font(theme::semibold(13.0)).color(p.ink));
+                        ui.label(crate::i18n::text(&active.detail).size(11.5).color(p.body));
                     } else {
-                        ui.label(RichText::new("Preparing the build…").size(12.0).color(p.body));
+                        ui.label(crate::i18n::text("Preparing the build…").size(12.0).color(p.body));
                     }
                     ui.add_space(8.0);
-                    ui.label(RichText::new("You can close this guide; the build continues in the activity hub at the bottom of the window. Reopening Setup guide from Overview returns here.").size(10.8).color(p.muted));
+                    ui.label(crate::i18n::text("You can close this guide; the build continues in the activity hub at the bottom of the window. Reopening Setup guide from Overview returns here.").size(10.8).color(p.muted));
                 } else {
                     if rows.as_deref().is_some_and(|r| !crate::deps::blocking(r).is_empty()) {
                         widgets::error_note(ui, &p, "The build is blocked by missing tools. Go back one step to install them.");
                     } else if app.game.exefs.is_none() {
                         widgets::error_note(ui, &p, "The game files are not chosen yet. Go back one step to point at them.");
                     } else {
-                        ui.label(RichText::new("This compiles a native executable from your dump. It is the one long step; later builds are incremental.").size(12.0).color(p.body));
+                        ui.label(crate::i18n::text("This compiles a native executable from your dump. It is the one long step; later builds are incremental.").size(12.0).color(p.body));
                         ui.add_space(8.0);
                         ui.horizontal_wrapped(|ui| {
                             widgets::pill(ui, &p, "one-time", Tone::Accent);
@@ -226,7 +226,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
             }
             STEP_READY => {
-                ui.label(RichText::new("The setup path is complete. The launcher will open here next time, with Play ready.").font(theme::display(18.0)).color(p.ink));
+                ui.label(crate::i18n::text("The setup path is complete. The launcher will open here next time, with Play ready.").font(theme::display(18.0)).color(p.ink));
                 ui.add_space(12.0);
                 ready_row(ui, &p, data_ready, "Game data", if data_ready { "Executable and data are readable" } else { "Needs game files" });
                 ready_row(ui, &p, rows.as_deref().is_some_and(|r| crate::deps::blocking(r).is_empty()), "Build tools", summary_tools(rows.as_deref()));
@@ -234,7 +234,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 ui.add_space(12.0);
                 widgets::status_line(ui, &p, if ready { Tone::Ok } else { Tone::Warn }, "Readiness", if ready { "Everything required is present." } else { "One of the checks above still needs work." });
                 ui.add_space(7.0);
-                ui.label(RichText::new("Saves, mods, controls and graphics can be changed later from the sidebar. They are not part of this setup path.").size(11.0).color(p.muted));
+                ui.label(crate::i18n::text("Saves, mods, controls and graphics can be changed later from the sidebar. They are not part of this setup path.").size(11.0).color(p.muted));
             }
             _ => {}
         }
@@ -262,7 +262,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             action.set(Some(Action::Step(2)));
                         }
                         if !data_ready {
-                            ui.label(RichText::new("Choose a readable game folder to continue.").size(10.5).color(p.muted));
+                            ui.label(crate::i18n::text("Choose a readable game folder to continue.").size(10.5).color(p.muted));
                         }
                     }
                     2 => {
@@ -277,7 +277,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 action.set(Some(Action::Step(STEP_READY)));
                             }
                         } else {
-                            ui.label(RichText::new("The build continues if this guide is closed.").size(10.5).color(p.muted));
+                            ui.label(crate::i18n::text("The build continues if this guide is closed.").size(10.5).color(p.muted));
                         }
                     }
                     STEP_READY => {
@@ -367,8 +367,8 @@ fn intro_row(ui: &mut egui::Ui, p: &theme::Palette, number: usize, title: &str, 
         ui.painter().circle_stroke(rect.center(), 11.0, egui::Stroke::new(1.0_f32, theme::alpha(p.accent, 110)));
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, number.to_string(), theme::semibold(10.0), p.accent_hi);
         ui.vertical(|ui| {
-            ui.label(RichText::new(title).font(theme::semibold(13.0)).color(p.ink));
-            ui.add(egui::Label::new(RichText::new(body).size(11.5).color(p.body)).wrap());
+            ui.label(crate::i18n::text(title).font(theme::semibold(13.0)).color(p.ink));
+            ui.add(egui::Label::new(crate::i18n::text(body).size(11.5).color(p.body)).wrap());
         });
     });
     ui.add_space(9.0);
@@ -378,9 +378,9 @@ fn file_row(ui: &mut egui::Ui, p: &theme::Palette, label: &str, ok: bool, path: 
     ui.horizontal_top(|ui| {
         widgets::status_dot(ui, p, if ok { Tone::Ok } else { Tone::Neutral });
         ui.vertical(|ui| {
-            ui.label(RichText::new(label).font(theme::semibold(12.5)).color(p.ink));
+            ui.label(crate::i18n::text(label).font(theme::semibold(12.5)).color(p.ink));
             let detail = path.map(|path| compact_path(&path.display().to_string())).unwrap_or_else(|| if ok { "found".into() } else { "not found".into() });
-            ui.add(egui::Label::new(RichText::new(detail).size(10.8).color(if ok { p.muted } else { p.warn })).wrap());
+            ui.add(egui::Label::new(crate::i18n::text(detail).size(10.8).color(if ok { p.muted } else { p.warn })).wrap());
         });
     });
     ui.add_space(5.0);
@@ -390,8 +390,8 @@ fn ready_row(ui: &mut egui::Ui, p: &theme::Palette, ok: bool, label: &str, detai
     ui.horizontal_top(|ui| {
         widgets::status_dot(ui, p, if ok { Tone::Ok } else { Tone::Warn });
         ui.vertical(|ui| {
-            ui.label(RichText::new(label).font(theme::semibold(12.5)).color(p.ink));
-            ui.add(egui::Label::new(RichText::new(detail).size(11.0).color(if ok { p.muted } else { p.warn })).wrap());
+            ui.label(crate::i18n::text(label).font(theme::semibold(12.5)).color(p.ink));
+            ui.add(egui::Label::new(crate::i18n::text(detail).size(11.0).color(if ok { p.muted } else { p.warn })).wrap());
         });
     });
     ui.add_space(7.0);

@@ -36,6 +36,16 @@ SOFTWARE.
 
 The nxrt parts that come from smo-recomp and ScarletNX are under GPL-3.0, like nxrt itself (GPL-3.0-or-later). The same holds for the ssbu-recomp references in `include/nxrt/diag.h`, `src/eh/*` (facts read from `runtime/eh_runtime.h` and `runtime/nncxxrt.c`: header layout of the SDK's libc++abi, the non-unique-name bit) and `src/core/hooks.cpp` (idea only). Upstream licence files: smo-recomp `LICENSE` (GPL-3.0), ScarletNX `LICENSE` (GPL-3.0; its source headers say GPL-3.0-or-later), ssbu-recomp `LICENSE` (GPL-3.0). The GPL-3.0 text for nxrt is the `LICENSE` file at the repository root.
 
+## FFmpeg 8.1 public headers (LGPL-2.1-or-later)
+
+`third_party/ffmpeg/include` holds the public `libavcodec` and `libavutil` headers of FFmpeg n8.1, taken from the
+`ffmpeg-n8.1-latest-win64-lgpl-shared-8.1` package published by BtbN (https://github.com/BtbN/FFmpeg-Builds/releases).
+They are used only to compile `src/media/movie_ffmpeg.cpp`, which loads a player-supplied FFmpeg 8.x shared build at run
+time. No FFmpeg library is linked and no FFmpeg binary is shipped. The headers are licensed under the GNU Lesser General
+Public License, version 2.1 or later; the licence texts are `third_party/ffmpeg/COPYING.LGPLv2.1` and
+`third_party/ffmpeg/COPYING.LGPLv3`, and `third_party/ffmpeg/README.md` records the source and the ABI pins. FFmpeg's
+upstream licence and copyright notices are at https://github.com/FFmpeg/FFmpeg.
+
 ## LLVM libc++abi (Apache-2.0 with LLVM exceptions)
 
 `src/eh/typeinfo.cpp`, `src/eh/unwind.cpp`, `include/nxrt/eh.h` and `tests/lift/guest/rt2.h` follow the behaviour and data layouts of LLVM libc++abi (`libcxxabi/src/private_typeinfo.cpp`, `cxa_exception.h`, `cxa_exception.cpp`, `cxa_personality.cpp`), read from the llvm-project repository on 2026-10-21. The code was written from that behaviour and from the Itanium C++ ABI; no libc++abi source text was copied. Licence of the upstream files: Apache License v2.0 with LLVM Exceptions (https://llvm.org/LICENSE.txt), which is compatible with GPL-3.0-or-later for this use. The licence text in the release is `licenses/LICENSE.libcxxabi.Apache-2.0-LLVM-exception.txt` (source: `tools/release/licenses/`).
@@ -251,6 +261,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 `src/services/pl.cpp` uses DejaVu Sans (`DejaVuSans.ttf`) as the fallback shared font. The font file is not in this worktree. Its licence text is `assets/fonts/LICENSE-DejaVu.txt` (in the `svc-pl` worktree, with the font at `assets/fonts/DejaVuSans.ttf`), the Bitstream Vera licence as the DejaVu fonts name it. Not copied here.
 
+The overlay's Latin UI face is Sora (`assets/fonts/Sora.ttf`), the typeface used by xiondigital.net, under the SIL Open Font License 1.1. The licence ships beside it as `assets/fonts/OFL-Sora.txt`.
+
 ## AMD FidelityFX SDK v1.1.4, FSR 1 shader headers (MIT)
 
 Files: `third_party/ffx_fsr1/` (`fsr1/ffx_fsr1.h`, `ffx_core*.h`, `ffx_common_types.h` and the other headers listed in `third_party/ffx_fsr1/README.txt`). Copyright (C) 2024 Advanced Micro Devices, Inc. Licence text: `third_party/ffx_fsr1/LICENSE.txt`. Source: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag v1.1.4. Used by `src/gfx/extras/`: the EASU and RCAS compute shaders are generated from these headers by `scripts/gen_extras_shaders.py`, and the constant setup is a port in `src/gfx/extras/fsr1_consts.cpp`.
@@ -262,6 +274,15 @@ Files: `third_party/nvidia_nis/` (`NIS_Scaler.h`, `NIS_Config.h`, unmodified). C
 ## AMD FidelityFX SDK v2.4.0, FidelityFX API headers (MIT)
 
 Files: `third_party/amd_ffx_api/` (`api/include/ffx_api.h`, `ffx_api_types.h`, `ffx_api_loader.h`, `vk/ffx_api_vk.h`, `upscalers/include/ffx_upscale.h`, unmodified). Copyright (c) Advanced Micro Devices, Inc. Licence text: `third_party/amd_ffx_api/LICENSE.txt`. Source: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, release v2.4.0. Used by `src/gfx/extras/temporal_ffx.cpp`.
+
+## MAKO (GPL-3.0-or-later)
+
+`src/gfx/extras/mako_spatial.cpp`, `src/gfx/extras/mako_spatial.h`, `src/gfx/extras/mako_shaders.inc` and
+`scripts/gen_mako_shaders.py` adapt the single-pass spatial scaler of MAKO `engine/mako-render/src/shaders/spatial_scaling.comp`,
+as a Vulkan compute pass behind nxrt's `SpatialUpscaler`. Copyright (C) 2025-2026 Eugenio Segala and contributors. Source:
+https://github.com/eugeniosegala/MAKO, commit `504611d42b73d33320456911e9bf92215dbb8cbf`. Licence: GPL-3.0-or-later, compatible
+with nxrt's GPL-3.0-or-later; the GPL-3.0 text is the `LICENSE` file at the repository root. The port changes the buffer and
+push-constant layout and the HDR pre-scale to nxrt's conventions; the reconstruction, anti-ringing and sharpening follow MAKO.
 
 ## AMD FidelityFX / FSR runtime DLLs (MIT)
 

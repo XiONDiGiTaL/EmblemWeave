@@ -112,7 +112,9 @@ void OutputPass::shutdown() {
     dev_->wait_idle();
     fsr_.shutdown();
     nis_.shutdown();
+    mako_.shutdown();
     nis_tried_ = false;
+    mako_tried_ = false;
     for (auto& [f, p] : enc_pipes_)
         if (p) { vkDestroyPipeline(d, p, nullptr); vk_gauge_pipelines().sub(1); }
     enc_pipes_.clear();
@@ -291,7 +293,7 @@ int OutputPass::record(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_fo
 
     const float* pic = p.picture ? p.pic : nullptr;
 
-    // FSR 1: only when the picture on screen is larger than the source crop and the crop starts at the origin
+    // Spatial upscalers: only when the picture on screen is larger than the source crop and the crop starts at the origin
     const int32_t sw = static_cast<int32_t>(p.src_extent.width), sh = static_cast<int32_t>(p.src_extent.height);
     const bool has_crop = p.crop[2] > 0 && p.crop[3] > 0;
     const double cw = has_crop ? std::min(p.crop[2], sw) : sw, ch = has_crop ? std::min(p.crop[3], sh) : sh;
@@ -303,16 +305,21 @@ int OutputPass::record(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_fo
     }
     const uint32_t upw = std::max(1u, static_cast<uint32_t>(std::lround(pw))), uph = std::max(1u, static_cast<uint32_t>(std::lround(ph)));
     const bool origin_ok = !has_crop || (p.crop[0] == 0 && p.crop[1] == 0);
-    if ((p.fsr1 || p.nis) && origin_ok && (upw > cw + 0.5 || uph > ch + 0.5)) {
+    if ((p.fsr1 || p.nis || p.mako) && origin_ok && (upw > cw + 0.5 || uph > ch + 0.5)) {
         const VkExtent2D in_view = {static_cast<uint32_t>(cw), static_cast<uint32_t>(ch)};
         const VkExtent2D out = {upw, uph};
         if (p.nis && !nis_tried_) {
             nis_tried_ = true;
             if (!nis_.init(*dev_)) NXLOG_W(kTag, "NVIDIA Image Scaling is not available (its pipeline failed): FSR 1 is used instead");
         }
-        SpatialUpscaler* su = p.nis && nis_.initialised() && nis_.supports(in_view, out) ? static_cast<SpatialUpscaler*>(&nis_)
-                              : fsr_.initialised()                                   ? static_cast<SpatialUpscaler*>(&fsr_)
-                                                                                     : nullptr;
+        if (p.mako && !mako_tried_) {
+            mako_tried_ = true;
+            if (!mako_.init(*dev_)) NXLOG_W(kTag, "the MAKO spatial scaler is not available (its pipeline failed): FSR 1 is used instead");
+        }
+        SpatialUpscaler* su = p.mako && mako_.initialised()                              ? static_cast<SpatialUpscaler*>(&mako_)
+                              : p.nis && nis_.initialised() && nis_.supports(in_view, out) ? static_cast<SpatialUpscaler*>(&nis_)
+                              : fsr_.initialised()                                 ? static_cast<SpatialUpscaler*>(&fsr_)
+                                                                                   : nullptr;
         // display-referred picture: the HDR window texture is 1.0 = paper white, so no pre-scale; SDR bytes are already [0,1]
         if (VkImageView up = su ? su->upscale(cb, p.src, in_view, p.src_extent, out, p.src_linear, 1.0f, p.sharpness) : VK_NULL_HANDLE) {
             const int32_t whole[4] = {0, 0, 0, 0};

@@ -6,7 +6,7 @@ use crate::jobs::JobKind;
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 
 const LANGUAGES: [(&str, &str); 12] = [
     ("en-US", "English (US)"),
@@ -43,7 +43,7 @@ fn path_row(
 ) -> bool {
     let mut changed = false;
     ui.label(
-        RichText::new(label)
+        crate::i18n::text(label)
             .font(theme::semibold(13.5))
             .color(p.ink),
     );
@@ -124,7 +124,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.spinner();
                 } else {
                     ui.label(
-                        RichText::new(format!(
+                        crate::i18n::text(format!(
                             "{} of {}",
                             crate::fmt_size(copied),
                             crate::fmt_size(total)
@@ -143,15 +143,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if total > 0 {
                 ui.add_space(theme::SPACE_XS);
                 widgets::progress_bar(ui, &p, Some(copied as f32 / total.max(1) as f32));
-                ui.label(RichText::new(message).size(12.5).color(p.body));
+                ui.label(crate::i18n::text(message).size(12.5).color(p.body));
                 ui.add_space(theme::SPACE_XS);
             }
         }
-        egui::CollapsingHeader::new(RichText::new("Individual locations").color(p.body)).show(
+        egui::CollapsingHeader::new(crate::i18n::text("Individual locations").color(p.body)).show(
             ui,
             |ui| {
                 ui.label(
-                    RichText::new("Leave empty to detect from the game folder.")
+                    crate::i18n::text("Leave empty to detect from the game folder.")
                         .size(12.5)
                         .color(p.muted),
                 );
@@ -207,7 +207,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.game.romfs.is_some() {
         widgets::section(ui, &p, "Game folder check", |ui| {
             ui.label(
-                RichText::new(
+                crate::i18n::text(
                     "Reads the package and writes out the files it cannot serve in place, then points the game at them. Nothing is rebuilt \
                      and the package itself is only read. Do this once after updating, or if Play says the game was built against a packed \
                      package.",
@@ -218,7 +218,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(theme::SPACE_S);
             let busy = app.running(JobKind::Repair).is_some();
             if widgets::button(ui, &p, "Check my game folder", !busy)
-                .on_hover_text("Writes the packed files into the engine's work folder and records them in fefw.ini. Nothing is compiled.")
+                .on_hover_text(crate::i18n::tr("Writes the packed files into the engine's work folder and records them in fefw.ini. Nothing is compiled."))
                 .clicked()
             {
                 app.start(JobKind::Repair);
@@ -228,7 +228,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "Validation", |ui| {
         if app.game.checks.is_empty() {
-            ui.label(RichText::new("No game folder chosen yet.").color(p.muted));
+            ui.label(crate::i18n::text("No game folder chosen yet.").color(p.muted));
         }
         for c in &app.game.checks {
             let tone = match c.severity {
@@ -258,7 +258,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
             widgets::section(&mut cols[1], &p, "Decoded module", |ui| {
                 if app.game.segments.is_empty() {
-                    ui.label(RichText::new("The main module has not been decoded.").color(p.body));
+                    ui.label(crate::i18n::text("The main module has not been decoded.").color(p.body));
                 }
                 for s in &app.game.segments {
                     let tone = if s.ok() { Tone::Ok } else { Tone::Bad };
@@ -274,7 +274,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let busy = app.running(JobKind::Decode).is_some();
                 let label = if app.game.decoded.is_some() { "Decode again" } else { "Decode main module" };
                 if widgets::button(ui, &p, label, app.game.exefs.is_some() && !busy)
-                    .on_hover_text("Runs the ZBIC bridge, which is built into the launcher and needs Python's zbic package. Output goes to %APPDATA%\\EmblemWeave\\work; your dump is only read.")
+                    .on_hover_text(crate::i18n::tr("Runs the ZBIC bridge, which is built into the launcher and needs Python's zbic package. Output goes to %APPDATA%\\EmblemWeave\\work; your dump is only read."))
                     .clicked()
                 {
                     app.start(JobKind::Decode);
@@ -291,19 +291,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .striped(true)
                 .show(ui, |ui| {
                     for h in ["File", "Module", "Compression", "Image size", "Status"] {
-                        ui.label(RichText::new(h).font(theme::semibold(12.0)).color(p.muted));
+                        ui.label(crate::i18n::text(h).font(theme::semibold(12.0)).color(p.muted));
                     }
                     ui.end_row();
                     for m in &exefs.modules {
                         ui.label(
-                            RichText::new(&m.file_name)
+                            crate::i18n::text(&m.file_name)
                                 .font(theme::mono(12.5))
                                 .color(p.ink),
                         );
-                        ui.label(RichText::new(&m.module_name).color(p.body));
-                        ui.label(RichText::new(m.compressions.join(" + ")).color(p.body));
+                        ui.label(crate::i18n::text(&m.module_name).color(p.body));
+                        ui.label(crate::i18n::text(m.compressions.join(" + ")).color(p.body));
                         ui.label(
-                            RichText::new(format!("{:.1} MiB", m.image_size() as f64 / 1048576.0))
+                            crate::i18n::text(format!("{:.1} MiB", m.image_size() as f64 / 1048576.0))
                                 .font(theme::mono(12.5)),
                         );
                         let (t, tone) = if m.file_name == "main" {
@@ -371,10 +371,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .map(|r| r.display().to_string())
                 .unwrap_or_else(|| "not found".into()),
         );
-        ui.label(RichText::new("The engine folder holds the built game and its build cache. Keeping one anywhere on disk is what spares a full rebuild when a new launcher version arrives: point the new copy here instead of unzipping a whole engine beside it.").size(12.5).color(p.muted));
+        ui.label(crate::i18n::text("The engine folder holds the built game and its build cache. Keeping one anywhere on disk is what spares a full rebuild when a new launcher version arrives: point the new copy here instead of unzipping a whole engine beside it.").size(12.5).color(p.muted));
         ui.horizontal(|ui| {
             if widgets::button(ui, &p, "Use another engine folder…", true)
-                .on_hover_text("Choose the checkout (…\\engine\\fefw-recomp) or a folder that holds it, such as an older EmblemWeave copy")
+                .on_hover_text(crate::i18n::tr("Choose the checkout (…\\engine\\fefw-recomp) or a folder that holds it, such as an older EmblemWeave copy"))
                 .clicked()
             {
                 if let Some(dir) = rfd::FileDialog::new().set_title("Choose an engine folder (engine\\fefw-recomp)").pick_folder() {
@@ -424,7 +424,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 "4. If a swap cannot replace the running launcher, the old one starts and the reason is written to logs\\update.log.",
             ];
             for step in steps {
-                ui.label(RichText::new(step).size(12.5).color(p.body));
+                ui.label(crate::i18n::text(step).size(12.5).color(p.body));
                 ui.add_space(3.0);
             }
             ui.add_space(theme::SPACE_XS);
@@ -448,7 +448,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     );
 
     widgets::section(ui, &p, "Save data", |ui| {
-        ui.label("Importing, save profiles and the save editor are on the Saves page.");
+        ui.label(crate::i18n::text("Importing, save profiles and the save editor are on the Saves page."));
     });
 
     widgets::section(ui, &p, "Runtime", |ui| {
@@ -541,18 +541,18 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
         let found = app.saves_ui.sources.clone();
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Emulator saves").font(theme::semibold(13.0)).color(p.ink));
-            if widgets::button(ui, p, "Scan again", true).on_hover_text("Looks in Switch emulator save folders").clicked() {
+            ui.label(crate::i18n::text("Emulator saves").font(theme::semibold(13.0)).color(p.ink));
+            if widgets::button(ui, p, "Scan again", true).on_hover_text(crate::i18n::tr("Looks in Switch emulator save folders")).clicked() {
                 app.saves_ui.sources = crate::saves::find_here(title);
                 app.saves_ui.sources_title = Some(title);
                 app.saves_ui.sources_at = now;
             }
-            if !found.is_empty() && widgets::primary_button(ui, p, "Import newest", true).on_hover_text("Imports the most recently written emulator save above").clicked() {
+            if !found.is_empty() && widgets::primary_button(ui, p, "Import newest", true).on_hover_text(crate::i18n::tr("Imports the most recently written emulator save above")).clicked() {
                 message = Some(import_notice(crate::saves::import(&found[0].path, &save_dir, title, &stamp())));
             }
         });
         if found.is_empty() {
-            ui.label(RichText::new("No emulator saves for this game were found. Lichii, Fritchii and Eden use the yuzu NAND layout; a portable install can be picked with Import from folder.").size(12.5).color(p.muted));
+            ui.label(crate::i18n::text("No emulator saves for this game were found. Lichii, Fritchii and Eden use the yuzu NAND layout; a portable install can be picked with Import from folder.").size(12.5).color(p.muted));
         }
         for f in &found {
             ui.horizontal(|ui| {
@@ -609,7 +609,7 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
                 let _ = std::process::Command::new("explorer").arg(&save_dir).spawn();
             }
         });
-        ui.label("Importing moves the current save to the backups folder first; the source is only read.");
+        ui.label(crate::i18n::text("Importing moves the current save to the backups folder first; the source is only read."));
     });
     if let Some((text, tone)) = message {
         app.notify(text, tone);

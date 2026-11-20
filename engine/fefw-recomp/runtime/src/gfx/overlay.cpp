@@ -27,6 +27,7 @@
 #include <imgui_impl_vulkan.h>
 
 #include "nxrt/config.h"
+#include "nxrt/gauge.h"
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
 #include "nxrt/menu_i18n.h"
@@ -34,7 +35,9 @@
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
+#include "nxrt/perf.h"
 #include "nxrt/services_api.h"
+#include "nxrt/ui_theme.h"
 #include "extras/framegen.h"
 #include "extras/overlay_composite.h"
 #include "fps_stats.h"
@@ -169,7 +172,7 @@ constexpr uint64_t kKbDirBits[4] = {
     hid::btn(hid::kBtnLeft) | hid::btn(hid::kBtnStickLLeft), hid::btn(hid::kBtnRight) | hid::btn(hid::kBtnStickLRight)};
 constexpr double kKbRepeatDelay = 0.40, kKbRepeatEvery = 0.07;   // seconds: a held direction or B repeats
 
-// ---- the code mods' widgets (mod API version 4, NxModUi): thin wrappers over ImGui, called from a panel inside the Mods window ----
+// ---- the code mods' widgets (mod API version 4, NxModUi): thin wrappers over ImGui, called from a panel inside the menu's Mods tab ----
 const char* lbl(const char* s) { return s && *s ? s : "##unnamed"; }
 void ui_text(const char* t) { ImGui::TextUnformatted(t ? t : ""); }
 void ui_text_disabled(const char* t) { ImGui::TextDisabled("%s", t ? t : ""); }
@@ -197,7 +200,7 @@ void ui_separator(const char* label) {
     if (label && *label) ImGui::SeparatorText(label);
     else ImGui::Separator();
 }
-// A panel's begin_disabled / tree_node it did not close again are closed after it (draw_mods_window), so a slip in one mod cannot
+// A panel's begin_disabled / tree_node it did not close again are closed after it (draw_mod_panels), so a slip in one mod cannot
 // break the window: these count what is open.
 int g_ui_disabled = 0, g_ui_trees = 0;
 void ui_begin_disabled(int d) { ImGui::BeginDisabled(d != 0); ++g_ui_disabled; }
@@ -237,10 +240,8 @@ void clear_imgui_input(ImGuiContext* ctx) {
 }
 }  // namespace
 
-bool has_mod_panels() { return !services::modapi::panels().empty(); }
-
-// Every code mod's panel (mod API add_panel) as a section that folds open, into the current ImGui window: the Mods window, or the
-// menu's Mods tab (play_ui.cpp), which is how a controller reaches them.
+// Every code mod's panel (mod API add_panel) as a section that folds open, into the current ImGui window: the menu's Mods tab
+// (play_ui.cpp), which is how a controller reaches them too.
 void draw_mod_panels() {
     const std::vector<services::modapi::PanelInfo> list = services::modapi::panels();
     if (list.empty()) {
@@ -282,8 +283,6 @@ struct Overlay::Impl {
     std::atomic<bool> visible{false};
     std::mutex mu;                    // guards the ImGui context: events arrive on the game's main thread, drawing happens on the presenting thread
     int toggle_sc = SDL_SCANCODE_F1;
-    int mods_sc = SDL_SCANCODE_F8;        // [gfx] mods_key: shows the Mods window (the code mods' panels) instead of the menu
-    std::atomic<bool> mods_mode{false};   // the overlay shows the Mods window, not the menu
     int trace_sc = SDL_SCANCODE_UNKNOWN;   // [gfx] trace_key: trace the next frame (draws, shaders, targets) into the log
     bool restore_relative = false;
     std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
@@ -333,7 +332,6 @@ struct Overlay::Impl {
 
     void build_ui();
     void build_ui_inner();
-    void draw_mods_window();
     void update_scale(const VkExtent2D& extent);
     void refresh_counter_text(double now_s);
     void draw_counter(const FrameInfo& f, double now_s);
@@ -377,26 +375,6 @@ struct Overlay::Impl {
     void draw_keyboard(double now_s);     // mu held, inside an ImGui frame
 };
 
-// The Mods window: every code mod's panel (mod API add_panel) as a section that folds open. Drawn in place of the menu while the overlay
-// was opened with [gfx] mods_key.
-void Overlay::Impl::draw_mods_window() {
-    const ImVec2 disp = ImGui::GetIO().DisplaySize;
-    const float k = ui_scale > 0.f ? ui_scale : 1.f;
-    // below the corner frame-rate counter; the window fits its contents (up to the frame's height, then it scrolls)
-    ImGui::SetNextWindowPos(ImVec2(16.f * k, 72.f * k), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(320.f * k, 0.f), ImVec2(std::max(320.f * k, disp.x - 32.f * k), std::max(200.f, disp.y - 88.f * k)));
-    bool open = true;
-    if (ImGui::Begin("Mods", &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushItemWidth(260.f * k);   // sliders keep one width (an auto-sized window cannot size them by its own width)
-        draw_mod_panels();
-        ImGui::Spacing();
-        ImGui::TextDisabled("%s closes this window", SDL_GetScancodeName(static_cast<SDL_Scancode>(mods_sc)));
-        ImGui::PopItemWidth();
-    }
-    ImGui::End();
-    if (!open) want_hide.store(true);
-}
-
 void Overlay::Impl::build_ui() {
     g_panels_drawn = false;   // set by draw_mod_panels: whether a mod's panel is on screen this frame (api->panel_visible)
     build_ui_inner();
@@ -404,10 +382,6 @@ void Overlay::Impl::build_ui() {
 }
 
 void Overlay::Impl::build_ui_inner() {
-    if (mods_mode.load()) {
-        draw_mods_window();
-        return;
-    }
     if (menu) {
         menu();
         return;
@@ -441,7 +415,8 @@ void Overlay::Impl::build_ui_inner() {
             }
             ImGui::EndCombo();
         }
-        if (r.present_mode() != r.requested_present_mode()) ImGui::TextDisabled("in use: %s (requested mode unavailable)", present_mode_name(r.present_mode()));
+        if (r.present_mode() != r.requested_present_mode())
+            ImGui::TextDisabled("in use: %s (requested %s)", present_mode_name(r.present_mode()), present_mode_name(r.requested_present_mode()));
 
         if (ctx.limiter) {
             char label[32];
@@ -547,13 +522,6 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     const std::string key = config_get_str("gfx", "overlay_key", "F1");
     if (const SDL_Scancode sc = SDL_GetScancodeFromName(key.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.toggle_sc = sc;
     else NXLOG_W(kTag, "unknown [gfx] overlay_key '%s': using F1", key.c_str());
-    {   // [gfx] mods_key: the Mods window (the code mods' panels); "none" or empty = no key
-        const std::string mk = config_get_str("gfx", "mods_key", "F8");
-        if (mk.empty() || mk == "none") s.mods_sc = SDL_SCANCODE_UNKNOWN;
-        else if (const SDL_Scancode sc = SDL_GetScancodeFromName(mk.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.mods_sc = sc;
-        else NXLOG_W(kTag, "unknown [gfx] mods_key '%s': using F8", mk.c_str());
-        if (s.mods_sc == s.toggle_sc) s.mods_sc = SDL_SCANCODE_UNKNOWN;   // the menu's key wins
-    }
     {   // [gfx] trace_key: empty = off
         const std::string tk = config_get_str("gfx", "trace_key", "");
         if (!tk.empty()) {
@@ -597,40 +565,51 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;      // set_menu_pad feeds it
     ImGui::StyleColorsDark();
-    // UI font: a CJK-capable face for [gfx] ui_language packs, else the scalable built-in default. ImGui 1.92's
-    // dynamic glyphs load only what the UI shows, so a system CJK font costs nothing until it is drawn.
+    nxrt::ui_theme::apply(ImGui::GetStyle());
+    // UI font: XiØN's Sora ships next to the exe and is the default for Latin text. [gfx] ui_language packs still
+    // choose a CJK-capable face, and [gfx] ui_font overrides both. ImGui 1.92's dynamic glyphs load only what the
+    // UI shows, so a system CJK font costs nothing until it is drawn.
     {
         std::string font = config_get_str("gfx", "ui_font", "");
         std::string lang = config_get_str("gfx", "ui_language", "auto");
-        const bool wants_cjk = !(lang.empty() || lang == "auto" || lang == "en" || lang == "en-US") || !font.empty();
+        const bool cjk_language = !(lang.empty() || lang == "auto" || lang == "en" || lang == "en-US");
+        const bool wants_cjk = cjk_language || !font.empty();
+        const auto exists = [](const std::string& p) {
+            WIN32_FILE_ATTRIBUTE_DATA a;
+            return p.size() < MAX_PATH && GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) &&
+                   !(a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+        };
         std::string chosen;
-        if (wants_cjk) {
-            const auto exists = [](const std::string& p) {
-                WIN32_FILE_ATTRIBUTE_DATA a;
-                return p.size() < MAX_PATH && GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) &&
-                       !(a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+        if (!font.empty() && exists(font)) chosen = font;
+        std::string dir;
+        char buf[MAX_PATH];
+        if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
+            dir = buf;
+            const size_t slash = dir.find_last_of("\\/");
+            if (slash != std::string::npos) dir.resize(slash);
+            else dir.clear();
+        }
+        if (chosen.empty() && wants_cjk && !dir.empty()) {
+            static const char* const kLocalCjk[] = {"fonts\\ui.ttf", "fonts\\font.ttf"};
+            for (const char* c : kLocalCjk)
+                if (exists(dir + "\\" + c)) { chosen = dir + "\\" + c; break; }
+        }
+        if (chosen.empty() && !wants_cjk && !dir.empty()) {
+            static const char* const kLocal[] = {"fonts\\Sora.ttf", "fonts\\DejaVuSans.ttf"};
+            for (const char* c : kLocal)
+                if (exists(dir + "\\" + c)) { chosen = dir + "\\" + c; break; }
+        }
+        if (chosen.empty() && wants_cjk) {
+            static const char* const kSystem[] = {
+                "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
             };
-            if (!font.empty() && exists(font)) chosen = font;
-            if (chosen.empty()) {
-                char buf[MAX_PATH];
-                if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
-                    std::string dir(buf);
-                    const size_t slash = dir.find_last_of("\\/");
-                    if (slash != std::string::npos) {
-                        dir.resize(slash);
-                        static const char* const kLocal[] = {"fonts\\ui.ttf", "fonts\\font.ttf"};
-                        for (const char* c : kLocal)
-                            if (exists(dir + "\\" + c)) { chosen = dir + "\\" + c; break; }
-                    }
-                }
-            }
-            if (chosen.empty()) {
-                static const char* const kSystem[] = {
-                    "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
-                };
-                for (const char* c : kSystem)
-                    if (exists(c)) { chosen = c; break; }
-            }
+            for (const char* c : kSystem)
+                if (exists(c)) { chosen = c; break; }
+        }
+        if (chosen.empty() && !wants_cjk) {
+            static const char* const kSystem[] = {"C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\tahoma.ttf"};
+            for (const char* c : kSystem)
+                if (exists(c)) { chosen = c; break; }
         }
         if (!chosen.empty() && io.Fonts->AddFontFromFileTTF(chosen.c_str(), 0.0f))
             NXLOG_I(kTag, "UI font: %s ([gfx] ui_language %s)", chosen.c_str(), lang.c_str());
@@ -713,7 +692,6 @@ void Overlay::set_visible(bool v) {
 bool Overlay::visible() const { return impl_->visible; }
 void Overlay::toggle() { set_visible(!impl_->visible); }
 int Overlay::toggle_scancode() const { return impl_->toggle_sc; }
-int Overlay::mods_scancode() const { return impl_->mods_sc; }
 void Overlay::set_toggle_scancode(int sc) { impl_->toggle_sc = sc; }
 uint64_t Overlay::frames_drawn() const { return impl_->drawn; }
 
@@ -902,7 +880,7 @@ void Overlay::Impl::draw_keyboard(double now_s) {
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
     const float k = ui_scale > 0.f ? ui_scale : 1.f;
     const float w = std::max(320.f, std::min(760.f * k, disp.x - 32.f * k));
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 110));
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, ImGui::GetColorU32(ui_theme::rgb(0x000000, 0.43f)));
     ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
     const std::string title = (kb_req.title.empty() ? std::string("Keyboard") : kb_req.title) + "###nxrt_swkbd";
@@ -986,8 +964,8 @@ void Overlay::Impl::draw_keyboard(double now_s) {
                 ImGui::EndDisabled();
                 if (lit) ImGui::PopStyleColor();
                 if (is_sel)
-                    ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(255, 200, 40, 255), style.FrameRounding,
-                                                        0, std::max(2.f, 2.5f * k));
+                    ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ui_theme::accent_hi),
+                                                        style.FrameRounding, 0, std::max(2.f, 2.5f * k));
                 ImGui::PopID();
                 x += key.w;
             }
@@ -1051,7 +1029,6 @@ uint64_t Overlay::set_menu_pad(uint64_t b, int lx, int ly) {
     if (s.hold_on_hide.exchange(false)) s.menu_mask |= b;   // closed (B, F1, the chord): what is still held stays away from the game
     const uint64_t fresh = b & ~s.menu_prev;
     if (s.menu_chord && (b & s.menu_chord) == s.menu_chord && (fresh & s.menu_chord)) {
-        if (!s.visible) s.mods_mode = false;   // the chord opens the menu
         toggle();
         s.menu_mask |= b;
         NXLOG_I(kTag, "overlay %s by the pad chord", s.visible ? "opened" : "closed");
@@ -1108,26 +1085,8 @@ bool Overlay::handle_event(const input::Event& e) {
         return true;
     }
     if ((e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.toggle_sc) {
-        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
-            if (s.visible && s.mods_mode.load()) {   // the Mods window is up: switch to the menu
-                s.mods_mode = false;
-            } else {
-                s.mods_mode = false;
-                toggle();
-            }
-        }
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle();
         return true;   // the toggle key never reaches the game (press, repeat and release)
-    }
-    if (s.mods_sc != SDL_SCANCODE_UNKNOWN && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.mods_sc) {
-        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
-            if (s.visible && s.mods_mode.load()) {
-                set_visible(false);
-            } else {
-                s.mods_mode = true;   // the menu was up: switch to the Mods window
-                if (!s.visible) set_visible(true);
-            }
-        }
-        return true;   // like the menu's key, the Mods key never reaches the game
     }
     const bool kb = s.kb_poll();
     if (kb && (e.type == EventType::KeyDown || e.type == EventType::KeyUp || e.type == EventType::Text)) return s.kb_key_event(e);
@@ -1277,15 +1236,19 @@ void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
     const float y0 = bottom ? H - margin - box_h : margin;
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + box_w, y0 + box_h), IM_COL32(0, 0, 0, 140), size * 0.3f);
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + box_w, y0 + box_h), ImGui::GetColorU32(ui_theme::with_alpha(ui_theme::bg, 0.82f)), size * 0.3f);
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + box_w, y0 + box_h), ImGui::GetColorU32(ui_theme::line), size * 0.3f, 0, 1.0f);
+    const float accent_w = std::max(2.0f, size * 0.12f);
+    dl->AddRectFilled(ImVec2(right ? x0 + box_w - accent_w : x0, y0), ImVec2(right ? x0 + box_w : x0 + accent_w, y0 + box_h),
+                      ImGui::GetColorU32(ui_theme::accent), size * 0.3f);
     for (int i = 0; i < n; ++i) {
         const float x = right ? x0 + box_w - pad - lines_w[i] : x0 + pad;
         const float y = y0 + pad + static_cast<float>(i) * (line_h + gap);
-        dl->AddText(font, size, ImVec2(x, y), IM_COL32(255, 255, 255, 255), counter_lines[i].c_str());
+        dl->AddText(font, size, ImVec2(x, y), ImGui::GetColorU32(i == 0 ? ui_theme::ink : ui_theme::body), counter_lines[i].c_str());
     }
     if (hint[0]) {
         const float x = right ? x0 + box_w - pad - hint_w : x0 + pad;
-        dl->AddText(font, hint_size, ImVec2(x, y0 + pad + lines_h + hint_gap), IM_COL32(255, 255, 255, 155), hint);
+        dl->AddText(font, hint_size, ImVec2(x, y0 + pad + lines_h + hint_gap), ImGui::GetColorU32(ui_theme::muted), hint);
     }
 }
 
@@ -1327,8 +1290,11 @@ void Overlay::Impl::draw_mods_note(const FrameInfo& f) {
     const float W = static_cast<float>(f.extent.width);
     const float x0 = (W - sz.x) * 0.5f - pad, y0 = size;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), IM_COL32(0, 0, 0, 170), size * 0.3f);
-    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), IM_COL32(255, 200, 80, 255), mods_text.c_str());
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad),
+                      ImGui::GetColorU32(ui_theme::with_alpha(ui_theme::surface_hi, 0.96f)), size * 0.3f);
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), ImGui::GetColorU32(ui_theme::warn),
+                size * 0.3f, 0, 1.0f);
+    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), ImGui::GetColorU32(ui_theme::warn), mods_text.c_str());
 }
 
 void Overlay::Impl::draw_note(const FrameInfo& f) {
@@ -1343,8 +1309,11 @@ void Overlay::Impl::draw_note(const FrameInfo& f) {
     const float W = static_cast<float>(f.extent.width), H = static_cast<float>(f.extent.height);
     const float x0 = (W - sz.x) * 0.5f - pad, y0 = H - size * 0.8f - sz.y - 2.f * pad;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), IM_COL32(0, 0, 0, 120), size * 0.3f);
-    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), IM_COL32(255, 255, 255, 220), text);
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad),
+                      ImGui::GetColorU32(ui_theme::with_alpha(ui_theme::surface, 0.94f)), size * 0.3f);
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), ImGui::GetColorU32(ui_theme::accent),
+                size * 0.3f, 0, 1.0f);
+    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), ImGui::GetColorU32(ui_theme::accent_hi), text);
 }
 
 void Overlay::draw(const FrameInfo& f) {
@@ -1353,6 +1322,20 @@ void Overlay::draw(const FrameInfo& f) {
     const bool counter_on = s.counter_show.load(std::memory_order_relaxed);
     const auto now = std::chrono::steady_clock::now();
     const double now_s = std::chrono::duration<double>(now.time_since_epoch()).count();
+    {
+        // The adaptive controller sees every presented frame, before any early return for a hidden overlay. Its one
+        // live visual output is the sampler mip-bias offset (a texture-detail knob, not a render-target change).
+        nxrt::perf::Sample ps;
+        ps.cpu_ms = std::chrono::duration<double, std::milli>(now - s.last_frame).count();
+        ps.gpu_ms = s.ctx.renderer->stats().gpu_ms_last;
+        ps.upload_total_ms = nxrt::hitch_phase_total_ms(nxrt::kHpRenderUpload);
+        ps.replay_total_ms = nxrt::hitch_phase_total_ms(nxrt::kHpRenderReplay);
+        ps.present_total_ms = nxrt::hitch_phase_total_ms(nxrt::kHpRenderPresent);
+        ps.shader_backlog = shader_backlog();
+        ps.vram_percent = video_live_percent();
+        ps.menu_open = s.visible;
+        nxrt::perf::frame(ps);
+    }
     const bool note_on = s.note_visible(now_s) && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
     const bool mods_on = s.mods_note_visible(now_s) && !s.ctx.renderer->capture_pending();
     const bool ptr_on = s.ptr_show.load(std::memory_order_relaxed) && (s.ptr_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());

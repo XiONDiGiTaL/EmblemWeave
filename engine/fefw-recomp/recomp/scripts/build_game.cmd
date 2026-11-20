@@ -2,7 +2,8 @@
 rem Configure and build the module libraries of one game (games\<id>), sccache kept in work\build\sccache.
 rem   scripts\build_game.cmd <id> [extra ninja args, e.g. -j 20 | -k 0 | <id>_sdk]
 rem A game folder games\<id> is a CMake project that takes NX_ROOT (the repository root: game\, work\) and has a target <id>_modules.
-rem Environment: NX_JOBS (default 20) = compile processes; NX_BUILD (default <root>\work\build\<id>).
+rem Environment: NX_JOBS (default: logical CPUs minus two, capped at 16) = compile processes;
+rem NX_BUILD (default <root>\work\build\<id>). The EmblemWeave launcher always supplies a memory-aware NX_JOBS.
 setlocal
 if "%~1"=="" (
     echo usage: scripts\build_game.cmd ^<id^> [ninja args]
@@ -20,7 +21,10 @@ if not exist "%HERE%..\games\%GAME%\CMakeLists.txt" (
     exit /b 2
 )
 if not defined NX_BUILD set "NX_BUILD=%ROOT%\work\build\%GAME%"
-if not defined NX_JOBS set "NX_JOBS=20"
+if not defined NX_JOBS set /a NX_JOBS=%NUMBER_OF_PROCESSORS%-2
+if not defined NX_JOBS set "NX_JOBS=1"
+if %NX_JOBS% LSS 1 set "NX_JOBS=1"
+if %NX_JOBS% GTR 16 set "NX_JOBS=16"
 if not defined SCCACHE_DIR set "SCCACHE_DIR=%ROOT%\work\build\sccache"
 if not defined SCCACHE_SERVER_PORT set "SCCACHE_SERVER_PORT=24339"
 if not defined SCCACHE_CACHE_SIZE set "SCCACHE_CACHE_SIZE=20G"

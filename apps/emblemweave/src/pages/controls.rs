@@ -5,7 +5,7 @@ use crate::pad::{self, button};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::time::Duration;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -55,8 +55,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ("Left stick", format!("{:+.2}, {:+.2}", l.left.0, l.left.1)),
                     ("Right stick", format!("{:+.2}, {:+.2}", l.right.0, l.right.1)),
                 ] {
-                    ui.label(RichText::new(label).size(12.5).color(p.muted));
-                    ui.label(RichText::new(text).font(theme::mono(12.5)).color(p.ink));
+                    ui.label(crate::i18n::text(label).size(12.5).color(p.muted));
+                    ui.label(crate::i18n::text(text).font(theme::mono(12.5)).color(p.ink));
                     ui.end_row();
                 }
             });
@@ -65,9 +65,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             // a trigger that only reaches 60 % is obvious at a glance.
             for (label, value) in [("ZL travel", l.lt), ("ZR travel", l.rt)] {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).size(12.5).color(p.muted));
+                    ui.label(crate::i18n::text(label).size(12.5).color(p.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("{:.0} %", value * 100.0)).font(theme::mono(12.0)).color(p.ink));
+                        ui.label(crate::i18n::text(format!("{:.0} %", value * 100.0)).font(theme::mono(12.0)).color(p.ink));
                     });
                 });
                 widgets::progress_bar(ui, &p, Some(value));
@@ -75,7 +75,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.add_space(4.0);
             if widgets::button(ui, &p, "Test vibration", true)
-                .on_hover_text("Runs both motors for about half a second through XInput, without starting the game. If this buzzes but play does not, set Vibration backend below to Standard.")
+                .on_hover_text(crate::i18n::tr("Runs both motors for about half a second through XInput, without starting the game. If this buzzes but play does not, set Vibration backend below to Standard."))
                 .clicked()
             {
                 match pad::rumble_test() {
@@ -97,7 +97,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // of the pad, and the table below is the same bindings in list form.
     widgets::section(ui, &p, "Controller map", |ui| {
         ui.label(
-            RichText::new("Where each action sits on the pad. Hover a button for its binding; the table below edits it.")
+            crate::i18n::text("Where each action sits on the pad. Hover a button for its binding; the table below edits it.")
                 .size(12.5)
                 .color(p.muted),
         );
@@ -109,15 +109,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     widgets::section(ui, &p, "Bindings", |ui| {
         egui::Grid::new("bindings").num_columns(3).spacing([24.0, 8.0]).striped(true).show(ui, |ui| {
             for h in ["Action", "Keyboard", "Controller"] {
-                ui.label(RichText::new(h).font(theme::semibold(12.0)).color(p.muted));
+                ui.label(crate::i18n::text(h).font(theme::semibold(12.0)).color(p.muted));
             }
             ui.end_row();
             for (i, b) in app.config.input.bindings.iter_mut().enumerate() {
-                ui.label(RichText::new(&b.action).color(p.ink));
+                ui.label(crate::i18n::text(&b.action).color(p.ink));
                 let capturing = app.capture == Some(i);
                 let text = if capturing { "Press a key… (Esc cancels)".to_string() } else { b.key.clone() };
-                let r = ui.add_sized([210.0, 26.0], egui::Button::new(RichText::new(text).font(theme::mono(12.5))).selected(capturing));
-                if r.on_hover_text("Click, then press the key to bind").clicked() {
+                let r = ui.add_sized([210.0, 26.0], egui::Button::new(crate::i18n::text(text).font(theme::mono(12.5))).selected(capturing));
+                if r.on_hover_text(crate::i18n::tr("Click, then press the key to bind")).clicked() {
                     app.capture = Some(i);
                 }
                 ui.add(egui::TextEdit::singleline(&mut b.pad).desired_width(220.0));
@@ -217,7 +217,7 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 ("rumble", "Standard (most compatible)"),
                 ("dualsense", "DualSense haptics"),
             ] {
-                if ui.selectable_label(backend == word, text).clicked() {
+                if ui.selectable_label(backend == word, crate::i18n::text(text)).clicked() {
                     backend = word.to_string();
                 }
             }
@@ -260,10 +260,10 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         if widgets::button(ui, p, "Re-read controls.ini", true).clicked() {
             app.tuning = Some(pad::Tuning::load(&ini, app.config.input.deadzone));
         }
-        ui.label(RichText::new(ini.display().to_string()).font(theme::mono(11.5)).color(p.muted));
+        ui.label(crate::i18n::text(ini.display().to_string()).font(theme::mono(11.5)).color(p.muted));
     });
     ui.label(
-        RichText::new("Written where the game reads them: it takes them at its next start, and F1 > Controller applies them at once in-game.")
+        crate::i18n::text("Written where the game reads them: it takes them at its next start, and F1 > Controller applies them at once in-game.")
             .size(12.0)
             .color(p.muted),
     );

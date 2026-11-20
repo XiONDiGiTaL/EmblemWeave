@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "nxrt/audio_eq.h"
 #include "nxrt/extras.h"
 #include "play_fastboot.h"
 #include "play_tweaks.h"
@@ -211,6 +212,12 @@ struct AudioSettings {
     bool mute_unfocused = false;   // [audio] mute_unfocused: silent while the window has no focus (live)
     std::string device = "default";   // [audio] device: "default" or part of an output device's name; used at the next start ([audio] device in the ini wins)
     int channels = 2;              // [audio] channels: 2 (stereo) or 6 (5.1 surround) for the game's audio renderer; used at the next start ([audio] channels in the ini or the environment wins)
+    // [audio] eq: the software equalizer on the final mix (nxrt/audio_eq.h). The preset name is kept for the menu and the launcher;
+    // eq_bands is what the DSP actually uses, so a hand-edited curve and a preset both survive a save.
+    bool eq_enabled = false;
+    std::string eq_preset = "flat";
+    double eq_preamp = 0.0;        // -12..12 dB, on top of the automatic headroom
+    double eq_bands[audio::kEqBandCount] = {};   // -12..12 dB per band, 31 Hz .. 16 kHz
 };
 
 // ---- button prompts ----------------------------------------------------------------------------------------------------------------

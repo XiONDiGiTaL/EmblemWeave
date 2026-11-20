@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Where the AMD FidelityFX DLLs are (FSR 3 upscaling and FSR 3 frame generation), and which one is missing when they are not. None of the
+// Where the AMD FidelityFX DLLs are (FSR 4/3 upscaling and FSR 3 frame generation), and which one is missing when they are not. None of the
 // DLLs is part of this repository; the release package carries AMD's signed builds (MIT) in upscalers\fsr\ next to the launcher.
 //
-//   upscaling          amd_fidelityfx_upscaler_vk.dll (FSR SDK v2.4.0, signedbin; FSR 3.1, or FSR 4 where AMD offers it), loaded through
+//   upscaling          amd_fidelityfx_upscaler_vk.dll (FSR SDK v2.4.0, signedbin; FSR 4.1.2 where AMD offers it, else FSR 3.1), loaded through
 //                      amd_fidelityfx_loader_vk.dll when that sits beside it; else amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4, FSR 3.1)
 //   frame generation   amd_fidelityfx_vk.dll (FidelityFX SDK v1.1.4: the Vulkan frame-generation swapchain)
 //

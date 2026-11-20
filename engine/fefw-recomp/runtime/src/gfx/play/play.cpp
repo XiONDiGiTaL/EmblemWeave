@@ -59,6 +59,7 @@
 #include "play_selftest.h"
 #include "play_types.h"
 #include "play_vpad.h"
+#include "play_audio_ui.h"
 #include "play_ui.h"
 #include "prompts.h"
 #include "pad_map.h"
@@ -322,8 +323,8 @@ const char* window_mode_name(platform::FullscreenMode m) {
     return "?";
 }
 
-// Master volume (live). The mute while the window has no focus is set every frame (update_hook) and on focus changes.
-void apply_audio(const AudioSettings& a) { audio::set_master_volume(static_cast<float>(a.volume)); }
+// Master volume and the software EQ (both live). The mute while the window has no focus is set every frame (update_hook) and on focus changes.
+void apply_audio(const AudioSettings& a) { audio_ui::preview_live(a); }
 
 void apply_unfocused_mute() {
     G& st = g();
@@ -1234,9 +1235,7 @@ public:
     void cancel_capture() override { g().capture_state.store(0); }
     bool reserved_key(const InputId& id) const override {
         G& st = g();
-        if (!st.overlay || id.kind != InKind::Key) return false;
-        const int mods = st.overlay->mods_scancode();   // the Mods window's key (0 = SDL_SCANCODE_UNKNOWN: none)
-        return id.code == st.overlay->toggle_scancode() || (mods != 0 && id.code == mods);
+        return st.overlay && id.kind == InKind::Key && id.code == st.overlay->toggle_scancode();
     }
 };
 Host g_host;
@@ -1398,6 +1397,9 @@ bool load() {
     // Speakers: the file's choice becomes [audio] channels unless the ini or the environment set it (the audio services read it when the game opens its audio renderer, after this).
     if (config_has("audio", "channels")) st.settings.audio.channels = config_get_int("audio", "channels", 2) == 6 ? 6 : 2;
     else config_set("audio", "channels", st.settings.audio.channels == 6 ? "6" : "2");
+
+    // The EQ settings came from controls.ini above; push them to the DSP once the sink wrapper can see them.
+    audio::set_eq_settings(audio_ui::to_engine(st.settings.audio));
     st.capture_mouse = config_get_bool("play", "capture_mouse", true);
     st.late_sample = config_get_bool("play", "late_sample", true);
     st.quit_on_close = config_get_bool("play", "quit_on_close", true);

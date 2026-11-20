@@ -30,21 +30,47 @@ a separate full-screen vector buffer.
 | TAAU (built in) | `extras/taau.cpp` | Temporal reconstruction with the game's jitter, motion vectors and depth. Default for the NVN2 DLSS API. |
 | AMD FSR 1 | `extras/fsr1_spatial.cpp` | Spatial, any GPU, sharpening 0 to 1. |
 | NVIDIA Image Scaling 1.0.3 | `extras/nis_spatial.cpp` | Spatial, any GPU, up to 2x per side; FSR 1 is used beyond that. |
-| AMD FSR 3.1 | `extras/temporal_ffx.cpp`, `ffx_files.cpp` | Temporal, through the FidelityFX API (SDK 2.4.0 Vulkan DLLs, or the 3.1 `amd_fidelityfx_vk.dll`). |
+| MAKO spatial scaler | `extras/mako_spatial.cpp` | Spatial, any GPU and any scale, one dispatch: a sharpened-cubic reconstruction adapted from MAKO (GPL-3.0-or-later). |
+| AMD FSR 4.1.2 / FSR 3.1 | `extras/temporal_ffx.cpp`, `ffx_files.cpp` | Temporal, through the FidelityFX API (SDK 2.4.0 Vulkan DLLs). The mode selects the provider generation; FSR 4.1.2 is verified on an RX 7900 XT with Adrenalin 26.10.1, with FSR 3.1 as the fallback. The older single-file 3.1 `amd_fidelityfx_vk.dll` still works. |
 | NVIDIA DLSS / DLAA | `extras/temporal_dlss.cpp` | Through Streamline (v2.14.16 files), RTX hardware, quality presets or native AA. |
 | Intel XeSS Super Resolution | `extras/temporal_xess.cpp` | Through `libxess.dll` (XeSS SDK 3.0.2), any GPU with DP4a, XMX on Intel Arc. |
 | AMD FSR 3 frame generation | `extras/framegen_ffx.cpp` | Implemented and validated with FSR 3.1 on an RX 7900 XT: 60 rendered fps presented as 120 fps at 2560 × 1440. Requires `amd_fidelityfx_vk.dll` from FidelityFX SDK 1.1.4 and Vsync off. |
-| Sharpening | `extras/extras_state.cpp` | FSR 1, NIS and FSR 3 sharpening, live from the Graphics page or F1. |
+| Sharpening | `extras/extras_state.cpp` | FSR 1, NIS, MAKO and FSR 4 / FSR 3 sharpening, live from the Graphics page or F1. |
 
 The vendor DLLs are not redistributed. The launcher's Graphics page lists the exact files each mode needs, searches for
 them, and reports what is missing; a mode whose files or hardware are absent falls back with a reason in the log.
+
+## Video decoding (cutscene movies)
+
+Fortune's Weave plays its cutscenes as AV1, and the engine decodes them into the player's NV12 CPU frames. The **Video
+decoder** choice on the launcher's Graphics page (Advanced) and the engine's Game > Movies page select the backend; it
+applies at the next start.
+
+- **dav1d (CPU)** is the built-in default. It needs nothing and is generally the faster software decoder.
+- **FFmpeg (libavcodec)** is optional and is not shipped. It loads `avcodec-62.dll`, `avutil-60.dll` and the
+  `swresample-6.dll` that libavcodec imports from `upscalers\ffmpeg` in the play folder (or another folder the launcher
+  detects). The DLLs must be from an FFmpeg 8.x shared build whose libavcodec major is 62 and libavutil major is 60;
+  anything else is refused with a log line and dav1d is used.
+- **Hardware video decode** is FFmpeg's D3D11VA path. A D3D11VA device decodes AV1 on the GPU and the engine copies each
+  NV12 frame back for the player. If the GPU or driver cannot decode AV1, FFmpeg switches to its bundled libdav1d decoder
+  for that movie; the switch is logged. With the toggle off (or with dav1d selected), decode stays on the CPU.
+
+FFmpeg's native `av1` decoder is hardware-only: its source returns `ENOSYS` without an active hardware decoder, so the
+software path uses FFmpeg's `libdav1d` decoder. The point of the FFmpeg option is the D3D11VA path, not a faster software
+decoder; dav1d remains the default. The headers in `runtime/third_party/ffmpeg/include` pin the ABI. FFmpeg binaries are
+not in the repository or the release.
+
+What was checked: FFmpeg 8.1 (libavcodec 62, libavutil 60, swresample 6) decoded raw AV1 and movie-shaped packets (an
+av1C record plus packets with their sequence header removed) through the dynamic loader in both software and D3D11VA modes
+on an RX 7900 XT (Adrenalin 26.10.1). In-game cutscene timing on this path is not measured yet; the decoder choice exists
+because cutscenes were reported slow, so use the log's decoder line and a frame-time capture to compare on your own GPU.
 
 ## Evaluated, not integrated
 
 | Technology | Classification | Why |
 | --- | --- | --- |
-| AMD FSR Upscaling 4.x (ML) | Integrable later | The engine's FidelityFX path currently calls FSR 3.1 through the SDK 2.4 Vulkan loader. FSR 4 needs the newer entry point, its own input contract and a compatible device path; not attempted without a validated SDK and hardware to test on. |
-| DLSS Frame Generation | Implemented, untested here | Streamline frame generation needs `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` and `NvLowLatencyVk.dll`, an RTX 40 class GPU and hardware-accelerated GPU scheduling. The engine has the path and detects the files; this project has not run it on RTX 40 hardware. The validated AMD path is FSR 3.1 + FSR 3 frame generation. |
+| AMD FSR Upscaling 4.1.2 (ML) | Integrated | The SDK 2.4 Vulkan provider exposes FSR 4.1.2 on supported Radeon GPUs and FSR 3.1 otherwise. `[upscale] mode = fsr4` pins the 4.x provider with `ffxOverrideVersion`; `mode = fsr3` pins 3.x. The DX12-only shader-override DLL and OptiScaler still do not apply to this Vulkan renderer. The launcher's AMD preset selects FSR 4.1.2 when the SDK 2.4 loader pair is installed (FSR 3.1 otherwise) and FSR 3 frame generation when the v1.1.4 DLL is present; the two were verified separately on the RX 7900 XT. |
+| DLSS Frame Generation | Implemented, untested here | Streamline frame generation needs `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` and `NvLowLatencyVk.dll`, an RTX 40 class GPU and hardware-accelerated GPU scheduling. The engine has the path and detects the files; this project has not run it on RTX 40 hardware. |
 | XeSS Frame Generation | Not integrated | Separate SDK capability from XeSS Super Resolution; needs its own inputs and validation. |
 | OptiScaler | Incompatible as designed | It redirects an upscaler interface a game already calls (DLSS/FSR/XeSS shims). This engine calls FidelityFX, Streamline and XeSS directly, so there is no vendor interface to intercept, and DLL replacement would be an unsupported hook. |
 | ReShade | Optional external tool, launcher-managed | The Graphics page detects the 64-bit Vulkan layer in `%ProgramData%\ReShade`, checks this build's entry in `ReShadeApps.ini`, opens the official setup tool for `fefw.exe` with `--api vulkan`, and can disable the layer for this game only. ReShade is not bundled or silently installed. Its own overlay applies shaders on the presented swap chain; depth-dependent effects depend on the depth resources the engine exposes and are not guaranteed. |
@@ -56,6 +82,9 @@ them, and reports what is missing; a mode whose files or hardware are absent fal
 - AMD FidelityFX SDK: MIT-style licence, but the Vulkan runtime DLLs are the player's to obtain; the release ships none.
 - NVIDIA Streamline / DLSS: NVIDIA's SDK terms; the DLLs are the player's to obtain and must carry NVIDIA's signatures.
 - Intel XeSS SDK: Intel's licence; `libxess.dll` is the player's to obtain, with the Visual C++ 2015-2022 runtime.
+- FFmpeg: only the public libavcodec/libavutil headers are vendored (LGPL-2.1-or-later, texts in
+  `runtime/third_party/ffmpeg/`). No FFmpeg library or binary is linked or shipped; the player supplies the FFmpeg 8.x
+  shared DLLs, as with the vendor upscalers.
 - ReShade: its own licence; it stays a separate download the user installs. EmblemWeave opens the official setup and never ships ReShade binaries or shader files.
 - vkBasalt: its own licence; not integrated.
 
@@ -98,6 +127,20 @@ runtime environment`. With **Load ReShade** off, the game starts normally and `R
 Depth-based effects depend on the depth buffer the engine exposes and are not guaranteed; colour, sharpening and
 anti-aliasing effects do not need it.
 
+### XiØN style for ReShade (supported mechanism only)
+
+ReShade's settings UI is ImGui, and `ReShade.ini` has a documented `[STYLE]` section. `StyleIndex=4` selects the
+"Custom Advanced" style, whose `Col*` keys are read as RGBA colours by ReShade's own runtime GUI. The launcher's
+**Performance > Diagnostics and ReShade** section writes the XiØN palette into those keys (background, surfaces,
+text, borders, accent, selection, tables and plots), sets the rounded corners, and keeps a one-time
+`ReShade.ini.xion-backup` beside the file. It also points ReShade's overlay font at Segoe UI when that font exists.
+
+This does not patch, inject into or redistribute ReShade: it edits the same ini a person can edit. ReShade's own
+version may ignore newer ImGui colour keys; unknown keys are harmless, and the core palette still applies. The
+native EmblemWeave overlays do **not** depend on this setting. The styled ReShade overlay has not been visually
+verified in this pass, so the correct claim is "the supported style configuration is written", not "ReShade was
+redesigned and tested".
+
 ## How to check a claim on your own PC
 
 1. Set the mode in **Graphics > Upscaling**, start the game, and read `%APPDATA%\EmblemWeave\logs\engine-*.log` for the
@@ -108,9 +151,11 @@ anti-aliasing effects do not need it.
 
 ## Known gaps
 
+- FSR 4.1.2 upscaling is validated on the RX 7900 XT (Adrenalin 26.10.1, FidelityFX SDK 2.4 Vulkan). Other Radeon generations still need a run; FSR 3.1 is the automatic fallback when the driver does not offer 4.x.
 - FSR 3 frame generation is validated only on the RX 7900 XT (Adrenalin 26.10.1, FidelityFX SDK 1.1.4). Other AMD GPUs and drivers still need a run; DLSS Frame Generation is untested on RTX 40 hardware.
+- FFmpeg movie decoding is verified on the RX 7900 XT with FFmpeg 8.1 (libavcodec 62 / libavutil 60 / swresample 6) in software and D3D11VA modes. GPUs without AV1 hardware decode should fall back to FFmpeg's libdav1d, but that fallback and in-game cutscene timing still need runs on other hardware.
 - ReShade's layer, allowlist, overlay and disable switch are verified (6.8.0 Add-on, Vulkan, this build). Individual shader packs and depth-based effects are not: they are the user's to choose, and depth-based ones may not see the buffers they expect.
-- FSR 4, DLSS 4 and XeSS 3 features are not integrated.
+- FSR 4.1.2 upscaling is integrated through the native Vulkan FidelityFX path. The DX12 FSR 4 shader-override builds, INT8 model swaps and OptiScaler remain unusable here because they hook DirectX or replace a DX12 DLL; DLSS 4 and XeSS 3 features are not integrated.
 - vkBasalt is not integrated.
 - Performance numbers for each upscaler on this project's hardware are not yet recorded in a complete benchmark table; the
   FSR 3 frame-generation run above is a single validated result. The engine's own notes mention XeSS costing about 1.6 ms

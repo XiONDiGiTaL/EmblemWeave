@@ -1,0 +1,45 @@
+name: Launcher tests
+
+# The repository has no games/mpr, so the launcher suite builds against the FEFW
+# data and exactly two cases skip for the missing MPR factory settings. This job
+# fails when the suite loses a case or reports any other skip, so "two skips"
+# is a checked number and not an assumption.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'engine/fefw-recomp/runtime/**'
+      - 'tools/check_launcher_skips.py'
+      - '.github/workflows/launcher-tests.yml'
+  pull_request:
+    paths:
+      - 'engine/fefw-recomp/runtime/**'
+      - 'tools/check_launcher_skips.py'
+      - '.github/workflows/launcher-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skip-baseline:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build mpr_launcher_tests
+        shell: pwsh
+        run: |
+          # env.cmd puts clang-cl, CMake, Ninja and the MSVC linker on PATH, as scripts\build.ps1 does locally.
+          cmd /c "call engine\fefw-recomp\runtime\scripts\env.cmd && cmake -S engine\fefw-recomp\runtime -B build\launcher-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DNXRT_BUILD_TESTS=ON && cmake --build build\launcher-ci --target mpr_launcher_tests --parallel 4"
+          if ($LASTEXITCODE -ne 0) { throw "building mpr_launcher_tests failed ($LASTEXITCODE)" }
+
+      - name: Assert the MPR-data skip baseline
+        run: python tools/check_launcher_skips.py --binary build/launcher-ci/mpr_launcher_tests.exe

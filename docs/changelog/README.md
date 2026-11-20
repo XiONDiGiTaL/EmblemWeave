@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.41](0.1.41.md) | 2026-11-20 | A measured adaptive performance controller, a Performance page, the XiØN nine-tab F1 menu and themed overlays, and the drag glide fix. |
 | [0.1.40](0.1.40.md) | 2026-11-18 | Update and Play without a rebuild, cleaner add-on failures, and a bounded packed-audio cache. |
 | [0.1.39](0.1.39.md) | 2026-11-18 | Standard mode, DLC discovery, special-character build paths, and an updater that keeps the built game. |
 | [0.1.38](0.1.38.md) | 2026-11-17 | Save-profile corrections, a build fix when another Python's paths are inherited, and a rebuilt launcher. |

@@ -9,6 +9,7 @@
 #include "nxrt/extras.h"
 #include "nxrt/log.h"
 #include "extras/fsr1_spatial.h"
+#include "extras/mako_spatial.h"
 #include "extras/nis_spatial.h"
 #include "extras/hdr_tonemap_patch.h"
 #include "extras/extras_shaders.inc"
@@ -114,15 +115,25 @@ bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash)
 
 bool scene_upscale_wanted() {
     const UpscaleMode m = upscale_mode();
-    return m == UpscaleMode::Fsr1 || m == UpscaleMode::Nis;
+    return m == UpscaleMode::Fsr1 || m == UpscaleMode::Nis || m == UpscaleMode::Mako;
 }
 
 SpatialUpscaler* scene_upscaler(void* gfx_device, VkExtent2D in, VkExtent2D out) {
     static Fsr1Spatial* fsr = nullptr;
     static NisSpatial* nis = nullptr;
-    static bool tried_fsr = false, tried_nis = false, told_range = false;
+    static MakoSpatial* mako = nullptr;
+    static bool tried_fsr = false, tried_nis = false, tried_mako = false, told_range = false;
     if (!gfx_device) return nullptr;
     gfx::Device& dev = *static_cast<gfx::Device*>(gfx_device);
+    if (upscale_mode() == UpscaleMode::Mako) {
+        if (!tried_mako) {
+            tried_mako = true;
+            auto* m = new MakoSpatial();
+            if (m->init(dev)) mako = m;
+            else delete m;
+        }
+        if (mako) return mako;
+    }
     if (upscale_mode() == UpscaleMode::Nis) {
         if (!tried_nis) {
             tried_nis = true;

@@ -29,6 +29,13 @@ the game build is one command:
 pwsh -NoProfile -File engine/fefw-recomp/game-build/scripts/build_fefw.ps1
 ```
 
+The launcher chooses the engine's compiler concurrency from the machine it is on: it leaves two logical CPUs and
+2 GiB of physical memory for Windows and the launcher, then budgets 1.5 GiB per compiler. A 16 GB machine with
+8 GiB free therefore uses four jobs even if it has sixteen logical CPUs; a large desktop still reaches its CPU
+limit. Set `NX_JOBS` to an integer from 1 to 64 to override that choice for one build (for example
+`$env:NX_JOBS = 6`). An invalid value is ignored and named in the build log rather than silently becoming one job.
+The chosen count and the reason are written to the job log before the compiler starts.
+
 `-LibDir` is only for a checkout whose lifted libraries are somewhere else. The
 script now removes inherited `PYTHONPATH` and `PYTHONHOME` and sets
 `PYTHONNOUSERSITE=1` before it starts anything, the same environment the

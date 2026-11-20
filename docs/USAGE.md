@@ -37,7 +37,7 @@ takes the chosen scheme's accent, glow and rim.
 | **In-game menu** | While the game runs, F10 (or Back + RB on a controller) opens EmblemWeave's menu on top of it: pause and resume, a screenshot of the game window (saved to Pictures\EmblemWeave), restart at the title screen, stop and return to the launcher, quick cheats, cheat codes and tables, display settings (window mode, picture size, frame rate counter) and the controls in use. |
 | **Quick cheats** | Per-unit switches for the units found in the game's memory, using the record layout of the community Cheat Engine tables (stats are single bytes, experience is a running total): infinite HP (current HP held at the unit's max HP every tick, including from 0 HP), quick level-up (the level rises one step every quarter second, up to 40) and max stats (max HP and every stat set to 200). The same switches are on the launcher's Cheats page and the in-game menu's Quick tab (F10); search again after a map loads. |
 | **Recompilation** | Run the nine-stage pipeline (parse, decompress, decode, recover, analyse, emit C, compile, verify, prepare) with live progress. |
-| **Graphics, Audio, Controls** | In **Standard**, **Graphics** offers Performance, Balanced and Quality presets plus resolution, display mode, VSync, frame cap, render scale, FSR 1.0 or native upscaling, sharpening and shader precompiling. It writes the settings the engine can act on into `fefw.ini` before every start; only values that changed since the last start are written, so a setting changed in the game's own F1 menu stands until you change it here. **Advanced** restores the full page, including FSR 3.1, NVIDIA Image Scaling, DLSS/DLAA, XeSS, frame generation, ReShade, upscaler DLL folders and shader-compile tuning. **Audio**'s master volume goes to the same file; music, effects and voice wait for mixing. Advanced Graphics and Audio panels fold into drawers with a one-line summary, and **Controls** draws ZL/ZR travel as bars. While playing, display settings are in the in-game menu and full rebinding is in the engine's F1 menu. |
+| **Graphics, Audio, Controls** | In **Standard**, **Graphics** offers Performance, Balanced and Quality presets plus resolution, display mode, VSync, frame cap, render scale, FSR 1.0 or native upscaling, sharpening and shader precompiling. It writes the settings the engine can act on into `fefw.ini` before every start; only values that changed since the last start are written, so a setting changed in the game's own F1 menu stands until you change it here. **Advanced** restores the full page, including FSR 4.1.2 / 3.1, NVIDIA Image Scaling, DLSS/DLAA, XeSS, frame generation, ReShade, upscaler DLL folders and shader-compile tuning. **Audio**'s master volume goes to the same file and can now go to 200% (a move above 100% asks **I know the risks** or **Cancel**); the ten-band **Equalizer** offers Flat, Bass, Treble, Vocal, Warm, V-Shape and Night presets plus a Custom curve from the F1 menu, and music, effects and voice wait for mixing. Advanced Graphics and Audio panels fold into drawers with a one-line summary, and **Controls** draws ZL/ZR travel as bars. While playing, display settings are in the in-game menu and full rebinding is in the engine's F1 menu. |
 | **Appearance** | **Interface** switches between Standard and Advanced at any time; both modes use the same installation and settings. Choose between the [XiØN](https://github.com/XiONDiGiTaL) scheme (XiØN's own palette, from xiondigital.net), Arcade (a retro video-game palette of hot pink, arcade yellow and cyan on violet, over a neon grid), FE (gold, white silver and royal blue), Ember (ember orange and molten gold over oxblood steel), Verdant (emerald and pale gold over moss-black) and Frost (glacier blue and ice silver over midnight). The logo artwork is recoloured to match each scheme, and every control takes its accent, its glow and its rim from it. |
 | **Diagnostics** | Stop reason, guest threads, host events, imports reached and the final events before a stop, with search and export. Its **Log** tab lists the log files: every task writes its own under the launcher's `logs` folder (`data\logs` in a portable install), with the compiler or script it ran, that tool's whole output, and why it stopped, so a failure can be sent on instead of described. |
 | **Troubleshooter** | The real game-data and build-tool checks in one place, the safe repairs the launcher can run (rebuild, reset graphics, open the logs), a plain explanation of long-session memory use, and **Create report bundle**. The bundle is a real `.zip` under the launcher's `reports` folder with settings, logs, the game log and any freeze or crash report; nothing is uploaded. The page also opens a prefilled GitHub issue after you write what happened. |
@@ -84,20 +84,22 @@ scale** the picture relative to it (0.50× to 2.00×, with the upscaler filling 
 mode, **Aspect ratio** the shape the game renders, **VSync** the presentation sync, and **Frame-rate limit** the
 presentation cap. They are written to `controls.ini` (and the picture size to `[fefw] output` in `fefw.ini`) before
 each start, so they apply the next time the game opens. **Audio**'s **Master** volume goes to `[audio] volume` in the
-same file; **Music**, **Effects** and **Voice** are the game's own mix and have no key there yet.
+same file, with the ten-band **Equalizer** (`[audio] eq`, `eq_preset`, `eq_preamp`, `eq_bands`); **Music**, **Effects** and **Voice** are the game's own mix and have no key there yet. In the game, **F1 > Audio > Audio Enhancements** opens the glass panel and applies the master gain, presets and band sliders live.
 
 Both pages read the files back. A **What the game will start with** panel lists what the engine will actually do on
 the next start (upscaler, output, window and picture size, frame limit, vsync and aspect ratio on **Graphics**; master
-volume on **Audio**) and names the settings still waiting for that start, so a value changed after the last run
+volume and equalizer on **Audio**) and names the settings still waiting for that start, so a value changed after the last run
 is never mistaken for one already in force, and a setting the game's own F1 menu changed since is taken back onto
 the page, so the two always agree unless you have changed the page yourself and not started the game yet.
 
 ## Upscaling
 
 The engine upscales the picture itself, and **Graphics > Upscaling** chooses how: **FSR 1.0** (AMD's spatial upscaler,
-any GPU), **NVIDIA Image Scaling** (spatial, any GPU, up to 2× per side), **FSR 3.1** (AMD's temporal upscaler through the
-FidelityFX API), **DLSS** / **DLAA** (NVIDIA's temporal upscaler through Streamline) and **XeSS** (Intel's temporal
-upscaler, on any GPU with DP4a). The launcher writes the choice, and the folder it found the DLLs in, into the run
+any GPU), **NVIDIA Image Scaling** (spatial, any GPU, up to 2× per side), **MAKO (spatial)** (spatial, any GPU and any
+scale, a single-pass sharpened-cubic filter), **FSR 4.1.2 / FSR 3.1** (AMD's temporal upscaler through the FidelityFX API;
+FSR 4.1.2 on supported Radeon GPUs, FSR 3.1 otherwise), **DLSS**
+/ **DLAA** (NVIDIA's temporal upscaler through Streamline) and **XeSS** (Intel's temporal upscaler, on any GPU with
+DP4a). The launcher writes the choice, and the folder it found the DLLs in, into the run
 folder's `fefw.ini` before it starts the game, so it applies at the game's next start.
 
 **Graphics > Sharpening** sets how crisp the final picture is: **Off**, **Low**, **Default** (the engine's own 0.8) or
@@ -106,9 +108,10 @@ F1 menu sees the same value.
 
 AMD's, NVIDIA's and Intel's files cannot be shipped, so those upscalers need you to add them, in the run folder, beside the game, or in an `upscalers` or `upscaler` folder anywhere from the game executable up through the engine checkout:
 
-- **FSR 3.1**: `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from the FidelityFX SDK (v2.4.0,
-  Vulkan), in the play folder's `upscalers\fsr` (an `fsr3` folder is read as well). FSR 3 frame generation
-  needs the v1.1.4 `amd_fidelityfx_vk.dll` there too, so the loader pair alone cannot make frames.
+- **FSR 4.1.2 / FSR 3.1**: `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` from the FidelityFX SDK
+  (v2.4.0, Vulkan), in the play folder's `upscalers\fsr` (an `fsr3` folder is read as well). The SDK 2.4 provider
+  exposes FSR 4.1.2 on supported Radeon GPUs and FSR 3.1 on older ones; the Graphics page has a mode for each. FSR 3
+  frame generation needs the v1.1.4 `amd_fidelityfx_vk.dll` there too, so the loader pair alone cannot make frames.
 - **DLSS / DLAA**: `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll` and `nvngx_dlss.dll` from NVIDIA's
   [Streamline SDK](https://github.com/NVIDIAGameWorks/Streamline) release `bin/x64`, in
   the play folder's `upscalers\streamline`. DLSS Frame Generation adds `sl.dlss_g.dll`, `sl.reflex.dll`,
@@ -122,9 +125,15 @@ missing. **Open the upscalers folder** creates those three folders and opens the
 launcher's folder, the engine folder, Downloads and the Desktop one folder deep, copies what it finds into the run
 folder and says what is still missing, so a ZIP that landed in Downloads does not have to be arranged by hand. The game's
 own F1 menu, Graphics tab, reports the same under `Files found`; at startup the runtime also walks the folders above
-`fefw.exe`, so a folder left in `engine/fefw-recomp/upscaler` works without moving it (#26). **FSR 4** is not integrated yet: the
-engine's FidelityFX path calls FSR 3.1 upscaling through the SDK 2.4 Vulkan loader, and AMD's newer ML upscaler needs a
-different entry point and input set. [GRAPHICS.md](GRAPHICS.md) records what was evaluated and why it is not
-present. **OptiScaler** redirects an upscaler a game already calls; this engine calls its own FidelityFX, Streamline and XeSS
-interfaces, so there is nothing for it to intercept, and it is documented as an external tool that does not apply here.
-FSR 3.1, DLSS / DLAA and XeSS are the temporal upscalers the engine runs itself.
+`fefw.exe`, so a folder left in `engine/fefw-recomp/upscaler` works without moving it (#26). **FSR 4.1.2** is now
+integrated through that native Vulkan FidelityFX provider; it was verified on the RX 7900 XT with Adrenalin 26.10.1,
+and FSR 3.1 is the automatic fallback when the driver does not expose 4.x. The separate DX12 FSR 4 shader-override
+builds, INT8 model swaps and **OptiScaler** still cannot drive this renderer: they hook DirectX or replace a DX12 DLL,
+while this engine calls its own FidelityFX, Streamline and XeSS interfaces over Vulkan. [GRAPHICS.md](GRAPHICS.md)
+records that boundary.
+
+For **AMD Fluid Motion Frames 2.1**, add `fefw.exe` to AMD Software: Adrenalin Edition (Gaming > Add) and enable AFMF
+in the driver. AFMF works with Vulkan on RX 7000 series in borderless fullscreen, needs Adrenalin 25.3.1 or newer, and
+requires VSync off in both the game and the driver. The launcher cannot toggle a driver-side feature, but the Graphics
+page's note repeats the setup. FSR 4.1.2, FSR 3.1, DLSS / DLAA and XeSS are the temporal upscalers the engine runs
+itself.

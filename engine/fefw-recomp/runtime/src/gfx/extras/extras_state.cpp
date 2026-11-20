@@ -80,7 +80,9 @@ Settings settings_from_config() {
     s.hdr.sdr_gamma = sg == "srgb" || sg == "0" || sg == "off" ? 0.0 : std::clamp(config_get_double("hdr", "sdr_gamma", 2.2), 1.8, 2.6);
 
     const std::string um = lower(config_get_str("upscale", "mode", "off"));
-    s.upscale.mode = um == "fsr1" || um == "spatial" ? UpscaleMode::Fsr1 : um == "fsr3" ? UpscaleMode::Fsr3 : um == "dlss" ? UpscaleMode::Dlss : um == "xess" ? UpscaleMode::Xess : um == "nis" ? UpscaleMode::Nis : um == "dlaa" ? UpscaleMode::Dlaa : UpscaleMode::Off;
+    s.upscale.mode = um == "fsr1" || um == "spatial" ? UpscaleMode::Fsr1 : um == "fsr3" ? UpscaleMode::Fsr3 : um == "fsr4" ? UpscaleMode::Fsr4
+                    : um == "dlss" ? UpscaleMode::Dlss : um == "xess" ? UpscaleMode::Xess : um == "nis" ? UpscaleMode::Nis
+                    : um == "dlaa" ? UpscaleMode::Dlaa : um == "mako" ? UpscaleMode::Mako : UpscaleMode::Off;
     const std::string uq = lower(config_get_str("upscale", "quality", "quality"));
     s.upscale.quality = uq == "native" || uq == "nativeaa" || uq == "aa" ? UpscaleQuality::Native : uq == "balanced" ? UpscaleQuality::Balanced
                       : uq == "performance" ? UpscaleQuality::Performance : uq == "ultra_performance" || uq == "ultraperformance" ? UpscaleQuality::UltraPerformance
@@ -205,7 +207,7 @@ UpscaleQuality upscale_quality() {
 
 bool upscale_temporal() {
     const UpscaleMode m = upscale_mode();
-    return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa || m == UpscaleMode::Xess;
+    return m == UpscaleMode::Fsr4 || m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa || m == UpscaleMode::Xess;
 }
 
 int quality_percent(UpscaleQuality q) {

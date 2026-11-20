@@ -5,7 +5,7 @@ use crate::mods::{self, GbFile, GbMod, Installed};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::sync::{Arc, Mutex};
 
 type Slot<T> = Arc<Mutex<Option<Result<T, String>>>>;
@@ -121,7 +121,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         // Name the exact folder the engine reads. A mod placed elsewhere, or a game started outside the launcher, is
         // then visible as the reason it does not load (#39), instead of only "no mods installed".
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Folder: {}", dir.display())).size(12.5).color(p.muted));
+            ui.label(crate::i18n::text(format!("Folder: {}", dir.display())).size(12.5).color(p.muted));
             if widgets::button(ui, &p, "Open folder", true).clicked() {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = std::process::Command::new("explorer").arg(&dir).spawn();
@@ -130,7 +130,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         let list = mods::list(&dir);
         if list.is_empty() {
-            ui.label(RichText::new("No mods installed. A mod is a folder here with a romfs/ folder, an exefs/ code mod or an ExeFS patch, or install one from an archive below.").color(p.muted));
+            ui.label(crate::i18n::text("No mods installed. A mod is a folder here with a romfs/ folder, an exefs/ code mod or an ExeFS patch, or install one from an archive below.").color(p.muted));
         }
         // Code mods whose hook sites the built game lacks (installed or updated since the last build).
         let engine = crate::engine::root();
@@ -172,7 +172,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if patch_stale && plan.can_build() {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("ExeFS patches changed since the last build: build the game again, or Play stays unavailable.")
+                    crate::i18n::text("ExeFS patches changed since the last build: build the game again, or Play stays unavailable.")
                         .size(12.5)
                         .color(p.warn),
                 );
@@ -183,13 +183,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         // A problem in a .sites file stops the build: say which file and line before it is pressed.
         if let Some(e) = engine.as_deref().filter(|_| list.iter().any(|m| m.has_code)).and_then(|r| crate::sites::problem(r, &dir)) {
-            ui.label(RichText::new(format!("A code mod's hook sites cannot be used: {e}")).size(12.5).color(p.bad));
+            ui.label(crate::i18n::text(format!("A code mod's hook sites cannot be used: {e}")).size(12.5).color(p.bad));
         }
         let stale = list.iter().any(|m| m.has_code) && engine.as_deref().and_then(|r| crate::sites::stale(r, &dir)) == Some(true);
         if stale {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("Code mods bring hook sites the built game does not have yet: build the game again, or their code will not run.")
+                    crate::i18n::text("Code mods bring hook sites the built game does not have yet: build the game again, or their code will not run.")
                         .size(12.5)
                         .color(p.warn),
                 );
@@ -207,7 +207,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(&m.info.title).font(theme::semibold(14.0)).color(if m.enabled { p.ink } else { p.muted }));
+                    ui.label(crate::i18n::text(&m.info.title).font(theme::semibold(14.0)).color(if m.enabled { p.ink } else { p.muted }));
                     let mut bits = vec![format!("{} files", m.files)];
                     if !m.info.author.is_empty() {
                         bits.push(format!("by {}", m.info.author));
@@ -250,13 +250,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         };
-                        ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted)).on_hover_text(detail);
+                        ui.label(crate::i18n::text(bits.join("  ·  ")).size(12.5).color(p.muted)).on_hover_text(detail);
                     } else {
-                        ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted));
+                        ui.label(crate::i18n::text(bits.join("  ·  ")).size(12.5).color(p.muted));
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::button(ui, &p, "Remove", true).on_hover_text("Moves the mod to the mods-removed folder").clicked() {
+                    if widgets::button(ui, &p, "Remove", true).on_hover_text(crate::i18n::tr("Moves the mod to the mods-removed folder")).clicked() {
                         message = Some(match mods::remove(m) {
                             Ok(to) => (format!("Moved {} to {}", m.info.title, to.display()), Tone::Ok),
                             Err(e) => (e, Tone::Bad),
@@ -266,14 +266,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         let _ = std::process::Command::new("explorer").arg(&m.path).spawn();
                     }
                     if !m.info.source.is_empty() {
-                        ui.hyperlink_to("Page", &m.info.source);
+                        ui.hyperlink_to(crate::i18n::text("Page"), &m.info.source);
                     }
                 });
             });
             ui.add_space(4.0);
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("RomFS changes apply the next time the game starts; when two mods change the same file, the one later in the list wins. ExeFS patches are applied before recompilation and require Build the game. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust.").size(12.5).color(p.muted));
+        ui.label(crate::i18n::text("RomFS changes apply the next time the game starts; when two mods change the same file, the one later in the list wins. ExeFS patches are applied before recompilation and require Build the game. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust.").size(12.5).color(p.muted));
     });
 
     // The rest of the page reads the folder once, after the toggles above.
@@ -297,8 +297,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("conflicts").max_height(crate::widgets::list_height(ui, 0.24)).show(ui, |ui| {
             egui::Grid::new("conflict-grid").num_columns(2).spacing([20.0, 6.0]).striped(true).show(ui, |ui| {
                 for c in &shared {
-                    ui.label(RichText::new(&c.file).font(theme::mono(11.5)).color(p.body));
-                    ui.label(RichText::new(c.mods.join("  ›  ")).size(12.0).color(p.warn));
+                    ui.label(crate::i18n::text(&c.file).font(theme::mono(11.5)).color(p.body));
+                    ui.label(crate::i18n::text(c.mods.join("  ›  ")).size(12.0).color(p.warn));
                     ui.end_row();
                 }
             });
@@ -307,7 +307,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "Profiles", |ui| {
         ui.label(
-            RichText::new("A profile is a set of mods to switch on together, so a whole setup can be swapped without touching each mod.")
+            crate::i18n::text("A profile is a set of mods to switch on together, so a whole setup can be swapped without touching each mod.")
                 .size(12.5)
                 .color(p.muted),
         );
@@ -318,8 +318,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         for (i, prof) in app.config.profiles.iter().enumerate() {
             let on = prof.enabled.iter().filter(|n| installed.iter().any(|m| m.name.eq_ignore_ascii_case(n) && m.enabled)).count();
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&prof.name).font(theme::semibold(13.5)).color(p.ink));
-                ui.label(RichText::new(format!("{on} of {} mods on", installed.len())).size(12.0).color(p.muted));
+                ui.label(crate::i18n::text(&prof.name).font(theme::semibold(13.5)).color(p.ink));
+                ui.label(crate::i18n::text(format!("{on} of {} mods on", installed.len())).size(12.0).color(p.muted));
                 if app.config.profile.eq_ignore_ascii_case(&prof.name) {
                     widgets::pill(ui, &p, "applied", Tone::Accent);
                 }
@@ -328,7 +328,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         delete = Some(i);
                     }
                     if widgets::button(ui, &p, "Update", true)
-                        .on_hover_text("Save the mods that are on now into this profile")
+                        .on_hover_text(crate::i18n::tr("Save the mods that are on now into this profile"))
                         .clicked()
                     {
                         overwrite = Some(i);
@@ -341,7 +341,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(2.0);
         }
         if app.config.profiles.is_empty() {
-            ui.label(RichText::new("No profiles yet.").size(12.5).color(p.muted));
+            ui.label(crate::i18n::text("No profiles yet.").size(12.5).color(p.muted));
         }
         ui.add_space(theme::SPACE_S);
         ui.horizontal(|ui| {
@@ -426,10 +426,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         widgets::section(ui, &p, &format!("Files of {}", m.name), |ui| {
             for f in files {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&f.name).font(theme::mono(13.0)).color(p.ink));
-                    ui.label(RichText::new(format!("{:.1} MB", f.size as f64 / 1e6)).color(p.muted));
+                    ui.label(crate::i18n::text(&f.name).font(theme::mono(13.0)).color(p.ink));
+                    ui.label(crate::i18n::text(format!("{:.1} MB", f.size as f64 / 1e6)).color(p.muted));
                     if !f.description.is_empty() {
-                        ui.label(RichText::new(&f.description).color(p.body));
+                        ui.label(crate::i18n::text(&f.description).color(p.body));
                     }
                     if widgets::button(ui, &p, "Install", !busy).clicked() {
                         chosen = Some((m.clone(), f.clone()));
@@ -452,12 +452,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::section(ui, &p, "GameBanana", |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Fire Emblem: Fortune's Weave mods, newest first.").color(p.body));
+            ui.label(crate::i18n::text("Fire Emblem: Fortune's Weave mods, newest first.").color(p.body));
             if widgets::button(ui, &p, if app.mods_ui.browse.is_empty() { "Load list" } else { "Refresh" }, app.mods_ui.listing.is_none()).clicked() {
                 app.mods_ui.page = 1;
                 app.mods_ui.listing = Some(spawn(|| mods::gb_list(1)));
             }
-            ui.hyperlink_to("Open on gamebanana.com", format!("https://gamebanana.com/mods/games/{}", mods::GAMEBANANA_GAME));
+            ui.hyperlink_to(crate::i18n::text("Open on gamebanana.com"), format!("https://gamebanana.com/mods/games/{}", mods::GAMEBANANA_GAME));
         });
         if app.mods_ui.listing.is_some() {
             ui.spinner();
@@ -468,21 +468,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             for m in &app.mods_ui.browse {
                 ui.vertical(|ui| {
                     ui.set_min_width(460.0);
-                    ui.hyperlink_to(RichText::new(&m.name).font(theme::semibold(13.5)), &m.url);
-                    ui.label(RichText::new(format!("{} by {}{}", m.kind, m.author, if m.version.is_empty() { String::new() } else { format!(", {}", m.version) })).size(12.0).color(p.muted));
+                    ui.hyperlink_to(crate::i18n::text(&m.name).font(theme::semibold(13.5)), &m.url);
+                    ui.label(crate::i18n::text(format!("{} by {}{}", m.kind, m.author, if m.version.is_empty() { String::new() } else { format!(", {}", m.version) })).size(12.0).color(p.muted));
                 });
-                ui.label(RichText::new(format!("♥ {}", m.likes)).color(p.muted));
+                ui.label(crate::i18n::text(format!("♥ {}", m.likes)).color(p.muted));
                 if installed.contains(&m.id) {
                     widgets::pill(ui, &p, "Installed", Tone::Ok);
                 } else {
-                    ui.label("");
+                    ui.label(crate::i18n::text(""));
                 }
                 if m.kind == "Mod" {
                     if widgets::button(ui, &p, "Install", !busy).clicked() {
                         fetch = Some(m.id);
                     }
                 } else {
-                    ui.label(RichText::new("a tool, not a mod").size(12.0).color(p.muted));
+                    ui.label(crate::i18n::text("a tool, not a mod").size(12.0).color(p.muted));
                 }
                 ui.end_row();
             }
@@ -496,7 +496,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.mods_ui.listing = Some(spawn(move || mods::gb_list(n)));
         }
         ui.add_space(4.0);
-        ui.label(RichText::new("Mods are made by their authors and installed as they are. Code mods made for this engine (a DLL in exefs) load at start; ExeFS .ips, .ips32 and .pchtxt patches are applied to the launcher's uncompressed main before the game is rebuilt, never to your game dump.").size(12.5).color(p.muted));
+        ui.label(crate::i18n::text("Mods are made by their authors and installed as they are. Code mods made for this engine (a DLL in exefs) load at start; ExeFS .ips, .ips32 and .pchtxt patches are applied to the launcher's uncompressed main before the game is rebuilt, never to your game dump.").size(12.5).color(p.muted));
     });
 
     if let Some((text, tone)) = message {

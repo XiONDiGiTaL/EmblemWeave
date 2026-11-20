@@ -6,7 +6,7 @@ use crate::deps::{self, Row, Stage, Status};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::time::Duration;
 
 fn tone(status: &Status) -> Tone {
@@ -31,13 +31,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         widgets::section(ui, &p, "Checking this PC", |ui| {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(15.0).color(p.accent));
-                ui.label(RichText::new("Preparing the build-tool report…").font(theme::semibold(13.0)).color(p.ink));
+                ui.label(crate::i18n::text("Preparing the build-tool report…").font(theme::semibold(13.0)).color(p.ink));
             });
             ui.add_space(7.0);
             widgets::progress_bar(ui, &p, None);
             ui.add_space(7.0);
             ui.label(
-                RichText::new(
+                crate::i18n::text(
                     "This runs in the background: Visual Studio, Windows SDK, LLVM, CMake, Ninja, Python and the packaged shader tools are checked independently. It usually takes a few seconds on the first launch.",
                 )
                 .size(12.0)
@@ -71,11 +71,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             widgets::status_dot(ui, &p, if all_ready { Tone::Ok } else { Tone::Bad });
             ui.vertical(|ui| {
                 ui.label(
-                    RichText::new(if all_ready { "This PC can build the game" } else { "A few things are needed first" })
+                    crate::i18n::text(if all_ready { "This PC can build the game" } else { "A few things are needed first" })
                         .font(theme::display(19.0))
                         .color(if all_ready { p.ok } else { p.warn }),
                 );
-                ui.label(RichText::new(deps::summary(&rows)).size(12.5).color(p.body));
+                ui.label(crate::i18n::text(deps::summary(&rows)).size(12.5).color(p.body));
             });
             // A fixed-height slot keeps this right-aligned action from taking the remaining page height and
             // pushing the missing-tool rows and manual instructions below the fold.
@@ -105,7 +105,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(7.0);
         ui.horizontal(|ui| {
             if widgets::button(ui, &p, "Check again", true)
-                .on_hover_text("Runs every check again. Nothing needs a restart: the checks look where a fresh install lands.")
+                .on_hover_text(crate::i18n::tr("Runs every check again. Nothing needs a restart: the checks look where a fresh install lands."))
                 .clicked()
             {
                 let rows = deps::refresh();
@@ -113,17 +113,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.notify(text, if deps::blocking(&rows).is_empty() { Tone::Ok } else { Tone::Warn });
             }
             if !app.config.onboarding.completed && widgets::button(ui, &p, if app.config.onboarding.dismissed { "Resume setup guide" } else { "Open setup guide" }, true)
-                .on_hover_text("Continue from the step you stopped at; the guide reads the same live tool checks.")
+                .on_hover_text(crate::i18n::tr("Continue from the step you stopped at; the guide reads the same live tool checks."))
                 .clicked()
             {
                 app.config.onboarding.dismissed = false;
                 app.config.onboarding.step = 2;
             }
-            ui.label(RichText::new("Checks happen in the background; this page updates itself.").size(10.5).color(p.muted));
+            ui.label(crate::i18n::text("Checks happen in the background; this page updates itself.").size(10.5).color(p.muted));
         });
         for line in &manual {
             ui.add_space(3.0);
-            ui.label(RichText::new(format!("• {line}")).size(11.5).color(p.body));
+            ui.label(crate::i18n::text(format!("• {line}")).size(11.5).color(p.body));
         }
         if deps::row(&rows, "sdk").is_some_and(|r| r.blocking()) {
             ui.add_space(2.0);
@@ -145,14 +145,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         Err(e) => app.notify(e, Tone::Warn),
                     }
                 }
-                ui.hyperlink_to("Open the Windows SDK download page", deps::WINDOWS_SDK_URL);
+                ui.hyperlink_to(crate::i18n::text("Open the Windows SDK download page"), deps::WINDOWS_SDK_URL);
             });
         }
     });
 
     widgets::section(ui, &p, "Updates and existing builds", |ui| {
         ui.label(
-            RichText::new(
+            crate::i18n::text(
                 "An EmblemWeave update replaces the launcher, documentation and engine sources in place. It does not delete your settings, saves, mods, fetched tools or built game, and it does not force a rebuild. Build reuses what is already there and only regenerates when the engine revision, compiler/toolchain or build settings actually changed.",
             )
             .size(12.0)
@@ -165,10 +165,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ("The game's run folder", crate::engine::run_dir()),
         ] {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{name}:")).size(11.0).color(p.muted));
+                ui.label(crate::i18n::text(format!("{name}:")).size(11.0).color(p.muted));
                 match path {
-                    Some(path) => ui.label(RichText::new(path.display().to_string()).size(11.0).monospace().color(p.ink)),
-                    None => ui.label(RichText::new("not selected yet").size(11.0).color(p.muted)),
+                    Some(path) => ui.label(crate::i18n::text(path.display().to_string()).size(11.0).monospace().color(p.ink)),
+                    None => ui.label(crate::i18n::text("not selected yet").size(11.0).color(p.muted)),
                 };
             });
         }
@@ -219,7 +219,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.add_space(5.0);
-            ui.label(RichText::new("Detection details and executable paths are included in the hover text and in Diagnostics → Export report.").size(10.5).color(p.muted));
+            ui.label(crate::i18n::text("Detection details and executable paths are included in the hover text and in Diagnostics → Export report.").size(10.5).color(p.muted));
         },
     );
 }
@@ -229,18 +229,18 @@ fn row_view(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, row: &Row) {
     let tone = tone(status);
     ui.horizontal_wrapped(|ui| {
         widgets::status_dot(ui, p, tone);
-        ui.label(RichText::new(row.dep.name).font(theme::semibold(12.5)).color(p.ink));
+        ui.label(crate::i18n::text(row.dep.name).font(theme::semibold(12.5)).color(p.ink));
         widgets::pill(ui, p, status.label(), tone);
         if let Some(min) = row.dep.min {
-            ui.label(RichText::new(format!("needs {min}")).size(11.0).color(p.muted));
+            ui.label(crate::i18n::text(format!("needs {min}")).size(11.0).color(p.muted));
         }
-        ui.label(RichText::new(if row.required { "required" } else { "optional here" }).size(10.5).color(p.muted));
+        ui.label(crate::i18n::text(if row.required { "required" } else { "optional here" }).size(10.5).color(p.muted));
     });
     ui.horizontal_top(|ui| {
         ui.add_space(14.0);
         ui.vertical(|ui| {
-            ui.add(egui::Label::new(RichText::new(status.detail()).size(11.5).color(p.body)).wrap());
-            ui.add(egui::Label::new(RichText::new(row.dep.note).size(11.0).color(p.muted)).wrap());
+            ui.add(egui::Label::new(crate::i18n::text(status.detail()).size(11.5).color(p.body)).wrap());
+            ui.add(egui::Label::new(crate::i18n::text(row.dep.note).size(11.0).color(p.muted)).wrap());
         });
         if !status.ok() {
             if let Some(install) = row.dep.install {
@@ -257,9 +257,9 @@ fn row_view(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, row: &Row) {
                         }
                     } else {
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("Manual step").size(10.0).color(p.warn)).on_hover_text(install.line());
+                            ui.label(crate::i18n::text("Manual step").size(10.0).color(p.warn)).on_hover_text(install.line());
                             if row.dep.key == "sdk" {
-                                ui.hyperlink_to("Download page", deps::WINDOWS_SDK_URL);
+                                ui.hyperlink_to(crate::i18n::text("Download page"), deps::WINDOWS_SDK_URL);
                             }
                         });
                     }

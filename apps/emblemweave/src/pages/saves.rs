@@ -13,7 +13,7 @@ use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind,
+    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
     Vec2,
 };
 use std::collections::hash_map::DefaultHasher;
@@ -401,12 +401,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     widgets::eyebrow(ui, &p, "Save profiles");
     ui.add_space(2.0);
     ui.label(
-        RichText::new("Independent playthroughs")
+        crate::i18n::text("Independent playthroughs")
             .font(theme::display(20.0))
             .color(p.ink),
     );
     ui.label(
-        RichText::new(if items.is_empty() {
+        crate::i18n::text(if items.is_empty() {
             "Create your first profile below. It keeps its own slots, backups and edits apart from every other playthrough."
         } else {
             "The centre card is selected for viewing. Nothing is loaded until you press Load Profile."
@@ -578,15 +578,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let backups = crate::saves::backups(&save_dir);
     widgets::section(ui, &p, "Backups", |ui| {
         if backups.is_empty() {
-            ui.label(RichText::new("No whole-save backups yet. Importing a save or loading a profile keeps the save it replaces here.").size(12.5).color(p.muted));
+            ui.label(crate::i18n::text("No whole-save backups yet. Importing a save or loading a profile keeps the save it replaces here.").size(12.5).color(p.muted));
         }
         for b in &backups {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&b.name).font(theme::mono(12.5)).color(p.ink));
-                ui.label(RichText::new(format!("{} files, {}", b.files, ago(b.modified))).size(12.0).color(p.muted));
+                ui.label(crate::i18n::text(&b.name).font(theme::mono(12.5)).color(p.ink));
+                ui.label(crate::i18n::text(format!("{} files, {}", b.files, ago(b.modified))).size(12.0).color(p.muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::button(ui, &p, "Restore", !running)
-                        .on_hover_text("Makes this backup the current save; the save it replaces is kept in the backups folder")
+                        .on_hover_text(crate::i18n::tr("Makes this backup the current save; the save it replaces is kept in the backups folder"))
                         .clicked()
                     {
                         message = Some(match crate::saves::restore_backup_verified(&save_dir, b, title, &stamp()) {
@@ -650,9 +650,9 @@ fn empty_profiles(
             crate::pages::Page::Saves.paint_icon(ui.painter(), icon.shrink(11.0), p.accent_hi);
             ui.add_space(10.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new("No save profiles yet").font(theme::display(18.0)).color(p.ink));
+                ui.label(crate::i18n::text("No save profiles yet").font(theme::display(18.0)).color(p.ink));
                 ui.label(
-                    RichText::new(
+                    crate::i18n::text(
                         "A profile keeps a whole playthrough separate: its slots, backups and edits. Make one from a fresh save, or keep the save that is already loaded.",
                     )
                     .size(12.0)
@@ -683,10 +683,10 @@ fn empty_profiles(
         });
         if running {
             ui.add_space(4.0);
-            ui.label(RichText::new("Close the game before creating or loading a profile; it writes its save when it closes.").size(11.0).color(p.warn));
+            ui.label(crate::i18n::text("Close the game before creating or loading a profile; it writes its save when it closes.").size(11.0).color(p.warn));
         }
         ui.add_space(5.0);
-        ui.label(RichText::new("Importing from an emulator or a folder is available in the Save data section below.").size(10.5).color(p.muted));
+        ui.label(crate::i18n::text("Importing from an emulator or a folder is available in the Save data section below.").size(10.5).color(p.muted));
     });
     action
 }
@@ -742,14 +742,14 @@ fn current_save(
     let current = crate::saves::slots_with_sizes(save_dir);
     widgets::section(ui, p, "Current save", |ui| {
         ui.label(
-            RichText::new("The game reads this folder")
+            crate::i18n::text("The game reads this folder")
                 .size(12.0)
                 .color(p.muted),
         );
         let path_text = account.display().to_string();
         ui.add(
             egui::Label::new(
-                RichText::new(tail_path(&path_text, 96))
+                crate::i18n::text(tail_path(&path_text, 96))
                     .font(theme::mono(11.5))
                     .color(p.ink),
             )
@@ -796,7 +796,7 @@ fn current_save(
         if current.is_empty() {
             ui.add_space(4.0);
             ui.label(
-                RichText::new("No save here yet. Play once, or import one below.")
+                crate::i18n::text("No save here yet. Play once, or import one below.")
                     .size(12.5)
                     .color(p.warn),
             );
@@ -804,7 +804,7 @@ fn current_save(
         ui.add_space(5.0);
         if active.is_none() {
             ui.label(
-                RichText::new("The current save is not one of the profiles. Keep it as a profile to make it part of the carousel.")
+                crate::i18n::text("The current save is not one of the profiles. Keep it as a profile to make it part of the carousel.")
                     .size(12.0)
                     .color(p.muted),
             );
@@ -952,7 +952,7 @@ fn carousel(
                 } else {
                     format!("{} OF {}", idx + 1, n)
                 };
-                ui.label(RichText::new(label).font(theme::mono(11.5)).color(p.muted));
+                ui.label(crate::i18n::text(label).font(theme::mono(11.5)).color(p.muted));
             });
             ui.add_space(4.0);
             if widgets::button(ui, p, "Next ›", n > 1).clicked() {
@@ -961,7 +961,7 @@ fn carousel(
         });
         ui.add_space(2.0);
         ui.label(
-            RichText::new("Click a side card, scroll over the carousel, or use the arrows and left/right keys. Selecting a card never loads it.")
+            crate::i18n::text("Click a side card, scroll over the carousel, or use the arrows and left/right keys. Selecting a card never loads it.")
                 .size(12.0)
                 .color(p.muted),
         );
@@ -971,7 +971,7 @@ fn carousel(
         ui.add_space(theme::SPACE_S);
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new("Create a separate playthrough")
+                crate::i18n::text("Create a separate playthrough")
                     .font(theme::semibold(14.0))
                     .color(p.ink),
             );
@@ -995,7 +995,7 @@ fn carousel(
     ui.horizontal_wrapped(|ui| {
         widgets::status_dot(ui, p, if active_here { Tone::Ok } else { Tone::Accent });
         ui.label(
-            RichText::new(&item.profile.name)
+            crate::i18n::text(&item.profile.name)
                 .font(theme::display(19.0))
                 .color(p.ink),
         );
@@ -1023,11 +1023,11 @@ fn carousel(
             can_load,
         );
         let load = if running {
-            load.on_hover_text("Close the game first")
+            load.on_hover_text(crate::i18n::tr("Close the game first"))
         } else if active_here {
-            load.on_hover_text("This is already the save the game reads")
+            load.on_hover_text(crate::i18n::tr("This is already the save the game reads"))
         } else if !can_load {
-            load.on_hover_text("This profile has no readable save. Use Manage Saves to inspect it.")
+            load.on_hover_text(crate::i18n::tr("This profile has no readable save. Use Manage Saves to inspect it."))
         } else {
             load
         };
@@ -1050,7 +1050,7 @@ fn carousel(
             action = Some(Action::OpenFolder);
         }
         if widgets::button(ui, p, "Delete…", true)
-            .on_hover_text("Moves the profile folder to Backups; the current save is not changed")
+            .on_hover_text(crate::i18n::tr("Moves the profile folder to Backups; the current save is not changed"))
             .clicked()
         {
             action = Some(Action::Delete);
@@ -1058,7 +1058,7 @@ fn carousel(
     });
     if crate::platform::game_running() {
         ui.label(
-            RichText::new("Loading and deleting are disabled while the game is running.")
+            crate::i18n::text("Loading and deleting are disabled while the game is running.")
                 .size(11.5)
                 .color(p.warn),
         );
@@ -1440,7 +1440,7 @@ fn current_slots(
         let account_text = format!("The save the game reads is {}:", account.display());
         ui.add(
             egui::Label::new(
-                RichText::new(account_text.clone())
+                crate::i18n::text(account_text.clone())
                     .size(12.5)
                     .color(p.muted),
             )
@@ -1448,7 +1448,7 @@ fn current_slots(
         )
         .on_hover_text(account_text);
         ui.label(
-            RichText::new(format!(
+            crate::i18n::text(format!(
                 "{} slot{}, {} in total.",
                 slots.len(),
                 if slots.len() == 1 { "" } else { "s" },
@@ -1459,14 +1459,14 @@ fn current_slots(
         );
         if slots.is_empty() {
             ui.label(
-                RichText::new("No save yet. Play the game or import a save below.").color(p.muted),
+                crate::i18n::text("No save yet. Play the game or import a save below.").color(p.muted),
             );
         }
         egui::Grid::new("slots").num_columns(4).spacing([18.0, 6.0]).striped(true).show(ui, |ui| {
             for (path, when, size) in &slots {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                ui.label(RichText::new(&name).font(theme::mono(13.0)).color(p.ink));
-                ui.label(RichText::new(format!("{}, {}", megabytes(*size), ago(*when))).color(p.muted));
+                ui.label(crate::i18n::text(&name).font(theme::mono(13.0)).color(p.ink));
+                ui.label(crate::i18n::text(format!("{}, {}", megabytes(*size), ago(*when))).color(p.muted));
                 let open = app.saves_ui.editor.as_ref().is_some_and(|e| &e.slot.path == path);
                 if widgets::button(ui, p, if open { "Editing" } else { "Edit" }, !open).clicked() {
                     if let Err(e) = open_slot(app, path) {
@@ -1474,7 +1474,7 @@ fn current_slots(
                     }
                 }
                 if widgets::button(ui, p, "Move to backups", !running)
-                    .on_hover_text("The game offers a new game in this slot again; the file is kept in the backups folder")
+                    .on_hover_text(crate::i18n::tr("The game offers a new game in this slot again; the file is kept in the backups folder"))
                     .clicked()
                 {
                     *message = Some(match crate::saves::archive_slot(save_dir, path, &stamp()) {
@@ -1524,8 +1524,8 @@ fn create_dialog(
         "An independent copy of the whole save folder.",
         540.0,
         |ui| {
-            ui.radio_value(&mut d.mode, CreateMode::Empty, "Empty profile");
-            ui.label(RichText::new("Starts with no save. Loading it gives the game a fresh save slot to create on its next play.").size(11.5).color(p.muted));
+            ui.radio_value(&mut d.mode, CreateMode::Empty, crate::i18n::text("Empty profile"));
+            ui.label(crate::i18n::text("Starts with no save. Loading it gives the game a fresh save slot to create on its next play.").size(11.5).color(p.muted));
             ui.add_space(4.0);
             ui.radio_value(
                 &mut d.mode,
@@ -1547,7 +1547,7 @@ fn create_dialog(
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("Profile name")
+                    crate::i18n::text("Profile name")
                         .font(theme::semibold(13.0))
                         .color(p.ink),
                 );
@@ -1559,10 +1559,10 @@ fn create_dialog(
             });
             if !d.name.trim().is_empty() {
                 if let Err(e) = crate::saves::checked_profile_name(&d.name) {
-                    ui.label(RichText::new(e).size(11.5).color(p.bad));
+                    ui.label(crate::i18n::text(e).size(11.5).color(p.bad));
                 } else if profiles.iter().any(|profile| profile.name == d.name.trim()) {
                     ui.label(
-                        RichText::new("That profile name is already in the carousel.")
+                        crate::i18n::text("That profile name is already in the carousel.")
                             .size(11.5)
                             .color(p.warn),
                     );
@@ -1570,7 +1570,7 @@ fn create_dialog(
             }
             if d.mode == CreateMode::Duplicate {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Source").color(p.muted));
+                    ui.label(crate::i18n::text("Source").color(p.muted));
                     egui::ComboBox::from_id_salt("duplicate-source")
                         .selected_text(
                             d.source
@@ -1596,7 +1596,7 @@ fn create_dialog(
                     }
                     ui.add(
                         egui::Label::new(
-                            RichText::new(
+                            crate::i18n::text(
                                 d.import_dir
                                     .as_ref()
                                     .map(|p| p.display().to_string())
@@ -1609,7 +1609,7 @@ fn create_dialog(
                     );
                 });
                 ui.label(
-                    RichText::new(
+                    crate::i18n::text(
                         "The folder is validated before it is added. Its source is never changed.",
                     )
                     .size(11.0)
@@ -1862,7 +1862,7 @@ fn delete_dialog(app: &mut App, ctx: &egui::Context, save_dir: &Path, p: &crate:
         &format!("Remove {target} from the carousel."),
         480.0,
         |ui| {
-            ui.label(RichText::new("The profile folder is moved to Backups, not deleted. The current save is not changed, so this cannot remove the save the game is reading.").size(12.0).color(p.body));
+            ui.label(crate::i18n::text("The profile folder is moved to Backups, not deleted. The current save is not changed, so this cannot remove the save the game is reading.").size(12.0).color(p.body));
         },
         |ui| {
             ui.horizontal(|ui| {
@@ -1994,7 +1994,7 @@ fn manage_dialog(
             });
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Carousel portrait")
+                crate::i18n::text("Carousel portrait")
                     .font(theme::semibold(11.0))
                     .color(p.muted),
             );
@@ -2010,7 +2010,7 @@ fn manage_dialog(
             );
             if let Some((text, tone)) = &m.notice {
                 ui.add_space(4.0);
-                ui.label(RichText::new(text).size(12.0).color(tone.colour(p)));
+                ui.label(crate::i18n::text(text).size(12.0).color(tone.colour(p)));
             }
             ui.separator();
             if slots.is_empty() {
@@ -2073,7 +2073,7 @@ fn manage_dialog(
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(fit(&display, 48))
+                                    crate::i18n::text(fit(&display, 48))
                                         .font(theme::semibold(13.0))
                                         .color(p.ink),
                                 )
@@ -2092,7 +2092,7 @@ fn manage_dialog(
                                 }
                             });
                             ui.label(
-                                RichText::new(format!(
+                                crate::i18n::text(format!(
                                     "{} · {} · {}",
                                     megabytes(slot.size),
                                     ago(slot.modified),
@@ -2103,7 +2103,7 @@ fn manage_dialog(
                             );
                             if !slot.problems.is_empty() {
                                 ui.label(
-                                    RichText::new(slot.problems.join("; "))
+                                    crate::i18n::text(slot.problems.join("; "))
                                         .size(11.0)
                                         .color(p.warn),
                                 );
@@ -2139,7 +2139,7 @@ fn manage_dialog(
                     });
                     if m.renaming.as_deref() == Some(slot.relative.as_str()) {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("Display name").size(12.0).color(p.muted));
+                            ui.label(crate::i18n::text("Display name").size(12.0).color(p.muted));
                             ui.add(
                                 egui::TextEdit::singleline(&mut m.rename_text).desired_width(260.0),
                             );
@@ -2160,11 +2160,11 @@ fn manage_dialog(
                                 m.renaming = None;
                             }
                         });
-                        ui.label(RichText::new("This label is not written into the game save; the file keeps its name.").size(11.0).color(p.muted));
+                        ui.label(crate::i18n::text("This label is not written into the game save; the file keeps its name.").size(11.0).color(p.muted));
                     }
                     if m.pending_delete.as_ref() == Some(&slot.path) {
                         ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new("Move this slot to Backups? The game will offer a new save there.").size(12.0).color(p.warn));
+                                ui.label(crate::i18n::text("Move this slot to Backups? The game will offer a new save there.").size(12.0).color(p.warn));
                                 if widgets::primary_button(ui, p, "Confirm remove", true).clicked() {
                                     archive_slot = Some(slot.path.clone());
                                 }
@@ -2296,14 +2296,14 @@ fn editor(
         if let Some(pl) = ed.player.as_mut() {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("Gold")
+                    crate::i18n::text("Gold")
                         .font(theme::semibold(14.0))
                         .color(p.ink),
                 );
                 ui.add(egui::DragValue::new(&mut pl.gold).range(0..=9_999_999));
                 ui.add_space(18.0);
                 ui.label(
-                    RichText::new("Renown")
+                    crate::i18n::text("Renown")
                         .font(theme::semibold(14.0))
                         .color(p.ink),
                 );
@@ -2311,15 +2311,15 @@ fn editor(
             });
             ui.add_space(6.0);
         } else {
-            ui.label(RichText::new("This slot has no player data (gold, renown).").color(p.muted));
+            ui.label(crate::i18n::text("This slot has no player data (gold, renown).").color(p.muted));
         }
         if !named {
-            ui.label(RichText::new("Units are found by the ids in your game data; choose your game on Game Setup to list them.").color(p.muted));
+            ui.label(crate::i18n::text("Units are found by the ids in your game data; choose your game on Game Setup to list them.").color(p.muted));
         } else if ed.units.is_empty() {
-            ui.label(RichText::new("No units were found in this slot.").color(p.muted));
+            ui.label(crate::i18n::text("No units were found in this slot.").color(p.muted));
         } else {
             ui.label(
-                RichText::new("Stats are what each unit has gained from level-ups; the game adds class and personal bases on top. HP is current HP.")
+                crate::i18n::text("Stats are what each unit has gained from level-ups; the game adds class and personal bases on top. HP is current HP.")
                     .size(12.5)
                     .color(p.muted),
             );
@@ -2336,12 +2336,12 @@ fn editor(
                                 .chain(STAT_NAMES.iter())
                             {
                                 ui.label(
-                                    RichText::new(*h).font(theme::semibold(12.0)).color(p.muted),
+                                    crate::i18n::text(*h).font(theme::semibold(12.0)).color(p.muted),
                                 );
                             }
                             ui.end_row();
                             for u in ed.units.iter_mut() {
-                                ui.label(RichText::new(&u.name).color(p.ink))
+                                ui.label(crate::i18n::text(&u.name).color(p.ink))
                                     .on_hover_text(format!("record at {:#x}", u.at));
                                 ui.add(egui::DragValue::new(&mut u.level).range(1..=99));
                                 ui.add(egui::DragValue::new(&mut u.exp).range(0..=99));
@@ -2361,15 +2361,15 @@ fn editor(
                 if u.masteries.is_empty() && u.items.is_empty() && u.spells.is_empty() {
                     continue;
                 }
-                egui::CollapsingHeader::new(RichText::new(format!("{}: masteries and items", u.name)).color(p.ink)).id_salt(("unit-more", n)).show(ui, |ui| {
+                egui::CollapsingHeader::new(crate::i18n::text(format!("{}: masteries and items", u.name)).color(p.ink)).id_salt(("unit-more", n)).show(ui, |ui| {
                     if !u.masteries.is_empty() {
-                        ui.label(RichText::new("Masteries (experience, grade)").font(theme::semibold(12.5)).color(p.muted));
+                        ui.label(crate::i18n::text("Masteries (experience, grade)").font(theme::semibold(12.5)).color(p.muted));
                         egui::Grid::new(("mastery", n)).num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
                             for (_, k, v) in u.masteries.iter_mut() {
                                 ui.label(MASTERY_NAMES.get(*k as usize).copied().unwrap_or("?"));
                                 ui.add(egui::DragValue::new(v).range(0..=2560));
-                                ui.label(RichText::new(grade(*v)).font(theme::semibold(13.0)).color(p.accent_hi));
-                                egui::ComboBox::from_id_salt(("grade", n, *k)).selected_text("set grade").width(90.0).show_ui(ui, |ui| {
+                                ui.label(crate::i18n::text(grade(*v)).font(theme::semibold(13.0)).color(p.accent_hi));
+                                egui::ComboBox::from_id_salt(("grade", n, *k)).selected_text(crate::i18n::tr("set grade")).width(90.0).show_ui(ui, |ui| {
                                     for (g, t) in GRADES {
                                         if ui.selectable_label(false, g).clicked() {
                                             *v = t;
@@ -2384,12 +2384,12 @@ fn editor(
                         if list.is_empty() {
                             continue;
                         }
-                        ui.label(RichText::new(label).font(theme::semibold(12.5)).color(p.muted));
+                        ui.label(crate::i18n::text(label).font(theme::semibold(12.5)).color(p.muted));
                         for (i, (_, id)) in list.iter_mut().enumerate() {
                             item_picker(ui, (label, n, i), id, &ids.items);
                         }
                     }
-                    ui.label(RichText::new("Items are swapped in place: the slot keeps its kind (a forged item stays forged). Adding or removing slots is not supported yet.").size(12.0).color(p.muted));
+                    ui.label(crate::i18n::text("Items are swapped in place: the slot keeps its kind (a forged item stays forged). Adding or removing slots is not supported yet.").size(12.0).color(p.muted));
                 });
             }
         }

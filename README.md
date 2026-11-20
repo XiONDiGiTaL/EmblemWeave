@@ -39,11 +39,10 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current release: 0.1.40.** The built-in updater now carries the existing build
-> across an in-place update: it records `carried_by` in `fefw.ini`, restarts once,
-> and opens ready to play without rebuilding. This release also cleans up failed
-> `.nsp`/`.xci` add-on scans and bounds the packed `.nup` audio cache. See the
-> [0.1.40 changelog](docs/changelog/0.1.40.md).
+> **Current release: 0.1.41.** A measured Adaptive Performance Controller and Frame-Time Stability system now sit
+> behind a dedicated launcher Performance page and a nine-tab F1 menu, all native overlays share the XiØN design
+> tokens and Sora typeface, and the launcher's post-release drag glide is removed. See the
+> [0.1.41 changelog](docs/changelog/0.1.41.md).
 
 ## Documentation
 
@@ -101,7 +100,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 - [Goldoire](https://github.com/Goldoire/fefw-recomp): fefw-recomp, the baseline engine, and everyone who contributed to that project. Its repository is no longer online; EmblemWeave continues from the snapshot in `engine/`
 - [Obersteinn](https://github.com/Obersteinn): preserved the final fefw-recomp 0.2.0 release and its files after the original repository was removed, keeping the reference build, its build tools and its tested-dump manifest available ([docs/UPSTREAM.md](docs/UPSTREAM.md))
 - [ranbinrang-rgb](https://github.com/ranbinrang-rgb): code mods, the DLL interface (`nxrt/mod_api.h`), the mod hook-site format and the loader (issue #31, PR #32)
-- [Mi-Kel](https://github.com/Mi-Kel): Code Mods API V4 (the Mods window, `[gfx] mods_key`, and the menu's Mods tab; PR #71)
+- [Mi-Kel](https://github.com/Mi-Kel): Code Mods API V4 (the F1 menu's Mods tab and the panel widgets; PR #71)
 - [moistman7](https://github.com/moistman7): the GT tone-curve HDR patch for Fortune's Weave's `ImageProcessing` shader (PR #40), the fefw-recomp 0.2.3/0.2.4 engine integration (PR #52), and the replay/HDR/sampler improvements (PRs #53–#55)
 - [metrist38](https://github.com/metrist38/fefw-recomp): maintains the fefw-recomp fork that supplies updates beyond the original 0.2.0
 - [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber): another fork based on fefw-recomp, with updates beyond 0.2.0. We are in full support of others extending the life of the original beyond its development

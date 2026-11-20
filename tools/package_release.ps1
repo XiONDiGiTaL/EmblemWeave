@@ -21,6 +21,13 @@ try {
         if (-not $line) { throw 'no version in Cargo.toml' }
         $Version = $line.Matches[0].Groups[1].Value
     }
+    # The site, README, changelog index and release.json are edited by hand. Check them before building anything, so a
+    # release cannot be packed with a download button or an updater pointer that still names the previous version.
+    $pyCheck = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $pyCheck) { $pyCheck = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $pyCheck) { throw 'python is needed to check the release metadata (tools/check_release.py)' }
+    & $pyCheck.Source 'tools/check_release.py' --version $Version
+    if ($LASTEXITCODE -ne 0) { throw "release metadata does not agree on $Version; fix it before packing" }
     $name = "EmblemWeave-v$Version"
     $pkg = Join-Path $repo "target\pkg\$name"
     $zip = Join-Path $repo "target\pkg\$name-windows-x64.zip"
@@ -138,6 +145,9 @@ try {
         'engine/fefw-recomp/recomp/requirements.txt', 'engine/fefw-recomp/tools/shaders/harness/Program.cs',
         # The CMake configure reads this before it builds anything; a zip without it failed every build (issues #16, #17).
         'engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt',
+        # The optional FFmpeg movie decoder compiles against these; the licence must travel with them.
+        'engine/fefw-recomp/runtime/third_party/ffmpeg/include/libavcodec/avcodec.h',
+        'engine/fefw-recomp/runtime/third_party/ffmpeg/COPYING.LGPLv2.1',
         'engine/fefw-recomp/tools/shaders/ampere/extract_corpus.py',
         'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/spirv_harness.exe'
     )

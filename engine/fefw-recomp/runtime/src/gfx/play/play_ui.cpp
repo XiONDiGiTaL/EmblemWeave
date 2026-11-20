@@ -4,6 +4,7 @@
 #include "play_ui.h"
 
 #include <algorithm>
+#include "play_audio_ui.h"
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
@@ -21,6 +22,7 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
 #include "nxrt/platform.h"
+#include "nxrt/ui_theme.h"
 #include "play_game.h"
 
 namespace nxrt::play {
@@ -29,11 +31,11 @@ namespace {
 
 namespace hid = nxrt::hid;
 
-const ImVec4 kRed(1.0f, 0.35f, 0.35f, 1.0f);
-const ImVec4 kYellow(1.0f, 0.85f, 0.3f, 1.0f);
-const ImVec4 kOrange(1.0f, 0.65f, 0.25f, 1.0f);
-const ImVec4 kPressed(0.20f, 0.60f, 0.30f, 1.0f);
-const ImVec4 kReleased(0.25f, 0.25f, 0.28f, 1.0f);
+const ImVec4& kRed = ui_theme::bad;
+const ImVec4& kYellow = ui_theme::warn;
+const ImVec4& kOrange = ui_theme::warn;
+const ImVec4& kPressed = ui_theme::accent_deep;
+const ImVec4& kReleased = ui_theme::field;
 
 constexpr int kWindowModeCount = 3;
 constexpr const char* kWindowModeNames[kWindowModeCount] = {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"};
@@ -92,6 +94,7 @@ struct Page {
     double monitors_at = -1e9;
     std::vector<std::string> audio_devices;   // Audio page: output device names, read when the page opens and by its Refresh button
     bool audio_loaded = false;
+    audio_ui::State audio_ui;              // 200% warning and the floating EQ panel
 };
 
 void mark(Page& p) { p.dirty = true; }
@@ -131,7 +134,7 @@ void set_notice(Page& p, const std::string& text, bool warn) {
 
 // Takes the captured input, if the host has one. Results are taken every frame, so a stale one never reaches a later rebind.
 // Only one capture runs at a time (the binding row or the frame rate hotkey), so a result goes to whichever one is waiting.
-// The keys that open the menu or the Mods window cannot be bound (and the frame rate hotkey cannot be bound to an action): the page says so and keeps waiting.
+// The key that opens the menu cannot be bound (and the frame rate hotkey cannot be bound to an action): the page says so and keeps waiting.
 void poll_capture(UiHost& host, Page& p) {
     InputId id;
     if (host.capture_result(&id)) {
@@ -140,7 +143,7 @@ void poll_capture(UiHost& host, Page& p) {
         if (p.fps_capture) {
             // The frame rate hotkey takes keyboard keys only; a mouse button or a wheel notch is dropped and the capture ends.
             if (reserved) {
-                set_notice(p, name + " opens this menu or the Mods window and cannot be the frame rate hotkey. Press another key, Escape cancels.", true);
+                set_notice(p, name + " opens this menu and cannot be the frame rate hotkey. Press another key, Escape cancels.", true);
                 host.begin_capture();
                 return;
             }
@@ -153,7 +156,7 @@ void poll_capture(UiHost& host, Page& p) {
         } else if (p.rebind >= 0 && p.rebind < static_cast<int>(p.edit.bindings.size())) {
             const Settings cur = host.settings();
             if (reserved || (id.kind == InKind::Key && id == cur.fps.key)) {
-                set_notice(p, name + (reserved ? " opens this menu or the Mods window" : " is the frame rate counter hotkey") + " and cannot be bound. Press another input, Escape cancels.", true);
+                set_notice(p, name + (reserved ? " opens this menu" : " is the frame rate counter hotkey") + " and cannot be bound. Press another input, Escape cancels.", true);
                 host.begin_capture();
                 return;
             }
@@ -215,6 +218,8 @@ void sanitize(Settings& s) {
     s.extras.upscale.sharpness = std::clamp(s.extras.upscale.sharpness, 0.0, 1.0);
     s.extras.picture = extras::picture_clamped(s.extras.picture);
     s.audio.volume = std::clamp(s.audio.volume, 0.0, 2.0);
+    s.audio.eq_preamp = std::clamp(s.audio.eq_preamp, -12.0, 12.0);
+    for (double& db : s.audio.eq_bands) db = std::clamp(db, -12.0, 12.0);
     s.display.monitor = std::clamp(s.display.monitor, 0, 32);
     if (s.audio.device.empty()) s.audio.device = "default";
 }
@@ -234,6 +239,7 @@ void revert_to_saved(UiHost& host, Page& p) {
     p.edit = host.settings();
     p.edit.fps = host.settings().fps;
     extras::set_picture_live(p.edit.extras.picture);   // the colour sliders preview live: back to the saved values
+    audio_ui::preview_live(p.edit.audio);
     refresh_out_text(p);
     p.dirty = false;
 }
@@ -243,6 +249,7 @@ void load_factory(UiHost& host, Page& p) {
     p.edit = host.factory();
     p.edit.fps = host.settings().fps;
     extras::set_picture_live(p.edit.extras.picture);
+    audio_ui::preview_live(p.edit.audio);
     refresh_out_text(p);
     mark(p);
 }
@@ -586,20 +593,22 @@ void fps_group(UiHost& host, Page& p) {
 constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native"};
 constexpr const char* kHdrFormatNames[] = {"Auto", "HDR10", "scRGB"};
 constexpr const char* kLatencyModeNames[] = {"Off", "Auto", "On", "Boost"};
-constexpr const char* kUpscaleNames[] = {"Off", "FSR 1 (spatial)", "FSR 3", "DLSS", "XeSS", "NIS (spatial)", "DLAA"};   // indexed by extras::UpscaleMode
+constexpr const char* kUpscaleNames[] = {"Off", "FSR 1 (spatial)", "FSR 3", "DLSS", "XeSS", "NIS (spatial)", "DLAA", "MAKO (spatial)", "FSR 4.1.2"};   // indexed by extras::UpscaleMode
 // The order the list shows them in: the spatial upscalers, then the temporal ones.
-constexpr extras::UpscaleMode kUpscaleOrder[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Nis,
-                                                 extras::UpscaleMode::Fsr3, extras::UpscaleMode::Dlss, extras::UpscaleMode::Dlaa, extras::UpscaleMode::Xess};
+constexpr extras::UpscaleMode kUpscaleOrder[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Nis, extras::UpscaleMode::Mako,
+                                                 extras::UpscaleMode::Fsr4, extras::UpscaleMode::Fsr3, extras::UpscaleMode::Dlss, extras::UpscaleMode::Dlaa, extras::UpscaleMode::Xess};
 constexpr const char* kUpscaleQualityNames[] = {"Native (AA only)", "Quality", "Balanced", "Performance", "Ultra performance", "Custom (scene resolution)"};
 
-// Off and the spatial upscalers (FSR 1, NIS) always work. The temporal ones (src/gfx/extras/temporal.h) get depth, camera motion vectors made by
-// the runtime and the game's projection jitter: FSR 3 when the FidelityFX DLLs are found, DLSS / DLAA when the Streamline DLLs and nvngx_dlss.dll are found (the GPU
+// Off and the spatial upscalers (FSR 1, NIS, MAKO) always work. The temporal ones (src/gfx/extras/temporal.h) get depth, camera motion vectors made by
+// the runtime and the game's projection jitter: FSR 4.1.2 / FSR 3 when the FidelityFX DLLs are found, DLSS / DLAA when the Streamline DLLs and nvngx_dlss.dll are found (the GPU
 // check runs when the renderer starts them), XeSS when libxess.dll is found (applies at the next start). A file that holds an unavailable one shows it as selected (the game runs as Off).
 bool upscale_available(extras::UpscaleMode m) {
     switch (m) {
         case extras::UpscaleMode::Off:
         case extras::UpscaleMode::Fsr1:
-        case extras::UpscaleMode::Nis: return true;
+        case extras::UpscaleMode::Nis:
+        case extras::UpscaleMode::Mako: return true;
+        case extras::UpscaleMode::Fsr4:
         case extras::UpscaleMode::Fsr3: return extras::temporal_ffx_available();
         case extras::UpscaleMode::Dlss:
         case extras::UpscaleMode::Dlaa: return extras::temporal_dlss_available();
@@ -608,9 +617,12 @@ bool upscale_available(extras::UpscaleMode m) {
     }
 }
 const char* temporal_why(extras::UpscaleMode m) {
-    if (m == extras::UpscaleMode::Fsr3)
-        return "Needs amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll (AMD FidelityFX SDK v2.4.0) in upscalers\\fsr3 next to the "
-               "executable, or a path in [upscale] fsr_dll.";
+    if (m == extras::UpscaleMode::Fsr4 || m == extras::UpscaleMode::Fsr3)
+        return m == extras::UpscaleMode::Fsr4
+                   ? "Needs amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll (AMD FidelityFX SDK v2.4.0) in upscalers\\fsr next to the "
+                     "executable. The driver provides FSR 4.1.2 on supported Radeon GPUs and falls back to FSR 3.1 otherwise."
+                   : "Needs amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll (AMD FidelityFX SDK v2.4.0) in upscalers\\fsr next to the "
+                     "executable, or a path in [upscale] fsr_dll.";
     if (m == extras::UpscaleMode::Dlss || m == extras::UpscaleMode::Dlaa)
         return "Needs an NVIDIA RTX GPU and the Streamline DLLs (sl.interposer.dll, sl.common.dll, sl.dlss.dll, nvngx_dlss.dll) in upscalers\\streamline "
                "next to the launcher, or their folder in [upscale] dlss_dll. They come from NVIDIA's Streamline SDK (bin/x64); this project does not ship them.";
@@ -700,9 +712,9 @@ void upscale_group(Page& p) {
     std::string preview = kUpscaleNames[mode];
     if (!upscale_available(u.mode)) preview += " (not available)";
     const bool open = ImGui::BeginCombo("Upscaler##upscale_mode", preview.c_str());
-    tip("FSR 1 (AMD) and NIS (NVIDIA Image Scaling) enlarge the game's picture from a lower render or scene resolution and sharpen it; both run on any GPU. "
-        "NIS covers up to 2x per side, FSR 1 takes over beyond that. FSR 3 and DLSS / DLAA are temporal: they anti-alias the HDR scene using depth, "
-        "camera motion and the game's jitter (switched on with them); DLSS and DLAA need an RTX GPU and apply from the next start.");
+    tip(        "FSR 1 (AMD), NIS (NVIDIA Image Scaling) and MAKO enlarge the game's picture from a lower render or scene resolution and sharpen it; all three run on any GPU. "
+        "NIS covers up to 2x per side; FSR 1 and MAKO take any scale. MAKO is a single-pass sharpened-cubic filter adapted from the MAKO layer. FSR 4.1.2, FSR 3 and DLSS / DLAA are temporal: they anti-alias the HDR scene using depth, "
+        "camera motion and the game's jitter (switched on with them); FSR 4 needs a current FidelityFX Vulkan provider on a supported Radeon GPU (FSR 3.1 otherwise), and DLSS and DLAA need an RTX GPU and apply from the next start.");
     if (open) {
         for (extras::UpscaleMode m : kUpscaleOrder) {
             const int i = static_cast<int>(m);
@@ -722,7 +734,7 @@ void upscale_group(Page& p) {
     if ((u.mode == extras::UpscaleMode::Dlss || u.mode == extras::UpscaleMode::Dlaa) && !extras::temporal_dlss_started()) restart_badge();
     if (u.mode == extras::UpscaleMode::Xess && !extras::temporal_xess_ready()) restart_badge();
 
-    if (u.mode == extras::UpscaleMode::Fsr3 || u.mode == extras::UpscaleMode::Dlss || u.mode == extras::UpscaleMode::Xess) {
+    if (u.mode == extras::UpscaleMode::Fsr4 || u.mode == extras::UpscaleMode::Fsr3 || u.mode == extras::UpscaleMode::Dlss || u.mode == extras::UpscaleMode::Xess) {
         const int q = static_cast<int>(u.quality);
         if (ImGui::BeginCombo("Quality##upscale_quality", kUpscaleQualityNames[q])) {
             for (int i = 0; i < 6; ++i) {
@@ -738,7 +750,7 @@ void upscale_group(Page& p) {
     }
 
     if (slider("Sharpness", &u.sharpness, 0.0, 1.0, "%.2f")) mark(p);
-    tip("How much FSR 1, NIS or FSR 3 sharpens the upscaled picture; 1 is the sharpest (DLSS has no sharpening).");
+    tip("How much FSR 1, NIS, MAKO or FSR 4 / 3 sharpens the upscaled picture; 1 is the sharpest (DLSS has no sharpening).");
     if (ImGui::SliderInt("Scene resolution##upscale_scene", &u.scene_scale, 25, 100, "%d%%")) mark(p);
     tip("Renders the 3D scene at this percent of the output size per side; the game scales it up and keeps the HUD and the post effects at full size. 100 turns it off. Applies live.");
     ImGui::TextDisabled("Or render everything below the window size with the render scale above; the upscaler then fills the rest.");
@@ -1113,11 +1125,16 @@ void audio_page(Page& p) {
     ImGui::SeparatorText("Volume");
     float pct = static_cast<float>(a.volume * 100.0);
     if (ImGui::SliderFloat("Master volume", &pct, 0.0f, 200.0f, "%.0f%%")) {
-        a.volume = std::clamp(static_cast<double>(pct), 0.0, 200.0) / 100.0;
-        mark(p);
+        if (audio_ui::apply_volume(a, p.audio_ui, pct)) {
+            audio_ui::preview_live(a);   // heard while dragged
+            mark(p);
+        }
     }
-    tip("The volume of everything the game plays, applied as a gain in the audio output. Above 100% it is a boost (up to 200%) with a limiter, so loud parts are held back instead of clipping. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
+    tip("The volume of everything the game plays, applied as a gain in the audio output. Above 100% it is a boost (up to 200%) with a limiter, so loud parts are held back instead of clipping. A move above 100% asks for confirmation. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
     if (ImGui::Checkbox("Mute when the window is not in focus", &a.mute_unfocused)) mark(p);
+
+    ImGui::SeparatorText("Audio enhancements");
+    audio_ui::enhancements_button(a, p.audio_ui);
 
     ImGui::SeparatorText("Output");
     if (!p.audio_loaded) load_audio_devices(p);
@@ -1201,7 +1218,7 @@ void bindings_tab(UiHost& host, Page& p) {
             const std::vector<int> clash = conflicts_of(p, row);
             const std::string label = input_button_text(b, waiting) + "##in";
             if (waiting) ImGui::PushStyleColor(ImGuiCol_Button, kPressed);
-            else if (!clash.empty()) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.38f, 0.10f, 1.0f));
+            else if (!clash.empty()) ImGui::PushStyleColor(ImGuiCol_Button, ui_theme::with_alpha(ui_theme::warn, 0.35f));
             const bool clicked = ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f));
             if (waiting || !clash.empty()) ImGui::PopStyleColor();
             if (!clash.empty() && ImGui::IsItemHovered()) {
@@ -1427,7 +1444,7 @@ void draw_settings_page(UiHost& host) {
     const LiveStatus live = host.status();
 
     if (host.capturing()) ImGui::TextColored(kYellow, "Press the key or mouse button for the binding, Escape cancels");
-    else if (!p.notice.empty()) ImGui::TextColored(p.notice_warn ? kOrange : ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", p.notice.c_str());
+    else if (!p.notice.empty()) ImGui::TextColored(p.notice_warn ? kOrange : ui_theme::ok, "%s", p.notice.c_str());
     ImGui::TextDisabled("Settings file: %s", host.settings_path().c_str());
     if (p.dirty) {
         ImGui::SameLine();
@@ -1473,6 +1490,18 @@ void draw_settings_page(UiHost& host) {
         ImGui::EndTabBar();
     }
     ImGui::PopItemWidth();
+
+    // The warning and the floating panel live outside the Audio tab: an open panel survives a tab switch, and the modal is drawn after
+    // everything else so it sits on top.
+    if (audio_ui::boost_warning(p.edit.audio, p.audio_ui)) {
+        audio_ui::preview_live(p.edit.audio);
+        mark(p);
+    }
+    const audio_ui::Edit panel = audio_ui::enhancements_window(p.edit.audio, p.audio_ui);
+    if (panel != audio_ui::Edit::None) {
+        audio_ui::preview_live(p.edit.audio);
+        mark(p);
+    }
 }
 
 }  // namespace nxrt::play

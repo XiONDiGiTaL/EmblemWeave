@@ -45,16 +45,6 @@ impl Frames {
         }
     }
 
-    /// The rate over the last half second, or `None` before two frames.
-    pub fn fps(&self) -> Option<f32> {
-        let n = self.times.len().min(30);
-        if n == 0 {
-            return None;
-        }
-        let sum: f32 = self.times.iter().rev().take(n).sum();
-        (sum > 0.0).then(|| n as f32 / sum)
-    }
-
     pub fn samples(&self) -> Vec<f32> {
         self.times.iter().copied().collect()
     }
@@ -153,7 +143,6 @@ mod tests {
     #[test]
     fn no_frames_no_numbers() {
         let f = Frames::default();
-        assert_eq!(f.fps(), None);
         assert_eq!(f.stats(), Stats::default());
     }
 }

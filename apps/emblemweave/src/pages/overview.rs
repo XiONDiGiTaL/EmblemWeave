@@ -8,7 +8,7 @@ use crate::pages::Page;
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, Color32, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, Sense, Vec2};
 
 /// One honest word for the sidebar: what the user can do right now.
 pub fn readiness(app: &App) -> (&'static str, Tone) {
@@ -33,6 +33,12 @@ enum Action {
     InstallTools,
 }
 
+enum UpdateAction {
+    Check,
+    Install,
+    Skip(String),
+}
+
 /// A lightweight panel opened from the header or a status button. Only one is
 /// open at a time, so the page never accumulates floating cards.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -53,7 +59,7 @@ fn update_offer(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             let mut skip = false;
             widgets::section(ui, p, "Update available", |ui| {
                 ui.label(
-                    RichText::new(format!(
+                    crate::i18n::text(format!(
                         "EmblemWeave {} is available. Updating replaces the launcher, docs and engine sources in place; your data, \
                          saves, built game and fetched tools stay where they are.",
                         release.tag
@@ -69,7 +75,7 @@ fn update_offer(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                         install = true;
                     }
                     if !release.page.is_empty() {
-                        ui.hyperlink_to("Release notes", &release.page);
+                        ui.hyperlink_to(crate::i18n::text("Release notes"), &release.page);
                     }
                     if widgets::button(ui, p, "Skip this version", true).clicked() {
                         skip = true;
@@ -77,7 +83,7 @@ fn update_offer(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 });
                 if release.asset.is_none() {
                     ui.label(
-                        RichText::new(
+                        crate::i18n::text(
                             "That release has no Windows download; use the release page.",
                         )
                         .size(12.0)
@@ -134,7 +140,7 @@ fn reuse_offer(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     let mut dismiss = false;
     widgets::section(ui, p, "A build is already on this PC", |ui| {
         ui.label(
-            RichText::new(format!(
+            crate::i18n::text(format!(
                 "{} already has the game built{when}. Use it instead of compiling the engine again here? Your saves, settings \
                  and game data are not moved.",
                 found.install.display()
@@ -148,7 +154,7 @@ fn reuse_offer(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 use_it = true;
             }
             if widgets::button(ui, p, "Not now", true)
-                .on_hover_text("Game Setup > Engine folder can still point at it later")
+                .on_hover_text(crate::i18n::tr("Game Setup > Engine folder can still point at it later"))
                 .clicked()
             {
                 dismiss = true;
@@ -236,6 +242,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_S);
     quick_access(app, ui, &p);
     ui.add_space(theme::SPACE_S);
+    overview_details(app, ui, &p, done, total);
+    ui.add_space(theme::SPACE_S);
 
     if let Some(action) = action {
         run_action(app, action);
@@ -287,17 +295,17 @@ fn hero(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let state = if crate::engine::ready() { "READY".to_string() } else { format!("SETUP {done}/{total}") };
-                ui.label(RichText::new(state).font(theme::mono(10.0)).color(if crate::engine::ready() { p.ok } else { p.muted }));
+                ui.label(crate::i18n::text(state).font(theme::mono(10.0)).color(if crate::engine::ready() { p.ok } else { p.muted }));
             });
         });
         ui.add_space(6.0);
-        ui.label(RichText::new(title).font(theme::display(25.0)).color(p.ink))
-            .on_hover_text("Statically recompiled from your own copy of the game into native PC code. No emulator.");
+        ui.label(crate::i18n::text(title).font(theme::display(25.0)).color(p.ink))
+            .on_hover_text(crate::i18n::tr("Statically recompiled from your own copy of the game into native PC code. No emulator."));
         ui.add_space(5.0);
         ui.horizontal_wrapped(|ui| {
             widgets::status_dot(ui, p, data_tone);
-            ui.label(RichText::new(data_text).size(11.5).color(data_tone.colour(p)));
-            ui.label(RichText::new("·").size(11.0).color(p.muted));
+            ui.label(crate::i18n::text(data_text).size(11.5).color(data_tone.colour(p)));
+            ui.label(crate::i18n::text("·").size(11.0).color(p.muted));
             let (text, tone) = if building {
                 ("Building the game from your dump".to_string(), Tone::Accent)
             } else if running {
@@ -311,7 +319,7 @@ fn hero(
             } else {
                 ("Choose your game data to begin".to_string(), Tone::Neutral)
             };
-            ui.label(RichText::new(text).size(11.5).color(tone.colour(p)));
+            ui.label(crate::i18n::text(text).size(11.5).color(tone.colour(p)));
         });
 
         if let Some((built, now)) = stale {
@@ -327,8 +335,8 @@ fn hero(
                     ui.horizontal_top(|ui| {
                         widgets::status_dot(ui, p, Tone::Warn);
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("This game folder came from another release").font(theme::semibold(11.5)).color(p.ink));
-                            ui.label(RichText::new(format!("Built by {built}; this launcher is {now}. Rebuilding updates it once; saves and mods are untouched.")).size(11.0).color(p.body));
+                            ui.label(crate::i18n::text("This game folder came from another release").font(theme::semibold(11.5)).color(p.ink));
+                            ui.label(crate::i18n::text(format!("Built by {built}; this launcher is {now}. Rebuilding updates it once; saves and mods are untouched.")).size(11.0).color(p.body));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if widgets::button(ui, p, "Repair now", data_ready && !building).clicked() {
@@ -361,7 +369,7 @@ fn hero(
             ui.vertical(|ui| {
                 ui.add_space(2.0);
                 if widgets::button(ui, p, if ready { "Rebuild" } else { "Build options" }, data_ready && !building)
-                    .on_hover_text("Recompile from your dump. The first build takes longer; later ones only redo what changed.")
+                    .on_hover_text(crate::i18n::tr("Recompile from your dump. The first build takes longer; later ones only redo what changed."))
                     .clicked()
                 {
                     *action = Some(if ready { Action::Run(JobKind::Engine) } else { Action::Open(Page::Recompile) });
@@ -375,7 +383,7 @@ fn hero(
         if !ready && data_ready && !building {
             if let Some(note) = crate::sites::installed_note() {
                 ui.add_space(6.0);
-                ui.label(RichText::new(note).size(11.0).color(p.warn));
+                ui.label(crate::i18n::text(note).size(11.0).color(p.warn));
             }
         }
 
@@ -386,10 +394,10 @@ fn hero(
         if !profiles.is_empty() && !running {
             ui.add_space(7.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Continue").size(10.5).color(p.muted));
+                ui.label(crate::i18n::text("Continue").size(10.5).color(p.muted));
                 let mut load = None;
                 egui::ComboBox::from_id_salt("overview-profile")
-                    .selected_text("Choose a save profile…")
+                    .selected_text(crate::i18n::tr("Choose a save profile…"))
                     .width(168.0)
                     .show_ui(ui, |ui| {
                         for pr in &profiles {
@@ -415,21 +423,33 @@ fn hero(
                         }
                     }
                 }
-                ui.label(RichText::new(format!("{} saved", profiles.len())).size(10.0).color(p.muted));
+                ui.label(
+                    crate::i18n::text(format!("{} {}", profiles.len(), crate::i18n::tr("saved")))
+                        .size(10.0)
+                        .color(p.muted),
+                );
             });
         }
         ui.add_space(7.0);
         ui.horizontal(|ui| {
             if ui
-                .link(RichText::new(format!("Setup guide · {done}/{total} ready")).size(10.5).color(p.accent_hi))
-                .on_hover_text("Open the guided checklist without leaving Overview")
+                .link(
+                    crate::i18n::text(format!(
+                        "{} · {done}/{total} {}",
+                        crate::i18n::tr("Setup guide"),
+                        crate::i18n::tr("ready")
+                    ))
+                    .size(10.5)
+                    .color(p.accent_hi),
+                )
+                .on_hover_text(crate::i18n::tr("Open the guided checklist without leaving Overview"))
                 .clicked()
             {
                 app.overview_popup = Some(Popup::SetupGuide);
             }
             if !ready && !data_ready && !building {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("Nothing is downloaded or executed without asking.").size(9.5).color(p.muted));
+                    ui.label(crate::i18n::text("Nothing is downloaded or executed without asking.").size(9.5).color(p.muted));
                 });
             }
         });
@@ -450,7 +470,7 @@ fn system_panel(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             widgets::tracked(ui, "SYSTEM CHECK", 8.5, p.accent_hi, 2.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .link(RichText::new("Full status").size(10.0).color(p.accent_hi))
+                    .link(crate::i18n::text("Full status").size(10.0).color(p.accent_hi))
                     .clicked()
                 {
                     app.open(Page::Requirements);
@@ -494,7 +514,7 @@ fn system_panel(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 let required = rows.iter().filter(|r| r.required).count().max(1);
                 let ok = rows.iter().filter(|r| r.required && r.status.ok()).count();
                 (
-                    format!("{ok}/{required} ready"),
+                    format!("{ok}/{required} {}", crate::i18n::tr("ready")),
                     if ok == required { Tone::Ok } else { Tone::Warn },
                 )
             }
@@ -512,7 +532,10 @@ fn system_panel(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             goto = Some(Page::Requirements);
         }
         let (runtime_value, runtime_tone) = match &app.last_boot {
-            Some((r, _)) => (format!("Boot test · {}", r.phase), Tone::Ok),
+            Some((r, _)) => (
+                format!("{} · {}", crate::i18n::tr("Boot test"), r.phase),
+                Tone::Ok,
+            ),
             None if app.game.bootable_inputs() => {
                 ("Boot test available".to_string(), Tone::Neutral)
             }
@@ -531,7 +554,7 @@ fn system_panel(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         ui.add_space(5.0);
         ui.horizontal(|ui| {
             if widgets::button(ui, p, "Re-check", true)
-                .on_hover_text("Checks the game folder and build tools again")
+                .on_hover_text(crate::i18n::tr("Checks the game folder and build tools again"))
                 .clicked()
             {
                 app.start(JobKind::Detect);
@@ -556,6 +579,9 @@ fn status_button(
     tone: Tone,
     tip: &str,
 ) -> bool {
+    let label = crate::i18n::tr(label);
+    let value = crate::i18n::tr(value);
+    let tip = crate::i18n::tr(tip);
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 31.0), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -576,14 +602,14 @@ fn status_button(
         painter.text(
             egui::pos2(rect.left() + 18.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            label,
+            &label,
             theme::semibold(8.0),
             p.muted,
         );
         painter.text(
             egui::pos2(rect.left() + 72.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            value,
+            &value,
             theme::semibold(10.0),
             p.ink,
         );
@@ -699,7 +725,12 @@ fn quick_access(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         ),
         (
             Page::Controls,
-            format!("{} bindings", app.config.input.bindings.len()),
+            counted_label(
+                app.config.input.bindings.len(),
+                "binding",
+                "bindings.few",
+                "bindings",
+            ),
             Tone::Neutral,
         ),
         (Page::Recompile, pipeline.0, pipeline.1),
@@ -720,6 +751,531 @@ fn quick_access(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     });
 }
 
+/// The quiet information card under Quick Access. Its body is deliberately
+/// bounded and scrolls on its own, so a long activity feed or release note can
+/// never push the page taller than the window.
+fn overview_details(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    done: usize,
+    total: usize,
+) {
+    let update = app.update.state.clone();
+    let update_ready = matches!(update, crate::UpdateState::Ready(_));
+    let summary = match &update {
+        crate::UpdateState::Ready(release) => format!("Update {} available", release.tag),
+        _ => "Next steps · activity · updates".to_string(),
+    };
+    let tab_id = egui::Id::new("overview-details-tab");
+    let mut tab = ui
+        .ctx()
+        .data(|d| d.get_temp::<u8>(tab_id))
+        .unwrap_or(if update_ready { 2 } else { 0 });
+    let mut action = None;
+    let mut update_action = None;
+    let mut open_guide = false;
+
+    widgets::section_drawer(
+        ui,
+        p,
+        "overview-details",
+        "At a glance",
+        &summary,
+        true,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
+                if glance_tab(ui, p, "Next steps", tab == 0) {
+                    tab = 0;
+                }
+                if glance_tab(ui, p, "Activity", tab == 1) {
+                    tab = 1;
+                }
+                let updates = if update_ready { "Updates · new" } else { "Updates" };
+                if glance_tab(ui, p, updates, tab == 2) {
+                    tab = 2;
+                }
+            });
+            ui.add_space(theme::SPACE_XS);
+            let height = widgets::list_height(ui, 0.26).min(250.0);
+            egui::Frame::new()
+                .fill(p.bg_deep)
+                .stroke(egui::Stroke::new(1.0_f32, p.line))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_S))
+                .inner_margin(egui::Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical()
+                        .id_salt(("overview-details-scroll", tab))
+                        .max_height(height)
+                        .min_scrolled_height(height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            match tab {
+                                0 => next_steps_tab(
+                                    app,
+                                    ui,
+                                    p,
+                                    done,
+                                    total,
+                                    &mut action,
+                                    &mut open_guide,
+                                    &mut tab,
+                                ),
+                                1 => activity_tab(app, ui, p, &mut action),
+                                _ => updates_tab(ui, p, &update, &mut update_action),
+                            }
+                        });
+                });
+        },
+    );
+    ui.ctx().data_mut(|d| d.insert_temp(tab_id, tab));
+    if open_guide {
+        app.overview_popup = Some(Popup::SetupGuide);
+    }
+    match update_action {
+        Some(UpdateAction::Check) => app.check_updates(),
+        Some(UpdateAction::Install) => app.install_update(),
+        Some(UpdateAction::Skip(tag)) => {
+            app.config.updates.skipped = tag.clone();
+            app.update.state = crate::UpdateState::Idle;
+            app.notify(
+                format!("Skipped {tag}; undo this on About > Updates"),
+                Tone::Neutral,
+            );
+        }
+        None => {}
+    }
+    if let Some(action) = action {
+        run_action(app, action);
+    }
+}
+
+/// A tab is a label with an underline instead of another filled button: the
+/// drawer already has one action inside it, and the row should stay quiet.
+/// The useful context that used to sit under a second Play button: which save
+/// profile is active, how many mods the selected profile carries, and what the
+/// next start will render. Play stays in the hero above, where it belongs.
+fn ready_facts(app: &App, ui: &mut egui::Ui, p: &theme::Palette) {
+    let save = app.saves_ui.active_profile.as_deref().unwrap_or("No save profile selected");
+    let mods = app
+        .config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == app.config.profile)
+        .map(|profile| profile.enabled.len())
+        .unwrap_or(0);
+    let graphics = &app.config.graphics;
+    ui.add_space(11.0);
+    widgets::kv(ui, p, "Save profile", save);
+    let mods_label = counted_label(mods, "mod on", "mods on.few", "mods on");
+    widgets::kv(
+        ui,
+        p,
+        "Next start",
+        &format!(
+            "{}  ·  {}  ·  {}",
+            graphics.resolution, graphics.upscaling, mods_label
+        ),
+    );
+    widgets::kv(
+        ui,
+        p,
+        "Controls",
+        &counted_label(
+            app.config.input.bindings.len(),
+            "binding",
+            "bindings.few",
+            "bindings",
+        ),
+    );
+    ui.add_space(2.0);
+}
+
+/// Counts use a plural form after the number, with a separate few-form for
+/// languages such as Russian where 2-4 take a different ending from 5 and up.
+/// English has no catalog, so it only needs its singular and plural spellings.
+fn counted_label(count: usize, one: &str, few: &str, many: &str) -> String {
+    let language = crate::i18n::current();
+    let label = if language == crate::i18n::Language::English {
+        if count == 1 { one.to_string() } else { many.to_string() }
+    } else {
+        let form = if language == crate::i18n::Language::Russian {
+            russian_plural_form(count)
+        } else if count == 1 {
+            1
+        } else if (2..=4).contains(&count) {
+            2
+        } else {
+            3
+        };
+        crate::i18n::tr(match form {
+            1 => one,
+            2 => few,
+            _ => many,
+        })
+    };
+    format!("{count} {label}")
+}
+
+/// Russian needs the last digit for 21, 22, 25 and so on, not just the size
+/// of the number; 11-14 are the exception and use the many-form.
+fn russian_plural_form(count: usize) -> u8 {
+    let last_two = count % 100;
+    if (11..=14).contains(&last_two) {
+        return 3;
+    }
+    match count % 10 {
+        1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    }
+}
+
+fn glance_tab(ui: &mut egui::Ui, p: &theme::Palette, label: &str, active: bool) -> bool {
+    let colour = if active { p.accent_hi } else { p.body };
+    let response = ui.add(
+        egui::Button::new(crate::i18n::text(label).font(theme::semibold(11.0)).color(colour))
+            .frame(false),
+    );
+    if active {
+        let rect = response.rect;
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 1.0,
+            egui::Stroke::new(1.5_f32, p.accent_hi),
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+fn next_steps_tab(
+    app: &App,
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    done: usize,
+    total: usize,
+    action: &mut Option<Action>,
+    open_guide: &mut bool,
+    tab: &mut u8,
+) {
+    let ready = crate::engine::ready();
+    let ready_summary = ready
+        && app.running(JobKind::Boot).is_none()
+        && app.running(JobKind::Engine).is_none()
+        && app.game.exefs.is_some()
+        && (app.game.romfs.is_some() || app.game.nup.is_some());
+    let running = app.running(JobKind::Boot).is_some();
+    let building = app.running(JobKind::Engine).is_some();
+    let detecting = app.running(JobKind::Detect).is_some();
+    let data_ready =
+        app.game.exefs.is_some() && (app.game.romfs.is_some() || app.game.nup.is_some());
+    let rows = crate::deps::cached();
+    let missing = rows
+        .as_deref()
+        .map(crate::deps::blocking)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let (title, detail, label, next): (&str, String, &str, Option<Action>) = if running {
+        (
+            "The game is running",
+            "Close the game window to come back to the launcher. Its log stays available while it runs.".to_string(),
+            "GAME LOG",
+            Some(Action::Open(Page::Log)),
+        )
+    } else if building {
+        (
+            "Building your game",
+            "The build keeps running if you leave this page. Progress and output are on Recompilation.".to_string(),
+            "VIEW PROGRESS",
+            Some(Action::Open(Page::Recompile)),
+        )
+    } else if !data_ready {
+        if detecting {
+            (
+                "Finding your game data",
+                "The launcher is checking the usual folders. You can choose a dump yourself if it misses it.".to_string(),
+                "GAME SETUP",
+                Some(Action::Open(Page::Setup)),
+            )
+        } else {
+            (
+                "Choose your game data",
+                "Point EmblemWeave at your own ExeFS and RomFS, or an extracted game folder. The files are only read."
+                    .to_string(),
+                "CHOOSE FILES",
+                Some(Action::Open(Page::Setup)),
+            )
+        }
+    } else if rows.is_none() {
+        (
+            "Checking your build tools",
+            "Visual Studio, LLVM, CMake and Ninja are being checked in the background.".to_string(),
+            "REQUIREMENTS",
+            Some(Action::Open(Page::Requirements)),
+        )
+    } else if missing > 0 {
+        (
+            "Finish the build tools",
+            format!(
+                "{missing} required tool{} need attention before the game can compile.",
+                if missing == 1 { "" } else { "s" }
+            ),
+            "REVIEW TOOLS",
+            Some(Action::Open(Page::Requirements)),
+        )
+    } else if !ready {
+        (
+            "Build the game",
+            "Compile your own dump once for this PC. Later builds only redo the parts that changed.".to_string(),
+            "BUILD NOW",
+            Some(Action::Run(JobKind::Engine)),
+        )
+    } else {
+        (
+            "Game ready",
+            "Your compiled game is ready. These are the values the next start will use.".to_string(),
+            "",
+            None,
+        )
+    };
+
+    ui.label(crate::i18n::text(title).font(theme::semibold(15.0)).color(p.ink));
+    ui.add_space(2.0);
+    ui.label(crate::i18n::text(detail).size(12.0).color(p.body));
+    ui.add_space(7.0);
+    ui.horizontal_wrapped(|ui| {
+        if !label.is_empty() {
+            if let Some(next) = next {
+                if widgets::primary_button(ui, p, label, true).clicked() {
+                    *action = Some(next);
+                }
+            }
+        }
+        if widgets::button(ui, p, "Setup guide", true).clicked() {
+            *open_guide = true;
+        }
+    });
+
+    if ready_summary && rows.is_some() && missing == 0 {
+        ready_facts(app, ui, p);
+    }
+
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        widgets::tracked(ui, "SETUP PROGRESS", 8.5, p.muted, 2.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                crate::i18n::text(format!(
+                    "{done}/{total} {}",
+                    crate::i18n::tr("ready")
+                ))
+                    .font(theme::mono(10.5))
+                    .color(if ready { p.ok } else { p.muted }),
+            );
+        });
+    });
+    ui.add_space(4.0);
+    widgets::progress_bar(ui, p, Some(done as f32 / total.max(1) as f32));
+
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        widgets::tracked(ui, "RECENT ACTIVITY", 8.5, p.muted, 2.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .link(crate::i18n::text("View all").size(10.5).color(p.accent_hi))
+                .clicked()
+            {
+                *tab = 1;
+            }
+        });
+    });
+    ui.add_space(3.0);
+    if app.activity.is_empty() {
+        ui.label(
+            crate::i18n::text("Launcher events appear here as they happen.")
+                .size(11.0)
+                .color(p.muted),
+        );
+    } else {
+        for a in app.activity.iter().rev().take(3) {
+            ui.horizontal_top(|ui| {
+                ui.label(crate::i18n::text(&a.at).font(theme::mono(9.5)).color(p.muted));
+                ui.add(
+                    egui::Label::new(
+                        crate::i18n::text(&a.text)
+                            .size(11.0)
+                            .color(a.tone.colour(p)),
+                    )
+                    .wrap(),
+                );
+            });
+            ui.add_space(2.0);
+        }
+    }
+}
+
+fn activity_tab(
+    app: &App,
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    action: &mut Option<Action>,
+) {
+    if app.activity.is_empty() {
+        ui.label(
+            crate::i18n::text("Nothing has happened yet. Detection, builds, plays and errors show up here.")
+                .size(12.0)
+                .color(p.muted),
+        );
+    } else {
+        for a in app.activity.iter().rev().take(40) {
+            ui.horizontal_top(|ui| {
+                ui.label(crate::i18n::text(&a.at).font(theme::mono(9.5)).color(p.muted));
+                ui.add(
+                    egui::Label::new(
+                        crate::i18n::text(&a.text)
+                            .size(11.5)
+                            .color(a.tone.colour(p)),
+                    )
+                    .wrap(),
+                );
+            });
+            ui.add_space(3.0);
+        }
+    }
+    ui.add_space(9.0);
+    ui.horizontal_wrapped(|ui| {
+        if widgets::button(ui, p, "Open Diagnostics", true).clicked() {
+            *action = Some(Action::Open(Page::Diagnostics));
+        }
+        if widgets::button(ui, p, "Game log", true).clicked() {
+            *action = Some(Action::Open(Page::Log));
+        }
+    });
+}
+
+fn updates_tab(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    update: &crate::UpdateState,
+    action: &mut Option<UpdateAction>,
+) {
+    match update {
+        crate::UpdateState::Idle => {
+            ui.label(
+                crate::i18n::text("Check GitHub for a newer release.")
+                    .font(theme::semibold(13.5))
+                    .color(p.ink),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                crate::i18n::text(
+                    "An update replaces the launcher, docs and engine sources. Your data, saves, settings and built game stay where they are.",
+                )
+                .size(12.0)
+                .color(p.body),
+            );
+            ui.add_space(8.0);
+            if widgets::button(ui, p, "Check for updates", true).clicked() {
+                *action = Some(UpdateAction::Check);
+            }
+        }
+        crate::UpdateState::Checking => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    crate::i18n::text("Checking GitHub for a newer release…")
+                        .size(12.5)
+                        .color(p.body),
+                );
+            });
+        }
+        crate::UpdateState::Ready(release) => {
+            widgets::status_line(
+                ui,
+                p,
+                Tone::Accent,
+                &format!("{} is available", release.tag),
+                "Updating replaces the launcher, docs and engine sources. Your data, saves and built game are kept.",
+            );
+            ui.add_space(7.0);
+            ui.horizontal_wrapped(|ui| {
+                if widgets::primary_button(ui, p, "Update now", release.asset.is_some()).clicked() {
+                    *action = Some(UpdateAction::Install);
+                }
+                if !release.page.is_empty() {
+                    ui.hyperlink_to(crate::i18n::text("Release notes"), &release.page);
+                }
+                if widgets::button(ui, p, "Skip this version", true).clicked() {
+                    *action = Some(UpdateAction::Skip(release.tag.clone()));
+                }
+            });
+            if release.asset.is_none() {
+                ui.add_space(4.0);
+                ui.label(
+                    crate::i18n::text("That release has no Windows download; use the release page.")
+                        .size(12.0)
+                        .color(p.warn),
+                );
+            }
+        }
+        crate::UpdateState::UpToDate(tag) => {
+            widgets::status_line(
+                ui,
+                p,
+                Tone::Ok,
+                "Up to date",
+                &format!("{tag} is the newest published release."),
+            );
+            ui.add_space(6.0);
+            if widgets::button(ui, p, "Check again", true).clicked() {
+                *action = Some(UpdateAction::Check);
+            }
+        }
+        crate::UpdateState::Failed(e) => {
+            widgets::status_line(
+                ui,
+                p,
+                Tone::Bad,
+                "The update check failed",
+                &format!("{e}. Nothing was changed."),
+            );
+            ui.add_space(6.0);
+            if widgets::button(ui, p, "Try again", true).clicked() {
+                *action = Some(UpdateAction::Check);
+            }
+        }
+        crate::UpdateState::InstallFailed(e) => {
+            widgets::status_line(
+                ui,
+                p,
+                Tone::Bad,
+                "The update did not finish",
+                &format!("{e}. Your data and built game were not touched."),
+            );
+            ui.add_space(6.0);
+            if widgets::button(ui, p, "Check again", true).clicked() {
+                *action = Some(UpdateAction::Check);
+            }
+        }
+        crate::UpdateState::Downloading => {
+            widgets::status_line(
+                ui,
+                p,
+                Tone::Accent,
+                "Updating EmblemWeave",
+                "Downloading and writing the new version. The launcher restarts when it is ready.",
+            );
+            ui.add_space(4.0);
+            ui.spinner();
+        }
+    }
+}
+
 fn setup_guide_body(
     app: &mut App,
     ui: &mut egui::Ui,
@@ -728,7 +1284,7 @@ fn setup_guide_body(
     done: usize,
     total: usize,
 ) {
-    ui.label(RichText::new("EmblemWeave reads your own game data once, then builds a native copy for this PC. You can leave this page while it works.").size(11.5).color(p.body));
+    ui.label(crate::i18n::text("EmblemWeave reads your own game data once, then builds a native copy for this PC. You can leave this page while it works.").size(11.5).color(p.body));
     ui.add_space(7.0);
     widgets::progress_bar(ui, p, Some(done as f32 / total.max(1) as f32));
     ui.add_space(8.0);
@@ -870,7 +1426,7 @@ fn game_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     let (text, tone) = data_summary(app);
     widgets::status_line(ui, p, tone, "Game data", &text);
     if let Some(attention) = app.game.attention_line() {
-        ui.label(RichText::new(attention).size(11.5).color(p.warn));
+        ui.label(crate::i18n::text(attention).size(11.5).color(p.warn));
     }
     ui.add_space(5.0);
     if widgets::button(ui, p, "Open Game Setup", true).clicked() {
@@ -879,7 +1435,7 @@ fn game_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     }
     ui.add_space(4.0);
     ui.collapsing(
-        RichText::new("Technical details").size(11.0).color(p.muted),
+        crate::i18n::text("Technical details").size(11.0).color(p.muted),
         |ui| {
             if let Some(root) = app.game.exefs.as_ref() {
                 widgets::kv(ui, p, "ExeFS", &root.display().to_string());
@@ -943,7 +1499,7 @@ fn build_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
                 .find(|s| matches!(s.status, crate::jobs::StageStatus::Active))
             {
                 ui.label(
-                    RichText::new(format!("{} · {}", active.name, active.detail))
+                    crate::i18n::text(format!("{} · {}", active.name, active.detail))
                         .size(11.5)
                         .color(p.body),
                 );
@@ -989,7 +1545,7 @@ fn build_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         );
         if !missing.is_empty() {
             ui.label(
-                RichText::new(format!("Missing: {}", missing.join(", ")))
+                crate::i18n::text(format!("Missing: {}", missing.join(", ")))
                     .size(11.0)
                     .color(p.body),
             );
@@ -1010,7 +1566,7 @@ fn build_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     }
     ui.add_space(5.0);
     ui.collapsing(
-        RichText::new("Technical details").size(11.0).color(p.muted),
+        crate::i18n::text("Technical details").size(11.0).color(p.muted),
         |ui| {
             widgets::kv(
                 ui,
@@ -1049,7 +1605,7 @@ fn build_status_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
 
 fn quick_help_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     ui.label(
-        RichText::new("If a build or launch does not work, start with the check that matches it.")
+        crate::i18n::text("If a build or launch does not work, start with the check that matches it.")
             .size(11.5)
             .color(p.body),
     );
@@ -1083,7 +1639,7 @@ fn quick_help_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
 
 fn whats_new_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     ui.label(
-        RichText::new("This build")
+        crate::i18n::text("This build")
             .font(theme::semibold(11.5))
             .color(p.ink),
     );
@@ -1095,13 +1651,13 @@ fn whats_new_body(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     ] {
         ui.horizontal_top(|ui| {
             widgets::status_dot(ui, p, Tone::Accent);
-            ui.label(RichText::new(line).size(11.0).color(p.body));
+            ui.label(crate::i18n::text(line).size(11.0).color(p.body));
         });
     }
     if matches!(app.update.state, crate::UpdateState::Ready(_)) {
         ui.add_space(4.0);
         ui.label(
-            RichText::new("The Update available card above installs it in place.")
+            crate::i18n::text("The Update available card above installs it in place.")
                 .size(11.5)
                 .color(p.muted),
         );
@@ -1180,8 +1736,8 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             widgets::tracked(ui, "OVERVIEW", 8.5, p.accent_hi, 2.0);
-                            ui.label(RichText::new(title).font(theme::display(18.0)).color(p.ink));
-                            ui.label(RichText::new(subtitle).size(10.5).color(p.muted));
+                            ui.label(crate::i18n::text(title).font(theme::display(18.0)).color(p.ink));
+                            ui.label(crate::i18n::text(subtitle).size(10.5).color(p.muted));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             if widgets::button(ui, &p, "Close", true).clicked() {

@@ -2,7 +2,8 @@
 // Fire Emblem: Fortune's Weave: the F1 menu (GamePlay::settings_menu, in place of the base settings page and the Diagnostics window).
 // notes/menu.md has the design and how it was tested.
 //
-// One window over the dimmed game, tabs Display, Graphics, Frame rate, Audio, Controls, Game and Debug. F1 or Minus + Plus on the pad open
+// One window over the dimmed game, nine XiØN tabs: Overview, Graphics, Performance, Upscaling, Display & pacing, Audio, Advanced
+// (Controls / Game / Mods), Diagnostics and System. F1 or Minus + Plus on the pad open
 // and close it ([gfx] overlay_key, [gfx] overlay_pad); while it is open the game gets no input (play.cpp holds the keyboard, the mouse and
 // the pad back). The mouse clicks and drags as usual; the pad navigates: the d-pad or the left stick moves, left / right change the value of
 // the focused row, A opens a list or holds a slider, B goes back (and closes the menu when nothing is open), L / R switch tabs.
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +34,7 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"   // NavMoveRequestCancel: left / right change a value instead of moving the cursor
+#include "play_audio_ui.h"
 #include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
 #include "extras/temporal.h"
@@ -49,6 +52,8 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
 #include "nxrt/menu_i18n.h"
+#include "nxrt/perf.h"
+#include "nxrt/ui_theme.h"
 #include "nxrt/haptic.h"
 #include "nxrt/platform.h"
 #include "nxrt/render_status.h"
@@ -67,21 +72,34 @@ namespace {
 constexpr const char* kTag = "menu";
 namespace hid = nxrt::hid;
 namespace haptic = nxrt::gfx::haptic;
+namespace audio_ui = nxrt::play::audio_ui;
 using nxrt::gfx::tr;
 using play::UiHost;
 
-const ImVec4 kOrange(1.0f, 0.66f, 0.26f, 1.0f);
-const ImVec4 kRestartTag(0.86f, 0.62f, 0.34f, 0.85f);
-const ImVec4 kGreen(0.55f, 0.86f, 0.55f, 1.0f);
-const ImVec4 kRed(1.0f, 0.42f, 0.38f, 1.0f);
-const ImVec4 kAccent(0.42f, 0.78f, 0.96f, 1.0f);
-const ImVec4 kInk(0.93f, 0.94f, 0.96f, 1.0f);
-const ImVec4 kBody(0.74f, 0.77f, 0.82f, 1.0f);
-const ImVec4 kMuted(0.53f, 0.57f, 0.63f, 1.0f);
-const ImVec4 kAccentDark(0.15f, 0.34f, 0.70f, 1.0f);
+const ImVec4& kOrange = ui_theme::warn;
+const ImVec4& kRestartTag = ui_theme::warn;
+const ImVec4& kGreen = ui_theme::ok;
+const ImVec4& kRed = ui_theme::bad;
+const ImVec4& kAccent = ui_theme::accent;
+const ImVec4& kInk = ui_theme::ink;
+const ImVec4& kMuted = ui_theme::muted;
+const ImVec4& kAccentDark = ui_theme::accent_deep;
+const ImVec4& kAccentHi = ui_theme::accent_hi;
 
-enum Tab { kTabDisplay, kTabGraphics, kTabFrameRate, kTabAudio, kTabControls, kTabGame, kTabMods, kTabDebug, kTabCount };
-constexpr const char* kTabNames[kTabCount] = {"Display", "Graphics", "Frame rate", "Audio", "Controls", "Game", "Mods", "Debug"};
+enum Tab {
+    kTabOverview,
+    kTabGraphics,
+    kTabPerformance,
+    kTabUpscaling,
+    kTabPacing,
+    kTabAudio,
+    kTabAdvanced,
+    kTabDiagnostics,
+    kTabSystem,
+    kTabCount
+};
+constexpr const char* kTabNames[kTabCount] = {"Overview", "Graphics", "Performance", "Upscaling", "Pacing",
+                                                "Audio",    "Advanced", "Diagnostics", "System"};
 
 // ---- the fefw.ini keys the menu edits -------------------------------------------------------------------------------------------------
 // The value read at start is kept (boot) so a restart-only row can show what is in force and the bottom bar can list what waits.
@@ -110,17 +128,41 @@ constexpr IniKey kIni[] = {
     {"fefw", "smooth_step", "auto", Norm::Text, true, "smooth time step"},
     {"fefw", "frame_fixes", "1", Norm::Bool, false, "frame-rate fixes"},
     {"fefw", "clock_log", "10", Norm::Number, false, "game clock log"},
-    {"dlss", "upscaler", "taau", Norm::Text, true, "upscaler"},
+    {"upscale", "mode", "off", Norm::Text, true, "upscaling"},
+    {"dlss", "upscaler", "taau", Norm::Text, true, "DLSS replacement"},
     {"dlss", "frame_gen", "0", Norm::Text, true, "frame generation"},
     {"dlss", "preset", "k", Norm::Text, false, "DLSS model"},
     {"dlss", "sharpness", "0", Norm::Number, true, "FSR 3 sharpening"},
     {"dlss", "history_weight", "12", Norm::Number, true, "TAAU history"},
     {"media", "movies", "host", Norm::Text, true, "movies"},
+    {"media", "movie_decoder", "dav1d", Norm::Text, true, "video decoder"},
+    {"media", "movie_hwaccel", "1", Norm::Bool, true, "video hardware acceleration"},
     {"log", "level", "info", Norm::Text, false, "log level"},
     {"gfx", "log_fps", "1", Norm::Bool, true, "frame rate log"},
     {"play", "log_status", "0", Norm::Bool, true, "play status log"},
     {"input", "jc2_mouse", "auto", Norm::Text, false, "mouse controls"},
     {"diag", "hitch_summary_s", "10", Norm::Number, true, "frame summary log"},
+    {"perf", "enabled", "1", Norm::Bool, false, "adaptive controller"},
+    {"perf", "mode", "automatic", Norm::Text, false, "controller mode"},
+    {"perf", "target_fps", "60", Norm::Number, false, "target frame rate"},
+    {"perf", "stability", "1", Norm::Bool, false, "frame-time stability"},
+    {"perf", "scene_profiles", "1", Norm::Bool, false, "scene-aware profiles"},
+    {"perf", "scene_override", "auto", Norm::Text, false, "scene profile override"},
+    {"perf", "adaptive_mip", "0", Norm::Bool, false, "adaptive texture detail"},
+    {"perf", "max_mip_bias", "0.75", Norm::Number, false, "mip bias ceiling"},
+    {"nvn", "staging_ring_mb", "256", Norm::Number, true, "upload staging ring"},
+    {"nvn", "pool_upload_ms", "6", Norm::Number, true, "upload budget"},
+    {"nvn", "tex_prep", "1", Norm::Bool, true, "background texture preparation"},
+    {"nvn", "tex_prep_threads", "0", Norm::Number, true, "texture preparation threads"},
+    {"nvn", "tex_prep_mb", "1024", Norm::Number, true, "texture preparation budget"},
+    {"gfx", "residency", "auto", Norm::Text, true, "VRAM residency policy"},
+    {"gfx", "residency_percent", "80", Norm::Number, true, "VRAM residency budget"},
+    {"nvn", "gpl", "1", Norm::Bool, true, "pipeline library"},
+    {"nvn", "gpl_threads", "0", Norm::Number, true, "shader compile threads"},
+    {"nvn", "prewarm", "1", Norm::Bool, true, "pipeline prewarm"},
+    {"nvn", "prewarm_threads", "0", Norm::Number, true, "prewarm threads"},
+    {"nvn", "shader_preload_threads", "6", Norm::Number, true, "shader preload threads"},
+    {"nvn", "lean_draws", "1", Norm::Bool, true, "lean draw replay"},
 };
 
 const IniKey* ini_key(const char* sec, const char* key) {
@@ -154,7 +196,7 @@ struct Menu {
     play::Settings edit;          // the working copy of controls.ini's settings: resynced from the host whenever no widget is held
     play::Settings boot;          // in force since the start: what the restart-only rows compare against
     std::map<std::string, std::string> boot_ini;   // "sec.key" -> the value at start (kIni)
-    int tab = kTabDisplay, tab_request = -1;
+    int tab = kTabOverview, tab_request = -1;
     bool focus_first = false;     // the first row of focus_tab takes the gamepad cursor (a tab switched by L / R)
     int focus_tab = -1;
     int last_frame = -100;        // ImGui frame of the last draw: a gap means the menu was just opened
@@ -168,6 +210,7 @@ struct Menu {
     double monitors_at = -1e9;
     std::vector<std::string> audio_devices;
     bool audio_loaded = false;
+    audio_ui::State audio_ui;   // 200% warning and the floating EQ panel
     // Debug page
     double phase_prev[kHpCount] = {}, phase_ms[kHpCount] = {};
     uint64_t frames_prev = 0;
@@ -185,14 +228,15 @@ Menu& menu() {
 
 float px(float v) { return v * ImGui::GetFontSize() / 16.0f; }
 
-// The menu gets its own compact, dark surface and blue accent. Keeping the
-// style in one scope means the rest of the overlay (notifications, the hint
-// bar) keeps the look it had before.
+// The menu adds its own spacing and radii on top of the shared XiØN tokens, so
+// every overlay is recognisably the same product. The scope restores the
+// caller's style afterwards; nothing outside the menu leaks.
 struct StyleScope {
     ImGuiStyle old;
     StyleScope() : old(ImGui::GetStyle()) {
         ImGuiStyle& s = ImGui::GetStyle();
-        s.WindowRounding = px(16);
+        ui_theme::apply(s);
+        s.WindowRounding = px(18);
         s.ChildRounding = px(12);
         s.FrameRounding = px(8);
         s.PopupRounding = px(10);
@@ -209,35 +253,6 @@ struct StyleScope {
         s.ItemSpacing = ImVec2(px(10), px(9));
         s.CellPadding = ImVec2(px(12), px(8));
         s.ScrollbarSize = px(12);
-        const auto col = [&s](ImGuiCol which, float r, float g, float b, float a = 1.0f) { s.Colors[which] = ImVec4(r, g, b, a); };
-        col(ImGuiCol_WindowBg, 0.031f, 0.039f, 0.051f, 0.99f);
-        col(ImGuiCol_ChildBg, 0.043f, 0.055f, 0.071f, 1.0f);
-        col(ImGuiCol_PopupBg, 0.055f, 0.071f, 0.094f, 1.0f);
-        col(ImGuiCol_Border, 1.0f, 1.0f, 1.0f, 0.08f);
-        col(ImGuiCol_FrameBg, 0.09f, 0.11f, 0.14f);
-        col(ImGuiCol_FrameBgHovered, 0.13f, 0.17f, 0.23f);
-        col(ImGuiCol_FrameBgActive, 0.17f, 0.24f, 0.34f);
-        col(ImGuiCol_TableRowBg, 1.0f, 1.0f, 1.0f, 0.0f);
-        col(ImGuiCol_TableRowBgAlt, 1.0f, 1.0f, 1.0f, 0.025f);
-        col(ImGuiCol_Separator, 1.0f, 1.0f, 1.0f, 0.09f);
-        col(ImGuiCol_Tab, 1.0f, 1.0f, 1.0f, 0.0f);
-        col(ImGuiCol_TabHovered, 0.18f, 0.28f, 0.42f, 0.6f);
-        col(ImGuiCol_TabSelected, 0.12f, 0.22f, 0.38f);
-        col(ImGuiCol_TabSelectedOverline, 0.48f, 0.65f, 1.0f);
-        col(ImGuiCol_TabDimmed, 1.0f, 1.0f, 1.0f, 0.0f);
-        col(ImGuiCol_TabDimmedSelected, 0.08f, 0.14f, 0.24f);
-        col(ImGuiCol_Button, 0.10f, 0.13f, 0.17f);
-        col(ImGuiCol_ButtonHovered, 0.15f, 0.20f, 0.27f);
-        col(ImGuiCol_ButtonActive, 0.18f, 0.32f, 0.55f);
-        col(ImGuiCol_Header, 0.12f, 0.24f, 0.42f);
-        col(ImGuiCol_HeaderHovered, 0.16f, 0.30f, 0.52f);
-        col(ImGuiCol_HeaderActive, 0.18f, 0.34f, 0.60f);
-        col(ImGuiCol_CheckMark, 0.48f, 0.65f, 1.0f);
-        col(ImGuiCol_SliderGrab, 0.35f, 0.55f, 0.90f);
-        col(ImGuiCol_SliderGrabActive, 0.55f, 0.72f, 1.0f);
-        col(ImGuiCol_ScrollbarBg, 0.02f, 0.025f, 0.035f);
-        col(ImGuiCol_ScrollbarGrab, 0.20f, 0.24f, 0.31f);
-        col(ImGuiCol_TextSelectedBg, 0.24f, 0.42f, 0.75f, 0.45f);
     }
     ~StyleScope() { ImGui::GetStyle() = old; }
 };
@@ -255,36 +270,49 @@ void pill(const char* text, const ImVec4& tint) {
     ImGui::Dummy(ImVec2(text_size.x + pad.x * 2, height + px(1)));
 }
 
-// The EmblemWeave title block: logo, page title, game name, FPS and the pad hint (the custom shell of 0.1.34).
+// The XiØN title block: the mark, the product name, the game and live state.
+// It is a quiet graphite surface with one blue edge, not a banner.
 void draw_header(const play::LiveStatus& live) {
     const float width = ImGui::GetContentRegionAvail().x;
-    const float height = px(58);
+    const float height = px(64);
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ImVec4(0.055f, 0.071f, 0.094f, 1.0f)), px(12));
-    dl->AddRect(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.08f)), px(12), 0, 1.0f);
+    dl->AddRectFilled(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ui_theme::surface_hi), px(14));
+    dl->AddRect(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(ui_theme::line), px(14), 0, 1.0f);
+    dl->AddRectFilled(p, ImVec2(p.x + px(3), p.y + height), ImGui::GetColorU32(kAccent), px(14));
 
-    const float mark = px(30);
-    const ImVec2 mark_at(p.x + px(14), p.y + (height - mark) * 0.5f);
-    dl->AddRectFilled(mark_at, ImVec2(mark_at.x + mark, mark_at.y + mark), ImGui::GetColorU32(kAccentDark), px(9));
-    const char* logo = "EW";
-    const ImVec2 logo_size = ImGui::GetFont()->CalcTextSizeA(px(11), FLT_MAX, 0.0f, logo);
-    dl->AddText(ImGui::GetFont(), px(11), ImVec2(mark_at.x + (mark - logo_size.x) * 0.5f, mark_at.y + (mark - logo_size.y) * 0.5f),
-                IM_COL32(255, 255, 255, 255), logo);
+    const float mark = px(36);
+    const ImVec2 mark_at(p.x + px(16), p.y + (height - mark) * 0.5f);
+    dl->AddRectFilled(mark_at, ImVec2(mark_at.x + mark, mark_at.y + mark), ImGui::GetColorU32(ui_theme::accent_soft), px(10));
+    dl->AddRect(mark_at, ImVec2(mark_at.x + mark, mark_at.y + mark), ImGui::GetColorU32(ui_theme::accent_hi), px(10), 0, 1.0f);
+    const char* logo = "X";
+    const ImVec2 logo_size = ImGui::GetFont()->CalcTextSizeA(px(17), FLT_MAX, 0.0f, logo);
+    dl->AddText(ImGui::GetFont(), px(17), ImVec2(mark_at.x + (mark - logo_size.x) * 0.5f, mark_at.y + (mark - logo_size.y) * 0.5f),
+                ImGui::GetColorU32(kAccentHi), logo);
 
-    dl->AddText(ImGui::GetFont(), px(18), ImVec2(p.x + px(56), p.y + px(11)), ImGui::GetColorU32(kInk), tr("Settings"));
-    dl->AddText(ImGui::GetFont(), px(10.5f), ImVec2(p.x + px(57), p.y + px(34)), ImGui::GetColorU32(kMuted), tr("Fire Emblem: Fortune's Weave"));
+    const float title_x = p.x + px(64);
+    dl->AddText(ImGui::GetFont(), px(16), ImVec2(title_x, p.y + px(10)), ImGui::GetColorU32(kInk), "EMBLEMWAVE");
+    dl->AddText(ImGui::GetFont(), px(10), ImVec2(title_x + px(1), p.y + px(31)), ImGui::GetColorU32(kMuted),
+                tr("XiØN interface  /  Fire Emblem: Fortune's Weave"));
+    dl->AddText(ImGui::GetFont(), px(9), ImVec2(title_x + px(1), p.y + px(45)), ImGui::GetColorU32(kAccentHi), "XIONDIGITAL.NET");
 
     const float small = px(10.5f);
+    // The status sample is empty for the first second, and a menu opened at once
+    // used to show "0 FPS". Fall back to ImGui's own presented-frame average.
+    const double fps_value = std::isfinite(live.fps) && live.fps > 0.0 ? live.fps : ImGui::GetIO().Framerate;
     char fps[48];
-    std::snprintf(fps, sizeof fps, "%.0f FPS", live.fps);
+    std::snprintf(fps, sizeof fps, "%.0f FPS", fps_value);
     const ImVec2 fps_size = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0.0f, fps);
-    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - fps_size.x, p.y + px(13)), ImGui::GetColorU32(kBody), fps);
+    const ImVec2 fps_at(p.x + width - px(16) - fps_size.x, p.y + px(13));
+    const ImVec2 fps_pad(px(8), px(4));
+    dl->AddRectFilled(ImVec2(fps_at.x - fps_pad.x, fps_at.y - fps_pad.y), ImVec2(fps_at.x + fps_size.x + fps_pad.x, fps_at.y + fps_size.y + fps_pad.y),
+                      ImGui::GetColorU32(ui_theme::accent_soft), px(7));
+    dl->AddRect(ImVec2(fps_at.x - fps_pad.x, fps_at.y - fps_pad.y), ImVec2(fps_at.x + fps_size.x + fps_pad.x, fps_at.y + fps_size.y + fps_pad.y),
+                ImGui::GetColorU32(kAccent), px(7), 0, 1.0f);
+    dl->AddText(ImGui::GetFont(), small, fps_at, ImGui::GetColorU32(kInk), fps);
     const char* hint = tr("L / R tabs   A select   B close");
     const ImVec2 hint_size = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0.0f, hint);
-    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - hint_size.x, p.y + px(34)), ImGui::GetColorU32(kMuted), hint);
-    dl->AddRectFilled(ImVec2(p.x + px(14), p.y + height - px(2)), ImVec2(p.x + width - px(14), p.y + height - px(1)),
-                      ImGui::GetColorU32(kAccent), px(1));
+    dl->AddText(ImGui::GetFont(), small, ImVec2(p.x + width - px(16) - hint_size.x, p.y + px(38)), ImGui::GetColorU32(kMuted), hint);
     ImGui::Dummy(ImVec2(0.0f, height));
     ImGui::Spacing();
 }
@@ -311,6 +339,7 @@ void ini_put(Menu& m, const IniKey& k, const std::string& value) {
     if (config_write(k.sec, k.key, value, &err)) {
         NXLOG_I(kTag, "[%s] %s = %s written to %s%s", k.sec, k.key, value.c_str(), config_file_path().c_str(),
                 k.restart ? " (applies on restart)" : "");
+        if (!std::strcmp(k.sec, "perf")) nxrt::perf::reload();   // the controller adopts a changed policy at once
         notify(m, std::string("Saved [") + k.sec + "] " + k.key + " = " + value + (k.restart ? "  (applies on restart)" : ""));
     } else {
         NXLOG_W(kTag, "cannot write [%s] %s: %s", k.sec, k.key, err.c_str());
@@ -503,6 +532,31 @@ void ini_combo_row(Menu& m, const IniKey& k, const char* label, const char* help
     }
 }
 
+void ini_check_row(Menu& m, const IniKey& k, const char* label, const char* help) {
+    row(m, label, k.restart ? When::Restart : When::Live, help);
+    if (env_locked(k)) return;
+    bool on = normalized(k, ini_now(k)) == "1";
+    if (check(m, "##v", &on)) ini_put(m, k, on ? "1" : "0");
+}
+
+void ini_int_row(Menu& m, const IniKey& k, const char* label, const char* help, int lo, int hi, int step, const char* fmt) {
+    row(m, label, k.restart ? When::Restart : When::Live, help);
+    if (env_locked(k)) return;
+    int v = std::atoi(ini_now(k).c_str());
+    if (islider(m, "##v", &v, lo, hi, step, fmt)) ini_put(m, k, std::to_string(v));
+}
+
+void ini_float_row(Menu& m, const IniKey& k, const char* label, const char* help, double lo, double hi, double step, const char* fmt) {
+    row(m, label, k.restart ? When::Restart : When::Live, help);
+    if (env_locked(k)) return;
+    double v = std::atof(ini_now(k).c_str());
+    if (slider(m, "##v", &v, lo, hi, step, fmt)) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%.2f", v);
+        ini_put(m, k, buf);
+    }
+}
+
 // ---- Display ----------------------------------------------------------------------------------------------------------------------------
 constexpr const char* kWindowModeNames[] = {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"};
 constexpr const char* kWindowModeKeys[] = {"windowed", "borderless", "exclusive"};
@@ -510,8 +564,6 @@ constexpr int kSizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440
 constexpr const char* kSizeNames[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
 constexpr const char* kCornerNames[] = {"Top left", "Top right", "Bottom left", "Bottom right"};
 constexpr const char* kDetailNames[] = {"Frame rate", "Frame rate and frame time", "Plus 1% low and the worst frame"};
-constexpr const char* kScaleNames[] = {"Bilinear (plain)", "FSR 1 (AMD, sharpened)", "NIS (NVIDIA Image Scaling)"};
-constexpr extras::UpscaleMode kScaleModes[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Nis};
 
 void refresh_monitors(Menu& m) {
     const double now = ImGui::GetTime();
@@ -569,24 +621,17 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     ImGui::TextDisabled(tr("Now: %s, %d x %d, %.2f Hz display, present mode %s"), live.window_mode, live.width, live.height,
                         static_cast<double>(live.refresh_hz), live.present_mode);
 
-    section("Scaling to the window");
-    if (begin_rows("scale")) {
+    {
         extras::UpscaleSettings& u = m.edit.extras.upscale;
-        row(m, "Filter", When::Live,
-            "How the game's output (Graphics > Output size) is scaled to the window when they differ. FSR 1 and NIS sharpen while they enlarge; "
-            "a smaller window is always averaged.");
-        int idx = -1;
-        for (int i = 0; i < 3; ++i)
-            if (u.mode == kScaleModes[i]) idx = i;
-        if (combo(m, "##flt", &idx, kScaleNames, 3, "Other (set in controls.ini)")) {
-            u.mode = kScaleModes[idx];
-            apply(host, m);
+        if (u.mode == extras::UpscaleMode::Fsr1 || u.mode == extras::UpscaleMode::Nis || u.mode == extras::UpscaleMode::Mako) {
+            section("Upscaler sharpness");
+            if (begin_rows("scale")) {
+                row(m, "Sharpness", When::Live,
+                    "How much the spatial upscaler sharpens while it scales (FSR 1, NIS, MAKO). Chosen in Graphics > Upscaling; 1 is the sharpest.");
+                if (slider(m, "##shp", &u.sharpness, 0.0, 1.0, 0.05, "%.2f")) apply(host, m);
+                end_rows();
+            }
         }
-        if (u.mode == extras::UpscaleMode::Fsr1 || u.mode == extras::UpscaleMode::Nis) {
-            row(m, "Sharpness", When::Live, "1 is the sharpest.");
-            if (slider(m, "##shp", &u.sharpness, 0.0, 1.0, 0.05, "%.2f")) apply(host, m);
-        }
-        end_rows();
     }
 
     section("Frame rate counter");
@@ -639,8 +684,15 @@ constexpr const char* kDetailLevelNames[] = {"Full", "Reduced"};
 constexpr const char* kDetailLevelVals[] = {"full", "reduced"};
 constexpr const char* kPresetNames[] = {"Low", "Medium (console)", "High", "Ultra"};
 static_assert(std::size(kPresetNames) == kGraphicsPresetCount);
-constexpr const char* kUpscalerNames[] = {"TAAU (built in, temporal)", "DLSS (NVIDIA RTX, through Streamline)", "FSR 3 (AMD FidelityFX)",
-                                          "XeSS (Intel, any GPU with DP4a)", "Bilinear (no anti-aliasing)", "Auto (DLSS, else XeSS, else FSR 3, else TAAU)"};
+constexpr const char* kUpscaleModeNames[] = {"Off", "FSR 1 (spatial)", "FSR 4.1.2 (AMD, temporal)", "FSR 3.1 (AMD, temporal)",
+                                             "NIS (spatial)", "MAKO (spatial)", "DLSS (NVIDIA RTX)", "DLAA (DLSS at native size)", "XeSS (Intel)"};
+constexpr const char* kUpscaleModeVals[] = {"off", "fsr1", "fsr4", "fsr3", "nis", "mako", "dlss", "dlaa", "xess"};
+constexpr extras::UpscaleMode kUpscaleModes[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Fsr4,
+                                                extras::UpscaleMode::Fsr3, extras::UpscaleMode::Nis, extras::UpscaleMode::Mako,
+                                                extras::UpscaleMode::Dlss, extras::UpscaleMode::Dlaa, extras::UpscaleMode::Xess};
+static_assert(std::size(kUpscaleModes) == std::size(kUpscaleModeNames), "the upscaling list and its values must stay paired");
+constexpr const char* kUpscalerNames[] = {"TAAU (built in, temporal)", "DLSS (NVIDIA RTX, through Streamline)", "FSR 4 / 3 (AMD FidelityFX)",
+                                          "XeSS (Intel, any GPU with DP4a)", "Bilinear (no anti-aliasing)", "Auto (DLSS, else XeSS, else FSR 4 / 3, else TAAU)"};
 constexpr const char* kUpscalerVals[] = {"taau", "dlss", "fsr3", "xess", "bilinear", "auto"};
 constexpr const char* kFgNames[] = {"Off", "DLSS Frame Generation (RTX 40 or newer)", "FSR 3 frame generation"};
 constexpr const char* kFgVals[] = {"0", "dlss", "fsr3"};
@@ -683,7 +735,7 @@ void resolution_group(Menu& m) {
             const char* cur = v == "4k" ? "2160p" : v.c_str();
             row(m, "Output size", When::Restart,
                 "The size the game renders its picture, UI and post effects at (its DLSS output). Up to 3840 x 2160 at 16:9; wider shapes "
-                "need Ultrawide. The window scales it (Display > Scaling to the window).");
+                "need Ultrawide. The window scales it with the upscaler (Graphics > Upscaling).");
             if (!env_locked(out)) {
                 int idx = -1;
                 for (int i = 0; i < kOutputCount; ++i)
@@ -743,16 +795,49 @@ void resolution_group(Menu& m) {
                             static_cast<double>(wi.k), static_cast<int>(std::lround(wi.out_h * 16.0 / 9.0)), wi.out_h);
 }
 
+// The one in-game upscaler control. What runs is the merged [upscale] mode (play mode lets fefw.ini override controls.ini), so show that
+// value; a choice is written to fefw.ini, which the next start merges over controls.ini.
+void upscaling_row(Menu& m) {
+    const IniKey& k = *ini_key("upscale", "mode");
+    row(m, "Upscaling", When::Restart,
+        "The engine's upscaler, and the filter used when the output is scaled to the window. FSR 4.1.2 needs the FidelityFX SDK 2.4 "
+        "loader pair (amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll in upscalers\\fsr next to the launcher) and uses "
+        "FSR 3.1 where the driver does not offer FSR 4; FSR 3.1 uses the same DLLs. DLSS / DLAA need an RTX GPU and the Streamline DLLs; "
+        "XeSS needs libxess.dll. A mode whose files are missing logs why and leaves the picture as Off. Applies at the next start.");
+    if (env_locked(k)) return;
+    const extras::UpscaleMode running = m.edit.extras.upscale.mode;
+    int idx = -1;
+    if (ini_pending(m, k)) {   // a choice waits for the restart: show it, with the running value below
+        const std::string now = normalized(k, ini_now(k));
+        for (int i = 0; i < static_cast<int>(std::size(kUpscaleModeVals)); ++i)
+            if (normalized(k, kUpscaleModeVals[i]) == now) idx = i;
+    } else {
+        for (int i = 0; i < static_cast<int>(std::size(kUpscaleModes)); ++i)
+            if (running == kUpscaleModes[i]) idx = i;
+    }
+    ImGui::PushID(k.key);
+    if (combo(m, "##v", &idx, kUpscaleModeNames, static_cast<int>(std::size(kUpscaleModeNames)), "Custom (set in the ini)"))
+        ini_put(m, k, kUpscaleModeVals[idx]);
+    ImGui::PopID();
+    if (ini_pending(m, k)) {
+        const char* label = "Custom (set in the ini)";
+        for (int i = 0; i < static_cast<int>(std::size(kUpscaleModes)); ++i)
+            if (running == kUpscaleModes[i]) label = kUpscaleModeNames[i];
+        pending_note(true, label);
+    }
+}
+
 void upscaler_group(Menu& m) {
     section("Upscaler and frame generation");
     if (begin_rows("ups")) {
+        upscaling_row(m);
         const IniKey& up = *ini_key("dlss", "upscaler");
-        ini_combo_row(m, up, "Upscaler",
+        ini_combo_row(m, up, "DLSS replacement",
                       "What answers the game's DLSS calls. TAAU needs nothing; DLSS needs an RTX GPU and the Streamline DLLs ([upscale] dlss_dll); "
-                      "FSR 3 runs on any GPU with AMD's FidelityFX DLLs (upscalers\\fsr next to the launcher, or [upscale] fsr_dll); "
-                      "XeSS runs on any GPU with DP4a (best on Intel Arc) and needs libxess.dll (upscalers\\xess next to the launcher, or "
-                      "[upscale] xess_dll) and the Visual C++ 2015-2022 runtime. One that cannot run falls back to TAAU and the log names the "
-                      "missing file. Choosing DLSS or XeSS (or Auto with the DLLs present) takes effect at the next start.",
+                      "FSR 4 / 3 runs AMD's FidelityFX path with the FSR 4.1.2 or FSR 3.1 provider the Upscaling row selects (upscalers\\fsr next to "
+                      "the launcher, or [upscale] fsr_dll); XeSS runs on any GPU with DP4a (best on Intel Arc) and needs libxess.dll "
+                      "(upscalers\\xess next to the launcher, or [upscale] xess_dll) and the Visual C++ 2015-2022 runtime. One that cannot run falls "
+                      "back to TAAU and the log names the missing file. Choosing DLSS or XeSS (or Auto with the DLLs present) takes effect at the next start.",
                       kUpscalerNames, kUpscalerVals, 6);
         const std::string u = lower(ini_now(up));
         if (u == "dlss" || u == "auto") {
@@ -767,7 +852,8 @@ void upscaler_group(Menu& m) {
             extras::set_dlss_preset(std::max(0, extras::dlss_preset_from_word(ini_now(pk))));
         }
         if (u == "fsr3")
-            ini_combo_row(m, *ini_key("dlss", "sharpness"), "FSR 3 sharpening", nullptr,
+            ini_combo_row(m, *ini_key("dlss", "sharpness"), "FidelityFX sharpening",
+                          "Sharpening of the FidelityFX path (FSR 4.1.2 / 3.1).",
                           std::array<const char*, 5>{"Off", "0.25", "0.5", "0.75", "1 (sharpest)"}.data(),
                           std::array<const char*, 5>{"0", "0.25", "0.5", "0.75", "1"}.data(), 5);
         if (u == "taau" || u.empty())
@@ -810,7 +896,7 @@ void upscaler_group(Menu& m) {
         } checks[] = {
             {"DLSS", extras::temporal_dlss_available()},
             {"DLSS-G", extras::streamline_framegen_files()},
-            {"FSR 3 upscaling", extras::temporal_ffx_available()},
+            {"FSR 4 / 3 upscaling", extras::temporal_ffx_available()},
             {"FSR 3 frame generation", extras::ffx_fg_files()},
             {"XeSS", extras::temporal_xess_available()},
         };
@@ -1090,11 +1176,201 @@ void graphics_page(UiHost& host, Menu& m) {
     preset_group(m);
     resolution_group(m);
     detail_group(host, m);
-    upscaler_group(m);
-    live_status_group();
     hdr_group(host, m);
     grading_group(host, m);
     picture_group(host, m);
+}
+
+void upscaling_page(UiHost& host, Menu& m) {
+    section("Upscaling and frame generation");
+    ImGui::TextWrapped("%s", tr("The upscaler runs after the game's own render scale. Dynamic resolution is a separate controller; it is not available in this replay path (see Performance)."));
+    upscaler_group(m);
+    live_status_group();
+    (void)host;
+}
+
+// ---- Performance -------------------------------------------------------------------------------------------------------------------------
+constexpr const char* kModeNames[] = {"Automatic", "Conservative", "Balanced", "Aggressive", "Manual"};
+constexpr const char* kModeVals[] = {"automatic", "conservative", "balanced", "aggressive", "manual"};
+constexpr const char* kSceneNames[] = {"Auto (from the workload)", "Exploration", "Crowded", "Combat", "Cinematic", "Menu", "Loading"};
+constexpr const char* kSceneVals[] = {"auto", "exploration", "crowded", "combat", "cinematic", "menu", "loading"};
+constexpr int kTargetFps[] = {30, 45, 60, 72, 90, 120, 144, 165, 240};
+constexpr const char* kResidencyNames[] = {"Auto (recommended)", "On", "Off"};
+constexpr const char* kResidencyVals[] = {"auto", "on", "off"};
+
+ImVec4 bottleneck_tint(nxrt::perf::Bottleneck b) {
+    switch (b) {
+        case nxrt::perf::Bottleneck::None: return kGreen;
+        case nxrt::perf::Bottleneck::Vram:
+        case nxrt::perf::Bottleneck::Shader: return kOrange;
+        default: return kAccentHi;
+    }
+}
+
+void perf_status_table(const nxrt::perf::Status& s, bool full) {
+    if (!s.loaded) {
+        ImGui::TextDisabled("%s", tr("Waiting for the first presented frame."));
+        return;
+    }
+    if (ImGui::BeginTable("##perfstat", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch, 0.42f);
+        ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch, 0.58f);
+        auto line = [&](const char* name, const ImVec4& tint, const char* fmt, auto... args) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("%s", tr(name));
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextColored(tint, fmt, args...);
+        };
+        line("Bottleneck", bottleneck_tint(s.bottleneck), "%s", tr(nxrt::perf::bottleneck_name(s.bottleneck)));
+        line("Scene profile", kInk, "%s  (%s)", tr(nxrt::perf::scene_name(s.scene)), s.profile_reason);
+        line("Average", kInk, "%.1f fps  (%.2f ms)", s.avg_fps, s.avg_fps > 0 ? 1000.0 / s.avg_fps : 0.0);
+        line("1% low", s.low1_fps < s.avg_fps * 0.7 ? kOrange : kInk, "%.1f fps", s.low1_fps);
+        line("0.1% low", s.low01_fps < s.avg_fps * 0.5 ? kOrange : kInk, "%.1f fps", s.low01_fps);
+        line("Frame time P50 / P95 / P99", kInk, "%.2f / %.2f / %.2f ms", s.p50_ms, s.p95_ms, s.p99_ms);
+        line("CPU / GPU", kInk, "%.2f / %.2f ms", s.cpu_ms, s.gpu_ms);
+        line("Upload / replay", kInk, "%.2f / %.2f ms", s.upload_ms, s.replay_ms);
+        if (full) {
+            if (s.vram_percent >= 0) line("VRAM budget used", s.vram_percent >= 92 ? kOrange : kInk, "%d%%", s.vram_percent);
+            else line("VRAM budget used", kMuted, "%s", tr("not known"));
+            line("Shader backlog", s.shader_backlog >= 16 ? kOrange : kInk, "%d", s.shader_backlog);
+            line("Controller", s.enabled ? kGreen : kMuted, "%s, %s, target %d fps", s.enabled ? tr("on") : tr("off"),
+                 tr(nxrt::perf::mode_name(s.mode)), s.target_fps);
+            line("Texture mip offset", s.mip_bias > 0.01f ? kOrange : kInk, "%+.2f  (ceiling %.2f)", static_cast<double>(s.mip_bias),
+                 static_cast<double>(s.max_mip_bias));
+            line("Changes / spikes", kInk, "%llu / %llu", static_cast<unsigned long long>(s.adjustments),
+                 static_cast<unsigned long long>(s.spikes));
+        }
+        ImGui::EndTable();
+    }
+    if (s.action[0]) ImGui::TextColored(kAccentHi, "%s", s.action);
+    if (s.event_count > 0 && ImGui::TreeNode(tr("Decision history"))) {
+        for (int i = 0; i < s.event_count; ++i) ImGui::BulletText("%s", s.events[i]);
+        ImGui::TreePop();
+    }
+}
+
+void limitation(const char* name, const char* why) {
+    ImGui::Bullet();
+    ImGui::TextUnformatted(tr(name));
+    ImGui::Indent(px(18));
+    ImGui::TextWrapped("%s", tr(why));
+    ImGui::Unindent(px(18));
+    ImGui::Spacing();
+}
+
+void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov);
+
+void performance_page(Menu& m) {
+    const nxrt::perf::Status ps = nxrt::perf::status();
+    section("Adaptive performance controller");
+    ImGui::TextWrapped("%s", tr("One policy evaluates frame time, percentiles, GPU load, VRAM, uploads and shader work. It explains every decision below; no setting changes silently."));
+    if (begin_rows("ctrl")) {
+        ini_check_row(m, *ini_key("perf", "enabled"), "Enable the controller",
+                      "Measures every presented frame and classifies the dominant bottleneck. Off leaves all user settings alone and only records timings.");
+        const IniKey& kmode = *ini_key("perf", "mode");
+        row(m, "Operating mode", When::Live, "Automatic adapts the strength to the measured pressure; Conservative, Balanced and Aggressive use a fixed strength; Manual never actuates.");
+        if (!env_locked(kmode)) {
+            const std::string now = normalized(kmode, ini_now(kmode));
+            int idx = 0;
+            for (int i = 0; i < 5; ++i) if (now == kModeVals[i]) idx = i;
+            if (combo(m, "##mode", &idx, kModeNames, 5)) ini_put(m, kmode, kModeVals[idx]);
+        }
+        const IniKey& kfps = *ini_key("perf", "target_fps");
+        row(m, "Target frame rate", When::Live, "The frame-time budget the controller aims for; it is not a frame limiter. The Pacing tab owns the limiter.");
+        if (!env_locked(kfps)) {
+            const int now = std::atoi(ini_now(kfps).c_str());
+            static const char* const kFpsNames[] = {"30 fps", "45 fps", "60 fps", "72 fps", "90 fps", "120 fps", "144 fps", "165 fps", "240 fps"};
+            int idx = -1;
+            for (int i = 0; i < static_cast<int>(std::size(kTargetFps)); ++i) if (kTargetFps[i] == now) idx = i;
+            char custom[32];
+            std::snprintf(custom, sizeof custom, "%d fps (set in fefw.ini)", now);
+            if (combo(m, "##tfps", &idx, kFpsNames, static_cast<int>(std::size(kFpsNames)), custom)) ini_put(m, kfps, std::to_string(kTargetFps[idx]));
+        }
+        ini_check_row(m, *ini_key("perf", "stability"), "Frame-time stability",
+                      "Holds a quality reduction back while a spike settles, and records recurring spikes. It does not add synchronization to the frame loop.");
+        ini_check_row(m, *ini_key("perf", "scene_profiles"), "Scene-aware profiles",
+                      "Recognises exploration, crowded areas, combat, cinematics, menus and loading from workload shape, not location names. Combat and cinematics are protected from aggressive detail cuts.");
+        const IniKey& kscene = *ini_key("perf", "scene_override");
+        row(m, "Profile override", When::Live, "Auto chooses from the workload. A fixed profile is useful for A/B runs; it does not change the controller's bottleneck classification.");
+        if (!env_locked(kscene)) {
+            const std::string now = normalized(kscene, ini_now(kscene));
+            int idx = 0;
+            for (int i = 0; i < static_cast<int>(std::size(kSceneVals)); ++i) if (now == kSceneVals[i]) idx = i;
+            if (combo(m, "##scene", &idx, kSceneNames, static_cast<int>(std::size(kSceneNames)))) ini_put(m, kscene, kSceneVals[idx]);
+        }
+        ini_check_row(m, *ini_key("perf", "adaptive_mip"), "Adaptive texture detail",
+                      "Live. Under sustained GPU or VRAM pressure the sampler LOD bias moves toward cheaper mips. The native UI uses a separate path and stays sharp; high-frequency game surfaces can soften while the offset is active. It is the only visual setting the controller touches.");
+        ini_float_row(m, *ini_key("perf", "max_mip_bias"), "Maximum mip offset",
+                      "How far texture detail may fall. 0.25 is subtle, 0.75 is the default ceiling, 2.0 is aggressive. Only used when Adaptive texture detail is on.", 0.25, 2.0, 0.05, "%.2f");
+        end_rows();
+    }
+    if (button(m, "Re-read the policy")) {
+        nxrt::perf::reload();
+        notify(m, "Adaptive controller policy reloaded from fefw.ini.");
+    }
+    ImGui::SameLine();
+    if (button(m, "Reset measurements")) {
+        nxrt::perf::test::reset();
+        nxrt::perf::reload();
+        notify(m, "Controller measurements cleared; texture detail restored.");
+    }
+
+    section("Live controller status");
+    perf_status_table(ps, true);
+
+    section("Renderer capabilities");
+    ImGui::TextWrapped("%s", tr("The NVN replay path fixes render-target sizes, shadow maps and scene traversal when the game starts. These are honest limits, not hidden switches."));
+    limitation("Adaptive geometry LOD", "Unsupported here: the game chooses LOD distances while it builds a scene; the replay path has no per-object LOD hook. Crowd and scenery detail remain startup settings in Graphics.");
+    limitation("GPU occlusion culling", "Unsupported here: the replay renderer records the game's draws and has no hierarchical depth buffer or visibility pass. Adding one would change renderer ownership, not expose a toggle.");
+    limitation("Adaptive shadow resolution", "Startup only: [fefw] shadow_size is read when the game builds its render config; its shadow maps cannot be resized live without breaking light correctness.");
+    limitation("Adaptive effects quality", "Startup only: particle and effect quality live in the game's render config. Combat-critical effects are never removed.");
+    limitation("Dynamic resolution", "Startup only: the game caches its render scale at the first frame. Use the game render scale in Graphics or the upscaler in Upscaling; neither is silently changed here.");
+    limitation("GPU-driven rendering / indirect draws", "Unsupported: this replay renderer has no indirect submission path. A GPU-driven renderer is a separate project, not a checkbox.");
+    limitation("Persistent object batching", "Not a separate path: the replay renderer records the game's draws in order, so merging them would change transparency and state semantics. [nvn] lean_draws already removes redundant state work without reordering.");
+
+    section("Memory and streaming");
+    ImGui::TextWrapped("%s", tr("These are the working systems this build already has, exposed here so they can be tuned and A/B tested. Restart rows are read once."));
+    if (begin_rows("stream")) {
+        ini_int_row(m, *ini_key("nvn", "staging_ring_mb"), "Upload staging ring",
+                    "Persistent host buffer for texture uploads, reused as a ring instead of allocating pinned memory per texture. 0 restores per-upload buffers.", 0, 1024, 64, "%d MB");
+        ini_int_row(m, *ini_key("nvn", "pool_upload_ms"), "Upload budget / frame",
+                    "Render-thread milliseconds for asset textures that only a pool needs. Past it, they stream in over later frames instead of causing one long load-in frame.", 0, 24, 1, "%d ms");
+        ini_check_row(m, *ini_key("nvn", "tex_prep"), "Background texture preparation",
+                      "Hashes, cache reads, untiling and BC7 work happen on workers when the game initializes a texture, not on the render thread at first use.");
+        ini_int_row(m, *ini_key("nvn", "tex_prep_threads"), "Preparation workers",
+                    "0 chooses a third of the hardware threads (2 to 8). Lower it on a low-core CPU to keep the game and render threads responsive.", 0, 8, 1, "%d threads");
+        ini_int_row(m, *ini_key("nvn", "tex_prep_mb"), "Preparation memory budget",
+                    "Most finished or queued texture data held at once. Over it, the oldest unused results are dropped and prepared again only if needed.", 128, 4096, 128, "%d MB");
+        ini_combo_row(m, *ini_key("gfx", "residency"), "VRAM residency",
+                      "Demotes textures no recent draw uses when video memory approaches the budget, then restores them whole when a draw needs them again. Auto follows the GPU's capability and the Intel compatibility quirk.",
+                      kResidencyNames, kResidencyVals, 3);
+        ini_int_row(m, *ini_key("gfx", "residency_percent"), "Residency threshold",
+                    "Share of the video-memory budget over which idle textures may be demoted. Higher uses more VRAM and demotes later; lower protects smaller cards.", 50, 100, 5, "%d%%");
+        ini_check_row(m, *ini_key("nvn", "lean_draws"), "Lean draw replay",
+                      "Existing optimization: applies only changed state, reads resolved bindings in place and pushes only changed uniform buffers. Disable only for troubleshooting.");
+        end_rows();
+    }
+
+    section("Shader compilation and workers");
+    limitation("Live worker resizing", "Worker pools are created when the game starts and own fixed queues and command buffers; resizing a running pool is unsupported. The rows below set the startup size and worker priority the pools actually use, which is the supported scheduling control on low-core CPUs.");
+    if (begin_rows("shaders")) {
+        ini_check_row(m, *ini_key("nvn", "prewarm"), "Pipeline prewarm",
+                      "Records pipelines a draw created and builds them for the next run on worker threads. The persistent pipeline cache still works when this is off.");
+        ini_check_row(m, *ini_key("nvn", "gpl"), "Pipeline library",
+                      "Compiles shader parts on background threads and links them at the draw when the key file has no whole pipeline. Falls back to whole pipelines if the driver lacks VK_EXT_graphics_pipeline_library.");
+        ini_int_row(m, *ini_key("nvn", "gpl_threads"), "Shader compile threads", "Worker threads that compile shader parts. 0 uses the runtime's core-aware default (a sixth of the hardware threads, 1 to 6).", 0, 12, 1, "%d threads");
+        ini_int_row(m, *ini_key("nvn", "prewarm_threads"), "Prewarm threads", "Worker threads that build recorded pipelines. 0 uses the core-aware default.", 0, 8, 1, "%d threads");
+        ini_int_row(m, *ini_key("nvn", "shader_preload_threads"), "Boot preload threads", "Threads that read prepared shaders at boot. 0 lets the shader loader choose; 6 is the built-in default.", 0, 16, 1, "%d threads");
+        end_rows();
+    }
+    if (ps.shader_backlog > 0) ImGui::TextColored(kOrange, tr("Background shader work: %d job(s)."), ps.shader_backlog);
+    else ImGui::TextDisabled("%s", tr("Background shader queue empty."));
+}
+
+void display_pacing_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov) {
+    display_page(host, m, live);
+    framerate_page(host, m, live, ov);
 }
 
 // ---- Frame rate -------------------------------------------------------------------------------------------------------------------------
@@ -1208,15 +1484,16 @@ void audio_page(UiHost& host, Menu& m) {
     play::AudioSettings& a = m.edit.audio;
     section("Sound");
     if (begin_rows("aud")) {
-        row(m, "Master volume", When::Live, "Everything the game plays.");
+        row(m, "Master volume", When::Live, "Everything the game plays. Above 100% is a limited boost, up to 200%.");
         double pct = a.volume * 100.0;
         bool drag = false;
         const bool commit = slider(m, "##vol", &pct, 0, 200, 5, "%.0f%%", &drag);   // 0 to audio::kMaxVolume (200%)
         if (drag || commit) {
-            a.volume = std::clamp(pct / 100.0, 0.0, 2.0);
-            audio::set_master_volume(static_cast<float>(a.volume));   // heard while dragged
+            if (audio_ui::apply_volume(a, m.audio_ui, pct)) {
+                audio::set_master_volume(static_cast<float>(a.volume));   // heard while dragged
+                if (commit) apply(host, m);
+            }
         }
-        if (commit) apply(host, m);
         row(m, "Mute in the background", When::Live, "Silent while the window is not in focus.");
         if (check(m, "##mute", &a.mute_unfocused)) apply(host, m);
 
@@ -1248,6 +1525,10 @@ void audio_page(UiHost& host, Menu& m) {
         }
         pending_note(a.channels != m.boot.audio.channels, m.boot.audio.channels == 6 ? "5.1 surround" : "Stereo");
         end_rows();
+
+        section("Enhancements");
+        audio_ui::enhancements_button(a, m.audio_ui);
+        ImGui::TextDisabled("%s", tr("Ten-band EQ, presets and a preamp. The same settings are on the launcher's Audio page."));
     }
 }
 
@@ -1499,16 +1780,76 @@ void game_page(UiHost& host, Menu& m) {
     }
     section("Movies");
     if (begin_rows("mov")) {
-        constexpr const char* kNames[] = {"Play them (AV1 on the CPU)", "Skip them"};
+        constexpr const char* kNames[] = {"Play them", "Skip them"};
         constexpr const char* kVals[] = {"host", "skip"};
-        ini_combo_row(m, *ini_key("media", "movies"), "Movies", "The game's movies are decoded on the CPU (dav1d). Skip makes each one end at once, as a skip does.",
+        ini_combo_row(m, *ini_key("media", "movies"), "Movies", "The game's movies are decoded by the video decoder below. Skip makes each one end at once, as a skip does.",
                       kNames, kVals, 2);
+        constexpr const char* kDecoderNames[] = {"dav1d (CPU)", "FFmpeg (libavcodec)"};
+        constexpr const char* kDecoderVals[] = {"dav1d", "ffmpeg"};
+        ini_combo_row(m, *ini_key("media", "movie_decoder"), "Video decoder",
+                      "dav1d is the engine's own AV1 decoder. FFmpeg uses a user-supplied libavcodec (avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg); its software path is libdav1d, and its hardware path is D3D11VA. Applies at the next start.",
+                      kDecoderNames, kDecoderVals, 2);
+        constexpr const char* kHwNames[] = {"Hardware (D3D11VA)", "Software"};
+        constexpr const char* kHwVals[] = {"1", "0"};
+        ini_combo_row(m, *ini_key("media", "movie_hwaccel"), "Video acceleration",
+                      "FFmpeg only: Hardware decodes AV1 on the GPU through D3D11VA and copies the NV12 frames back; if the GPU or driver cannot, FFmpeg's libdav1d runs. Software uses libdav1d directly. Applies at the next start.",
+                      kHwNames, kHwVals, 2);
         end_rows();
     }
+}
+
+void advanced_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
+    ImGui::TextDisabled("%s", tr("Controls, game integration and code mods keep their own pages; nothing here was removed by the redesign."));
+    if (ImGui::BeginTabBar("##advanced", ImGuiTabBarFlags_FittingPolicyShrink)) {
+        if (ImGui::BeginTabItem(tr("Controls"))) {
+            controls_page(host, m, live);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(tr("Game"))) {
+            game_page(host, m);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(tr("Mods"))) {
+            ImGui::TextColored(kMuted, "%s", tr("Code mods' own settings. Changes apply at once."));
+            ImGui::Spacing();
+            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+            gfx::draw_mod_panels();
+            ImGui::PopItemWidth();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+
+void system_page(UiHost& host, gfx::Overlay& ov) {
+    const cpu::Static& c = cpu::info();
+    section("Processor");
+    ImGui::Text("%s", c.brand.empty() ? tr("Unknown processor") : c.brand.c_str());
+    if (c.perf_cores > 0)
+        ImGui::TextDisabled(tr("%d physical cores, %d hardware threads (%d performance + %d efficiency)"), c.cores, c.logical, c.perf_cores,
+                            c.eff_cores);
+    else
+        ImGui::TextDisabled(tr("%d physical cores, %d hardware threads"), c.cores, c.logical);
+    if (c.l3_kb > 0) ImGui::TextDisabled(tr("L3 cache %.1f MB, %.1f GB RAM"), c.l3_kb / 1024.0, c.ram_total / 1073741824.0);
+    if (!c.brand.empty()) ImGui::TextDisabled("%s", cpu::features_text(c).c_str());
+    ImGui::TextDisabled(tr("Game code build: %s"), cpu::game_build() ? cpu::game_build() : tr("not reported"));
+
+    section("Graphics");
+    ImGui::TextDisabled("%s", tr("Renderer details are read from the active Vulkan device, not assumed."));
+    const gfx::GpuInfo& g = ov.context().device->gpu();
+    ImGui::Text("%s", g.name.c_str());
+    ImGui::TextDisabled(tr("Vulkan 1.3, driver 0x%08x, validation %s"), g.driver_version,
+                        ov.context().device->validation_enabled() ? tr("on") : tr("off"));
+    const uint64_t budget = gfx::video_budget_bytes();
+    const int used = gfx::video_live_percent();
+    if (used >= 0) ImGui::TextDisabled(tr("Video memory budget %.0f MB; this process at %d%%"), budget / 1048576.0, used);
+    else ImGui::TextDisabled(tr("Video memory budget %.0f MB; this process' use is not known"), budget / 1048576.0);
+
     section("Files");
     ImGui::TextDisabled(tr("Game settings: %s"), config_file_path().empty() ? "(none)" : config_file_path().c_str());
     ImGui::TextDisabled(tr("Controls and display: %s"), host.settings_path().c_str());
     ImGui::TextDisabled("%s", tr("Every key: runtime/docs/CONFIG.md"));
+
     section("About");
     play::draw_about_page(host.settings_path());
 }
@@ -1767,6 +2108,55 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
                         static_cast<unsigned long long>(log_count(LogLevel::Warn)));
 }
 
+// ---- Overview ----------------------------------------------------------------------------------------------------------------------------
+void overview_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov) {
+    const nxrt::perf::Status ps = nxrt::perf::status();
+    section("Live now");
+    if (ImGui::BeginTable("##overview", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableSetupColumn("##k", ImGuiTableColumnFlags_WidthStretch, 0.38f);
+        ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthStretch, 0.62f);
+        auto kv = [&](const char* k, const char* fmt, auto... args) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("%s", tr(k));
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text(fmt, args...);
+        };
+        kv("Frame rate", "%.1f fps", live.fps);
+        if (ps.loaded) kv("1% low / 0.1% low", "%.1f / %.1f fps", ps.low1_fps, ps.low01_fps);
+        else kv("1% low / 0.1% low", "%s", tr("collecting..."));
+        if (ps.loaded) kv("CPU / GPU frame", "%.2f / %.2f ms", ps.cpu_ms, ps.gpu_ms);
+        kv("Output", "%d x %d, %s", live.width, live.height, live.present_mode);
+        const gfx::GpuInfo& gpu = ov.context().device->gpu();
+        kv("GPU", "%s", gpu.name.c_str());
+        kv("Bound", "%s", ps.loaded ? tr(nxrt::perf::bottleneck_name(ps.bottleneck)) : tr("collecting..."));
+        kv("Profile", "%s", ps.loaded ? tr(nxrt::perf::scene_name(ps.scene)) : tr("collecting..."));
+        ImGui::EndTable();
+    }
+
+    section("Adaptive controller");
+    perf_status_table(ps, false);
+
+    section("Active systems");
+    const auto state = [](bool on) { return on ? tr("on") : tr("off"); };
+    ImGui::BulletText("%s: %s", tr("Background texture preparation"), state(config_get_bool("nvn", "tex_prep", true)));
+    ImGui::BulletText("%s: %s", tr("Upload staging ring"), state(config_get_int("nvn", "staging_ring_mb", 256) > 0));
+    ImGui::BulletText("%s: %s", tr("VRAM residency"), state(config_get_str("gfx", "residency", "auto") != "off"));
+    ImGui::BulletText("%s: %s", tr("Pipeline prewarm"), state(config_get_bool("nvn", "prewarm", true)));
+    ImGui::BulletText("%s: %s", tr("Pipeline library"), state(config_get_bool("nvn", "gpl", true)));
+    ImGui::BulletText("%s: %s", tr("Lean draw replay"), state(config_get_bool("nvn", "lean_draws", true)));
+    ImGui::BulletText("%s: %s", tr("Adaptive texture detail"), state(config_get_bool("perf", "adaptive_mip", false)));
+
+    section("Shortcuts");
+    if (ImGui::Button(tr("Performance settings"))) m.tab_request = kTabPerformance;
+    ImGui::SameLine();
+    if (ImGui::Button(tr("Diagnostics"))) m.tab_request = kTabDiagnostics;
+    ImGui::SameLine();
+    if (ImGui::Button(tr("System information"))) m.tab_request = kTabSystem;
+    ImGui::TextDisabled("%s", tr("Every optimiser is also in the launcher. Configuration keys are documented in runtime/docs/CONFIG.md."));
+    (void)host;
+}
+
 // ---- what waits for a restart -----------------------------------------------------------------------------------------------------------
 std::string pending_list(Menu& m) {
     std::string s;
@@ -1805,19 +2195,28 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         m.focus_first = true;
         m.focus_tab = m.tab;
     }
-    if (!ImGui::IsAnyItemActive()) m.edit = host.settings();   // the working copy follows the game (the counter hotkey, Alt+Enter)
+    // The working copy follows the game, but not while the floating EQ panel or its warning owns the interaction: a custom slider's
+    // active id can clear on the release frame before the panel has committed its last value.
+    if (!ImGui::IsAnyItemActive() && !m.audio_ui.eq_open && !m.audio_ui.boost_warning) m.edit = host.settings();
     const play::LiveStatus live = host.status();
     StyleScope style;
 
     // B or Escape go back; with nothing open or held they close the menu
     const bool back = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
-    if (back && !m.busy_last && !opened) ov.request_hide();
+    if (back && !opened) {
+        if (m.audio_ui.boost_warning) {
+            // The modal handles B / Escape itself; the menu stays behind it.
+        } else if (m.audio_ui.eq_open) {
+            m.audio_ui.eq_open = false;   // B / Escape closes the floating panel first
+        } else if (!m.busy_last) {
+            ov.request_hide();
+        }
+    }
     // L / R switch tabs (not while a widget is held: L / R then tweak its speed)
     if (!ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup)) {
         int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) ? 1 : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) ? -1 : 0;
         if (step) {
             m.tab_request = (m.tab + step + kTabCount) % kTabCount;
-            if (m.tab_request == kTabMods && !gfx::has_mod_panels()) m.tab_request = (m.tab_request + step + kTabCount) % kTabCount;
             m.focus_tab = m.tab_request;
             m.focus_first = true;
         }
@@ -1838,9 +2237,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         const float help_h = ImGui::GetTextLineHeightWithSpacing() * 2.2f;
         const float bottom = help_h + ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 4 + px(8);
         if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons | ImGuiTabBarFlags_FittingPolicyShrink)) {
-            const bool mods_tab = gfx::has_mod_panels();   // the Mods tab only when a code mod added a panel
             for (int t = 0; t < kTabCount; ++t) {
-                if (t == kTabMods && !mods_tab) continue;
                 char label[48];
                 std::snprintf(label, sizeof label, "  %s  ###tab%d", tr(kTabNames[t]), t);
                 if (!ImGui::BeginTabItem(label, nullptr, m.tab_request == t ? ImGuiTabItemFlags_SetSelected : 0)) continue;
@@ -1849,20 +2246,15 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
                 ImGui::BeginChild("##page", ImVec2(0, -bottom), ImGuiChildFlags_NavFlattened | ImGuiChildFlags_Borders);
                 ImGui::PushItemWidth(-FLT_MIN);
                 switch (t) {
-                    case kTabDisplay: display_page(host, m, live); break;
+                    case kTabOverview: overview_page(host, m, live, ov); break;
                     case kTabGraphics: graphics_page(host, m); break;
-                    case kTabFrameRate: framerate_page(host, m, live, ov); break;
+                    case kTabPerformance: performance_page(m); break;
+                    case kTabUpscaling: upscaling_page(host, m); break;
+                    case kTabPacing: display_pacing_page(host, m, live, ov); break;
                     case kTabAudio: audio_page(host, m); break;
-                    case kTabControls: controls_page(host, m, live); break;
-                    case kTabGame: game_page(host, m); break;
-                    case kTabMods:   // the code mods' panels (mod API 4): they apply at once, not with this menu's Save
-                        ImGui::TextColored(kMuted, "%s", tr("Code mods' own settings. Changes apply at once."));
-                        ImGui::Spacing();
-                        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);   // room for the sliders' labels
-                        gfx::draw_mod_panels();
-                        ImGui::PopItemWidth();
-                        break;
-                    case kTabDebug: debug_page(host, m, ov); break;
+                    case kTabAdvanced: advanced_page(host, m, live); break;
+                    case kTabDiagnostics: debug_page(host, m, ov); break;
+                    case kTabSystem: system_page(host, ov); break;
                 }
                 ImGui::PopItemWidth();
                 ImGui::EndChild();
@@ -1871,6 +2263,13 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
             }
             m.tab_request = -1;
             ImGui::EndTabBar();
+        }
+
+        // The 200% warning is a modal owned by this window, so it is drawn before End; the floating EQ panel below is a window of
+        // its own and is drawn after End. Both survive a tab switch.
+        if (audio_ui::boost_warning(m.edit.audio, m.audio_ui)) {
+            audio_ui::preview_live(m.edit.audio);
+            apply(host, m);
         }
 
         // bottom: the row's description, the notice or what waits for a restart, Close
@@ -1910,13 +2309,24 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         }
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bw);
         ImGui::PushStyleColor(ImGuiCol_Button, kAccentDark);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.44f, 0.84f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.28f, 0.60f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui_theme::accent_hover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui_theme::accent_deep);
         if (ImGui::Button(close, ImVec2(bw, 0))) ov.request_hide();
         ImGui::PopStyleColor(3);
     }
     ImGui::End();
-    m.busy_last = ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+
+    // The floating EQ panel is a window of its own, so it is drawn after the settings window's End rather than nested inside it.
+    // It belongs to the whole menu, not the Audio tab, so it survives a tab switch.
+    const audio_ui::Edit eq = audio_ui::enhancements_window(m.edit.audio, m.audio_ui);
+    if (eq == audio_ui::Edit::Commit) {
+        audio_ui::preview_live(m.edit.audio);
+        apply(host, m);
+    } else if (eq == audio_ui::Edit::Live) {
+        audio_ui::preview_live(m.edit.audio);
+    }
+    m.busy_last = ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) || m.audio_ui.eq_open ||
+                  m.audio_ui.boost_warning;
     static const bool debug_nav = config_get_bool("menu", "debug_nav", false);   // [menu] debug_nav: log the gamepad cursor (test aid)
     if (debug_nav) {
         ImGuiContext& g = *GImGui;

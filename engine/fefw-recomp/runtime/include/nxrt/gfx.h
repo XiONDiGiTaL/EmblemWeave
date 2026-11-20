@@ -6,7 +6,8 @@
 //             resize / minimise handling, screenshots, an overlay hook. Frame limiting is separate (frame_limiter.h): call
 //             FrameLimiter::begin_frame() first, then platform::pump_events(), then Renderer::begin_frame().
 // Configuration (config.h; env wins): [gfx] gpu (NXRT_GFX_GPU), validation (NXRT_GFX_VALIDATION), headless (NXRT_GFX_HEADLESS),
-// present_mode (NXRT_GFX_PRESENT_MODE), frames_in_flight (NXRT_GFX_FRAMES_IN_FLIGHT); see docs/S4b.md.
+// present_mode (NXRT_GFX_PRESENT_MODE), present_guard (NXRT_GFX_PRESENT_GUARD), frames_in_flight (NXRT_GFX_FRAMES_IN_FLIGHT);
+// see docs/S4b.md.
 #pragma once
 #include <volk.h>
 
@@ -263,6 +264,17 @@ enum class PresentMode : uint8_t { Fifo, FifoRelaxed, Mailbox, Immediate };
 const char* present_mode_name(PresentMode m);
 bool parse_present_mode(const char* s, PresentMode* out);          // "fifo", "fifo_relaxed", "mailbox", "immediate"
 VkPresentModeKHR to_vk(PresentMode m);
+// The guard against the immediate present path ([gfx] present_guard, issue #72). Intel's Windows driver can reset the device
+// there on a GPU that is not discrete, so an immediate request becomes mailbox, else FIFO. Auto (the default) guards Intel
+// GPUs that are not discrete; On guards every GPU (an Arc, or a driver that reports the wrong type); Off guards none.
+enum class PresentGuard : uint8_t { Auto, On, Off };
+PresentGuard parse_present_guard(const char* s);                    // "auto", "on"/"1", "off"/"0"; anything else: auto
+bool present_guard_applies(PresentGuard guard, uint32_t vendor_id, int device_type);   // should immediate be replaced?
+// The presentation rule alone (no GPU or window), tested without hardware: the mode to use given what the surface offers.
+// from_ini: a hand-written [gfx] present_mode named exactly this mode, a deliberate override the guard does not touch.
+// guard: present_guard_applies() for this device; true replaces an immediate request as described above.
+PresentMode choose_present_mode(PresentMode want, bool from_ini, bool guard,
+                                const std::vector<VkPresentModeKHR>& supported);
 
 struct RendererDesc {
     PresentMode present_mode = PresentMode::Fifo;   // [gfx] present_mode overrides

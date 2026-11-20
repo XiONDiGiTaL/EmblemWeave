@@ -52,8 +52,10 @@ struct HdrSettings {
     double gamut_expand = 0;         // HDR output: 0 = the game's own BT.709 colours (as on the console), up to 1 = saturated colours toward DCI-P3
 };
 
-// Nis: NVIDIA Image Scaling v1.0.3 (spatial, any GPU). Fsr3, Dlss, Dlaa, Xess: temporal (Dlaa = DLSS at the input size).
-enum class UpscaleMode : uint8_t { Off = 0, Fsr1, Fsr3, Dlss, Xess, Nis, Dlaa };
+// Nis: NVIDIA Image Scaling v1.0.3 (spatial, any GPU). Mako: a single-pass sharpened-cubic spatial scaler adapted from
+// MAKO (GPL-3.0-or-later), any GPU and any scale. Fsr4 / Fsr3, Dlss, Dlaa, Xess: temporal (Fsr4 asks the FidelityFX
+// provider for its FSR 4 generation, Fsr3 for FSR 3; Dlaa = DLSS at the input size).
+enum class UpscaleMode : uint8_t { Off = 0, Fsr1, Fsr3, Dlss, Xess, Nis, Dlaa, Mako, Fsr4 };
 // Temporal quality preset: the input scale per side (native 1, quality 1/1.5, balanced 1/1.7, performance 1/2, ultra performance 1/3); Custom
 // keeps scene_scale. The scale only takes effect where the game renders the scene below its output (scene_scale); otherwise the temporal
 // upscalers run at the input size (native anti-aliasing).
@@ -63,7 +65,7 @@ struct UpscaleSettings {
     UpscaleQuality quality = UpscaleQuality::Quality;
     double sharpness = 0.8;          // 0 .. 1 (FSR 1 RCAS or the NIS sharpening; 1 = sharpest)
     int scene_scale = 100;           // 25 .. 100: percent of the output size the 3D scene is rendered at (the game's own dynamic-resolution path; HUD and post stay native)
-    std::string fsr_dll;             // FidelityFX API DLL for FSR 3 (amd_fidelityfx_loader_vk.dll or amd_fidelityfx_vk.dll; empty: next to the exe)
+    std::string fsr_dll;             // FidelityFX API DLL for FSR 4 / 3 (amd_fidelityfx_loader_vk.dll or amd_fidelityfx_vk.dll; empty: next to the exe)
     std::string dlss_dll;            // folder (or sl.interposer.dll path) of the Streamline + DLSS DLLs (empty: next to the exe)
     std::string xess_dll;            // libxess.dll the player supplies (empty: not used)
     bool frame_generation = false;   // FSR 3 frame interpolation (needs the FSR 3 mode)
@@ -140,7 +142,7 @@ inline const char* dlss_preset_word(int preset) {
 }
 int upscale_scene_scale();          // percent, 100 = off (a temporal mode with a quality preset other than Custom: the preset's percent)
 UpscaleQuality upscale_quality();
-bool upscale_temporal();            // the mode is FSR 3, DLSS, DLAA or XeSS
+bool upscale_temporal();            // the mode is FSR 4, FSR 3, DLSS, DLAA or XeSS
 int quality_percent(UpscaleQuality q);   // the preset's input scale per side in percent (Custom: -1)
 // The game's own projection jitter as its TAA code last stored it (NDC units, the previous frame's; pkp_taa.cpp), for the log only.
 void temporal_note_game_jitter(float x_ndc, float y_ndc);

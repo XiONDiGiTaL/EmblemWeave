@@ -125,6 +125,10 @@ NXTEST(tweaks_suit_part_and_reset) {
 }
 
 NXTEST(tweaks_factory_file_has_the_section_off) {
+    if (std::string(nxrt::play::default_settings_text()).find("[tweaks]") == std::string::npos) {
+        nxtest::skip("factory controls.ini has no [tweaks] (MPR game data is not linked in this build)");
+        return;
+    }
     Settings s;
     std::string err;
     std::vector<std::string> w;

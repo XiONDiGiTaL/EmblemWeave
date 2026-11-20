@@ -563,6 +563,76 @@ NXTEST(fsr1_upscales_a_gradient) {
     CHECK(mean_abs < 6.0);
 }
 
+// ---- 5b: MAKO upscales a gradient in one pass ----------------------------------------------------------------------------------------
+
+NXTEST(mako_upscales_a_gradient) {
+    Rig r;
+    Teardown td{r};
+    if (!make_device(r)) {
+        nxtest::skip("no headless Vulkan device");
+        return;
+    }
+    if (!formats_supported(*r.dev, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM)) {
+        nxtest::skip("needed format not supported");
+        return;
+    }
+    constexpr uint32_t S = 32, D = 64;
+    std::vector<uint8_t> src(S * S * 4);
+    for (uint32_t y = 0; y < S; ++y)
+        for (uint32_t x = 0; x < S; ++x) {
+            uint8_t* px = &src[(static_cast<size_t>(y) * S + x) * 4];
+            px[0] = px[1] = px[2] = static_cast<uint8_t>(x * 8);
+            px[3] = 255;
+        }
+    REQUIRE(upload_source(r, VK_FORMAT_R8G8B8A8_UNORM, S, S, src));
+    REQUIRE(make_dst(r, VK_FORMAT_R8G8B8A8_UNORM, D, D, 4));
+    hdr::OutputParams p = base_params(r, S, S);
+    p.keep_aspect = true;
+    p.out = hdr::OutputKind::Sdr8;
+    p.src_linear = false;
+    p.mako = true;
+    p.sharpness = 0.8f;
+    CHECK_EQ(r.pass.mako_frames(), 0u);
+    std::vector<uint8_t> got;
+    const int mode = run_pass(r, p, &got);
+    CHECK_EQ(mode, 0);
+    CHECK_EQ(r.pass.mako_frames(), 1u);
+    REQUIRE(got.size() == static_cast<size_t>(D) * D * 4);
+
+    double bil[D];
+    for (uint32_t x = 0; x < D; ++x) {
+        double sx = (x + 0.5) * S / D - 0.5;
+        sx = std::clamp(sx, 0.0, S - 1.0);
+        const int x0 = static_cast<int>(std::floor(sx));
+        const int x1 = std::min(x0 + 1, static_cast<int>(S) - 1);
+        const double f = sx - x0;
+        bil[x] = (1.0 - f) * (8.0 * x0) + f * (8.0 * x1);
+    }
+    size_t drop_bad = 0;
+    int first_max = 0, last_min = 255;
+    double sum_abs = 0.0;
+    int max_abs = 0;
+    for (uint32_t y = 0; y < D; ++y) {
+        const uint8_t* row = &got[static_cast<size_t>(y) * D * 4];
+        first_max = std::max(first_max, static_cast<int>(row[0]));
+        last_min = std::min(last_min, static_cast<int>(row[(D - 1) * 4]));
+        for (uint32_t x = 1; x < D; ++x)
+            if (static_cast<int>(row[(x - 1) * 4]) - static_cast<int>(row[x * 4]) > 2) ++drop_bad;
+        for (uint32_t x = 0; x < D; ++x) {
+            const int d = std::abs(static_cast<int>(row[x * 4 + 0]) - static_cast<int>(std::lround(bil[x])));
+            sum_abs += d;
+            max_abs = std::max(max_abs, d);
+        }
+    }
+    const double mean_abs = sum_abs / (static_cast<double>(D) * D);
+    std::printf("    mako gradient: %zu steps decreasing by more than 2 levels, first column max %d, last column min %d\n", drop_bad, first_max, last_min);
+    std::printf("    mako gradient: vs CPU bilinear, mean abs difference %.3f levels, max %d\n", mean_abs, max_abs);
+    CHECK(drop_bad == 0);
+    CHECK(first_max <= 20);
+    CHECK(last_min >= 230);
+    CHECK(mean_abs < 12.0);
+}
+
 // ---- 6: FSR 1 in HDR keeps highlights -----------------------------------------------------------------------------------------------
 
 NXTEST(fsr1_hdr_keeps_highlights) {

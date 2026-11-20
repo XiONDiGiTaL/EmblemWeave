@@ -10,7 +10,7 @@
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -141,15 +141,19 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
             }
             if let Some(pid) = app.ingame.branded {
                 refresh_title(pid, &mut app.ingame);
-                if app.config.discord.enabled && !app.discord.active() {
-                    app.discord.start(&app.config.discord.client_id, pid);
+                if app.config.discord.enabled {
+                    app.discord.start_game(pid);
                 }
             }
         } else {
             app.ingame.branded = None;
             app.ingame.fps = None;
             app.ingame.log_from = 0;
-            app.discord.stop();
+            if app.config.discord.enabled {
+                app.discord.start_launcher();
+            } else {
+                app.discord.stop();
+            }
         }
         if app.ingame.running && !was {
             app.notify("Game started: press F10, or Back + RB on a controller, for the EmblemWeave menu", Tone::Ok);
@@ -210,7 +214,7 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(14))).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for (t, label) in [(Tab::Quick, "Quick cheats"), (Tab::Codes, "Codes & tables"), (Tab::Display, "Display"), (Tab::Controls, "Controls"), (Tab::States, "Save states")] {
-                    if ui.selectable_label(app.ingame.tab == t, RichText::new(label).font(theme::semibold(13.5))).clicked() {
+                    if ui.selectable_label(app.ingame.tab == t, crate::i18n::text(label).font(theme::semibold(13.5))).clicked() {
                         app.ingame.tab = t;
                     }
                 }
@@ -235,10 +239,10 @@ fn display(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
     let Some(ini) = controls_ini() else { return };
     widgets::section(ui, p, "Window", |ui| {
         let mode = ini_get(&ini, "display", "window_mode").unwrap_or_else(|| "windowed".into());
-        ui.label("Alt+Enter in the game switches between a window and full screen at once. The mode it starts in:");
+        ui.label(crate::i18n::text("Alt+Enter in the game switches between a window and full screen at once. The mode it starts in:"));
         ui.horizontal(|ui| {
             for (m, label) in [("windowed", "Windowed"), ("borderless", "Borderless full screen"), ("exclusive", "Exclusive full screen")] {
-                if ui.selectable_label(mode == m, label).clicked() {
+                if ui.selectable_label(mode == m, crate::i18n::text(label)).clicked() {
                     match ini_set(&ini, "display", "window_mode", m) {
                         Ok(()) => app.notify(format!("{label}: applies the next time the game starts (Alt+Enter switches now)"), Tone::Ok),
                         Err(e) => app.notify(e, Tone::Bad),
@@ -249,7 +253,7 @@ fn display(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
         ui.add_space(6.0);
         let mut w: u32 = ini_get(&ini, "display", "render_width").and_then(|v| v.parse().ok()).unwrap_or(0);
         let mut h: u32 = ini_get(&ini, "display", "render_height").and_then(|v| v.parse().ok()).unwrap_or(0);
-        ui.label("Picture size (0 = the window's size when the game starts):");
+        ui.label(crate::i18n::text("Picture size (0 = the window's size when the game starts):"));
         ui.horizontal(|ui| {
             let a = ui.add(egui::DragValue::new(&mut w).range(0..=7680).suffix(" wide"));
             let b = ui.add(egui::DragValue::new(&mut h).range(0..=4320).suffix(" high"));
@@ -264,7 +268,7 @@ fn display(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
                 }
             }
         });
-        ui.label(RichText::new("The picture size applies the next time the game starts.").size(12.0).color(p.muted));
+        ui.label(crate::i18n::text("The picture size applies the next time the game starts.").size(12.0).color(p.muted));
     });
     widgets::section(ui, p, "Frame rate counter", |ui| {
         let mut on = ini_get(&ini, "fps", "show").as_deref() == Some("1");
@@ -272,18 +276,18 @@ fn display(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
             if widgets::toggle(ui, p, &mut on).changed() {
                 let _ = ini_set(&ini, "fps", "show", if on { "1" } else { "0" });
             }
-            ui.label("Show the frame rate in a corner of the game (applies on the next frame; F2 in the game too)");
+            ui.label(crate::i18n::text("Show the frame rate in a corner of the game (applies on the next frame; F2 in the game too)"));
         });
     });
 }
 
 fn controls(ui: &mut egui::Ui, p: &crate::theme::Palette) {
     widgets::section(ui, p, "Controls", |ui| {
-        ui.label("Keyboard and controller buttons can be rebound in the game's own settings: press F1 in the game, then Controls. The launcher's Controls page holds EmblemWeave's own bindings.");
+        ui.label(crate::i18n::text("Keyboard and controller buttons can be rebound in the game's own settings: press F1 in the game, then Controls. The launcher's Controls page holds EmblemWeave's own bindings."));
         ui.add_space(6.0);
         egui::Grid::new("default-keys").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
             for (k, what) in [("F10, or Back + RB", "this menu"), ("F1", "the game's own settings"), ("F2", "frame rate counter"), ("Alt+Enter", "window / full screen")] {
-                ui.label(RichText::new(k).font(theme::mono(13.0)).color(p.ink));
+                ui.label(crate::i18n::text(k).font(theme::mono(13.0)).color(p.ink));
                 ui.label(what);
                 ui.end_row();
             }
@@ -296,8 +300,8 @@ fn controls(ui: &mut egui::Ui, p: &crate::theme::Palette) {
 /// the launcher's.
 fn game_title(fps: Option<f32>) -> String {
     match fps {
-        Some(f) => format!("Fire Emblem: Fortune's Weave (FPS: {f:.0})"),
-        None => "Fire Emblem: Fortune's Weave (FPS: --)".to_string(),
+        Some(f) => format!("Fire Emblem: Fortune's Weave | FPS: {f:.0}"),
+        None => "Fire Emblem: Fortune's Weave | FPS: --".to_string(),
     }
 }
 
@@ -578,11 +582,11 @@ fn session_bar(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette, ctx:
                     }
                 }
             }
-            if widgets::button(ui, p, "📷 Screenshot", !app.ingame.paused).on_hover_text("Saved to the EmblemWeave folder in Pictures").clicked() {
+            if widgets::button(ui, p, "📷 Screenshot", !app.ingame.paused).on_hover_text(crate::i18n::tr("Saved to the EmblemWeave folder in Pictures")).clicked() {
                 app.ingame.open = false;
                 app.ingame.shot_at = Some(Instant::now() + Duration::from_millis(350));
             }
-            if widgets::button(ui, p, "⟲ Restart", true).on_hover_text("Closes the game and starts it again, at the title screen. Unsaved progress is lost.").clicked() {
+            if widgets::button(ui, p, "⟲ Restart", true).on_hover_text(crate::i18n::tr("Closes the game and starts it again, at the title screen. Unsaved progress is lost.")).clicked() {
                 app.ingame.confirm_stop = false;
                 if app.ingame.paused {
                     session::set_paused(pid, false);
@@ -598,7 +602,7 @@ fn session_bar(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette, ctx:
                     app.ingame.confirm_stop = true;
                 }
             } else {
-                ui.label(RichText::new("Stop the game? Unsaved progress is lost.").color(p.warn));
+                ui.label(crate::i18n::text("Stop the game? Unsaved progress is lost.").color(p.warn));
                 if widgets::button(ui, p, "Stop and return", true).clicked() {
                     if app.ingame.paused {
                         session::set_paused(pid, false);
@@ -618,7 +622,7 @@ fn session_bar(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette, ctx:
             }
         });
         if app.ingame.paused {
-            ui.label(RichText::new("Paused: the game and its sound are frozen until you resume.").size(12.0).color(p.muted));
+            ui.label(crate::i18n::text("Paused: the game and its sound are frozen until you resume.").size(12.0).color(p.muted));
         }
     }
 }
