@@ -90,10 +90,15 @@ user points at.
 - For a `.nup`, `gamedata::packed_romfs` counts the zstd-compressed RomFS entries.
   If there are any, `unpack_packed_romfs` writes **only those compressed entries**
   into `<engine-root>/work/romfs-overlay`.
-- The overlay stamp is a text key:
-  `"<package path>|<count> files|<bytes> bytes"`.
-- `unpack_packed_romfs` skips a destination file when its **length** already equals
-  the package entry’s decompressed size.
+- The overlay identity is a text key: the package path, its size and modification
+  time, and a SHA-256 over every packed entry’s path, decompressed size and entry
+  hash. `work/romfs-overlay/.source` records the identity the folder was written
+  for and `.written` that the write finished.
+- `unpack_packed_romfs` writes each file to `work/romfs-overlay.parts` and renames
+  it into place, so a file at its final path is complete; a destination at the
+  package entry’s decompressed size is then a safe resume test within one identity.
+- A different identity clears `work/romfs-overlay` before the write, so a path the
+  old package packed cannot survive as an orphan over the current package.
 - `ini_text` writes:
   - `[fs] romfs = <folder-or-.nup>`
   - optional `[fs] romfs_overlay = <work/romfs-overlay>`
@@ -215,19 +220,21 @@ This should be treated as a robustness bug in the data path, independent of #70.
 
 ### B.7 Overlay correctness gaps
 
-The overlay is the weakest link in the `.nup` path:
+The overlay was the weakest link in the `.nup` path. The first three items are now
+addressed by `gamedata::overlay_identity` and `gamedata::write_romfs_overlay`;
+the last two remain open:
 
-1. **Weak identity.** The stamp is path + packed-file count + total packed bytes.
-   It does not include the package’s size, modification time, TOC digest, or
-   per-file hashes. A package replaced with one that has the same count and total
-   size but different contents reuses the old overlay.
-2. **No orphan cleanup.** `romfs_folder_for_play` never clears `dest`. If a newer
-   package has fewer packed files, or different paths with the same count/size,
-   files from the old package remain in the overlay. Because the overlay is
-   merged after the package, an orphan can **override** a current stored entry.
-3. **Size-only resume.** A destination file at the expected length is accepted
-   without checking its content. A stale same-size file from an older package is
-   reused.
+1. **Identity (fixed).** The identity now covers the package path, its size and
+   modification time, and a SHA-256 over every packed entry’s path, decompressed
+   size and entry hash. A package replaced with one that has the same count and
+   total size but different contents no longer reuses the old overlay.
+2. **Orphan cleanup (fixed).** A different identity clears `work/romfs-overlay`
+   before the write, so files from an older package cannot remain and, because the
+   overlay is merged after the package, override a current stored entry.
+3. **Resume (fixed).** Files are written to a staging folder and renamed into
+   place, so a file at its final path is complete. A destination at the expected
+   length is accepted only within the same identity, which covers the content of
+   every packed entry.
 4. **Narrow reuse of the ExeFS copy.** `use_nup` reuses the copied ExeFS when all
    lengths match; it does not verify hashes. The directory is keyed by title and
    version, so this is less exposed than the overlay, but a same-version repack
@@ -237,7 +244,7 @@ The overlay is the weakest link in the `.nup` path:
    or cleanup policy.
 
 These are correctness issues in data preparation, not rendering or decoding
-issues. They should be fixed before any decoder work is considered.
+issues. The overlay items were fixed before any decoder work, as required.
 
 ### B.8 Minimum evidence needed before changing code
 
@@ -258,7 +265,7 @@ from the extracted folder that the reporter used, and record:
 If the file sets and hashes match, the decoder becomes the leading suspect. If
 they do not, #70 is a data-path issue and a decoder rewrite would not fix it.
 
-### B.9 Candidate Phase 2A fixes (not implemented)
+### B.9 Phase 2A fixes (items 1-3 implemented, items 4-5 open)
 
 These are deliberately small and evidence-preserving:
 

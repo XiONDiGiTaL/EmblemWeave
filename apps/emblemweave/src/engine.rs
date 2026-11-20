@@ -1695,37 +1695,14 @@ fn romfs_folder_for_play(root: &Path, romfs: &Path, ctx: &Ctx) -> Result<Option<
     if romfs.is_dir() {
         return Ok(None);
     }
-    let Some((count, bytes)) = crate::gamedata::packed_romfs(romfs) else {
+    if crate::gamedata::packed_romfs(romfs).is_none() {
         return Ok(None);
-    };
-    let dest = root.join("work").join("romfs-overlay");
-    let stamp = dest.join(".written");
-    let key = format!("{}|{count} files|{bytes} bytes", romfs.display());
-    if std::fs::read_to_string(&stamp)
-        .map(|t| t.trim() == key.trim())
-        .unwrap_or(false)
-    {
-        ctx.log(format!(
-            "game files: {count} packed files; using the overlay already written in {}",
-            dest.display()
-        ));
-        return Ok(Some(dest));
     }
-    ctx.log(format!(
-        "game files: {count} files of this package ({:.1} GB) are packed with zstd, which the engine cannot read in place, so those files are written once into {} and read from there; the package is used as it is for everything else",
-        bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-        dest.display()
-    ));
-    std::fs::create_dir_all(&dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
-    let (written, total) = crate::gamedata::unpack_packed_romfs(romfs, &dest, &mut |m| {
+    let dest = root.join("work").join("romfs-overlay");
+    // The identity of the package decides reuse, resume or a clean rebuild, and orphan paths from an older package are cleared with it.
+    crate::gamedata::write_romfs_overlay(romfs, &dest, &mut |m| {
         ctx.log(format!("game files: {m}"))
     })?;
-    std::fs::write(&stamp, &key).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
-    ctx.log(format!(
-        "game files: {written} packed files written ({:.1} GB) to {}; the package supplies the rest",
-        total as f64 / (1024.0 * 1024.0 * 1024.0),
-        dest.display()
-    ));
     Ok(Some(dest))
 }
 
@@ -2252,22 +2229,24 @@ fn play_blocker_in(dir: &Path) -> Option<String> {
     ))
 }
 
-/// The package the built game points at, when that package packs files with zstd and the game folder has no overlay for them: Play writes
-/// those files first and then starts the game. True for a game folder built before 0.1.20, or one whose write never ran.
+/// The package the built game points at, when that package packs files with zstd and the game folder's overlay is missing or was written
+/// for a different package: Play writes those files first and then starts the game. True for a game folder built before 0.1.20, for one
+/// whose write never ran, and for one whose package was replaced after the build (even by a package with the same packed count and bytes).
 pub fn packed_package_without_overlay() -> Option<PathBuf> {
     let dir = run_dir()?;
     let written = ini_map(&dir.join("fefw.ini"));
-    // A key is not an overlay: an interrupted write, or a folder the player moved, leaves an ini that points at nothing.
-    // Play then tries to write the files again instead of starting an engine that reports main.npdm is compressed.
-    if written
-        .get("fs.romfs_overlay")
-        .map(PathBuf::from)
-        .is_some_and(|p| p.is_dir())
-    {
+    let path = PathBuf::from(written.get("fs.romfs")?);
+    if !path.is_file() || crate::gamedata::packed_romfs(&path).is_none() {
         return None;
     }
-    let path = PathBuf::from(written.get("fs.romfs")?);
-    (path.is_file() && crate::gamedata::packed_romfs(&path).is_some()).then_some(path)
+    // A key is not an overlay: an interrupted write, or a folder the player moved, leaves an ini that points at nothing. A folder that is
+    // there but was written for other content is the same problem one step later, so the identity decides instead of the folder's presence.
+    if let Some(overlay) = written.get("fs.romfs_overlay").map(PathBuf::from) {
+        if overlay.is_dir() && crate::gamedata::overlay_is_current(&path, &overlay) {
+            return None;
+        }
+    }
+    Some(path)
 }
 
 /// Game Setup's "Check my game folder": what the build does for a package it cannot read in place, done on its own so a game folder that
@@ -2304,29 +2283,23 @@ pub fn repair(ctx: &Ctx, romfs: PathBuf) -> Result<JobResult, String> {
 
     ctx.start(1);
     let dest = root.join("work").join("romfs-overlay");
-    let stamp = dest.join(".written");
-    let key = format!("{}|{count} files|{bytes} bytes", romfs.display());
-    if std::fs::read_to_string(&stamp)
-        .map(|t| t.trim() == key.trim())
-        .unwrap_or(false)
-    {
+    let write = crate::gamedata::write_romfs_overlay(&romfs, &dest, &mut |m| {
+        ctx.log(format!("game files: {m}"))
+    })?;
+    if write.reused {
         ctx.end(
             1,
             StageStatus::Skipped,
             format!("already written in {}", dest.display()),
         );
     } else {
-        std::fs::create_dir_all(&dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
-        let (written, total) = crate::gamedata::unpack_packed_romfs(&romfs, &dest, &mut |m| {
-            ctx.log(format!("game files: {m}"))
-        })?;
-        std::fs::write(&stamp, &key).map_err(|e| format!("writing {}: {e}", stamp.display()))?;
         ctx.end(
             1,
             StageStatus::Done,
             format!(
-                "{written} files, {:.1} GB in {}",
-                total as f64 / (1024.0 * 1024.0 * 1024.0),
+                "{} files, {:.1} GB in {}",
+                write.written,
+                write.written_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 dest.display()
             ),
         );

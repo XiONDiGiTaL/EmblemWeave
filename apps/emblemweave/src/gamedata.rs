@@ -11,6 +11,7 @@
 //! user's files.
 
 use crate::config::{Config, Paths};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// The build of the game the engine was tested against. The list of module
@@ -364,7 +365,8 @@ fn file_len(p: &Path) -> Option<u64> {
 
 /// The zstd entries of a `.nup`'s RomFS cannot be read in place by the engine (one zstd frame per file, no random access), so they are
 /// written out as files once, into the folder the game reads as `[fs] romfs_overlay` over the package. Returns how many files were written
-/// and how many bytes; a file already at its full size is left alone, so an interrupted run resumes where it stopped. `say` gets progress.
+/// and how many bytes. A file already at its full size is left alone, so a run of the same package resumes where it stopped; the caller
+/// is what guarantees a destination folder only ever holds the package its identity names. `say` gets progress.
 pub fn unpack_packed_romfs(
     nup_path: &Path,
     dest: &Path,
@@ -377,6 +379,10 @@ pub fn unpack_packed_romfs(
         .ok_or("the .nup holds no base game or update")?;
     let entries = nup.walk(pkg.romfs);
     std::fs::create_dir_all(dest).map_err(|e| format!("creating {}: {e}", dest.display()))?;
+    // Each file is written beside the overlay and renamed in. A file at its final path is therefore always complete, which is what makes
+    // the length check below a safe resume test: a run that stopped mid-file leaves nothing the next run could accept as finished.
+    let staging = dest.with_extension("parts");
+    let _ = std::fs::remove_dir_all(&staging);
     let (mut written, mut bytes) = (0usize, 0u64);
     for (n, (rel, index)) in entries.iter().enumerate() {
         let file = &nup.files[*index as usize];
@@ -387,20 +393,29 @@ pub fn unpack_packed_romfs(
         if std::fs::metadata(&out).map(|m| m.len()).ok() == Some(file.size) {
             continue;
         }
-        if let Some(parent) = out.parent() {
+        let staged = staging.join(rel);
+        if let Some(parent) = staged.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
         let data = nup
             .read(*index)
             .map_err(|e| format!("reading {rel} from {}: {e}", nup_path.display()))?;
-        std::fs::write(&out, &data).map_err(|e| format!("writing {}: {e}", out.display()))?;
+        std::fs::write(&staged, &data).map_err(|e| format!("writing {}: {e}", staged.display()))?;
+        // `rename` refuses an existing target on Windows, so a file left at the destination goes first.
+        match std::fs::remove_file(&out) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("replacing {}: {e}", out.display())),
+        }
+        std::fs::rename(&staged, &out).map_err(|e| format!("writing {}: {e}", out.display()))?;
         written += 1;
         bytes += file.size;
         if n % 500 == 0 {
             say(format!("{n} of {} unpacked", entries.len()));
         }
     }
+    let _ = std::fs::remove_dir_all(&staging);
     Ok((written, bytes))
 }
 
@@ -416,6 +431,143 @@ pub fn packed_romfs(nup_path: &Path) -> Option<(usize, u64)> {
         .filter(|f| f.compressed)
         .collect();
     (!packed.is_empty()).then(|| (packed.len(), packed.iter().map(|f| f.size).sum()))
+}
+
+/// The hidden files the launcher keeps in an overlay: the identity of the package it was written for, and the marker that the write
+/// finished. Neither is game data.
+const OVERLAY_SOURCE: &str = ".source";
+const OVERLAY_WRITTEN: &str = ".written";
+
+/// What an overlay is written from. A path, a packed-file count and a total byte count are not enough: a replaced package that happens to
+/// line up reuses the old folder, and a packed path the new package no longer holds keeps its old file, which then wins over the package
+/// because the overlay is merged last. The key therefore covers the package's own size and modification time and, for every packed file,
+/// its path, decompressed size and entry SHA-256. It changes whenever any packed content does.
+#[derive(Debug, Clone)]
+pub struct OverlayIdentity {
+    pub key: String,
+    pub count: usize,
+    pub bytes: u64,
+}
+
+/// What one call to [`write_romfs_overlay`] did.
+#[derive(Debug, Clone, Copy)]
+pub struct OverlayWrite {
+    pub written: usize,
+    pub written_bytes: u64,
+    pub reused: bool,
+}
+
+fn read_trim(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|t| t.trim().to_string())
+}
+
+pub fn overlay_identity(nup_path: &Path) -> Result<OverlayIdentity, String> {
+    let nup = ew_format::nup::Nup::open(nup_path)
+        .map_err(|e| format!("reading {}: {e}", nup_path.display()))?;
+    let Some(pkg) = nup.program_package() else {
+        return Err(format!(
+            "{} holds no base game or update, so it has no RomFS to write",
+            nup_path.display()
+        ));
+    };
+    let modified = std::fs::metadata(nup_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut digest = Sha256::new();
+    digest.update(b"emblemweave romfs overlay 2\0");
+    digest.update(nup_path.display().to_string().as_bytes());
+    digest.update(nup.size.to_le_bytes());
+    digest.update(modified.to_le_bytes());
+    let (mut count, mut bytes) = (0usize, 0u64);
+    for (rel, index) in nup.walk(pkg.romfs) {
+        let file = &nup.files[index as usize];
+        if !file.compressed {
+            continue;
+        }
+        count += 1;
+        bytes += file.size;
+        digest.update(rel.as_bytes());
+        digest.update([0u8]);
+        digest.update(file.size.to_le_bytes());
+        digest.update(file.sha256);
+    }
+    let sum: [u8; 32] = digest.finalize().into();
+    let hex: String = sum.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(OverlayIdentity {
+        key: format!("{}|{count} files|{bytes} bytes|{hex}", nup_path.display()),
+        count,
+        bytes,
+    })
+}
+
+/// Whether `dest` holds a finished write of exactly the package at `nup_path`. Cheap (the package's TOC and metadata, no game file is
+/// hashed or read), so Play can check it before starting instead of serving files an older package wrote.
+pub fn overlay_is_current(nup_path: &Path, dest: &Path) -> bool {
+    overlay_identity(nup_path).is_ok_and(|id| {
+        id.count > 0 && read_trim(&dest.join(OVERLAY_WRITTEN)).as_deref() == Some(id.key.as_str())
+    })
+}
+
+/// Bring `dest` up to date for the package at `nup_path`, and say what happened through `say`.
+///
+/// A finished write of the same package (the marker matches the identity) is reused as it is. A write of the same package that did not
+/// finish keeps its files and resumes. Anything else, including a folder written by an older launcher with no identity, is cleared first:
+/// the folder then holds only this package's files, so a path the old package packed can never shadow the one the game reads now.
+pub fn write_romfs_overlay(
+    nup_path: &Path,
+    dest: &Path,
+    say: &mut dyn FnMut(String),
+) -> Result<OverlayWrite, String> {
+    let id = overlay_identity(nup_path)?;
+    if id.count == 0 {
+        return Ok(OverlayWrite {
+            written: 0,
+            written_bytes: 0,
+            reused: false,
+        });
+    }
+    let source = dest.join(OVERLAY_SOURCE);
+    if read_trim(&dest.join(OVERLAY_WRITTEN)).as_deref() == Some(id.key.as_str()) {
+        say(format!(
+            "{} packed files; using the overlay already written in {}",
+            id.count,
+            dest.display()
+        ));
+        return Ok(OverlayWrite {
+            written: 0,
+            written_bytes: 0,
+            reused: true,
+        });
+    }
+    say(format!(
+        "{} files of this package ({:.1} GB) are packed with zstd, which the engine cannot read in place, so those files are written once into {} and read from there; the package is used as it is for everything else",
+        id.count,
+        id.bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        dest.display()
+    ));
+    if read_trim(&source).as_deref() != Some(id.key.as_str()) {
+        reset_managed_dir(dest)?;
+        std::fs::write(&source, &id.key)
+            .map_err(|e| format!("writing {}: {e}", source.display()))?;
+    }
+    let (written, written_bytes) = unpack_packed_romfs(nup_path, dest, say)?;
+    std::fs::write(dest.join(OVERLAY_WRITTEN), &id.key)
+        .map_err(|e| format!("writing {}: {e}", dest.join(OVERLAY_WRITTEN).display()))?;
+    say(format!(
+        "{written} packed files written ({:.1} GB) to {}; the package supplies the rest",
+        written_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        dest.display()
+    ));
+    Ok(OverlayWrite {
+        written,
+        written_bytes,
+        reused: false,
+    })
 }
 
 /// A file name from a container is data, not a path: reject `..`, a drive
@@ -1946,6 +2098,165 @@ mod tests {
         out.extend(toc);
         out.extend(payload);
         std::fs::write(path, out).unwrap();
+    }
+
+    /// A zstd frame with one raw block: `ruzstd` decodes it back to `payload`. The tests need a package `Nup::read` accepts, without
+    /// depending on an encoder.
+    fn zstd_raw(payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 256, "the test frame uses a one-byte content size");
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x20, payload.len() as u8];
+        let block = ((payload.len() as u32) << 3) | 1; // last block, raw, this size
+        frame.extend_from_slice(&block.to_le_bytes()[..3]);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// A real `.nup` with one base package whose RomFS holds `files`, each packed as one zstd frame. The bytes are deliberately not game
+    /// data; the point is that `Nup::read` decompresses and hash-checks them like a real package's packed files.
+    fn write_overlay_nup(path: &Path, files: &[(&str, &[u8])]) {
+        use sha2::{Digest, Sha256};
+        let mut names = vec!["root".to_string(), "romfs".to_string()];
+        names.extend(files.iter().map(|(name, _)| (*name).to_string()));
+        let mut pool = Vec::new();
+        let mut at = std::collections::HashMap::new();
+        for name in &names {
+            at.insert(name.clone(), (pool.len() as u32, name.len() as u32));
+            pool.extend_from_slice(name.as_bytes());
+        }
+        let frames: Vec<Vec<u8>> = files.iter().map(|(_, data)| zstd_raw(data)).collect();
+        let (n_pkg, n_dir, n_file) = (1usize, 2usize, files.len());
+        let toc_size =
+            0x30 + n_pkg * 0x40 + n_dir * 0x18 + n_file * 0x50 + (1 + n_file) * 4 + pool.len();
+        let data_off = 0x80 + toc_size;
+        let mut payload = Vec::new();
+        let mut offsets = Vec::new();
+        for frame in &frames {
+            offsets.push((data_off + payload.len()) as u64);
+            payload.extend_from_slice(frame);
+        }
+        let total = data_off + payload.len();
+
+        let mut toc = vec![0u8; toc_size];
+        toc[0..4].copy_from_slice(b"TOC\x01");
+        toc[4..8].copy_from_slice(&(n_pkg as u32).to_le_bytes());
+        toc[8..16].copy_from_slice(&(n_dir as u64).to_le_bytes());
+        toc[16..24].copy_from_slice(&(n_file as u64).to_le_bytes());
+        let pool_off = toc_size - pool.len();
+        toc[24..32].copy_from_slice(&(pool_off as u64).to_le_bytes());
+        toc[32..40].copy_from_slice(&(pool.len() as u64).to_le_bytes());
+
+        let pkg = 0x30;
+        toc[pkg..pkg + 8].copy_from_slice(&0x0400_7EF0_1F8A_E000u64.to_le_bytes());
+        toc[pkg + 16..pkg + 20].copy_from_slice(&1u32.to_le_bytes()); // romfs directory
+
+        let dir_at = pkg + 0x40;
+        // root (dir 0): one child, the romfs directory.
+        toc[dir_at + 12..dir_at + 16].copy_from_slice(&1u32.to_le_bytes());
+        // romfs (dir 1): its files, which follow the romfs directory in the child list.
+        let romfs_dir = dir_at + 0x18;
+        toc[romfs_dir + 4..romfs_dir + 8].copy_from_slice(&5u32.to_le_bytes()); // "romfs"
+        toc[romfs_dir + 8..romfs_dir + 12].copy_from_slice(&1u32.to_le_bytes());
+        toc[romfs_dir + 12..romfs_dir + 16].copy_from_slice(&(n_file as u32).to_le_bytes());
+
+        let file_at = dir_at + n_dir * 0x18;
+        for (i, (name, data)) in files.iter().enumerate() {
+            let e = file_at + i * 0x50;
+            let (off, len) = at[*name];
+            toc[e..e + 4].copy_from_slice(&off.to_le_bytes());
+            toc[e + 4..e + 8].copy_from_slice(&len.to_le_bytes());
+            toc[e + 8..e + 16].copy_from_slice(&(data.len() as u64).to_le_bytes());
+            toc[e + 16..e + 24].copy_from_slice(&offsets[i].to_le_bytes());
+            toc[e + 24..e + 32].copy_from_slice(&(frames[i].len() as u64).to_le_bytes());
+            toc[e + 32..e + 64].copy_from_slice(&Sha256::digest(data));
+            toc[e + 64] = 1; // one zstd frame
+        }
+        let child_at = file_at + n_file * 0x50;
+        toc[child_at..child_at + 4].copy_from_slice(&1u32.to_le_bytes()); // root -> romfs
+        for i in 0..n_file {
+            let at_child = child_at + (1 + i) * 4;
+            toc[at_child..at_child + 4]
+                .copy_from_slice(&(n_dir as u32 + i as u32).to_le_bytes());
+        }
+        toc[pool_off..].copy_from_slice(&pool);
+
+        let mut head = vec![0u8; 0x80];
+        head[0..4].copy_from_slice(b"NUP\x01");
+        head[4..6].copy_from_slice(&0x80u16.to_le_bytes());
+        head[6..8].copy_from_slice(&1u16.to_le_bytes());
+        head[8..16].copy_from_slice(&0x80u64.to_le_bytes());
+        head[16..24].copy_from_slice(&(toc_size as u64).to_le_bytes());
+        head[24..56].copy_from_slice(&Sha256::digest(&toc));
+        head[56..64].copy_from_slice(&(data_off as u64).to_le_bytes());
+        head[0x40..0x48].copy_from_slice(&(total as u64).to_le_bytes());
+        head[0x48..0x4C].copy_from_slice(&(n_pkg as u32).to_le_bytes());
+
+        let mut out = head;
+        out.extend(toc);
+        out.extend(payload);
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// A package replaced under the same path by one with the same packed count and the same total decompressed bytes must not reuse the
+    /// overlay: the old key (path, count, bytes) matched this case, so the stale file was accepted and the engine read the old voice.
+    #[test]
+    fn a_replaced_package_with_the_same_count_and_bytes_rebuilds_the_overlay() {
+        let dir = std::env::temp_dir().join(format!("ew-overlay-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        let dest = dir.join("work").join("romfs-overlay");
+
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICE\n")]);
+        assert_eq!(packed_romfs(&nup), Some((1, 6)));
+        let before = overlay_identity(&nup).unwrap();
+        let first = write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!first.reused);
+        assert_eq!(std::fs::read(dest.join("voice.bin")).unwrap(), b"VOICE\n");
+
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICX\n")]);
+        assert_eq!(packed_romfs(&nup), Some((1, 6)));
+        let after = overlay_identity(&nup).unwrap();
+        assert_ne!(before.key, after.key, "the identity ignored the content");
+        assert!(
+            !overlay_is_current(&nup, &dest),
+            "an overlay written for the old content still looked current"
+        );
+        let second = write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!second.reused);
+        assert_eq!(std::fs::read(dest.join("voice.bin")).unwrap(), b"VOICX\n");
+
+        assert!(overlay_is_current(&nup, &dest));
+        let third = write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(third.reused);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer package with fewer packed files must not leave the old ones in the overlay: the overlay is merged last, so an orphan path
+    /// would win over the package.
+    #[test]
+    fn an_overlay_from_another_package_leaves_no_orphans() {
+        let dir = std::env::temp_dir().join(format!("ew-overlay-orphans-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        let dest = dir.join("work").join("romfs-overlay");
+
+        write_overlay_nup(
+            &nup,
+            &[("voice.bin", b"VOICE\n"), ("movie.bin", b"MOVIE\n")],
+        );
+        write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(dest.join("movie.bin").is_file());
+
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICE\n")]);
+        write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read(dest.join("voice.bin")).unwrap(), b"VOICE\n");
+        assert!(
+            !dest.join("movie.bin").exists(),
+            "the old package's movie stayed in the overlay"
+        );
+        assert!(dest.join(OVERLAY_WRITTEN).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     static NUP_DETECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
