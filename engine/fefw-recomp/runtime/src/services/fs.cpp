@@ -489,15 +489,25 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     if (s.edited_files) NXLOG_I("mods", "%u file(s) edited by code mods", s.edited_files);
     // [fs] romfs_files: the file count of the complete RomFS of the supported version (the game sets it). A dump well short of it (the
     // base game's RomFS beside the update's code, a copy that stopped part way) boots and then crashes on a file that is not there (#64).
-    if (const int64_t want = config_get_int("fs", "romfs_files", 0); want > 0 && s.files < want * 95 / 100) {
-        char hint[768];
-        std::snprintf(hint, sizeof hint,
-                      "the game's files are incomplete: the RomFS folder %s has %u files, the complete RomFS of this version has %lld. "
-                      "Use the romfs of the update (updates/<version>/romfs, with the base game's files merged in), not the base game's, "
-                      "and make sure the dump or copy finished; then run Set up again.",
-                      dir.c_str(), s.files, static_cast<long long>(want));
-        NXLOG_E("fs", "%s", hint);
-        crash_set_hint(hint);
+    if (const int64_t want = config_get_int("fs", "romfs_files", 0); want > 0) {
+        if (s.files < want * 95 / 100) {
+            char hint[768];
+            std::snprintf(hint, sizeof hint,
+                          "the game's files are incomplete: the RomFS folder %s has %u files, the complete RomFS of this version has %lld. "
+                          "Use the romfs of the update (updates/<version>/romfs, with the base game's files merged in), not the base game's, "
+                          "and make sure the dump or copy finished; then run Set up again.",
+                          dir.c_str(), s.files, static_cast<long long>(want));
+            NXLOG_E("fs", "%s", hint);
+            crash_set_hint(hint);
+        } else if (s.files != want) {
+            // Close but not equal: a few movies or voice banks missing from a merged folder still boots and plays most scenes, and the
+            // scene that reads one goes silent or stutters with no clue why (#70). Not fatal, so say it and let the game run.
+            NXLOG_W("fs",
+                    "the RomFS folder %s has %u files, the complete RomFS of this version has %lld: the game data differs from it, and a "
+                    "scene that reads a missing file fails or falls silent. Rebuild from a complete .nup, or merge the update's RomFS over "
+                    "the base game's",
+                    dir.c_str(), s.files, static_cast<long long>(want));
+        }
     }
     st().rom = img;
     return img;
