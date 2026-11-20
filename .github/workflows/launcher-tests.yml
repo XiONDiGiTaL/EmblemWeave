@@ -38,7 +38,10 @@ jobs:
         shell: pwsh
         run: |
           # env.cmd puts clang-cl, CMake, Ninja and the MSVC linker on PATH, as scripts\build.ps1 does locally.
-          cmd /c "call engine\fefw-recomp\runtime\scripts\env.cmd && cmake -S engine\fefw-recomp\runtime -B build\launcher-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DNXRT_BUILD_TESTS=ON && cmake --build build\launcher-ci --target mpr_launcher_tests --parallel 4"
+          # A clean checkout has no fetched tools/textures/third_party tree, so configure the runtime's supported
+          # no-ASTC build. mpr_launcher_tests does not link nxrt_gfx or exercise ASTC; the skip baseline below still
+          # runs every launcher case and rejects any new skip, so this changes no test's outcome.
+          cmd /c "call engine\fefw-recomp\runtime\scripts\env.cmd && cmake -S engine\fefw-recomp\runtime -B build\launcher-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DNXRT_BUILD_TESTS=ON -DNXRT_ASTC2BC7=OFF && cmake --build build\launcher-ci --target mpr_launcher_tests --parallel 4"
           if ($LASTEXITCODE -ne 0) { throw "building mpr_launcher_tests failed ($LASTEXITCODE)" }
 
       - name: Assert the MPR-data skip baseline
