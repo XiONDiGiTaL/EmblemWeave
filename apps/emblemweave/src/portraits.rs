@@ -2,7 +2,7 @@
 //!
 //! The five renders in `assets/portraits` are decoded once and uploaded as
 //! textures the first time a card needs them. A profile can be assigned a
-//! portrait explicitly, or left on Automatic: a protagonist found in the
+//! portrait explicitly, or left on Automatic: the route lord stored in the
 //! newest readable slot is used, and the card falls back to the generic
 //! silhouette only when neither source names one.
 
@@ -67,9 +67,9 @@ pub fn key_for_name(text: &str) -> Option<&'static str> {
     None
 }
 
-/// The portrait to draw for a profile: an explicit choice wins, then the
-/// protagonist in its newest readable slot, then the profile name (which is
-/// useful when someone names a run after a character before saving).
+/// The portrait to draw for a profile: an explicit choice wins, then the route
+/// lord in its newest readable slot, then the profile name (which is useful when
+/// someone names a run after a character before saving).
 pub fn for_profile(explicit: Option<&str>, leader: Option<&str>, profile: &str) -> Option<&'static str> {
     explicit
         .and_then(Portrait::by_key)

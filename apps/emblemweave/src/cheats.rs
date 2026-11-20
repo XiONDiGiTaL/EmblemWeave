@@ -15,7 +15,7 @@
 //!   made for, so the game's own memory is scanned instead), and the entries
 //!   below show live values that can be edited or frozen.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const MAIN_BASE: u64 = 0x71_0000_0000;
 pub const HEAP_BASE: u64 = 0x78_0000_0000;
@@ -207,6 +207,55 @@ pub fn aob_scan(mem: &dyn Memory, lo: u64, hi: u64, pattern: &[Option<u8>]) -> O
     None
 }
 
+/// Every match for `pattern` in readable memory within `[lo, hi)`, up to
+/// `limit`. Used for a value the game keeps in more than one copy, such as the
+/// free-time clock; a single hit is not enough when the UI and the schedule
+/// each hold a copy.
+pub fn aob_scan_all(mem: &dyn Memory, lo: u64, hi: u64, pattern: &[Option<u8>], limit: usize) -> Vec<u64> {
+    if pattern.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    const CHUNK: u64 = 4 << 20;
+    let Some(first) = pattern.iter().position(|b| b.is_some()) else {
+        return Vec::new();
+    };
+    let key = pattern[first].unwrap();
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    for (s, e) in mem.regions(lo, hi) {
+        let mut a = s;
+        while a < e {
+            let len = (e - a).min(CHUNK + pattern.len() as u64 - 1);
+            buf.resize(len as usize, 0);
+            if mem.read(a, &mut buf) {
+                let mut i = 0usize;
+                while i + pattern.len() <= buf.len() {
+                    match buf[i + first..].iter().position(|&b| b == key) {
+                        None => break,
+                        Some(k) => i += k,
+                    }
+                    if i + pattern.len() > buf.len() {
+                        break;
+                    }
+                    if pattern.iter().zip(&buf[i..]).all(|(p, b)| p.is_none_or(|p| p == *b)) {
+                        out.push(a + i as u64);
+                        if out.len() >= limit {
+                            out.sort_unstable();
+                            out.dedup();
+                            return out;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            a += CHUNK;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// `aob_scan` split across the CPU's cores, returning the lowest match.
 pub fn aob_scan_parallel(mem: &(dyn Memory + Sync), lo: u64, hi: u64, pattern: &[Option<u8>]) -> Option<u64> {
     const PIECE: u64 = 64 << 20;
@@ -351,6 +400,57 @@ fn scan_units_in(mem: &(dyn Memory + Sync), range: (u64, u64)) -> Vec<u64> {
     v.sort_unstable();
     v.dedup();
     v
+}
+
+/// Where one convoy row's quantity, tag and item id sit in the live process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveConvoySlot {
+    pub qty_at: u64,
+    pub tag_at: u64,
+    pub item_at: u64,
+}
+
+/// A live convoy watch. `last_qty` and `last_item` are the previous tick's
+/// values; the thread compares against them so only a gain is multiplied, not
+/// the whole stack on every frame.
+#[derive(Debug, Clone)]
+pub struct ItemMultiplier {
+    pub base: u64,
+    /// Bytes from `base` through the last row's item id, read once per tick.
+    pub span: usize,
+    pub factor: u32,
+    pub slots: Vec<LiveConvoySlot>,
+    pub last_qty: Vec<u16>,
+    pub last_item: Vec<u32>,
+    /// ReWeaver's `item_stack.json`: items that take a slot of their own
+    /// (weapons, tomes, staves, shields, anything with uses). Their quantity
+    /// is always 1, and the multiplier must never touch them.
+    pub single: HashSet<u32>,
+}
+
+/// Items ReWeaver measured as one-per-slot gear. The list is bundled because
+/// the launcher cannot assume the player's RomFS is available while the game
+/// is running; it was generated from `Item.bin`, `Item_P0.bin` and
+/// `Item_P1.bin` by ReWeaver's `build_item_stack.py`.
+fn single_item_ids() -> HashSet<u32> {
+    include_str!("../data/item_stack.txt")
+        .lines()
+        .filter_map(|line| {
+            let id = line.trim();
+            if id.is_empty() || id.starts_with('#') {
+                return None;
+            }
+            u32::from_str_radix(id.trim_start_matches("0x"), 16).ok()
+        })
+        .collect()
+}
+
+/// The current free-time clock held at every live copy, so the six-hour turn
+/// boundaries do not pass while the cheat is on.
+#[derive(Debug, Clone)]
+pub struct ClockFreeze {
+    pub addresses: Vec<u64>,
+    pub value: Vec<u8>,
 }
 
 /// One piece of a memory, as its only region.
@@ -1020,6 +1120,187 @@ fn apply_unit(mem: &dyn Memory, a: u64, c: UnitCheats, level_due: bool, rejected
     }
 }
 
+// ------------------------------------------------------- party / free time
+
+/// Find the live convoy by the shape of the current save's convoy. The save's
+/// rows are fixed and mostly empty, so the first filled row supplies a strong
+/// signature (its quantity is wild, because pickups change it).
+pub fn find_item_multiplier(
+    mem: &(dyn Memory + Sync),
+    save_dir: &std::path::Path,
+    factor: u32,
+) -> Result<ItemMultiplier, String> {
+    let (slot, convoy) = newest_convoy(save_dir)?;
+    let pattern = convoy
+        .pattern(&slot.payload)
+        .ok_or("the current save's convoy is empty: pick up or buy one item, save, and try again")?;
+    let found = aob_scan_parallel(mem, GUEST_RANGE.0, GUEST_RANGE.1, &pattern)
+        .or_else(|| aob_scan_parallel(mem, 0x1_0000, 0x7FFF_FFFF_FFFF, &pattern))
+        .ok_or("the convoy was not found in the game's memory: load the save in game, then try again")?;
+    // The pattern begins at the `Transporter` copy's pointer, so the match is
+    // the convoy base; the count follows at +5.
+    let base = found;
+    let mut head = [0u8; 3];
+    if !mem.read(base + 4, &mut head) || head[0] != 1 {
+        return Err("the convoy marker moved before it could be read".into());
+    }
+    let count = u16::from_le_bytes([head[1], head[2]]) as usize;
+    if count != convoy.count {
+        return Err("the convoy in memory has a different row count from the save".into());
+    }
+    let span = convoy.slots.iter().map(|row| row.qty_at + 7).max().unwrap_or(0);
+    let mut slots = Vec::with_capacity(convoy.slots.len());
+    let mut last_qty = Vec::with_capacity(convoy.slots.len());
+    let mut last_item = Vec::with_capacity(convoy.slots.len());
+    for row in &convoy.slots {
+        let qty_at = row.qty_at as u64;
+        let mut qb = [0u8; 2];
+        if !mem.read(base + qty_at, &mut qb) {
+            return Err("a convoy row could not be read from the game's memory".into());
+        }
+        let qty = u16::from_le_bytes(qb);
+        let item = if qty > 0 {
+            let mut tag = [0u8; 1];
+            if !mem.read(base + row.tag_at as u64, &mut tag) || !matches!(tag[0], 0x41 | 0x61) {
+                return Err("a convoy row has an item tag EmblemWeave does not know".into());
+            }
+            let mut ib = [0u8; 4];
+            if !mem.read(base + row.item_at as u64, &mut ib) {
+                return Err("a convoy item id could not be read from the game's memory".into());
+            }
+            u32::from_le_bytes(ib)
+        } else {
+            0
+        };
+        slots.push(LiveConvoySlot {
+            qty_at,
+            tag_at: row.tag_at as u64,
+            item_at: row.item_at as u64,
+        });
+        last_qty.push(qty);
+        last_item.push(item);
+    }
+    Ok(ItemMultiplier { base, span, factor: factor.max(2), slots, last_qty, last_item, single: single_item_ids() })
+}
+
+fn newest_convoy(save_dir: &std::path::Path) -> Result<(crate::savefile::Slot, crate::savefile::Convoy), String> {
+    for (path, _) in crate::saves::slots(save_dir) {
+        let Ok(slot) = crate::savefile::Slot::open(&path) else {
+            continue;
+        };
+        if let Some(convoy) = slot.convoy() {
+            return Ok((slot, convoy));
+        }
+    }
+    Err("no current save has a convoy yet: load a save in game and try again".into())
+}
+
+/// Keep the free-time clock at the value the current save was taken at. The
+/// clock advances in six-hour blocks, and each block is a free-time turn; not
+/// letting the clock cross a boundary is the closest live equivalent of a
+/// maximum action-point pool in this game.
+pub fn find_clock_freeze(
+    mem: &(dyn Memory + Sync),
+    save_dir: &std::path::Path,
+) -> Result<ClockFreeze, String> {
+    for (path, _) in crate::saves::slots(save_dir) {
+        let Ok(slot) = crate::savefile::Slot::open(&path) else {
+            continue;
+        };
+        let Some(clock) = slot.game_clock() else {
+            continue;
+        };
+        let addresses = scan_clock(mem, &clock);
+        if addresses.is_empty() {
+            return Err("the save's clock was not found in the game's memory: load that save and switch this on while free time is showing".into());
+        }
+        return Ok(ClockFreeze { addresses, value: clock.to_vec() });
+    }
+    Err("no current save has a free-time clock yet: save once in free time and try again".into())
+}
+
+fn scan_clock(mem: &(dyn Memory + Sync), clock: &[u8; 7]) -> Vec<u64> {
+    let exact: Vec<Option<u8>> = clock.iter().copied().map(Some).collect();
+    let mut found = aob_scan_all(mem, GUEST_RANGE.0, GUEST_RANGE.1, &exact, 64);
+    if found.is_empty() {
+        found = aob_scan_all(mem, 0x1_0000, 0x7FFF_FFFF_FFFF, &exact, 64);
+    }
+    if found.is_empty() {
+        // Some builds keep the seconds byte elsewhere; hold the date and time
+        // to the minute, which is all a six-hour turn boundary needs.
+        let minute: Vec<Option<u8>> = clock[..6].iter().copied().map(Some).collect();
+        found = aob_scan_all(mem, GUEST_RANGE.0, GUEST_RANGE.1, &minute, 64);
+        if found.is_empty() {
+            found = aob_scan_all(mem, 0x1_0000, 0x7FFF_FFFF_FFFF, &minute, 64);
+        }
+    }
+    found
+}
+
+/// Compare every convoy row with the previous tick. A gain is multiplied only
+/// when that row already held a stack of the same item, and never for gear that
+/// ReWeaver's item table marks as one-per-slot. A use, sale or newly filled row
+/// is only recorded. Returns the number of writes the game refused.
+pub fn apply_item_multiplier(mem: &dyn Memory, m: &mut ItemMultiplier) -> u64 {
+    let factor = m.factor.max(2) as u32;
+    let mut buf = vec![0u8; m.span];
+    if !mem.read(m.base, &mut buf) {
+        return 1;
+    }
+    let mut rejected = 0u64;
+    for i in 0..m.slots.len() {
+        let row = m.slots[i];
+        let at = row.qty_at as usize;
+        let Some(qb) = buf.get(at..at + 2) else {
+            rejected += 1;
+            continue;
+        };
+        let qty = u16::from_le_bytes([qb[0], qb[1]]);
+        let mut item = 0u32;
+        if qty > 0 {
+            let tag_at = row.tag_at as usize;
+            let item_at = row.item_at as usize;
+            match (buf.get(tag_at), buf.get(item_at..item_at + 4)) {
+                (Some(&tag), Some(ib)) if matches!(tag, 0x41 | 0x61) => {
+                    item = u32::from_le_bytes([ib[0], ib[1], ib[2], ib[3]]);
+                }
+                _ => rejected += 1,
+            }
+        }
+        let last = m.last_qty[i];
+        let last_item = m.last_item[i];
+        // Gear takes a slot per copy and always has quantity 1. Requiring an
+        // existing stack of the same item means a newly filled row is never
+        // rewritten; the item list additionally protects gear even if a save
+        // editor or an earlier build left a larger quantity in its row.
+        let existing_stack = last_item == item && last >= 2;
+        if qty > last && item != 0 && existing_stack && !m.single.contains(&item) {
+            let wanted = (last as u32).saturating_add((qty as u32 - last as u32).saturating_mul(factor));
+            let new = wanted.min(9999).max(qty as u32) as u16;
+            if new != qty {
+                if mem.write(m.base + row.qty_at, &new.to_le_bytes()) {
+                    m.last_qty[i] = new;
+                    buf[at..at + 2].copy_from_slice(&new.to_le_bytes());
+                } else {
+                    rejected += 1;
+                    m.last_qty[i] = qty;
+                }
+            } else {
+                m.last_qty[i] = qty;
+            }
+            m.last_item[i] = item;
+        } else {
+            m.last_qty[i] = qty;
+            m.last_item[i] = item;
+        }
+    }
+    rejected
+}
+
+pub fn apply_clock_freeze(mem: &dyn Memory, c: &ClockFreeze) -> u64 {
+    c.addresses.iter().filter(|a| !mem.write(**a, &c.value)).count() as u64
+}
+
 // ------------------------------------------------------------------ runner
 
 /// The quick cheats switched on for one unit.
@@ -1040,6 +1321,10 @@ pub struct Shared {
     /// Units with a quick cheat switched on: the record's address and the
     /// cheats to hold there, applied by the cheat thread every tick.
     pub units: Vec<(u64, UnitCheats)>,
+    /// A live convoy watch: gains are multiplied as the game writes them.
+    pub item_multiplier: Option<ItemMultiplier>,
+    /// The free-time clock held still, so its six-hour turns do not advance.
+    pub clock_freeze: Option<ClockFreeze>,
     /// Writes the game refused since the units were found.
     pub rejected: u64,
     /// The game's process id while attached.
@@ -1083,7 +1368,7 @@ pub fn start() -> Handle {
             loop {
                 let proc = game();
                 let pid = proc.as_ref().map(|p| p.pid);
-                let (codes, freezes, units) = {
+                let (codes, freezes, units, party_active) = {
                     let mut s = shared.lock().unwrap();
                     if s.stop {
                         return;
@@ -1093,13 +1378,16 @@ pub fn start() -> Handle {
                         // records from the old one mean nothing now.
                         s.units.clear();
                         s.freezes.clear();
+                        s.item_multiplier = None;
+                        s.clock_freeze = None;
                         s.rejected = 0;
                         seen = pid;
                     }
                     s.attached = pid;
-                    (s.codes.clone(), s.freezes.clone(), s.units.clone())
+                    let party = s.item_multiplier.is_some() || s.clock_freeze.is_some();
+                    (s.codes.clone(), s.freezes.clone(), s.units.clone(), party)
                 };
-                if codes.is_empty() && freezes.is_empty() && units.is_empty() {
+                if codes.is_empty() && freezes.is_empty() && units.is_empty() && !party_active {
                     // Only look for the game now and then when there is nothing to apply.
                     idle += 1;
                     if idle % 60 == 0 {
@@ -1124,8 +1412,15 @@ pub fn start() -> Handle {
                     if due && units.iter().any(|(_, c)| c.quick_level) {
                         leveled = std::time::Instant::now();
                     }
+                    let mut s = shared.lock().unwrap();
+                    if let Some(m) = s.item_multiplier.as_mut() {
+                        rejected += apply_item_multiplier(p.as_ref(), m);
+                    }
+                    if let Some(c) = &s.clock_freeze {
+                        rejected += apply_clock_freeze(p.as_ref(), c);
+                    }
                     if rejected > 0 {
-                        shared.lock().unwrap().rejected += rejected;
+                        s.rejected += rejected;
                     }
                 } else {
                     vm = VmState::default();
@@ -1320,6 +1615,88 @@ unregistersymbol(diet)
         m.write(at + unit::LEVEL, &[unit::MAX_LEVEL]);
         apply_unit(&m, at, c, true, &mut rejected);
         assert_eq!(rd(&m, at + unit::LEVEL, 1), u64::from(unit::MAX_LEVEL));
+    }
+
+    #[test]
+    fn item_gains_are_multiplied_once() {
+        let m = fake();
+        let base = HEAP_BASE + 0x2000;
+        let item = 0x1122_3344u32;
+        m.write(base + 0x10, &3u16.to_le_bytes());
+        m.write(base + 0x12, &[0x41]);
+        m.write(base + 0x13, &item.to_le_bytes());
+        let mut watch = ItemMultiplier {
+            base,
+            span: 0x20,
+            factor: 3,
+            slots: vec![LiveConvoySlot { qty_at: 0x10, tag_at: 0x12, item_at: 0x13 }],
+            last_qty: vec![3],
+            last_item: vec![item],
+            single: HashSet::new(),
+        };
+        // Picking up two more turns 3 into 3 + 2*3 = 9, not into 15.
+        m.write(base + 0x10, &5u16.to_le_bytes());
+        assert_eq!(apply_item_multiplier(&m, &mut watch), 0);
+        assert_eq!(rd(&m, base + 0x10, 2), 9);
+        // Spending some is recorded, not multiplied.
+        m.write(base + 0x10, &2u16.to_le_bytes());
+        apply_item_multiplier(&m, &mut watch);
+        assert_eq!(rd(&m, base + 0x10, 2), 2);
+        // One more becomes 2 + 1*3 = 5.
+        m.write(base + 0x10, &3u16.to_le_bytes());
+        apply_item_multiplier(&m, &mut watch);
+        assert_eq!(rd(&m, base + 0x10, 2), 5);
+        // A newly filled row is recorded, not multiplied: it may be one-slot
+        // gear. Once the same item has a stack, later gains are multiplied.
+        m.write(base + 0x10, &0u16.to_le_bytes());
+        apply_item_multiplier(&m, &mut watch);
+        m.write(base + 0x10, &1u16.to_le_bytes());
+        apply_item_multiplier(&m, &mut watch);
+        assert_eq!(rd(&m, base + 0x10, 2), 1);
+    }
+
+    #[test]
+    fn a_one_slot_gear_item_is_left_alone() {
+        let m = fake();
+        let base = HEAP_BASE + 0x2400;
+        let gear = 0x2f0d_2589u32; // Wooden Sword, from the bundled stack list.
+        assert!(single_item_ids().contains(&gear), "the bundled list must mark the Wooden Sword as one-per-slot");
+        let mut watch = ItemMultiplier {
+            base,
+            span: 0x20,
+            factor: 3,
+            slots: vec![LiveConvoySlot { qty_at: 0x10, tag_at: 0x12, item_at: 0x13 }],
+            last_qty: vec![0],
+            last_item: vec![0],
+            single: single_item_ids(),
+        };
+        // The game fills an empty low-part slot with one copy.
+        m.write(base + 0x10, &1u16.to_le_bytes());
+        m.write(base + 0x12, &[0x41]);
+        m.write(base + 0x13, &gear.to_le_bytes());
+        assert_eq!(apply_item_multiplier(&m, &mut watch), 0);
+        assert_eq!(rd(&m, base + 0x10, 2), 1, "a one-slot gear pickup stays one copy");
+        // Even a row already showing a larger quantity is protected by the
+        // one-per-slot list; this is the case an existing-stack check alone
+        // would otherwise multiply.
+        m.write(base + 0x10, &5u16.to_le_bytes());
+        apply_item_multiplier(&m, &mut watch);
+        m.write(base + 0x10, &6u16.to_le_bytes());
+        assert_eq!(apply_item_multiplier(&m, &mut watch), 0);
+        assert_eq!(rd(&m, base + 0x10, 2), 6, "gear quantity is never rewritten");
+    }
+
+    #[test]
+    fn aob_scan_finds_every_copy() {
+        let m = fake();
+        let bytes = parse_aob("DE AD ?? EF").unwrap();
+        for at in [0x300u64, 0x900, 0x1200] {
+            m.write(HEAP_BASE + at, &[0xDE, 0xAD, 0x55, 0xEF]);
+        }
+        assert_eq!(
+            aob_scan_all(&m, HEAP_BASE, HEAP_BASE + 0x10000, &bytes, 8),
+            vec![HEAP_BASE + 0x300, HEAP_BASE + 0x900, HEAP_BASE + 0x1200]
+        );
     }
 
     #[test]

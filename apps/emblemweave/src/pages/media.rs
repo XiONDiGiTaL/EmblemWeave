@@ -216,6 +216,57 @@ fn standard_graphics(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+/// How a stored GPU value is shown in the dropdown. A category keeps its name;
+/// a device name gets the adapter type and video memory the engine logged.
+fn gpu_display(value: &str, devices: &[crate::gpu::Device]) -> String {
+    match value.trim() {
+        "" | "Automatic" => "Automatic (recommended)".into(),
+        "Discrete" => "Discrete (most video memory)".into(),
+        "Integrated" => "Integrated".into(),
+        name => devices
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(name))
+            .map(|d| {
+                if d.vram_mb > 0 {
+                    format!("{} ({}, {:.1} GB)", d.name, d.kind, d.vram_mb as f64 / 1024.0)
+                } else {
+                    format!("{} ({})", d.name, d.kind)
+                }
+            })
+            .unwrap_or_else(|| name.to_string()),
+    }
+}
+
+/// The GPU picker: the engine's categories plus every Vulkan 1.3 device the
+/// loader can see. Selecting a device stores its full name, which the engine
+/// matches case-insensitively and independently of enumeration order.
+fn gpu_combo(ui: &mut egui::Ui, value: &mut String, devices: &[crate::gpu::Device]) {
+    egui::ComboBox::from_id_salt("gpu")
+        .selected_text(crate::i18n::tr(&gpu_display(value, devices)))
+        .width(280.0)
+        .show_ui(ui, |ui| {
+            for choice in GPU_CHOICES {
+                ui.selectable_value(value, (*choice).to_string(), gpu_display(choice, devices));
+            }
+            if !devices.is_empty() {
+                ui.separator();
+                for d in devices {
+                    ui.selectable_value(value, d.name.clone(), gpu_display(&d.name, devices));
+                }
+            }
+            if !value.is_empty()
+                && !GPU_CHOICES.contains(&value.as_str())
+                && !devices.iter().any(|d| d.name.eq_ignore_ascii_case(value))
+            {
+                // A hand-written name or a device that is no longer installed:
+                // keep it visible so selecting another adapter is deliberate.
+                let current = value.clone();
+                ui.separator();
+                ui.selectable_value(value, current.clone(), format!("{} (not detected)", current));
+            }
+        });
+}
+
 /// The Standard graphics presets: labels, hover text and values in one place.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Preset {
@@ -350,13 +401,13 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
         );
         let decoder_help = match &sdk.ffmpeg {
             Some(dir) => format!("AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder. FFmpeg loads the libavcodec DLLs found in {} and uses D3D11VA when hardware acceleration is on; its software path is FFmpeg's libdav1d. Applies at the next start.", dir.display()),
-            None => "AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder and needs nothing. FFmpeg needs avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg in the play folder; without them the game uses dav1d. Applies at the next start.".into(),
+            None => "AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder and needs nothing. FFmpeg uses the avcodec-62.dll, avutil-60.dll and swresample-6.dll shipped in upscalers\\ffmpeg; if that folder is missing, the game uses dav1d. Applies at the next start.".into(),
         };
         widgets::setting_row(ui, &p, "Video decoder", &decoder_help, |ui| {
             combo(ui, "vdec", &mut g.video_decoder, VIDEO_DECODERS);
         });
         if g.video_decoder == "FFmpeg (libavcodec)" && sdk.ffmpeg.is_none() {
-            widgets::pending_note(ui, &p, "FFmpeg is selected, but avcodec-62.dll, avutil-60.dll and swresample-6.dll were not found in upscalers\\ffmpeg, so the game will use its built-in dav1d instead. Put a matching FFmpeg 8.x shared build there to use it.");
+            widgets::pending_note(ui, &p, "FFmpeg is selected, but avcodec-62.dll, avutil-60.dll and swresample-6.dll were not found in upscalers\\ffmpeg, so the game will use its built-in dav1d instead. Restore the shipped folder or put a matching FFmpeg 8.x shared build there to use it.");
         }
         widgets::setting_row(
             ui,
@@ -450,9 +501,23 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &p,
             "GPU",
-            "Which Vulkan device the engine opens. Automatic takes the discrete GPU with the most video memory.",
+            "Which Vulkan device the engine opens. Automatic takes the discrete GPU with the most video memory. The list below shows the Vulkan 1.3 devices this PC reports; choosing one writes its full name to [gfx] gpu.",
             |ui| {
-                combo(ui, "gpu", &mut g.gpu, GPU_CHOICES);
+                let devices = crate::gpu::cached();
+                gpu_combo(ui, &mut g.gpu, devices);
+                if devices.is_empty() {
+                    ui.label(
+                        crate::i18n::text("No Vulkan 1.3 device was reported; Automatic, Discrete and Integrated still work through the engine's own rule.")
+                            .size(10.8)
+                            .color(p.muted),
+                    );
+                } else {
+                    ui.label(
+                        crate::i18n::text(format!("Detected: {}", devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(" · ")))
+                            .size(10.8)
+                            .color(p.muted),
+                    );
+                }
             },
         );
         widgets::setting_row(ui, &p, "Renderer", "", |ui| {

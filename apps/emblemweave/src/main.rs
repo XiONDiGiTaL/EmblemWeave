@@ -16,6 +16,7 @@ mod crash;
 mod deps;
 mod discord;
 mod engine;
+mod gpu;
 #[cfg(windows)]
 mod exe_icon;
 mod gamedata;

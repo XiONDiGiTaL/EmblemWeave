@@ -178,7 +178,13 @@ jobs:
             --require "EmblemWeave-v${VERSION}/EmblemWeave.exe" \
             --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt" \
             --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/ffmpeg/include/libavcodec/avcodec.h" \
-            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/ffmpeg/COPYING.LGPLv2.1"
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/runtime/third_party/ffmpeg/COPYING.LGPLv2.1" \
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/avcodec-62.dll" \
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/avutil-60.dll" \
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/swresample-6.dll" \
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/LICENSE.txt" \
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/SHA256SUMS" \
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/README.md"
           python tools/verify_archive.py "dist/EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" --require linux-x64/spirv_harness
           sha256sum dist/*
       - name: Write the notes

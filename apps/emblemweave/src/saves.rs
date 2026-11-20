@@ -609,8 +609,9 @@ pub struct SlotInfo {
     pub gold: Option<u32>,
     pub renown: Option<u32>,
     pub units: usize,
-    /// The first main character this slot names, when it has one. Display-only:
-    /// the carousel uses it to choose a portrait when no explicit one is set.
+    /// The route lord this slot was saved on, from its route byte, or the first
+    /// protagonist in the roster when that byte is unknown. Display-only: the
+    /// carousel uses it to choose a portrait when no explicit one is set.
     pub leader: Option<String>,
     pub valid: bool,
     pub problems: Vec<String>,
@@ -733,10 +734,18 @@ pub fn profile_slots(p: &Profile, ids: &crate::savefile::Ids) -> Vec<SlotInfo> {
                 Ok(slot) => {
                     let player = slot.player();
                     let roster = slot.units(ids);
-                    let leader = roster
-                        .iter()
-                        .find_map(|u| crate::portraits::key_for_name(&u.name))
-                        .map(str::to_string);
+                    // The route lord is who the save is following. Fall back to
+                    // the first protagonist in the roster only for slots whose
+                    // route byte is not one of the five known routes.
+                    let leader = slot
+                        .route_lord()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            roster
+                                .iter()
+                                .find_map(|u| crate::portraits::key_for_name(&u.name))
+                                .map(str::to_string)
+                        });
                     let problems = slot.verify();
                     let summary = slot.summary();
                     (

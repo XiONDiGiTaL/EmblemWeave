@@ -5,8 +5,8 @@
 //   NXRT_FFMPEG_TEST_DIR=<folder with avcodec-62.dll and avutil-60.dll>
 //   NXRT_FFMPEG_TEST_FILE=<one-frame AV1 .obu>
 //
-// The engine ships no FFmpeg binary; this proves the run-time loader and the D3D11VA/software decoder path against a
-// user-supplied build without making FFmpeg a build dependency.
+// The release ships the FFmpeg shared DLLs, but they are not a build dependency; this proves the run-time loader and the
+// D3D11VA/software decoder path against a build supplied through the test environment.
 #include <cstdlib>
 #include <fstream>
 #include <iterator>

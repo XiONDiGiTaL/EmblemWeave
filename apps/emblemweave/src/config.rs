@@ -103,7 +103,7 @@ pub struct Graphics {
     /// driver (#72). "Automatic" (its own rule: Intel GPUs that are not discrete), "Always on" or "Off".
     pub present_guard: String,
     /// `[media] movie_decoder`: the engine's AV1 decoder for cutscene movies. "dav1d (CPU)" is built in;
-    /// "FFmpeg (libavcodec)" loads the player-supplied avcodec/avutil/swresample DLLs and can use D3D11VA.
+    /// "FFmpeg (libavcodec)" loads the shipped avcodec/avutil/swresample DLLs and can use D3D11VA.
     pub video_decoder: String,
     /// `[media] movie_hwaccel`: ask FFmpeg for D3D11VA instead of its software decoder. Ignored by dav1d.
     pub video_hwaccel: bool,

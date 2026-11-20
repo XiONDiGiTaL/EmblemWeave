@@ -4123,19 +4123,26 @@ fn dlss_upscaler_label(word: &str) -> Option<&'static str> {
     })
 }
 
-fn gpu_word(label: &str) -> &'static str {
-    match label {
-        "Discrete" => "discrete",
-        "Integrated" => "integrated",
-        _ => "",
+fn gpu_word(label: &str) -> String {
+    match label.trim() {
+        "Discrete" => "discrete".into(),
+        "Integrated" => "integrated".into(),
+        // The GPU picker stores the adapter's full Vulkan name. The engine
+        // matches a case-insensitive part of that name, so it does not depend
+        // on the loader's enumeration order (and a hybrid laptop keeps the
+        // exact discrete/integrated adapter the player chose).
+        "" | "Automatic" => String::new(),
+        name => name.to_string(),
     }
 }
 
-fn gpu_label(word: &str) -> Option<&'static str> {
-    Some(match word.trim().to_ascii_lowercase().as_str() {
-        "" | "auto" | "automatic" => "Automatic",
-        "discrete" => "Discrete",
-        "integrated" => "Integrated",
+fn gpu_label(word: &str) -> Option<String> {
+    let word = word.trim();
+    Some(match word.to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" => "Automatic".into(),
+        "discrete" => "Discrete".into(),
+        "integrated" => "Integrated".into(),
+        _ if !word.is_empty() => word.to_string(),
         _ => return None,
     })
 }
@@ -5447,6 +5454,17 @@ mod tests {
         std::fs::write(fsr.join("amd_fidelityfx_upscaler_vk.dll"), "").unwrap();
         assert!(found.fsr4(), "the SDK 2.4 loader pair enables FSR 4.1.2");
         assert!(found.fsr_framegen(), "the v1.1.4 DLL beside the pair still enables FSR 3 frame generation");
+        // The release puts the FFmpeg runtime in the same upscalers tree; the launcher must find that exact layout
+        // without the player moving the three DLLs into the play folder.
+        let ffmpeg = root.join("upscalers").join("ffmpeg");
+        std::fs::create_dir_all(&ffmpeg).unwrap();
+        for f in ["avcodec-62.dll", "avutil-60.dll", "swresample-6.dll"] {
+            std::fs::write(ffmpeg.join(f), "").unwrap();
+        }
+        assert_eq!(sdk_ffmpeg(&[root.clone()]), Some(ffmpeg.clone()));
+        // Two of the three DLLs are not a usable decoder: the loader must keep looking and the game falls back to dav1d.
+        std::fs::remove_file(ffmpeg.join("swresample-6.dll")).unwrap();
+        assert_eq!(sdk_ffmpeg(&[root.clone()]), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6289,6 +6307,53 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         g.sharpening = "High".into();
         let d = super::desired_values(&g, &crate::config::Audio::default());
         assert_eq!(d.get("upscale.sharpness").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn a_chosen_gpu_name_is_written_for_the_engines_name_match() {
+        let g = crate::config::Graphics {
+            gpu: "AMD Radeon RX 7900 XT".into(),
+            ..crate::config::Graphics::default()
+        };
+        let d = super::desired_values(&g, &crate::config::Audio::default());
+        assert_eq!(
+            d.get("gfx.gpu").map(String::as_str),
+            Some("AMD Radeon RX 7900 XT"),
+            "the full Vulkan device name, not a category that could pick another adapter"
+        );
+        assert_eq!(super::gpu_label("AMD Radeon RX 7900 XT"), Some("AMD Radeon RX 7900 XT".into()));
+    }
+
+    #[test]
+    fn a_master_boost_above_one_hundred_percent_reaches_the_ini_and_comes_back() {
+        // Issue #60: the slider is 0..200%. The engine accepts 2.00 and limits
+        // the mix itself, so neither the launcher's write nor its adoption may
+        // quietly cap the value at 100%.
+        let dir = std::env::temp_dir().join(format!("ew-audio-boost-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fefw.ini"), "[log]\npath = fefw.log\n").unwrap();
+        std::fs::write(dir.join("controls.ini"), "[meta]\ndefaults_rev = 1\n").unwrap();
+
+        let g = crate::config::Graphics::default();
+        let a = crate::config::Audio {
+            master: 1.85,
+            ..crate::config::Audio::default()
+        };
+        let mut applied = Values::new();
+        assert!(write_settings(&dir, &g, &a, &crate::config::Performance::default(), &mut applied).unwrap());
+        let controls = std::fs::read_to_string(dir.join("controls.ini")).unwrap();
+        assert!(
+            controls.contains("[audio]\nvolume = 1.85"),
+            "a 185% master reaches controls.ini without being capped"
+        );
+
+        let desired = desired_values(&g, &a);
+        let mut file = desired.clone();
+        file.insert("audio.volume".into(), "2.00".into());
+        let mut adopt_g = g;
+        let mut adopt_a = a;
+        assert!(adopt_from(&mut adopt_g, &mut adopt_a, &desired, &desired, &file));
+        assert!((adopt_a.master - 2.0).abs() < 0.001, "the engine's 200% is adopted, not clamped away");
     }
 
     #[test]

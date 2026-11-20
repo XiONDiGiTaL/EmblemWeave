@@ -36,15 +36,21 @@ SOFTWARE.
 
 The nxrt parts that come from smo-recomp and ScarletNX are under GPL-3.0, like nxrt itself (GPL-3.0-or-later). The same holds for the ssbu-recomp references in `include/nxrt/diag.h`, `src/eh/*` (facts read from `runtime/eh_runtime.h` and `runtime/nncxxrt.c`: header layout of the SDK's libc++abi, the non-unique-name bit) and `src/core/hooks.cpp` (idea only). Upstream licence files: smo-recomp `LICENSE` (GPL-3.0), ScarletNX `LICENSE` (GPL-3.0; its source headers say GPL-3.0-or-later), ssbu-recomp `LICENSE` (GPL-3.0). The GPL-3.0 text for nxrt is the `LICENSE` file at the repository root.
 
-## FFmpeg 8.1 public headers (LGPL-2.1-or-later)
+## FFmpeg 8.1 public headers (LGPL-2.1-or-later) and shared libraries (GPL-2.0-or-later)
 
 `third_party/ffmpeg/include` holds the public `libavcodec` and `libavutil` headers of FFmpeg n8.1, taken from the
 `ffmpeg-n8.1-latest-win64-lgpl-shared-8.1` package published by BtbN (https://github.com/BtbN/FFmpeg-Builds/releases).
-They are used only to compile `src/media/movie_ffmpeg.cpp`, which loads a player-supplied FFmpeg 8.x shared build at run
-time. No FFmpeg library is linked and no FFmpeg binary is shipped. The headers are licensed under the GNU Lesser General
-Public License, version 2.1 or later; the licence texts are `third_party/ffmpeg/COPYING.LGPLv2.1` and
-`third_party/ffmpeg/COPYING.LGPLv3`, and `third_party/ffmpeg/README.md` records the source and the ABI pins. FFmpeg's
-upstream licence and copyright notices are at https://github.com/FFmpeg/FFmpeg.
+They are used only to compile `src/media/movie_ffmpeg.cpp`, which loads the shared libraries at run time; no FFmpeg
+library is linked into `fefw.exe`. The headers are licensed under the GNU Lesser General Public License, version 2.1 or
+later; the licence texts are `third_party/ffmpeg/COPYING.LGPLv2.1` and `third_party/ffmpeg/COPYING.LGPLv3`.
+
+The release also ships `avcodec-62.dll`, `avutil-60.dll` and `swresample-6.dll` in `upscalers/ffmpeg`. They are the
+FFmpeg GPL shared Windows build `N-123619-g44ad73031d` (2026-03-25; libavcodec 62.29.101, libavutil 60.29.100,
+swresample 6.4.100), with SHA-256 hashes in `SHA256SUMS`, the GPLv3 text in `LICENSE.txt` and `COPYING.GPLv3`, and source
+links in `README.md`. The build contains libx264 and libx265; the engine only uses FFmpeg's AV1 decoder (native AV1 with
+D3D11VA, or its bundled libdav1d in software). FFmpeg's upstream licence and copyright notices are at
+https://github.com/FFmpeg/FFmpeg; the source for the reported revision is
+https://github.com/FFmpeg/FFmpeg/commit/44ad73031d.
 
 ## LLVM libc++abi (Apache-2.0 with LLVM exceptions)
 

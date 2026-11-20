@@ -41,7 +41,8 @@ game code, no assets and no keys, and it only ever reads your files.
 
 > **Current release: 0.1.41.** A measured Adaptive Performance Controller and Frame-Time Stability system now sit
 > behind a dedicated launcher Performance page and a nine-tab F1 menu, all native overlays share the XiØN design
-> tokens and Sora typeface, and the launcher's post-release drag glide is removed. See the
+> tokens and Sora typeface, the master volume goes to 200%, the GPU picker lists the PC's real Vulkan adapters, and
+> the launcher's post-release drag glide is removed. See the
 > [0.1.41 changelog](docs/changelog/0.1.41.md).
 
 ## Documentation
@@ -105,6 +106,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 - [metrist38](https://github.com/metrist38/fefw-recomp): maintains the fefw-recomp fork that supplies updates beyond the original 0.2.0
 - [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber): another fork based on fefw-recomp, with updates beyond 0.2.0. We are in full support of others extending the life of the original beyond its development
 - [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause) and [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause): the host video decoders the baseline build links
+- [FFmpeg](https://ffmpeg.org/) (GPL shared build): the optional AV1 movie decoder, shipped as `upscalers\ffmpeg` with its GPL text, hashes and source links
 - [roxmltree](https://github.com/RazrFalcon/roxmltree) (MIT / Apache-2.0) reads Cheat Engine tables; [windows-sys](https://github.com/microsoft/windows-rs) (MIT / Apache-2.0) reaches the game's memory and the controller
 - [GameBanana](https://gamebanana.com/mods/games/26274) hosts the mods the Mods page lists; each mod belongs to its author
 - [egui](https://github.com/emilk/egui): the launcher interface

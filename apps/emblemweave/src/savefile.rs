@@ -75,6 +75,80 @@ pub struct Block {
     pub end: usize,
 }
 
+/// One row of the fixed convoy store: the quantity and item tag/id offsets are
+/// relative to the convoy itself. An empty row has `item_at == 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConvoySlot {
+    pub qty_at: usize,
+    pub tag_at: usize,
+    pub item_at: usize,
+}
+
+/// The convoy block as ReWeaver and fefw-editor describe it: a count and a
+/// fixed row of `[u16 quantity][item tag, id]` entries. Stackable items keep
+/// their quantity here; gear uses one row per copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Convoy {
+    pub at: usize,
+    pub count: usize,
+    pub slots: Vec<ConvoySlot>,
+}
+
+impl Convoy {
+    /// A byte pattern that finds this convoy in the game's memory. It starts at
+    /// the convoy pointer (which tells this `Transporter` copy apart from the
+    /// restart and reliquary copies), keeps the row count and empty rows exact,
+    /// and leaves the first filled row's quantity wild so a later pickup still
+    /// matches. `None` when the convoy holds no items yet.
+    pub fn pattern(&self, payload: &[u8]) -> Option<Vec<Option<u8>>> {
+        let first = self.slots.iter().position(|s| s.item_at != 0)?;
+        let end = self.slots[first].qty_at.checked_add(7)?;
+        if self.at.checked_add(end)? > payload.len() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(end);
+        for o in 0..end {
+            if o >= self.slots[first].qty_at && o < self.slots[first].qty_at + 2 {
+                out.push(None);
+            } else {
+                out.push(Some(payload[self.at + o]));
+            }
+        }
+        Some(out)
+    }
+}
+
+fn convoy_at(payload: &[u8], at: usize, end: usize, count: usize) -> Option<Convoy> {
+    let mut i = at.checked_add(7)?;
+    let mut slots = Vec::with_capacity(count);
+    for _ in 0..count {
+        if i + 2 > end {
+            return None;
+        }
+        let qty_at = i - at;
+        let qty = u16::from_le_bytes([payload[i], payload[i + 1]]);
+        i += 2;
+        let (tag_at, item_at) = if qty == 0 {
+            (0, 0)
+        } else {
+            let tag = *payload.get(i)?;
+            let size = match tag {
+                0x41 => 5,
+                0x61 => 13,
+                _ => return None,
+            };
+            if i + size > end {
+                return None;
+            }
+            (i - at, i + 1 - at)
+        };
+        slots.push(ConvoySlot { qty_at, tag_at, item_at });
+        i += if qty == 0 { 0 } else if payload[tag_at + at] == 0x61 { 13 } else { 5 };
+    }
+    // The node ends with at most three alignment bytes after the last row.
+    (i <= end && end - i < 4).then_some(Convoy { at, count, slots })
+}
+
 /// One decoded slot.
 #[derive(Debug, Clone)]
 pub struct Slot {
@@ -173,6 +247,63 @@ impl Slot {
 
     pub fn block(&self, name: &str) -> Option<Block> {
         self.blocks().into_iter().find(|b| b.name == name)
+    }
+
+    /// The convoy store inside `Transporter`, when this slot has one.
+    ///
+    /// The game writes a fixed row of item quantities; the save editor calls
+    /// its marker/count layout the convoy. Looking for that layout inside the
+    /// block is what the editor does too, because the block's first bytes are
+    /// its end pointer rather than the row count.
+    pub fn convoy(&self) -> Option<Convoy> {
+        let b = self.block("Transporter")?;
+        let p = &self.payload;
+        let end = b.end.min(p.len());
+        let mut at = b.start;
+        while at + 7 <= end {
+            if p[at + 4] == 1 {
+                let count = u16::from_le_bytes([p[at + 5], p[at + 6]]) as usize;
+                if (16..=4096).contains(&count) {
+                    if let Some(c) = convoy_at(p, at, end, count) {
+                        return Some(c);
+                    }
+                }
+            }
+            at += 1;
+        }
+        None
+    }
+
+    /// The free-time clock the slot was saved at: year, month, day, hour,
+    /// minute, second. The game mirrors this in `GameSchedule`; it is the value
+    /// that advances in six-hour steps as free-time turns are spent.
+    pub fn game_clock(&self) -> Option<[u8; 7]> {
+        let b = self.block("GameSchedule")?;
+        let p = &self.payload;
+        if b.end - b.start != 24 || p.get(b.start + 4) != Some(&1) || b.start + 12 > p.len() {
+            return None;
+        }
+        let mut clock = [0u8; 7];
+        clock.copy_from_slice(&p[b.start + 5..b.start + 12]);
+        let year = u16::from_le_bytes([clock[0], clock[1]]);
+        if !(1000..=3000).contains(&year)
+            || !(1..=12).contains(&clock[2])
+            || !(1..=31).contains(&clock[3])
+            || clock[4] >= 24
+            || clock[5] >= 60
+            || clock[6] >= 60
+        {
+            return None;
+        }
+        Some(clock)
+    }
+
+    /// The route lord the slot was saved on, from `GameUserData`'s route byte.
+    /// This is the character whose route the player is in, not merely the first
+    /// protagonist anywhere in the roster.
+    pub fn route_lord(&self) -> Option<&'static str> {
+        let at = self.user_data()?;
+        route_lord_key(*self.payload.get(at + 3)?)
     }
 
     /// Offset of the player data (gold and the like), when the slot has it.
@@ -275,6 +406,19 @@ fn with_suffix(p: &Path, s: &str) -> PathBuf {
     let mut o = p.as_os_str().to_owned();
     o.push(s);
     PathBuf::from(o)
+}
+
+/// The save's route code to the portrait key of its route lord. The codes are
+/// the game's own: Cai 1, Dietrich 2, Theodora 3, Leda 4, Eshmel 9.
+pub fn route_lord_key(code: u8) -> Option<&'static str> {
+    match code {
+        1 => Some("cai"),
+        2 => Some("dietrich"),
+        3 => Some("theodora"),
+        4 => Some("leda"),
+        9 => Some("eshmel"),
+        _ => None,
+    }
 }
 
 /// A zstd frame holding `data` in raw blocks.
@@ -607,6 +751,16 @@ mod tests {
             ruzstd::StreamingDecoder::new(std::io::Cursor::new(&frame[..])).unwrap().read_to_end(&mut out).unwrap();
             assert_eq!(out, data, "{n} bytes");
         }
+    }
+
+    #[test]
+    fn route_codes_map_to_portrait_keys() {
+        assert_eq!(route_lord_key(1), Some("cai"));
+        assert_eq!(route_lord_key(2), Some("dietrich"));
+        assert_eq!(route_lord_key(3), Some("theodora"));
+        assert_eq!(route_lord_key(4), Some("leda"));
+        assert_eq!(route_lord_key(9), Some("eshmel"));
+        assert_eq!(route_lord_key(0), None);
     }
 
     #[test]

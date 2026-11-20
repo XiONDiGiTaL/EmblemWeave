@@ -73,6 +73,32 @@ try {
     Copy-Item (Join-Path $repo 'docs\changelog') (Join-Path $pkg 'docs\changelog') -Recurse
     Copy-Item (Join-Path $repo 'docs\screenshots') (Join-Path $pkg 'docs\screenshots') -Recurse
 
+    # 3b. The optional movie decoder's shared runtime. These are deliberately not taken from the player's machine:
+    # a release must contain the exact ABI the runtime was compiled against, and the GPL build is easy to lose when
+    # the FFmpeg download page only offers a monolithic ffmpeg.exe. The hashes pin the set in this release.
+    $ffmpegSrc = Join-Path $repo 'upscalers\ffmpeg'
+    $ffmpegHashes = @{
+        'avcodec-62.dll'    = 'c202c131bb051e2298aaf5aca2571fc65d2e781ac07568c63c925b6d4e128877'
+        'avutil-60.dll'     = '1645ea1d5774d07304731f842e6b16507f5000c331cca3cf6d71346ebc02541b'
+        'swresample-6.dll'  = 'ce4dce3d71ea83c49cc332437fd61fe847fa055f4f25a9cf120fd4f41294f1c4'
+    }
+    $ffmpegDst = Join-Path $pkg 'upscalers\ffmpeg'
+    New-Item -ItemType Directory -Force $ffmpegDst | Out-Null
+    foreach ($f in $ffmpegHashes.Keys) {
+        $src = Join-Path $ffmpegSrc $f
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+            throw "missing FFmpeg runtime $src; restore upscalers\ffmpeg from the repository before packing"
+        }
+        $got = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($got -ne $ffmpegHashes[$f]) {
+            throw "FFmpeg runtime $f has sha256 $got, expected $($ffmpegHashes[$f]); use the pinned FFmpeg 8.1 shared build"
+        }
+        Copy-Item -LiteralPath $src -Destination (Join-Path $ffmpegDst $f) -Force
+    }
+    foreach ($f in 'README.md', 'SHA256SUMS', 'LICENSE.txt', 'COPYING.GPLv3') {
+        Copy-Item -LiteralPath (Join-Path $ffmpegSrc $f) -Destination (Join-Path $ffmpegDst $f) -Force
+    }
+
     # The dump, the build output and the fetched third-party sources stay out.
     $xd = @(
         (Join-Path $repo 'engine\fefw-recomp\game'),
@@ -148,6 +174,13 @@ try {
         # The optional FFmpeg movie decoder compiles against these; the licence must travel with them.
         'engine/fefw-recomp/runtime/third_party/ffmpeg/include/libavcodec/avcodec.h',
         'engine/fefw-recomp/runtime/third_party/ffmpeg/COPYING.LGPLv2.1',
+        # The shipped decoder itself, beside the launcher where sdk_dirs()/sdk_ffmpeg() looks for it. A zip without
+        # these would silently fall back to dav1d even though the Graphics page offers FFmpeg.
+        'upscalers/ffmpeg/avcodec-62.dll',
+        'upscalers/ffmpeg/avutil-60.dll',
+        'upscalers/ffmpeg/swresample-6.dll',
+        'upscalers/ffmpeg/LICENSE.txt',
+        'upscalers/ffmpeg/SHA256SUMS',
         'engine/fefw-recomp/tools/shaders/ampere/extract_corpus.py',
         'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/spirv_harness.exe'
     )

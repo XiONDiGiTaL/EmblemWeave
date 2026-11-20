@@ -21,6 +21,8 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 │   ├── INSTALL.md, USAGE.md, BUILDING.md, SECURITY.md, TERMS.md, PRIVACY.md, LEGAL.md, DMCA.md
 │   ├── changelog/         what changed in each release, newest first
 │   └── screenshots/       the images the README shows
+├── upscalers/
+│   └── ffmpeg/            the bundled FFmpeg 8.1 DLLs, GPLv3 text, hashes and source notes
 └── engine/
     └── fefw-recomp/       the engine, in full source form (GPL-3.0-or-later, its own LICENSE and notices inside)
         ├── LEGAL.md, LICENSE, README.md, SECURITY.md
@@ -45,6 +47,12 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 | `tools/textures/third_party/`, `tools/shaders/third_party/`, `work/refs/` (not `runtime/third_party/`, which the build needs) | Fetched from their upstreams during **Build the game**, pinned by URL and hash in `runtime/cmake/gfx_deps.cmake` and `tools/textures/scripts/fetch_third_party.ps1`. |
 | `node_modules/`, `dist/`, `.git/`, `.github/`, editor folders | Development leftovers, never part of a player package. `.github/` holds the engine's issue templates, which belong to the repository, not to a download. |
 | `.venv/`, `__pycache__/`, `*.pyc`, `.pytest_cache/` | The engine's Python environment and byte-compiled caches, created on your PC by **Build the game**. |
+
+`upscalers\ffmpeg` is the only vendor-DLL folder in the zip. It carries `avcodec-62.dll`, `avutil-60.dll` and
+`swresample-6.dll` so the optional movie decoder works without a separate download; the AMD, NVIDIA and Intel upscaler
+DLLs are still the player's to obtain. The launcher finds the shipped folder beside `EmblemWeave.exe` and writes its path
+into `[media] ffmpeg_dir`; `upscalers\ffmpeg\README.md` records the version, hashes, licence and source links, and
+`SHA256SUMS` is checked by the packaging script before it writes the zip.
 
 `engine/fefw-recomp/game-build/release/BUNDLED_TOOLS.txt` describes the tool bundle the engine's own build ships (Zig, an
 embedded Python, a prebuilt lifter). EmblemWeave does not use that bundle and does not ship those tools; the file is kept
@@ -75,8 +83,9 @@ Ubuntu runner by `.github/workflows/release.yml`, so the executable bit is recor
 
 ## Size
 
-About 54 MB, of which the engine sources are most of the download: the shader translator is published as a single
-self-contained executable so the build needs no .NET SDK and no .NET runtime. The launcher itself is about 14 MB.
+The engine sources and the shader translator are most of the download; the translator is published as a single
+self-contained executable so the build needs no .NET SDK and no .NET runtime. The launcher itself is about 14 MB. The three
+FFmpeg DLLs add about 35 MB compressed; the package built while adding them measured 112.5 MB.
 
 ## Extracting on Linux or macOS
 

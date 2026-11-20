@@ -44,6 +44,15 @@ pub struct Ui {
     searching: Option<Arc<Mutex<Option<Vec<u64>>>>>,
     /// Per unit: infinite HP, quick level-up, max stats.
     unit_cheats: HashMap<u64, [bool; 3]>,
+    /// Item pickup multiplier and its live convoy search.
+    item_factor: u32,
+    item_on: bool,
+    item_status: String,
+    item_search: Option<Arc<Mutex<Option<Result<cheats::ItemMultiplier, String>>>>>,
+    /// Free-time clock hold (the game's turn currency) and its search.
+    clock_on: bool,
+    clock_status: String,
+    clock_search: Option<Arc<Mutex<Option<Result<cheats::ClockFreeze, String>>>>>,
 }
 
 impl Ui {
@@ -53,6 +62,12 @@ impl Ui {
         self.units.clear();
         self.unit_cheats.clear();
         self.searching = None;
+        self.item_on = false;
+        self.item_search = None;
+        self.item_status = "Start the game and load a save, then switch the multiplier on again.".into();
+        self.clock_on = false;
+        self.clock_search = None;
+        self.clock_status = "Start the game and load a save, then switch the clock hold on again.".into();
     }
 }
 
@@ -90,6 +105,9 @@ fn load(ui_state: &mut Ui, dir: &std::path::Path) {
             }
             _ => {}
         }
+    }
+    if ui_state.item_factor < 2 {
+        ui_state.item_factor = 3;
     }
     ui_state.loaded = true;
 }
@@ -426,12 +444,199 @@ const QUICK: [(&str, &str); 3] = [
     ("Max stats", "max HP and every stat set to 200 (the game may cap them by class)"),
 ];
 
+fn clock_text(value: &[u8]) -> String {
+    if value.len() < 6 {
+        return "the save's clock".into();
+    }
+    let year = u16::from_le_bytes([value[0], value[1]]);
+    format!("{year:04}-{:02}-{:02} {:02}:{:02}", value[2], value[3], value[4], value[5])
+}
+
+/// Party-wide modifications derived from ReWeaver's save layout: convoy row
+/// quantities and the free-time clock that gives each chapter its turns.
+fn toolbox(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.config.theme.palette();
+    if app.cheats_ui.runner.is_none() {
+        app.cheats_ui.runner = Some(cheats::start());
+    }
+    if app.cheats_ui.item_factor < 2 {
+        app.cheats_ui.item_factor = 3;
+    }
+    let game = cheats::game();
+    if let Some(done) = app
+        .cheats_ui
+        .item_search
+        .as_ref()
+        .and_then(|s| s.lock().unwrap().take())
+    {
+        app.cheats_ui.item_search = None;
+        match done {
+            Ok(m) => {
+                let (base, rows) = (m.base, m.slots.len());
+                if let Some(r) = &app.cheats_ui.runner {
+                    r.lock().unwrap().item_multiplier = Some(m);
+                }
+                app.cheats_ui.item_on = true;
+                app.cheats_ui.item_status = format!("Watching {rows} convoy rows at {base:#x}.");
+            }
+            Err(e) => {
+                app.cheats_ui.item_on = false;
+                app.cheats_ui.item_status = e.clone();
+                app.notify(e, Tone::Bad);
+            }
+        }
+    }
+    if let Some(done) = app
+        .cheats_ui
+        .clock_search
+        .as_ref()
+        .and_then(|s| s.lock().unwrap().take())
+    {
+        app.cheats_ui.clock_search = None;
+        match done {
+            Ok(c) => {
+                let (n, text) = (c.addresses.len(), clock_text(&c.value));
+                if let Some(r) = &app.cheats_ui.runner {
+                    r.lock().unwrap().clock_freeze = Some(c);
+                }
+                app.cheats_ui.clock_on = true;
+                app.cheats_ui.clock_status = format!("Holding {text} in {n} memory location(s).");
+            }
+            Err(e) => {
+                app.cheats_ui.clock_on = false;
+                app.cheats_ui.clock_status = e.clone();
+                app.notify(e, Tone::Bad);
+            }
+        }
+    }
+
+    widgets::section(ui, &p, "Party & free time", |ui| {
+        ui.label(
+            crate::i18n::text(
+                "These use the save layout ReWeaver and the community save editor document: convoy rows hold a quantity, and free time spends one turn each time the clock crosses a six-hour boundary.",
+            )
+            .size(12.0)
+            .color(p.muted),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let mut on = app.cheats_ui.item_on;
+            if widgets::toggle(ui, &p, &mut on).changed() {
+                if on {
+                    match (game.clone(), crate::config::Config::save_dir()) {
+                        (Some(g), Some(dir)) => {
+                            let factor = app.cheats_ui.item_factor.max(2);
+                            let slot: Arc<Mutex<Option<Result<cheats::ItemMultiplier, String>>>> = Default::default();
+                            let out = slot.clone();
+                            std::thread::spawn(move || {
+                                let r = cheats::find_item_multiplier(g.as_ref(), &dir, factor);
+                                *out.lock().unwrap() = Some(r);
+                            });
+                            app.cheats_ui.item_search = Some(slot);
+                            app.cheats_ui.item_on = true;
+                            app.cheats_ui.item_status = "Searching the game's memory for the current convoy…".into();
+                        }
+                        (None, _) => {
+                            app.cheats_ui.item_on = false;
+                            app.notify("Start the game and load a save first", Tone::Warn);
+                        }
+                        (_, None) => {
+                            app.cheats_ui.item_on = false;
+                            app.notify("The launcher's save folder is not set up yet", Tone::Warn);
+                        }
+                    }
+                } else {
+                    app.cheats_ui.item_on = false;
+                    app.cheats_ui.item_search = None;
+                    app.cheats_ui.item_status = "Off.".into();
+                    if let Some(r) = &app.cheats_ui.runner {
+                        r.lock().unwrap().item_multiplier = None;
+                    }
+                }
+            }
+            ui.label(crate::i18n::text("Item pickup multiplier").font(theme::semibold(13.0)).color(p.ink))
+                .on_hover_text("Multiplies the quantity the game adds to an existing stack of 2 or more. New rows and one-slot gear are left alone");
+            let mut factor = app.cheats_ui.item_factor.max(2);
+            if ui
+                .add(egui::DragValue::new(&mut factor).range(2..=9).speed(0.2))
+                .on_hover_text("How many copies a gain becomes (2-9)")
+                .changed()
+            {
+                app.cheats_ui.item_factor = factor;
+                if let Some(r) = &app.cheats_ui.runner {
+                    if let Some(m) = r.lock().unwrap().item_multiplier.as_mut() {
+                        m.factor = factor;
+                    }
+                }
+            }
+            ui.label(crate::i18n::text("×").color(p.muted));
+        });
+        if !app.cheats_ui.item_status.is_empty() {
+            ui.label(crate::i18n::text(&app.cheats_ui.item_status).size(11.5).color(p.muted));
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let mut on = app.cheats_ui.clock_on;
+            if widgets::toggle(ui, &p, &mut on).changed() {
+                if on {
+                    match (game.clone(), crate::config::Config::save_dir()) {
+                        (Some(g), Some(dir)) => {
+                            let slot: Arc<Mutex<Option<Result<cheats::ClockFreeze, String>>>> = Default::default();
+                            let out = slot.clone();
+                            std::thread::spawn(move || {
+                                let r = cheats::find_clock_freeze(g.as_ref(), &dir);
+                                *out.lock().unwrap() = Some(r);
+                            });
+                            app.cheats_ui.clock_search = Some(slot);
+                            app.cheats_ui.clock_on = true;
+                            app.cheats_ui.clock_status = "Looking for the free-time clock in the game's memory…".into();
+                        }
+                        (None, _) => {
+                            app.cheats_ui.clock_on = false;
+                            app.notify("Start the game and load a save first", Tone::Warn);
+                        }
+                        (_, None) => {
+                            app.cheats_ui.clock_on = false;
+                            app.notify("The launcher's save folder is not set up yet", Tone::Warn);
+                        }
+                    }
+                } else {
+                    app.cheats_ui.clock_on = false;
+                    app.cheats_ui.clock_search = None;
+                    app.cheats_ui.clock_status = "Off.".into();
+                    if let Some(r) = &app.cheats_ui.runner {
+                        r.lock().unwrap().clock_freeze = None;
+                    }
+                }
+            }
+            ui.label(crate::i18n::text("Max action points (hold the free-time clock)")
+                .font(theme::semibold(13.0))
+                .color(p.ink))
+                .on_hover_text("Freezes the in-game date and time at the save's current value, so the clock never crosses the six-hour boundaries that spend free-time turns");
+        });
+        if !app.cheats_ui.clock_status.is_empty() {
+            ui.label(crate::i18n::text(&app.cheats_ui.clock_status).size(11.5).color(p.muted));
+        }
+        ui.label(
+            crate::i18n::text(
+                "Switch the clock hold on while free time is visible. It keeps the current date and time, so exploration and activities no longer cross a turn boundary; save before switching it off if you want the game's clock to continue normally.",
+            )
+            .size(11.0)
+            .color(p.muted),
+        );
+    });
+}
+
 /// Quick cheats: per-unit switches for the units found in the game's memory.
 pub fn quick(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     if app.cheats_ui.runner.is_none() {
         app.cheats_ui.runner = Some(cheats::start());
     }
+    toolbox(app, ui);
     let game = cheats::game();
     widgets::section(ui, &p, "Units on the map", |ui| {
         ui.label(

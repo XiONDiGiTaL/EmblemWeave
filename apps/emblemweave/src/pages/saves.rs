@@ -39,6 +39,8 @@ pub struct Ui {
     pub dialog: Option<CreateDialog>,
     pub rename: Option<RenameDialog>,
     pub manage: Option<ManageDialog>,
+    /// The profile whose portrait picker is open directly from its card.
+    pub portrait: Option<String>,
     pub delete: Option<String>,
     /// Scroll the page to the editor on the next frame (the tour asks for it).
     pub scroll_to_editor: bool,
@@ -124,6 +126,7 @@ enum Action {
     Load,
     Duplicate,
     Manage,
+    Portrait(String),
     Export,
     OpenFolder,
     Rename,
@@ -514,6 +517,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     });
                 }
             }
+            Action::Portrait(profile) => {
+                app.saves_ui.portrait = Some(profile);
+            }
             Action::Export => {
                 if let Some(item) = selected_item(&items, app.saves_ui.selected_profile.as_deref())
                 {
@@ -619,6 +625,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     rename_dialog(app, ui.ctx(), &save_dir, &profiles, &p);
     delete_dialog(app, ui.ctx(), &save_dir, &p);
     manage_dialog(app, ui.ctx(), &save_dir, &ids, &p, running, &mut message);
+    portrait_dialog(app, ui.ctx(), &save_dir, &p);
 
     if let Some((text, tone)) = message {
         app.notify(text, tone);
@@ -854,7 +861,7 @@ fn carousel(
         let left = idx.checked_sub(1).and_then(|i| items.get(i));
         match left {
             Some(item) => {
-                if draw_profile_card(
+                let (card, portrait) = draw_profile_card(
                     ui,
                     p,
                     item,
@@ -863,9 +870,10 @@ fn carousel(
                     active == Some(item.profile.name.as_str()),
                     side_w,
                     side_h,
-                )
-                .clicked()
-                {
+                );
+                if portrait.is_some_and(|r| r.clicked()) {
+                    action = Some(Action::Portrait(item.profile.name.clone()));
+                } else if card.clicked() {
                     action = Some(Action::Select(item.profile.name.clone()));
                 }
             }
@@ -882,7 +890,7 @@ fn carousel(
             ui.add_space(create_w);
             ui.add_space(gap);
             let active_here = active == Some(item.profile.name.as_str());
-            if draw_profile_card(
+            let (card, portrait) = draw_profile_card(
                 ui,
                 p,
                 item,
@@ -891,9 +899,10 @@ fn carousel(
                 active_here,
                 center_w,
                 center_h,
-            )
-            .clicked()
-            {
+            );
+            if portrait.is_some_and(|r| r.clicked()) {
+                action = Some(Action::Portrait(item.profile.name.clone()));
+            } else if card.clicked() {
                 action = Some(Action::Select(item.profile.name.clone()));
             }
         }
@@ -905,7 +914,7 @@ fn carousel(
         };
         match right {
             Some(item) => {
-                if draw_profile_card(
+                let (card, portrait) = draw_profile_card(
                     ui,
                     p,
                     item,
@@ -914,9 +923,10 @@ fn carousel(
                     active == Some(item.profile.name.as_str()),
                     side_w,
                     side_h,
-                )
-                .clicked()
-                {
+                );
+                if portrait.is_some_and(|r| r.clicked()) {
+                    action = Some(Action::Portrait(item.profile.name.clone()));
+                } else if card.clicked() {
                     action = Some(Action::Select(item.profile.name.clone()));
                 }
             }
@@ -1096,12 +1106,12 @@ fn draw_profile_card(
     active: bool,
     width: f32,
     height: f32,
-) -> egui::Response {
+) -> (egui::Response, Option<egui::Response>) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     if !ui.is_rect_visible(rect) {
-        return response;
+        return (response, None);
     }
-    let painter = ui.painter();
+    let painter = ui.painter().clone();
     painter.rect_filled(rect, theme::CARD, p.surface);
     painter.rect_stroke(
         rect,
@@ -1128,12 +1138,12 @@ fn draw_profile_card(
             rect.top() + height * if selected { 0.43 } else { 0.47 },
         ),
     );
-    draw_art(ui, painter, art, p, item, portrait, selected);
+    draw_art(ui, &painter, art, p, item, portrait, selected);
 
     let active_badge = active;
     if active_badge {
         draw_tag(
-            painter,
+            &painter,
             Pos2::new(art.left() + 12.0, art.top() + 12.0),
             p,
             "Active",
@@ -1141,7 +1151,7 @@ fn draw_profile_card(
         );
     } else if crate::saves::is_empty_profile(&item.profile) {
         draw_tag(
-            painter,
+            &painter,
             Pos2::new(art.left() + 12.0, art.top() + 12.0),
             p,
             "Empty",
@@ -1149,7 +1159,7 @@ fn draw_profile_card(
         );
     } else if item.meta.valid_slots == 0 {
         draw_tag(
-            painter,
+            &painter,
             Pos2::new(art.left() + 12.0, art.top() + 12.0),
             p,
             "Check save",
@@ -1250,7 +1260,42 @@ fn draw_profile_card(
             p.muted,
         );
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    // A direct way into the portrait picker: the Manage Saves dialog has one,
+    // but the card should not require finding that dialog first. It is painted
+    // over the portrait with its own interaction, and checked before the card's
+    // click so pressing it does not merely select the profile.
+    let button = Rect::from_center_size(
+        Pos2::new(art.right() - 16.0, art.top() + 16.0),
+        Vec2::splat(26.0),
+    );
+    let mut portrait_hit = ui.interact(
+        button,
+        ui.id().with(("portrait-button", item.profile.name.as_str())),
+        Sense::click(),
+    );
+    let hover = if portrait_hit.hovered() { 1.0 } else { 0.0 };
+    painter.rect_filled(
+        button,
+        CornerRadius::same(13),
+        Color32::from_black_alpha(if hover > 0.0 { 125 } else { 82 }),
+    );
+    painter.rect_stroke(
+        button,
+        CornerRadius::same(13),
+        Stroke::new(1.0_f32, theme::alpha(Color32::WHITE, 105)),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        button.center(),
+        Align2::CENTER_CENTER,
+        "✎",
+        theme::semibold(13.0),
+        theme::alpha(Color32::WHITE, 225),
+    );
+    portrait_hit = portrait_hit
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(crate::i18n::tr("Change this profile's portrait"));
+    (response.on_hover_cursor(egui::CursorIcon::PointingHand), Some(portrait_hit))
 }
 
 fn draw_create_card(
@@ -1908,6 +1953,58 @@ fn delete_dialog(app: &mut App, ctx: &egui::Context, save_dir: &Path, p: &crate:
         }
     } else if close {
         app.saves_ui.delete = None;
+    }
+}
+
+/// The small picker opened by the pencil on a profile card. It edits the same
+/// `profile_portraits` entry the Manage Saves dialog does, so the two controls
+/// stay in step.
+fn portrait_dialog(app: &mut App, ctx: &egui::Context, save_dir: &Path, p: &crate::theme::Palette) {
+    let Some(name) = app.saves_ui.portrait.clone() else {
+        return;
+    };
+    if !crate::saves::profiles(save_dir).iter().any(|profile| profile.name == name) {
+        app.saves_ui.portrait = None;
+        return;
+    }
+    let explicit = app.config.profile_portraits.get(&name).cloned();
+    let mut choice: Option<Option<String>> = None;
+    let shown = widgets::modal(
+        ctx,
+        p,
+        "profile-portrait",
+        "Profile portrait",
+        &name,
+        520.0,
+        |ui| {
+            ui.label(
+                crate::i18n::text(
+                    "Automatic uses the route lord stored in the newest readable save, so a Theodora run shows Theodora even when another protagonist appears first in the roster.",
+                )
+                .size(12.0)
+                .color(p.body),
+            );
+            ui.add_space(8.0);
+            choice = crate::portraits::picker(ui, p, explicit.as_deref());
+        },
+        |_| {},
+    );
+    if shown.close {
+        app.saves_ui.portrait = None;
+        return;
+    }
+    if let Some(choice) = choice {
+        match choice {
+            Some(key) => {
+                app.config.profile_portraits.insert(name.clone(), key);
+                app.notify(format!("Portrait for {name} set"), Tone::Ok);
+            }
+            None => {
+                app.config.profile_portraits.remove(&name);
+                app.notify(format!("Portrait for {name} follows the save again"), Tone::Ok);
+            }
+        }
+        app.saves_ui.portrait = None;
     }
 }
 
