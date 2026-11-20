@@ -32,19 +32,22 @@ try {
         throw "no changelog for ${Version}: write docs\changelog\$Version.md first, it is the release notes"
     }
 
-    # 1. Read the one-line summary and the body the notes are made of.
+    # 1. Read the summary and the body the notes are made of. A summary may wrap across several `> ` lines; the index
+    # row needs it on one line, so join the blockquote paragraph instead of taking only its first line.
     $lines = [System.IO.File]::ReadAllLines($changelog)
     if (-not $lines[0].StartsWith('# ')) { throw "docs\changelog\${Version}.md must start with '# EmblemWeave $Version'" }
-    $summary = ''
+    $summaryLines = @()
     $bodyStart = 1
     for ($i = 1; $i -lt $lines.Count; $i++) {
         if ($lines[$i].Trim() -eq '') { continue }
         if ($lines[$i].StartsWith('> ')) {
-            $summary = $lines[$i].Substring(2).Trim()
+            $summaryLines += $lines[$i].Substring(2).Trim()
             $bodyStart = $i + 1
+            continue
         }
         break
     }
+    $summary = ($summaryLines -join ' ').Trim()
     if (-not $summary) { throw "docs\changelog\${Version}.md needs a '> one line' summary under its title, for the index" }
     $body = ($lines[$bodyStart..($lines.Count - 1)] -join "`n").Trim()
 
@@ -139,8 +142,15 @@ $body
     if ($LASTEXITCODE -ne 0) { throw 'a release asset failed archive verification; nothing was uploaded' }
     $sha = (Get-FileHash $assets[0] -Algorithm SHA256).Hash.ToLower()
     if ($sha -ne $manifest.zipSha) { throw "$($manifest.zip) hashes to $sha, the manifest says $($manifest.zipSha)" }
+    # Windows PowerShell 5.1 turns a native command's stderr into a terminating
+    # error while $ErrorActionPreference is Stop. A missing release is the
+    # normal first-publish case, so silence the probe and use its exit code.
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
     gh release view $tag *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $releaseExists = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = $oldPreference
+    if ($releaseExists) {
         # An existing release is edited rather than refused, so a corrected note can be republished.
         gh release edit $tag --title "EmblemWeave $Version" --notes-file $notesPath
         foreach ($a in $assets) {
