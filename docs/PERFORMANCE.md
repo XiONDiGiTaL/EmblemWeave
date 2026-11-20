@@ -99,6 +99,47 @@ Snap handling was changed, but that is a code-preservation argument, not a snapp
 
 No gameplay FPS number is claimed: this pass changes the launcher frame, not the engine.
 
+## This pass: no redraws inside a window move
+
+The launcher still felt slow to move on the reporter's Windows 11 machine even after the caption and arrangement
+fixes (issue #59). Their observation made the mechanism visible: CPU rose while the window moved and fell when it
+stopped.
+
+On Windows, dragging a caption runs a modal move loop inside `DefWindowProc`. That loop dispatches `WM_PAINT`.
+winit 0.30.13 answers each paint with `RedrawRequested`; eframe draws a frame on the same thread, and if egui asks
+for another frame, winit's paint handler posts another `WM_PAINT` with `RedrawWindow(RDW_INTERNALPAINT)`. The loop
+then follows the pointer only as fast as the launcher can draw, once per move step. This is
+[winit#4708](https://github.com/rust-windowing/winit/issues/4708); an application that idles between events is
+not affected, which is why the launcher only showed it during a drag and why a faster GPU did not remove it.
+
+`platform.rs` already subclasses the launcher window for the native caption and edges. It now records that a
+non-client press was on `HTCAPTION`, arms the guard when `WM_ENTERSIZEMOVE` follows, and sends `WM_PAINT` to
+`DefWindowProcW` during that move. Windows validates the paint region, and DWM carries the last presented frame;
+no frame is drawn and no next paint is posted. A press on an edge does not arm the guard, `WM_SIZING` clears it
+again, and `WM_EXITSIZEMOVE` invalidates once so a window restored from maximized is repainted at its final size.
+Live resizing keeps its frames.
+
+| Measurement | Before | After | How it was measured |
+| --- | ---: | ---: | --- |
+| Restored caption drag, launcher CPU | 2.484 s over 3.005 s (82.7% of one core) | 0.156 s over 3.002 s (5.2%) | `work/move_cpu_probe.ps1`, installed pre-fix build then rebuilt release, 1440x900, synthetic `SendInput` caption drag with 92–95 move steps over 3 s |
+| Window following the pointer during that drag | 1:1, max sampled lag 0 px | 1:1, max sampled lag 0 px | `GetWindowRect` after every 20 ms drag step |
+| Idle CPU before the drag | 0.141 s over 2.004 s (7.0%) | 0.172 s over 2.012 s (8.5%) | same probe, five seconds after the window settled; both builds are idle-reactive, the difference is run-to-run background work |
+
+A second post-fix run measured 0.000 s of CPU over a 3.006 s drag; the residual in the table is background work,
+not the move loop. A maximized caption press restored under the pointer and then dragged with 0 px sampled lag
+(0.172 s over 3.031 s, 5.7%), and a right-edge resize grew the window 1200 -> 1280 px, so live resizing still
+paints.
+
+The probe is a scripted Win32 drag, not a physical mouse, and it ran on the development PC with a discrete NVIDIA
+GPU, not the reporter's machine. No claim is made for their frame rate. The mechanism removed here is one frame per
+`WM_PAINT` in the OS move loop, independent of the renderer, so it applies to the same winit code on any GPU.
+
+A first probe run pressed 6 px below the window top: that is the `HTTOP` resize band, not the caption, so it
+armed a resize and measured 103.6% CPU with the guard correct. The probe now starts at least 15 px below the top;
+the table uses only the runs whose rect tracked the cursor.
+
+No gameplay FPS number is claimed: this pass changes the launcher frame, not the engine.
+
 ## This pass: the adaptive controller and the XiØN interface
 
 The controller (`runtime/src/gfx/perf.cpp`) is a measurement and policy layer over systems that already existed. It

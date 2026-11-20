@@ -225,7 +225,7 @@ mod native_drag {
 
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
-    use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+    use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -236,8 +236,8 @@ mod native_drag {
         GetWindowPlacement, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, IsZoomed, RegisterWindowMessageW,
         SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT,
         HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, SM_CXDRAG, SM_CYDRAG, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOZORDER, WINDOWPLACEMENT, WM_CAPTURECHANGED, WM_ENTERSIZEMOVE, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-        WS_MAXIMIZE,
+        SWP_NOZORDER, WINDOWPLACEMENT, WM_CAPTURECHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST,
+        WM_NCLBUTTONDOWN, WM_PAINT, WM_SIZING, WS_MAXIMIZE,
     };
 
     /// Per-window DWM transitions. Windows animates a maximize/restore over
@@ -269,6 +269,18 @@ mod native_drag {
     static MAXIMIZED_PRESS: AtomicBool = AtomicBool::new(false);
     static PRESS_X: AtomicI32 = AtomicI32::new(0);
     static PRESS_Y: AtomicI32 = AtomicI32::new(0);
+    /// Whether the non-client press that is about to enter Windows' modal loop
+    /// was on the caption. `WM_ENTERSIZEMOVE` is sent for both a move and a
+    /// resize, so the press, not the loop, has to say which one this is.
+    static MOVE_INTENT: AtomicBool = AtomicBool::new(false);
+    /// Windows' modal move loop dispatches `WM_PAINT`; winit answers it with
+    /// `RedrawRequested`, and a frame that asks for another repaint posts one
+    /// more `WM_PAINT` inside the same loop. The loop then follows the pointer
+    /// only as fast as the launcher can draw. A moved window's contents do not
+    /// change, so this lets `DefWindowProcW` validate the paint and leaves DWM
+    /// carrying the last presented frame. Resizes are excluded: their layout
+    /// does change with every step.
+    static IN_MOVE: AtomicBool = AtomicBool::new(false);
 
     /// A launcher-side log for the native setup: `%APPDATA%\EmblemWeave\logs\launcher.log`.
     /// The DWM result is written once at install, because a silent failure there
@@ -414,10 +426,21 @@ mod native_drag {
         (unsafe { GetAsyncKeyState(key as i32) } as u16 & 0x8000) != 0
     }
 
+    /// `WM_NCLBUTTONDOWN` carries the hit-test code as its `wParam`. Only
+    /// `HTCAPTION` starts a move; the edge codes start a resize, whose frames
+    /// must not be deferred.
+    fn is_caption_press(wparam: WPARAM) -> bool {
+        wparam as u32 == HTCAPTION as u32
+    }
+
     /// Restore the window under the pointer and hand the press to the native
     /// caption move loop, from the place it was grabbed.
     unsafe fn start_maximized_move(hwnd: HWND, point: POINT) {
         restore_under_cursor(hwnd, point.x);
+        // The press is already past the drag threshold; tell the
+        // WM_ENTERSIZEMOVE handler that this loop is a move. Set after the
+        // restore so its size-change paint is not mistaken for the drag's.
+        MOVE_INTENT.store(true, Ordering::Relaxed);
         ReleaseCapture();
         begin_caption_move(hwnd, pack_point(point));
     }
@@ -433,6 +456,48 @@ mod native_drag {
     }
 
     unsafe extern "system" fn hit_test(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // A caption press starts Windows' modal move loop. Any other
+        // non-client press (an edge or corner) is a resize, whose frames must
+        // keep coming, so clear the intent there.
+        if msg == WM_NCLBUTTONDOWN {
+            MOVE_INTENT.store(is_caption_press(wparam), Ordering::Relaxed);
+        }
+        if msg == WM_ENTERSIZEMOVE {
+            if MOVE_INTENT.swap(false, Ordering::Relaxed) {
+                IN_MOVE.store(true, Ordering::Relaxed);
+            }
+        }
+        if msg == WM_SIZING {
+            // A stale caption press must never make a resize look like a move:
+            // the first sizing message puts the frames back.
+            IN_MOVE.store(false, Ordering::Relaxed);
+            MOVE_INTENT.store(false, Ordering::Relaxed);
+        }
+        if msg == WM_PAINT && IN_MOVE.load(Ordering::Relaxed) {
+            // Validate the paint region without handing winit a RedrawRequested,
+            // so it cannot re-arm another paint inside the modal loop. DWM keeps
+            // presenting the frame drawn before the drag; one fresh frame is
+            // requested when the loop exits.
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        }
+        if msg == WM_EXITSIZEMOVE {
+            let was_move = IN_MOVE.swap(false, Ordering::Relaxed);
+            MOVE_INTENT.store(false, Ordering::Relaxed);
+            if was_move {
+                // The window may have been restored from maximized on the
+                // press, so the last presented frame can be the wrong size.
+                // One repaint at the final position is enough; there is no
+                // per-step work.
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+        }
+        if msg == WM_LBUTTONUP {
+            // A click that never crossed the drag threshold leaves no move to
+            // enter; do not let its intent classify a later keyboard loop.
+            // Do not do this on WM_CAPTURECHANGED: Windows changes capture as
+            // the move loop starts, before WM_ENTERSIZEMOVE arrives.
+            MOVE_INTENT.store(false, Ordering::Relaxed);
+        }
         // Windhawk's Slick Window Arrangement injects a subclass into every
         // window entering a native move. On WM_EXITSIZEMOVE it deliberately
         // keeps moving the HWND from a 10 ms timer, which is the launcher's
@@ -468,6 +533,7 @@ mod native_drag {
                 start_maximized_move(hwnd, current);
                 return 0;
             }
+            MOVE_INTENT.store(false, Ordering::Relaxed);
             if key_down(VK_LBUTTON) && !key_down(VK_ESCAPE) {
                 begin_manual_caption_tracking(hwnd, current);
             } else {
@@ -644,6 +710,14 @@ mod native_drag {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn only_the_caption_band_starts_a_move() {
+            assert!(is_caption_press(HTCAPTION as WPARAM));
+            assert!(!is_caption_press(HTLEFT as WPARAM));
+            assert!(!is_caption_press(HTTOP as WPARAM));
+            assert!(!is_caption_press(HTBOTTOMRIGHT as WPARAM));
+        }
 
         #[test]
         fn a_caption_click_waits_for_the_drag_threshold() {
