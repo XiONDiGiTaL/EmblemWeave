@@ -39,6 +39,18 @@ endif()
 
 option(NXRT_BUILD_TESTS "Build the nxrt_tests executable and register its CTest entries" ON)
 
+# Optional upscaler backends (header-only SDKs, runtime DLLs loaded from upscalers/ folders).
+# Disabling removes the corresponding headers from the build and the mode from the UI.
+option(NXRT_UPSCALER_FSR "AMD FidelityFX FSR 1/3/4 via FFX API (temporal_ffx.cpp)" ON)
+option(NXRT_UPSCALER_DLSS "NVIDIA DLSS/DLAA via Streamline SDK (temporal_dlss.cpp)" ON)
+option(NXRT_UPSCALER_XESS "Intel XeSS via libxess.dll (temporal_xess.cpp)" ON)
+option(NXRT_UPSCALER_NIS "NVIDIA Image Scaling v1.0.3 spatial (nis_spatial.cpp)" ON)
+option(NXRT_UPSCALER_MAKO "MAKO spatial scaler (mako_spatial.cpp)" ON)
+
+# Optional video decoders for Switch 2 movies.
+option(NXRT_DAV1D "Build dav1d for AV1 movies (src/media/movie_vdec.cpp)" ON)
+option(NXRT_LIBVPX "Enable libvpx VP9/VP8 decoders via vcpkg (src/media/video_codec.cpp)" ON)
+
 # The generated-code ABI header (Ctx, call_indirect, ...) lives in the recompiler (recomp/include/nxrecomp/).
 # Found next to the checkout (../recomp) or, for a git worktree under runtime-wt/<name>, two levels up (../../recomp).
 set(NXRT_RECOMP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../recomp/include" CACHE PATH "Directory that holds nxrecomp/")
@@ -53,6 +65,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
                         -Wno-cast-function-type-strict -Wno-language-extension-token)
 endif()
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
+
+# Build performance options
+option(NXRT_UNITY_BUILD "Enable unity (jumbo) builds for faster compilation" OFF)
+option(NXRT_PCH "Use precompiled headers for common system headers (SDL3, Vulkan, ImGui, VMA)" ON)
+if(NXRT_PCH AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(WARNING "Precompiled headers work best with clang-cl; disabling for ${CMAKE_CXX_COMPILER_ID}")
+    set(NXRT_PCH OFF)
+endif()
 
 option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, src/gfx, cmake/gfx.cmake)" ON)
 # Game modules (games/<id>/, docs/GAME_BOUNDARY.md): the title-specific code a game exe links. The test executables register one of them, so
@@ -71,12 +91,79 @@ file(GLOB NXRT_PLATFORM_SOURCES CONFIGURE_DEPENDS "${NXRT_PLATFORM_DIR}/*.cpp")
 list(APPEND NXRT_SOURCES ${NXRT_PLATFORM_SOURCES})
 include(cmake/zstd_deps.cmake)   # zstd for the shader pack and the .nx RomFS reader
 
+# Precompiled header for nxrt core
+if(NXRT_PCH)
+    set(NXRT_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/nxrt_pch.h")
+    file(WRITE "${NXRT_PCH_HEADER}"
+        "// nxrt precompiled header\n"
+        "#include <nxrt/platform.h>\n"
+        "#include <nxrt/memory.h>\n"
+        "#include <nxrt/log.h>\n"
+        "#include <nxrt/config.h>\n"
+        "#include <nxrt/diag.h>\n"
+        "#include <nxrt/gauge.h>\n"
+        "#include <algorithm>\n"
+        "#include <atomic>\n"
+        "#include <chrono>\n"
+        "#include <cstdint>\n"
+        "#include <cstring>\n"
+        "#include <memory>\n"
+        "#include <mutex>\n"
+        "#include <string>\n"
+        "#include <string_view>\n"
+        "#include <vector>\n"
+    )
+endif()
+
 add_library(nxrt STATIC ${NXRT_SOURCES})
+if(NXRT_PCH)
+    target_precompile_headers(nxrt PRIVATE "${NXRT_PCH_HEADER}")
+endif()
+if(NXRT_UNITY_BUILD)
+    set_target_properties(nxrt PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
+endif()
 target_include_directories(nxrt PUBLIC include)
 if(EXISTS "${NXRT_RECOMP_INCLUDE}")
     target_include_directories(nxrt PUBLIC "${NXRT_RECOMP_INCLUDE}")
 endif()
 target_link_libraries(nxrt PUBLIC psapi nxrt_zstd)
+# Convert ON/OFF option() values to 1/0 for C++ #if expressions
+if(NXRT_UPSCALER_FSR)
+    set(_nxrt_upscaler_fsr 1)
+else()
+    set(_nxrt_upscaler_fsr 0)
+endif()
+if(NXRT_UPSCALER_DLSS)
+    set(_nxrt_upscaler_dlss 1)
+else()
+    set(_nxrt_upscaler_dlss 0)
+endif()
+if(NXRT_UPSCALER_XESS)
+    set(_nxrt_upscaler_xess 1)
+else()
+    set(_nxrt_upscaler_xess 0)
+endif()
+if(NXRT_UPSCALER_NIS)
+    set(_nxrt_upscaler_nis 1)
+else()
+    set(_nxrt_upscaler_nis 0)
+endif()
+if(NXRT_UPSCALER_MAKO)
+    set(_nxrt_upscaler_mako 1)
+else()
+    set(_nxrt_upscaler_mako 0)
+endif()
+
+# Propagate feature gates as compile definitions for conditional compilation in headers
+target_compile_definitions(nxrt PUBLIC
+    NXRT_DAV1D=${NXRT_DAV1D}
+    NXRT_LIBVPX=${NXRT_LIBVPX}
+    NXRT_UPSCALER_FSR=${_nxrt_upscaler_fsr}
+    NXRT_UPSCALER_DLSS=${_nxrt_upscaler_dlss}
+    NXRT_UPSCALER_XESS=${_nxrt_upscaler_xess}
+    NXRT_UPSCALER_NIS=${_nxrt_upscaler_nis}
+    NXRT_UPSCALER_MAKO=${_nxrt_upscaler_mako}
+)
 include(cmake/media_deps.cmake)   # libvpx for the Switch 2 video decoders (optional)
 
 if(NXRT_BUILD_TESTS)

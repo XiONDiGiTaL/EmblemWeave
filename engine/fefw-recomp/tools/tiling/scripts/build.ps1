@@ -9,7 +9,7 @@ foreach ($line in (cmd /c "`"$vcvars`" >nul 2>&1 && set")) {
     $i = $line.IndexOf('=')
     if ($i -gt 0) { Set-Item -Path ("Env:" + $line.Substring(0, $i)) -Value $line.Substring($i + 1) }
 }
-$env:PATH = "C:\Program Files\LLVM\bin;C:\Program Files\CMake\bin;$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:PATH"
+$env:PATH = "$(Join-Path $env:ProgramFiles 'LLVM\bin');$(Join-Path $env:ProgramFiles 'CMake\bin');$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:PATH"
 if ($Clean -and (Test-Path $build)) { Remove-Item -Recurse -Force $build }
 cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang-cl
 if ($LASTEXITCODE) { throw 'cmake configure failed' }

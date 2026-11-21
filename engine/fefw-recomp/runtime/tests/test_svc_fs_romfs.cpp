@@ -956,6 +956,22 @@ NXTEST(romfs_overlays_replace_and_add) {
     CHECK(!img.file_extent("/data/unit.bin", &off, &sz));   // the game's spelling is kept
 }
 
+// Files a mod adds are not replacements, and the completeness check for the game's own RomFS has to leave them out. Track the two
+// apart: a mod that replaces files adds none, and a later mod replacing an added path must not count it twice.
+NXTEST(romfs_mod_added_files_exclude_replacements) {
+    TempTree base, mod, later;
+    write_host(base.root, {{"/keep.bin", false, pattern(5, 1)}, {"/replace.bin", false, pattern(5, 2)}});
+    write_host(mod.root, {{"/replace.bin", false, pattern(5, 3)}, {"/new.bin", false, pattern(5, 4)}});
+    write_host(later.root, {{"/new.bin", false, pattern(5, 5)}});
+    RomfsImage img;
+    std::string err;
+    const std::vector<RomfsOverlay> overlays{{utf8(mod.root), "More Files", true}, {utf8(later.root), "Later Mod", true}};
+    REQUIRE(img.build(utf8(base.root), &err, overlays));
+    CHECK_EQ(img.stats().files, 3u);
+    CHECK_EQ(img.stats().installed_mod_files, 3u);   // replace.bin and new.bin from the first mod, new.bin again from the second
+    CHECK_EQ(img.stats().mod_added_files, 1u);      // only /new.bin was a new path
+}
+
 namespace {
 
 struct LogCapture {
@@ -1019,6 +1035,41 @@ NXTEST(romfs_overlay_diagnostics_separate_mods_from_package) {
     CHECK(has_line(reversed_log, "package overlay"));
     CHECK(has_line(reversed_log, "shadows 1 file(s) from installed mod 'Weapon Durability'"));
     CHECK(has_line(reversed_log, "below mods, so the mod's files are not used"));
+}
+
+// #70: the completeness warning compares the game's own RomFS with the complete count. A mod that adds files must not make a complete
+// install look different; a genuinely short install must still be named.
+NXTEST(romfs_file_count_check_ignores_mod_added_files) {
+    TempTree base, mods;
+    write_host(base.root, {{"/a.bin", false, pattern(10, 1)}, {"/b.bin", false, pattern(10, 2)}});
+    write_host(mods.root / "More Files" / "romfs", {{"/added.bin", false, pattern(10, 3)}});
+    nxrt::config_clear();
+    nxrt::config_set("fs", "romfs", utf8(base.root).c_str());
+    nxrt::config_set("fs", "mods", utf8(mods.root).c_str());
+    nxrt::config_set("fs", "romfs_files", "2");
+
+    std::vector<std::string> complete;
+    {
+        LogCapture cap(complete);
+        nxrt::services::reset_all();
+        std::vector<uint8_t> got;
+        REQUIRE(nxrt::services::read_romfs_file("/a.bin", got));
+    }
+    CHECK(!has_line(complete, "complete RomFS"));
+    CHECK(!has_line(complete, "incomplete"));
+
+    nxrt::config_set("fs", "romfs_files", "4");
+    std::vector<std::string> short_dump;
+    {
+        LogCapture cap(short_dump);
+        nxrt::services::reset_all();
+        std::vector<uint8_t> got;
+        REQUIRE(nxrt::services::read_romfs_file("/a.bin", got));
+    }
+    CHECK(has_line(short_dump, "files are incomplete"));
+    CHECK(has_line(short_dump, "has 2 files"));   // the mod's added file is not counted
+    nxrt::services::reset_all();
+    nxrt::config_clear();
 }
 
 // Edits (code mods' edit_file): a wanted file is handed over as it stands after the overlays, the image serves the returned bytes with

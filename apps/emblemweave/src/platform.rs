@@ -127,33 +127,21 @@ pub fn adopt_portable_on_first_run() -> Option<std::path::PathBuf> {
     if profile.exists() {
         return None;
     }
-    let data = exe_dir.join("data");
-    std::fs::create_dir_all(&data).ok()?;
-    std::fs::write(exe_dir.join(PORTABLE_MARKER), b"").ok()?;
-    forget_data_root();
-    Some(data)
+    // The marker is the switch; this also forgets both resolved folders, because the settings folder (and the
+    // `engine.txt` in it) moves with it.
+    set_portable_marker(&exe_dir, true).ok()?;
+    Some(exe_dir.join("data"))
 }
 
 /// Switch this copy to keeping everything beside the program, the way the About page's button does: the marker goes in, and the saves
 /// that the profile already holds are copied across so the player's progress comes with them. The game folder and the build output are
 /// not copied: they are rebuilt in the new folder by the next build, and the old ones are left where they were.
 pub fn set_portable(exe_dir: &std::path::Path, on: bool) -> Result<Option<std::path::PathBuf>, String> {
-    let marker = exe_dir.join(PORTABLE_MARKER);
+    set_portable_marker(exe_dir, on)?;
     if !on {
-        match std::fs::remove_file(&marker) {
-            Ok(()) => {
-                forget_data_root();
-                return Ok(None);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("removing {}: {e}", marker.display())),
-        }
+        return Ok(None);
     }
     let data = exe_dir.join("data");
-    std::fs::create_dir_all(&data).map_err(|e| format!("creating {}: {e}", data.display()))?;
-    std::fs::write(&marker, b"").map_err(|e| format!("writing {}: {e}", marker.display()))?;
-    // The resolved folder is cached for the session; the marker just changed it.
-    forget_data_root();
     // The saves are the part a player cannot get back, so they follow the switch; a copy that cannot be made does not undo it. The
     // settings come too (theme, chosen folders, save profiles), and so do installed mods: a mod the player added is their own file, and
     // making them find and install it again after pressing a button is not "everything in this folder".
@@ -176,6 +164,27 @@ pub fn set_portable(exe_dir: &std::path::Path, on: bool) -> Result<Option<std::p
         }
     }
     Ok(copied)
+}
+
+/// The marker half of [`set_portable`]: create `data` and write `portable.txt`, or remove the marker. Either way
+/// both resolved folders are forgotten, because portable storage moves the settings folder and the `engine.txt`
+/// that names the engine checkout lives inside it. Turning it off also forgets them when the marker was already
+/// gone, in case storage changed outside the launcher.
+fn set_portable_marker(exe_dir: &std::path::Path, on: bool) -> Result<(), String> {
+    let marker = exe_dir.join(PORTABLE_MARKER);
+    if on {
+        let data = exe_dir.join("data");
+        std::fs::create_dir_all(&data).map_err(|e| format!("creating {}: {e}", data.display()))?;
+        std::fs::write(&marker, b"").map_err(|e| format!("writing {}: {e}", marker.display()))?;
+    } else {
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("removing {}: {e}", marker.display())),
+        }
+    }
+    forget_resolved_folders();
+    Ok(())
 }
 
 /// The folder the launcher's copy was started from, for portable mode.
@@ -208,11 +217,32 @@ fn data_root_cache() -> &'static std::sync::Mutex<(bool, Option<std::path::PathB
     CACHE.get_or_init(|| std::sync::Mutex::new((false, None)))
 }
 
+/// Forget both folders resolved for this session. Portable storage moves the settings folder, and the engine
+/// checkout is remembered in an `engine.txt` inside it, so clearing only one would leave the other pointing at the
+/// folder the player just switched away from. An update that rewrites the install calls this too.
+pub(crate) fn forget_resolved_folders() {
+    forget_data_root();
+    crate::engine::forget_root();
+}
+
 /// Forget the resolved data folder. Switching portable mode moves it, and the
 /// About page can do that while the launcher runs.
 pub fn forget_data_root() {
     let mut slot = data_root_cache().lock().unwrap_or_else(|e| e.into_inner());
     *slot = (false, None);
+    #[cfg(test)]
+    DATA_ROOT_FORGETS.with(|n| n.set(n.get() + 1));
+}
+
+// How many times this thread cleared the cached data folder, for the test that checks a storage switch forgets it.
+#[cfg(test)]
+std::thread_local! {
+    static DATA_ROOT_FORGETS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+#[cfg(test)]
+pub(crate) fn data_root_forgets() -> usize {
+    DATA_ROOT_FORGETS.with(std::cell::Cell::get)
 }
 
 fn resolve_data_root() -> Option<std::path::PathBuf> {
@@ -849,6 +879,31 @@ mod tests {
             assert!(install_unsupported_reason().contains(name()));
             assert!(build_unsupported_reason().contains("docs/LINUX.md"));
         }
+    }
+
+    #[test]
+    fn switching_portable_storage_forgets_both_resolved_folders() {
+        let dir =
+            std::env::temp_dir().join(format!("emblemweave-portable-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let data_before = data_root_forgets();
+        let engine_before = crate::engine::forgets();
+        set_portable_marker(&dir, true).unwrap();
+        assert!(dir.join(PORTABLE_MARKER).is_file());
+        assert!(data_root_forgets() > data_before, "the data folder was left cached");
+        assert!(crate::engine::forgets() > engine_before, "the engine checkout was left cached");
+
+        // Turning it off moves the settings folder back, so it invalidates the same two answers.
+        let data_before = data_root_forgets();
+        let engine_before = crate::engine::forgets();
+        set_portable_marker(&dir, false).unwrap();
+        assert!(!dir.join(PORTABLE_MARKER).is_file());
+        assert!(data_root_forgets() > data_before, "the data folder was left cached");
+        assert!(crate::engine::forgets() > engine_before, "the engine checkout was left cached");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }

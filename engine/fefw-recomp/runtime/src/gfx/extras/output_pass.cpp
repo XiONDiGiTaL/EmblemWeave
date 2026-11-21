@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 #include "nxrt/log.h"
 #include "vk_gauges.h"
@@ -111,8 +112,12 @@ void OutputPass::shutdown() {
     VkDevice d = dev_->device();
     dev_->wait_idle();
     fsr_.shutdown();
-    nis_.shutdown();
-    mako_.shutdown();
+#if NXRT_UPSCALER_NIS
+    if (nis_) nis_->shutdown();
+#endif
+#if NXRT_UPSCALER_MAKO
+    if (mako_) mako_->shutdown();
+#endif
     nis_tried_ = false;
     mako_tried_ = false;
     for (auto& [f, p] : enc_pipes_)
@@ -308,18 +313,28 @@ int OutputPass::record(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_fo
     if ((p.fsr1 || p.nis || p.mako) && origin_ok && (upw > cw + 0.5 || uph > ch + 0.5)) {
         const VkExtent2D in_view = {static_cast<uint32_t>(cw), static_cast<uint32_t>(ch)};
         const VkExtent2D out = {upw, uph};
+        #if NXRT_UPSCALER_NIS
         if (p.nis && !nis_tried_) {
             nis_tried_ = true;
-            if (!nis_.init(*dev_)) NXLOG_W(kTag, "NVIDIA Image Scaling is not available (its pipeline failed): FSR 1 is used instead");
+            nis_ = std::make_unique<NisSpatial>();
+            if (!nis_->init(*dev_)) NXLOG_W(kTag, "NVIDIA Image Scaling is not available (its pipeline failed): FSR 1 is used instead");
         }
+#endif
+#if NXRT_UPSCALER_MAKO
         if (p.mako && !mako_tried_) {
             mako_tried_ = true;
-            if (!mako_.init(*dev_)) NXLOG_W(kTag, "the MAKO spatial scaler is not available (its pipeline failed): FSR 1 is used instead");
+            mako_ = std::make_unique<MakoSpatial>();
+            if (!mako_->init(*dev_)) NXLOG_W(kTag, "the MAKO spatial scaler is not available (its pipeline failed): FSR 1 is used instead");
         }
-        SpatialUpscaler* su = p.mako && mako_.initialised()                              ? static_cast<SpatialUpscaler*>(&mako_)
-                              : p.nis && nis_.initialised() && nis_.supports(in_view, out) ? static_cast<SpatialUpscaler*>(&nis_)
-                              : fsr_.initialised()                                 ? static_cast<SpatialUpscaler*>(&fsr_)
-                                                                                   : nullptr;
+#endif
+        SpatialUpscaler* su = nullptr;
+#if NXRT_UPSCALER_MAKO
+        if (!su && p.mako && mako_ && mako_->initialised()) su = static_cast<SpatialUpscaler*>(mako_.get());
+#endif
+#if NXRT_UPSCALER_NIS
+        if (!su && p.nis && nis_ && nis_->initialised() && nis_->supports(in_view, out)) su = static_cast<SpatialUpscaler*>(nis_.get());
+#endif
+        if (!su && fsr_.initialised()) su = static_cast<SpatialUpscaler*>(&fsr_);
         // display-referred picture: the HDR window texture is 1.0 = paper white, so no pre-scale; SDR bytes are already [0,1]
         if (VkImageView up = su ? su->upscale(cb, p.src, in_view, p.src_extent, out, p.src_linear, 1.0f, p.sharpness) : VK_NULL_HANDLE) {
             const int32_t whole[4] = {0, 0, 0, 0};

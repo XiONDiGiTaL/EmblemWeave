@@ -414,6 +414,11 @@ fn unpack_packed_romfs(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("replacing {}: {e}", out.display())),
         }
+        // Ensure the destination parent directory exists before renaming.
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
         std::fs::rename(&staged, &out).map_err(|e| format!("writing {}: {e}", out.display()))?;
         written += 1;
         bytes += file.size;
@@ -631,6 +636,25 @@ fn discard_dir(dest: &Path) {
     let _ = std::fs::remove_dir_all(dest);
 }
 
+/// Files and bytes under `root`, so a managed folder's disk cost can be reported and reclaimed deliberately. A missing or unreadable
+/// root is `(0, 0)`; symbolic links are not followed.
+pub fn folder_disk_use(root: &Path) -> (usize, u64) {
+    fn walk(dir: &Path, files: &mut usize, bytes: &mut u64) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                walk(&entry.path(), files, bytes);
+            } else if meta.is_file() {
+                *files += 1;
+                *bytes += meta.len();
+            }
+        }
+    }
+    let (mut files, mut bytes) = (0, 0);
+    walk(root, &mut files, &mut bytes);
+    (files, bytes)
+}
+
 fn reset_managed_dir(dest: &Path) -> Result<(), String> {
     if let Err(e) = std::fs::remove_dir_all(dest) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -832,6 +856,16 @@ fn unpack_package_addons(
     Ok(AddonOutcome::Ready)
 }
 
+/// Whether a copied ExeFS folder holds exactly the modules the package names. Lengths alone let a same-version repack, a truncated
+/// copy or an edited file pass as current; compare the package's SHA-256 for each module instead. `files` carries the name, size and
+/// entry hash from the package.
+fn exefs_copy_matches(dir: &Path, files: &[(String, u64, [u8; 32])]) -> bool {
+    files.iter().all(|(name, size, sha)| {
+        std::fs::read(dir.join(name))
+            .is_ok_and(|data| data.len() as u64 == *size && Sha256::digest(&data)[..] == sha[..])
+    })
+}
+
 /// Open a `.nup` dump: copy its ExeFS out once (it is small), use its RomFS in
 /// place, and unpack its add-ons. Returns the ExeFS folder.
 fn use_nup(
@@ -882,9 +916,14 @@ fn use_nup(
         .join("nup")
         .join(format!("{:016X}-v{}", pkg.title_id, pkg.version));
     let dir = dump.join("exefs");
-    let current = exefs
+    let wanted: Vec<(String, u64, [u8; 32])> = exefs
         .iter()
-        .all(|(name, i)| file_len(&dir.join(name)) == Some(nup.files[*i as usize].size));
+        .map(|(name, i)| {
+            let file = &nup.files[*i as usize];
+            (name.clone(), file.size, file.sha256)
+        })
+        .collect();
+    let current = exefs_copy_matches(&dir, &wanted);
     if !current {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             g.checks.push(Check::new(
@@ -2396,6 +2435,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A copied ExeFS is reused on the next detect, so its modules must match the package by hash, not only by length: a
+    /// same-version repack or an edited/truncated copy has to be rewritten.
+    #[test]
+    fn an_exefs_copy_is_current_only_when_every_module_hash_matches() {
+        let dir = std::env::temp_dir().join(format!("ew-exefs-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sha = |b: &[u8]| -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(Sha256::digest(b).as_slice());
+            out
+        };
+        let main = b"main module bytes".to_vec();
+        let npdm = b"npdm".to_vec();
+        let files = vec![
+            ("main".to_string(), main.len() as u64, sha(&main)),
+            ("main.npdm".to_string(), npdm.len() as u64, sha(&npdm)),
+        ];
+        std::fs::write(dir.join("main"), &main).unwrap();
+        std::fs::write(dir.join("main.npdm"), &npdm).unwrap();
+        assert!(exefs_copy_matches(&dir, &files));
+
+        // Same length, different bytes: the case a length check accepted.
+        std::fs::write(dir.join("main"), vec![b'X'; main.len()]).unwrap();
+        assert!(!exefs_copy_matches(&dir, &files));
+        std::fs::write(dir.join("main"), &main).unwrap();
+
+        std::fs::write(dir.join("main.npdm"), &npdm[..2]).unwrap();
+        assert!(!exefs_copy_matches(&dir, &files));
+        std::fs::remove_file(dir.join("main.npdm")).unwrap();
+        assert!(!exefs_copy_matches(&dir, &files));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_disk_use_counts_nested_files_and_bytes() {
+        let dir = std::env::temp_dir().join(format!("ew-disk-use-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a").join("b")).unwrap();
+        std::fs::write(dir.join("one.bin"), b"1234").unwrap();
+        std::fs::write(dir.join("a").join("b").join("two.bin"), b"12").unwrap();
+        assert_eq!(folder_disk_use(&dir), (2, 6));
+        assert_eq!(folder_disk_use(&dir.join("missing")), (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     static NUP_DETECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Break the add-on package's RomFS index in the TOC and re-sign the TOC.
@@ -2948,6 +3033,82 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(find_dlc(&g, &wrong_path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The RomFS overlay write must create parent directories for nested files.
+    /// Regression test for the exact failing path: Animation/AC/MV0002/AC_MV0002_01_CD_107_Face.matanimb
+    #[test]
+    fn romfs_overlay_creates_nested_parent_directories() {
+        let dir = std::env::temp_dir().join(format!("ew-overlay-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        let dest = dir.join("work").join("romfs-overlay");
+
+        // Create a .nup with a deeply nested packed file path
+        write_overlay_nup(
+            &nup,
+            &[("Animation/AC/MV0002/AC_MV0002_01_CD_107_Face.matanimb", b"MATANIMB\n")],
+        );
+        assert_eq!(packed_romfs(&nup), Some((1, 9)));
+
+        // This should not fail with "The system cannot find the path specified"
+        let write = write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!write.reused);
+        assert_eq!(write.written, 1);
+
+        // Verify the file was written at the correct nested path
+        let written_file = dest.join("Animation/AC/MV0002/AC_MV0002_01_CD_107_Face.matanimb");
+        assert!(written_file.is_file(), "nested file was not created");
+        assert_eq!(std::fs::read(&written_file).unwrap(), b"MATANIMB\n");
+
+        // Verify parent directories exist
+        assert!(dest.join("Animation").is_dir());
+        assert!(dest.join("Animation/AC").is_dir());
+        assert!(dest.join("Animation/AC/MV0002").is_dir());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A packed file with multiple levels of nesting must have all parent directories created.
+    #[test]
+    fn romfs_overlay_creates_multiple_nested_parent_directories() {
+        let dir = std::env::temp_dir().join(format!("ew-overlay-multi-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        let dest = dir.join("work").join("romfs-overlay");
+
+        // Create a .nup with multiple deeply nested packed file paths
+        write_overlay_nup(
+            &nup,
+            &[
+                ("a/b/c/d/e/file1.bin", b"FILE1\n"),
+                ("x/y/z/file2.bin", b"FILE2\n"),
+                ("alpha/beta/gamma/delta/epsilon/file3.bin", b"FILE3\n"),
+            ],
+        );
+        assert_eq!(packed_romfs(&nup), Some((3, 18)));
+
+        let write = write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+        assert!(!write.reused);
+        assert_eq!(write.written, 3);
+
+        // Verify all files were written at the correct nested paths
+        assert!(dest.join("a/b/c/d/e/file1.bin").is_file());
+        assert!(dest.join("x/y/z/file2.bin").is_file());
+        assert!(dest.join("alpha/beta/gamma/delta/epsilon/file3.bin").is_file());
+
+        assert_eq!(std::fs::read(dest.join("a/b/c/d/e/file1.bin")).unwrap(), b"FILE1\n");
+        assert_eq!(std::fs::read(dest.join("x/y/z/file2.bin")).unwrap(), b"FILE2\n");
+        assert_eq!(std::fs::read(dest.join("alpha/beta/gamma/delta/epsilon/file3.bin")).unwrap(), b"FILE3\n");
+
+        // Verify parent directories exist
+        assert!(dest.join("a/b/c/d/e").is_dir());
+        assert!(dest.join("x/y/z").is_dir());
+        assert!(dest.join("alpha/beta/gamma/delta/epsilon").is_dir());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,11 +1,12 @@
 # Builds mx_batch.exe (the batch Maxwell -> GLSL -> SPIR-V driver) with clang-cl, into tools\shaders\build\smo\.
 # Run from the project folder:  pwsh -File tools\shaders\smo\build.ps1
-# Needs: LLVM (C:\Program Files\LLVM\bin\clang-cl.exe) and the VS Build Tools (vcvars64.bat, for the Windows SDK and CRT).
+# Needs: LLVM (LLVM\bin under the Program Files folder Windows reports) and the VS Build Tools (vcvars64.bat, for the
+# Windows SDK and CRT).
 $ErrorActionPreference = 'Stop'
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $out   = Join-Path $here '..\build\smo' | ForEach-Object { [System.IO.Path]::GetFullPath($_) }
 $obj   = Join-Path $out 'obj'
-$clang = 'C:\Program Files\LLVM\bin\clang-cl.exe'
+$clang = Join-Path $env:ProgramFiles 'LLVM\bin\clang-cl.exe'
 $vcvars = Join-Path (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
 
 if (-not (Test-Path $clang))   { throw "clang-cl not found at $clang" }

@@ -63,8 +63,8 @@ about making their inputs and evidence trustworthy, not replacing them.
    otherwise the first base package. Its comment says the update “carries the
    newest program and a full RomFS”.
 4. `use_nup` walks that package’s ExeFS and copies it to
-   `work/nup/<title-id>-v<version>/exefs`. The copy is reused when every file’s
-   **length** matches the package entry.
+   `work/nup/<title-id>-v<version>/exefs`. The copy is reused only when every
+   file’s **SHA-256** matches the package entry, not merely its length.
 5. Add-on packages for the base title are unpacked to `work/nup/.../dlc`.
 6. `g.romfs` is set to the `.nup` file itself, not to the copied ExeFS folder.
 7. `finish` reports the RomFS as “read in place from the `.nup`”.
@@ -224,9 +224,9 @@ This should be treated as a robustness bug in the data path, independent of #70.
 
 ### B.7 Overlay correctness gaps
 
-The overlay was the weakest link in the `.nup` path. The first three items are now
-addressed by `gamedata::overlay_identity` and `gamedata::write_romfs_overlay`;
-the last two remain open:
+The overlay was the weakest link in the `.nup` path. All five items are now
+addressed by `gamedata::overlay_identity`, `gamedata::write_romfs_overlay` and the
+ExeFS copy check in `gamedata::use_nup`:
 
 1. **Identity (fixed).** The identity now covers the package path, its size and
    modification time, and a SHA-256 over every packed entry’s path, decompressed
@@ -239,13 +239,12 @@ the last two remain open:
    place, so a file at its final path is complete. A destination at the expected
    length is accepted only within the same identity, which covers the content of
    every packed entry.
-4. **Narrow reuse of the ExeFS copy.** `use_nup` reuses the copied ExeFS when all
-   lengths match; it does not verify hashes. The directory is keyed by title and
-   version, so this is less exposed than the overlay, but a same-version repack
-   can still leave stale modules.
-5. **Disk cost is not surfaced after the build.** The overlay can be gigabytes;
-   the launcher reports it during extraction, but there is no ongoing accounting
-   or cleanup policy.
+4. **Narrow reuse of the ExeFS copy (fixed).** `use_nup` now verifies each copied
+   module’s SHA-256 against the package entry, not only its length, so a
+   same-version repack, a truncated copy or an edited module is written again.
+5. **Overlay disk cost (fixed).** A successful build logs the overlay folder, its
+   file count and its bytes, and says that deleting the folder reclaims the space
+   and that the next build or Play writes it again.
 
 These are correctness issues in data preparation, not rendering or decoding
 issues. The overlay items were fixed before any decoder work, as required.
@@ -269,7 +268,7 @@ from the extracted folder that the reporter used, and record:
 If the file sets and hashes match, the decoder becomes the leading suspect. If
 they do not, #70 is a data-path issue and a decoder rewrite would not fix it.
 
-### B.9 Phase 2A fixes (items 1-3 implemented, items 4-5 open)
+### B.9 Phase 2A fixes (items 1-5 implemented)
 
 These are deliberately small and evidence-preserving:
 
@@ -481,13 +480,13 @@ packed cache.
    exposes retained/peak/evictions/skips, but `fs.cpp` logs only the initial image
    size. A long session with packed audio cannot show whether the cache is
    thrashing or near its budget from the normal log.
-2. **Overlay disk usage is not accounted for.** `work/romfs-overlay` can be
-   gigabytes and is not part of the run-folder report.
+2. **Overlay disk usage (fixed).** A successful build now logs the overlay folder,
+   its file count and its bytes, so the space can be reclaimed deliberately.
 3. **Integrity is uneven.** The Rust `.nup` reader verifies SHA-256; the runtime
    `nup::read_file` does not. A corrupted stored entry is served as bytes. This can
    look like a decoder or audio bug.
-4. **Overlay orphan files can retain stale data indefinitely**, as described in
-   B.7.
+4. **Overlay orphan files (fixed).** A different identity clears the folder before
+   writing, as described in B.7.
 5. **No per-file handle attribution in the freeze report.** The 16-handle cache is
    bounded, but a stall inside `acquire`/`ReadFile` is not named.
 
@@ -497,7 +496,8 @@ packed cache.
   `Info` only when values changed materially.
 - Add packed-cache retained/peak/evictions/skips to the freeze and device-loss
   headers.
-- Record overlay path, file count, and bytes at build and at first play.
+- Record overlay path, file count and bytes at first play as well; a successful
+  build now logs them.
 - In the benchmark matrix, sample process working set, private commit, pagefile,
   VMA budget/usage, packed-cache bytes, and audio queue depth at the same points.
 

@@ -426,7 +426,7 @@ pub fn decode(exefs: PathBuf) -> Job {
             // The one failure almost every report is: the Python that ran the
             // bridge has no `zbic` package. Say the install line, not a hint.
             if text.contains("zbic") {
-                return Err("the decoder needs Python's `zbic` package: run `pip install zbic` (or `py -m pip install zbic`), then decode again".into());
+                return Err("the decoder needs Python's `zbic` package: run the install command shown above, then decode again".into());
             }
             return Err("decoding failed; the log has the bridge's own message".into());
         }
@@ -464,11 +464,9 @@ pub const PIPELINE_STAGES: [&str; 9] = [
 /// asking for a bare `clang` found nothing on a PC that had it (issue 10).
 fn cc_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = crate::engine::tool_path().split(';').filter(|d| !d.is_empty()).map(PathBuf::from).collect();
-    for extra in [r"C:\Program Files\LLVM\bin", r"C:\Program Files (x86)\LLVM\bin"] {
-        dirs.push(PathBuf::from(extra));
-    }
-    for base in [r"C:\Program Files\Microsoft Visual Studio", r"C:\Program Files (x86)\Microsoft Visual Studio"] {
-        let Ok(editions) = std::fs::read_dir(base) else { continue };
+    for root in crate::toolchain::program_files_roots() {
+        dirs.push(root.join("LLVM").join("bin"));
+        let Ok(editions) = std::fs::read_dir(root.join("Microsoft Visual Studio")) else { continue };
         for edition in editions.flatten() {
             let Ok(years) = std::fs::read_dir(edition.path()) else { continue };
             for year in years.flatten() {

@@ -22,7 +22,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -54,6 +57,274 @@ namespace SpirvHarness
 
         /// NVN2 (Switch 2) control section: magic 0x98761234, version 201 (docs/AMPERE.md section 3).
         public static bool IsNvn2(byte[] ctrl) => ctrl != null && ctrl.Length >= 0xd8 && BitConverter.ToUInt32(ctrl, 0) == 0x98761234 && BitConverter.ToUInt32(ctrl, 4) == 201;
+
+        // Build ID of the translator assembly (Ryujinx.Graphics.Shader). Changes when translator code changes.
+        static string TranslatorBuildId => typeof(Translator).Assembly.ManifestModule.ModuleVersionId.ToString("N");
+
+        // SPIR-V validator path/version. Used to invalidate cache when validator changes.
+        static string SpirvValId => FindSpirvVal(); // path is sufficient; version changes imply path or content change
+
+        // Cache schema version. Increment when CacheEntry format changes.
+        const int CacheSchemaVersion = 1;
+
+        // ---- content-addressable shader translation cache -----------------------------------------------------------
+        // The cache key is a SHA-256 of all inputs that affect translation output:
+        //   - Shader code bytes + control section bytes
+        //   - Translation options (target-env, host, texture-pool, sampler-pool, glslc path+content, no-retry, debug-mode, glsl)
+        //   - TranslatorVersion (logical version for output format changes)
+        //   - TranslatorBuildId (actual translator binary identity)
+        //   - SpirvValId (validator identity, when validation enabled)
+        //   - CacheSchemaVersion (cache format version)
+        sealed class ShaderCache
+        {
+            readonly string _cacheDir;
+            readonly string _indexPath;
+            readonly Dictionary<string, CacheEntry> _index = new();
+            readonly object _indexLock = new();
+            readonly SHA256 _sha256 = SHA256.Create();
+            readonly string _translatorBuildId;
+            readonly string _spirvValId;
+            readonly bool _validate;
+
+            public ShaderCache(string outDir, bool validate, string spirvVal)
+            {
+                _cacheDir = Path.Combine(outDir, ".shader_cache");
+                _indexPath = Path.Combine(_cacheDir, "index.json");
+                _validate = validate;
+                _spirvValId = spirvVal ?? "";
+                _translatorBuildId = TranslatorBuildId;
+                Directory.CreateDirectory(_cacheDir);
+                LoadIndex();
+            }
+
+            sealed class CacheKey
+            {
+                public byte[] Code;
+                public byte[] Ctrl;
+                public string TargetEnv;
+                public string Host;
+                public int TexturePool;
+                public int SamplerPool;
+                public string GlslcPath;
+                public byte[] GlslcContentHash;  // SHA-256 of glslc file content (for NVN2/CUDA)
+                public bool NoRetry;
+                public bool Debug;
+                public bool Glsl;
+                public bool DrawParametersFromBuiltIns;  // Set to true for NVN2, false for Maxwell/CUDA
+
+                public override int GetHashCode()
+                {
+                    int h = HashCode.Combine(Code, Ctrl, TargetEnv, Host, TexturePool, SamplerPool);
+                    h = HashCode.Combine(h, GlslcPath, GlslcContentHash, NoRetry, Debug);
+                    return HashCode.Combine(h, Glsl, DrawParametersFromBuiltIns);
+                }
+                public override bool Equals(object obj) => obj is CacheKey other && Equals(other);
+                public bool Equals(CacheKey other) =>
+                    other != null &&
+                    Code.SequenceEqual(other.Code) &&
+                    Ctrl.SequenceEqual(other.Ctrl) &&
+                    TargetEnv == other.TargetEnv &&
+                    Host == other.Host &&
+                    TexturePool == other.TexturePool &&
+                    SamplerPool == other.SamplerPool &&
+                    GlslcPath == other.GlslcPath &&
+                    (GlslcContentHash == null ? other.GlslcContentHash == null : GlslcContentHash.SequenceEqual(other.GlslcContentHash)) &&
+                    NoRetry == other.NoRetry &&
+                    Debug == other.Debug &&
+                    Glsl == other.Glsl &&
+                    DrawParametersFromBuiltIns == other.DrawParametersFromBuiltIns;
+            }
+
+            sealed class CacheEntry
+            {
+                public int SchemaVersion = CacheSchemaVersion;
+                public string KeyHash;       // SHA-256 hex of the key
+                public Result Result;        // the translation result
+                public byte[] Spv;           // the SPIR-V bytes (null if no output)
+                public string SpvHash;       // SHA-256 hex of SPIR-V content for integrity
+                public DateTime Timestamp;   // for LRU eviction if needed
+            }
+
+            // Compute SHA-256 hash of a file's content.
+            static byte[] ComputeFileHash(string path)
+            {
+                try
+                {
+                    using var fs = File.OpenRead(path);
+                    using var sha = SHA256.Create();
+                    return sha.ComputeHash(fs);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            // Compute the cache key hash from inputs.
+            public string ComputeKeyHash(byte[] code, byte[] ctrl, string targetEnv, string host, int texturePool, int samplerPool,
+                                         string glslcPath, bool noRetry, bool debug, bool glsl, bool drawParametersFromBuiltIns)
+            {
+                byte[] glslcHash = null;
+                if (!string.IsNullOrEmpty(glslcPath) && File.Exists(glslcPath))
+                    glslcHash = ComputeFileHash(glslcPath);
+
+                var key = new CacheKey
+                {
+                    Code = code,
+                    Ctrl = ctrl,
+                    TargetEnv = targetEnv,
+                    Host = host,
+                    TexturePool = texturePool,
+                    SamplerPool = samplerPool,
+                    GlslcPath = glslcPath ?? "",
+                    GlslcContentHash = glslcHash,
+                    NoRetry = noRetry,
+                    Debug = debug,
+                    Glsl = glsl,
+                    DrawParametersFromBuiltIns = drawParametersFromBuiltIns
+                };
+                return ComputeKeyHash(key);
+            }
+
+            string ComputeKeyHash(CacheKey key)
+            {
+                using var ms = new MemoryStream();
+                using var writer = new BinaryWriter(ms);
+                writer.Write(key.Code.Length);
+                writer.Write(key.Code);
+                writer.Write(key.Ctrl.Length);
+                writer.Write(key.Ctrl);
+                writer.Write(key.TargetEnv ?? "");
+                writer.Write(key.Host ?? "");
+                writer.Write(key.TexturePool);
+                writer.Write(key.SamplerPool);
+                writer.Write(key.GlslcPath ?? "");
+                writer.Write(key.GlslcContentHash?.Length ?? 0);
+                if (key.GlslcContentHash != null) writer.Write(key.GlslcContentHash);
+                writer.Write(key.NoRetry);
+                writer.Write(key.Debug);
+                writer.Write(key.Glsl);
+                writer.Write(key.DrawParametersFromBuiltIns);
+                writer.Write(TranslatorVersion);
+                writer.Write(_translatorBuildId);
+                writer.Write(_spirvValId);
+                writer.Write(_validate);
+                writer.Write(CacheSchemaVersion);
+                var hash = _sha256.ComputeHash(ms.ToArray());
+                return Convert.ToHexString(hash).ToLowerInvariant();
+            }
+
+            static string ComputeSpvHash(byte[] spv)
+            {
+                using var sha = SHA256.Create();
+                return Convert.ToHexString(sha.ComputeHash(spv)).ToLowerInvariant();
+            }
+
+            void LoadIndex()
+            {
+                if (!File.Exists(_indexPath)) return;
+                try
+                {
+                    string json = File.ReadAllText(_indexPath);
+                    var entries = JsonSerializer.Deserialize<List<CacheEntry>>(json);
+                    if (entries != null)
+                    {
+                        foreach (var e in entries)
+                        {
+                            // Only keep entries for current schema version and translator build
+                            if (e.SchemaVersion == CacheSchemaVersion && e.Result != null)
+                            {
+                                // Verify SPIR-V integrity if present
+                                if (e.Spv != null && !string.IsNullOrEmpty(e.SpvHash))
+                                {
+                                    var actualHash = ComputeSpvHash(e.Spv);
+                                    if (actualHash != e.SpvHash)
+                                        continue; // Corrupted entry, skip
+                                }
+                                _index[e.KeyHash] = e;
+                            }
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+
+            void SaveIndex()
+            {
+                try
+                {
+                    var entries = _index.Values.ToList();
+                    string json = JsonSerializer.Serialize(entries, new JsonSerializerOptions { WriteIndented = false });
+                    string tmp = _indexPath + ".tmp";
+                    File.WriteAllText(tmp, json);
+                    // Atomic replace on Windows (same volume required)
+                    File.Move(tmp, _indexPath, true);
+                }
+                catch (Exception) { }
+            }
+
+            // Try to get cached result. Returns true if found and valid.
+            public bool TryGet(string keyHash, out Result result, out byte[] spv)
+            {
+                lock (_indexLock)
+                {
+                    if (_index.TryGetValue(keyHash, out var entry))
+                    {
+                        // Verify SPIR-V integrity on read
+                        if (entry.Spv != null && !string.IsNullOrEmpty(entry.SpvHash))
+                        {
+                            var actualHash = ComputeSpvHash(entry.Spv);
+                            if (actualHash != entry.SpvHash)
+                            {
+                                _index.Remove(keyHash); // Corrupted, remove
+                                SaveIndex();
+                                result = null;
+                                spv = null;
+                                return false;
+                            }
+                        }
+                        result = entry.Result;
+                        spv = entry.Spv;
+                        entry.Timestamp = DateTime.UtcNow;
+                        return true;
+                    }
+                }
+                result = null;
+                spv = null;
+                return false;
+            }
+
+            // Store result in cache.
+            public void Put(string keyHash, Result result, byte[] spv)
+            {
+                lock (_indexLock)
+                {
+                    _index[keyHash] = new CacheEntry
+                    {
+                        SchemaVersion = CacheSchemaVersion,
+                        KeyHash = keyHash,
+                        Result = result,
+                        Spv = spv,
+                        SpvHash = spv != null ? ComputeSpvHash(spv) : null,
+                        Timestamp = DateTime.UtcNow
+                    };
+                    SaveIndex();
+                }
+            }
+
+            // Write SPIR-V to output directory (for the runtime to load).
+            public void WriteSpv(string outDir, string hash, byte[] spv)
+            {
+                if (spv != null)
+                    File.WriteAllBytes(Path.Combine(outDir, hash + ".spv"), spv);
+            }
+
+            // Delete SPIR-V from output directory.
+            public void DeleteSpv(string outDir, string hash)
+            {
+                try { File.Delete(Path.Combine(outDir, hash + ".spv")); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
 
         static int Main(string[] args)
         {

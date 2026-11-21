@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Toolchain file: LLVM clang-cl (C:\Program Files\LLVM\bin, or the folder in the environment variable NX_LLVM) with the MSVC x64
-# environment (run through scripts/nx_env.cmd, or from a shell where vcvars64.bat has run), Ninja, optional sccache.
+# Toolchain file: LLVM clang-cl (the folder in NX_LLVM, else LLVM under the Program Files folder Windows reports) with the
+# MSVC x64 environment (run through scripts/nx_env.cmd, or from a shell where vcvars64.bat has run), Ninja, optional sccache.
 set(CMAKE_SYSTEM_NAME Windows)
 if(DEFINED ENV{NX_LLVM})
   file(TO_CMAKE_PATH "$ENV{NX_LLVM}" NX_LLVM_BIN)
+elseif(DEFINED ENV{ProgramFiles})
+  file(TO_CMAKE_PATH "$ENV{ProgramFiles}/LLVM/bin" NX_LLVM_BIN)
 else()
   set(NX_LLVM_BIN "C:/Program Files/LLVM/bin")
 endif()

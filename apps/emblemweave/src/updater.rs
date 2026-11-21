@@ -542,6 +542,9 @@ fn overlay_release(release: &Path, install: &Path, engine: &Path) -> Result<usiz
         }
     }
     copied += overlay_tree(&from_engine, engine, Path::new(""), &KEEP_ENGINE)?;
+    // The release just rewrote the install and the checkout beside it, and may have brought engine sources this
+    // copy had none of, so a folder resolved earlier in the session no longer describes what is on disk.
+    crate::platform::forget_resolved_folders();
     Ok(copied)
 }
 

@@ -18,7 +18,11 @@ import sys
 try:
     import zbic
 except ImportError:  # pragma: no cover
-    sys.exit("the `zbic` package is required: pip install zbic")
+    # Use the actual Python executable that ran this script.
+    # On Windows, the path may contain spaces, so quote it.
+    import shlex
+    exe = shlex.quote(sys.executable)
+    sys.exit(f"the `zbic` package is required: {exe} -m pip install zbic")
 
 SEGMENTS = ("text", "rodata", "data")
 

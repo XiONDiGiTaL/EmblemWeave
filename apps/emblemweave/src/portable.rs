@@ -1,19 +1,24 @@
-//! The portable toolchain: clang-cl + lld-link, CMake, Ninja and a relocatable Python, fetched on first run into
+//! The portable toolchain: clang-cl + lld-link, CMake, Ninja and a relocatable Python, fetched into
 //! `engine/fefw-recomp/tools/bin`.
 //!
 //! `toolchain::tool_path` already puts that folder first on the PATH every probe and build step reads, so a piece that
 //! lands there is found before anything installed on the PC, and the Requirements page reports it as carried rather than
 //! installed. What is left is the download: one table of artifacts with their URLs, sizes and SHA-256, a curl per piece
 //! with progress taken from the file's own size, a hash check that refuses a damaged file, and an unpack through the
-//! `tar.exe` Windows ships (it reads zip and xz as well).
+//! `tar.exe` Windows ships (it reads zip) or the built-in zstd/tar stack for LLVM.
+//!
+//! Only the files the build actually runs are installed. LLVM's release archive holds every tool and static library
+//! (about 3.4 GB unpacked); the compiler, linker, resource compiler, manifest tool and clang's resource headers are a
+//! tenth of that. The 901 MB `.tar.xz` is also replaced by LLVM's 264 MB `.tar.zst`, so a first run downloads less and
+//! leaves less behind.
 //!
 //! Visual Studio's C++ tools and the Windows SDK are not here on purpose: those headers and import libraries are
 //! Microsoft's and are not ours to redistribute (`docs/INSTALL.md`).
 
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::io::{BufReader, Read};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// One archive the release carries.
@@ -34,20 +39,39 @@ pub struct Piece {
     pub exe: &'static str,
     /// The version the piece reports once it runs.
     pub version: &'static str,
+    /// Files and folders to take from a `.tar.zst` archive, relative to its top folder. Empty means everything. The
+    /// small zip pieces are extracted whole.
+    pub keep: &'static [&'static str],
 }
+
+/// The LLVM release has a tool for every job. These are the ones the engine's CMake projects invoke, plus clang's
+/// built-in resource headers. `clang.exe` is the C compiler the launcher's own recompiler may use when no `zig` is
+/// present; `llvm-rc` is the resource compiler the runtime's `.rc` file needs.
+const CLANG_KEEP: &[&str] = &[
+    "bin/clang-cl.exe",
+    "bin/clang.exe",
+    "bin/lld-link.exe",
+    "bin/llvm-lib.exe",
+    "bin/llvm-rc.exe",
+    "bin/llvm-mt.exe",
+    "bin/vcruntime140.dll",
+    "bin/vcruntime140_1.dll",
+    "lib/clang/23/include/",
+];
 
 /// The four pieces, at the versions the engine builds against. LLVM 23 is the release `MIN_CLANG_MAJOR` asks for;
 /// CMake 3.31 is past the 3.25 the projects require; the 3.12 embeddable Python is the interpreter the translator runs.
 pub const PIECES: &[Piece] = &[
     Piece {
         key: "clang",
-        name: "LLVM (clang-cl and lld-link)",
-        file: "clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.xz",
-        url: "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/clang%2Bllvm-23.1.5-x86_64-pc-windows-msvc.tar.xz",
-        sha256: "62fdada7f6fa2b73856486dfbbdba3d2c1882991621615bcb55c60207611c6d4",
-        bytes: 901309624,
+        name: "LLVM (clang-cl, lld-link and llvm-rc)",
+        file: "clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.zst",
+        url: "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/clang%2Bllvm-23.1.5-x86_64-pc-windows-msvc.tar.zst",
+        sha256: "b2be33385ddc86e83511417a060de927ae8b09d1f3017cc3cdce5c73cd5029d7",
+        bytes: 276368249,
         exe: "clang-cl.exe",
         version: "23.1.5",
+        keep: CLANG_KEEP,
     },
     Piece {
         key: "cmake",
@@ -58,6 +82,7 @@ pub const PIECES: &[Piece] = &[
         bytes: 46473549,
         exe: "cmake.exe",
         version: "3.31.6",
+        keep: &[],
     },
     Piece {
         key: "ninja",
@@ -68,6 +93,7 @@ pub const PIECES: &[Piece] = &[
         bytes: 289808,
         exe: "ninja.exe",
         version: "1.13.1",
+        keep: &[],
     },
     Piece {
         key: "python",
@@ -78,6 +104,7 @@ pub const PIECES: &[Piece] = &[
         bytes: 11094114,
         exe: "python.exe",
         version: "3.12.8",
+        keep: &[],
     },
 ];
 
@@ -104,15 +131,31 @@ pub fn carried(piece: &Piece) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the piece was carried by an older install (the executable is there, the stamp is not): still usable, but the
-/// page should say so rather than claim a version it cannot prove.
-pub fn present(piece: &Piece) -> bool {
-    bin_dir().map(|b| b.join(piece.exe).is_file()).unwrap_or(false)
-}
-
-/// The pieces that are not carried yet.
-pub fn missing() -> Vec<&'static Piece> {
-    PIECES.iter().filter(|p| !carried(p)).collect()
+/// Whether the PC already has a tool this piece would supply. Checked in the background before the launcher downloads
+/// anything: a player with LLVM 23, CMake, Ninja and Python installed gets no duplicate copy and no download.
+fn system_ready(piece: &Piece) -> bool {
+    match piece.key {
+        "clang" => crate::toolchain::clang_candidates().into_iter().any(|exe| {
+            let major = crate::toolchain::clang_version(&exe)
+                .as_deref()
+                .and_then(crate::toolchain::version_parts)
+                .and_then(|parts| parts.first().copied())
+                .unwrap_or(0);
+            major >= crate::toolchain::MIN_CLANG_MAJOR
+                && exe.parent().is_some_and(|bin| {
+                    ["clang.exe", "lld-link.exe", "llvm-lib.exe", "llvm-rc.exe", "llvm-mt.exe"]
+                        .iter()
+                        .all(|tool| bin.join(tool).is_file())
+                })
+        }),
+        "cmake" => crate::toolchain::cmake_version()
+            .is_some_and(|version| crate::deps::compare(&version, &[3, 25])),
+        "ninja" => crate::toolchain::ninja_version().is_some(),
+        "python" => crate::deps::pythons()
+            .iter()
+            .any(|python| crate::deps::compare(&python.version, &[3, 9])),
+        _ => false,
+    }
 }
 
 /// Downloads, checks and unpacks one piece. `progress` is told the fraction (0..1) and a line to show; it is called from
@@ -149,10 +192,19 @@ pub fn install(piece: &'static Piece, progress: &dyn Fn(f32, String)) -> Result<
     let unpack = tools.join("unpack").join(piece.key);
     let _ = fs::remove_dir_all(&unpack);
     fs::create_dir_all(&unpack).map_err(|e| format!("creating {}: {e}", unpack.display()))?;
-    let out = hidden(&mut Command::new(system_tool("tar.exe"))).arg("-xf").arg(&archive).arg("-C").arg(&unpack).output()
-        .map_err(|e| format!("running tar: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("{} could not be unpacked: {}", piece.file, String::from_utf8_lossy(&out.stderr).trim()));
+    if piece.file.ends_with(".tar.zst") {
+        unpack_zstd(piece, &archive, &unpack)?;
+    } else {
+        let out = hidden(&mut Command::new(system_tool("tar.exe")))
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&unpack)
+            .output()
+            .map_err(|e| format!("running tar: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("{} could not be unpacked: {}", piece.file, String::from_utf8_lossy(&out.stderr).trim()));
+        }
     }
 
     let exe = find_file(&unpack, piece.exe, 5).ok_or_else(|| format!("{} holds no {}", piece.file, piece.exe))?;
@@ -174,45 +226,275 @@ pub fn install(piece: &'static Piece, progress: &dyn Fn(f32, String)) -> Result<
 
     fs::write(bin.join(format!("{STAMP_PREFIX}{}", piece.key)), format!("{}\n", piece.sha256))
         .map_err(|e| format!("writing the stamp: {e}"))?;
+    // The archive has been checked and unpacked: keeping it only costs a second copy of the download. A failed install
+    // keeps it so the next attempt does not download again.
+    let _ = fs::remove_file(&archive);
     progress(1.0, format!("{} {} is carried", piece.name, piece.version));
     Ok(())
 }
 
-/// Every piece, in order.
-pub fn install_all(progress: &dyn Fn(f32, String)) -> Result<(), String> {
-    let total = PIECES.len() as f32;
-    for (i, piece) in PIECES.iter().enumerate() {
+/// A subset of the pieces, for the background first-run fetch. The CLI's `--fetch-tools` uses [`install_all`].
+fn install_selected(pieces: &[&'static Piece], progress: &dyn Fn(f32, String)) -> Result<(), String> {
+    let total = pieces.len().max(1) as f32;
+    for (i, piece) in pieces.iter().enumerate() {
         let base = i as f32 / total;
         install(piece, &|f, line| progress((base + f / total).min(1.0), line))?;
     }
     Ok(())
 }
 
-/// Starts the first-run fetch in the background, once. The release is meant to arrive with `tools\bin` already filled; a
-/// copy that does not have it (a source checkout, or a zip whose tools were stripped) fills it here instead of asking the
-/// player to install four things. Progress goes to `tools/fetch.log` so it can be watched, and the Requirements page picks
-/// the pieces up as Carried on its next check.
+/// Every piece, in order. Like the background first-run path, this trims an existing full LLVM install even when all the
+/// pieces are already carried, then removes the archives a successful install leaves behind.
+pub fn install_all(progress: &dyn Fn(f32, String)) -> Result<(), String> {
+    let pieces: Vec<&'static Piece> = PIECES.iter().collect();
+    trim_after_fetch(install_selected(&pieces, progress))
+}
+
+/// Trim whatever an older full LLVM install left behind, then clear the download cache only when every piece is in
+/// place. A failed fetch keeps its archive so the next attempt does not download it again.
+fn trim_after_fetch(r: Result<(), String>) -> Result<(), String> {
+    tidy();
+    if r.is_ok() {
+        clean_downloads();
+    }
+    r
+}
+
+/// Starts the first-run fetch in the background, once. Only the pieces the PC does not already have are downloaded.
+/// Progress goes to `tools/fetch.log` so it can be watched, and the Requirements page picks the pieces up as Carried on
+/// its next check.
 pub fn auto_start() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static STARTED: AtomicBool = AtomicBool::new(false);
-    if missing().is_empty() || STARTED.swap(true, Ordering::SeqCst) {
+    if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(|| {
+        let wanted: Vec<&'static Piece> = PIECES
+            .iter()
+            .filter(|piece| !carried(piece) && !system_ready(piece))
+            .collect();
+        if wanted.is_empty() {
+            let _ = trim_after_fetch(Ok(()));
+            return;
+        }
         use std::io::Write;
         let log = std::cell::RefCell::new(dir().and_then(|d| fs::File::create(d.join("fetch.log")).ok()));
-        let r = install_all(&|frac, line| {
+        let r = install_selected(&wanted, &|frac, line| {
             if let Some(f) = log.borrow_mut().as_mut() {
                 let _ = writeln!(f, "{:>3.0}% {line}", frac * 100.0);
                 let _ = f.flush();
             }
         });
-        if let Err(e) = r {
+        if let Err(e) = &r {
             if let Some(f) = log.borrow_mut().as_mut() {
                 let _ = writeln!(f, "failed: {e}");
             }
         }
+        let _ = trim_after_fetch(r);
     });
+}
+
+/// Unpacks the LLVM `.tar.zst`, taking only the files in `piece.keep`. `zstd` needs `window_log_max(31)` because the
+/// LLVM release is compressed with a 1 GiB window; the decoder is streamed into the tar reader, so the 3.4 GB archive
+/// never lands on disk.
+fn unpack_zstd(piece: &Piece, archive: &Path, unpack: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive).map_err(|e| format!("reading {}: {e}", archive.display()))?;
+    let mut decoder = zstd::stream::read::Decoder::new(BufReader::new(file))
+        .map_err(|e| format!("opening {} as zstd: {e}", archive.display()))?;
+    decoder
+        .window_log_max(31)
+        .map_err(|e| format!("setting the zstd window: {e}"))?;
+    let mut tar = tar::Archive::new(decoder);
+    let entries = tar.entries().map_err(|e| format!("reading {}: {e}", archive.display()))?;
+    let mut files = 0usize;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("reading {}: {e}", archive.display()))?;
+        let path = entry.path().map_err(|e| format!("reading a path in {}: {e}", archive.display()))?.into_owned();
+        let Some(rel) = archive_relative(&path) else { continue };
+        if !kept(piece, &rel) || !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let dest = unpack.join(&rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        entry.unpack(&dest).map_err(|e| format!("unpacking {}: {e}", dest.display()))?;
+        files += 1;
+    }
+    if files == 0 {
+        return Err(format!("{} held none of the files the build uses", piece.file));
+    }
+    Ok(())
+}
+
+/// The path inside the archive with its single top folder removed. Absolute paths, parent components and empty paths
+/// are refused, so an archive cannot write outside the unpack folder.
+fn archive_relative(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    match components.next()? {
+        Component::Normal(_) => {}
+        _ => return None,
+    }
+    let mut rel = PathBuf::new();
+    for component in components {
+        match component {
+            Component::Normal(part) => rel.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!rel.as_os_str().is_empty()).then_some(rel)
+}
+
+/// Whether a relative archive path is one of the files this piece keeps.
+fn kept(piece: &Piece, rel: &Path) -> bool {
+    if piece.keep.is_empty() {
+        return true;
+    }
+    let text = rel.to_string_lossy().replace('\\', "/");
+    piece.keep.iter().any(|entry| {
+        if let Some(dir) = entry.strip_suffix('/') {
+            text.get(..dir.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(dir))
+                && text.as_bytes().get(dir.len()) == Some(&b'/')
+        } else {
+            text.eq_ignore_ascii_case(entry)
+        }
+    })
+}
+
+/// Removes what the old, full LLVM archive left in `tools`, plus an interrupted unpack folder. It leaves CMake, Python
+/// and Ninja alone: those share `tools/bin` with LLVM, so only LLVM's own tool names are removed. Download cleanup belongs
+/// to the fetch that knows the result, not here.
+fn tidy() {
+    let Some(tools) = dir() else { return };
+    let _ = fs::remove_dir_all(tools.join("unpack"));
+    let bin = tools.join("bin");
+    if bin.join("clang-cl.exe").is_file() {
+        trim_include(&tools.join("include"));
+        trim_lib(&tools.join("lib"));
+        trim_share(&tools.join("share"));
+        trim_bin(&bin);
+    }
+}
+
+fn trim_include(include: &Path) {
+    let Ok(entries) = fs::read_dir(include) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if ["clang", "clang-c", "llvm", "llvm-c", "lld", "lldb", "mlir", "polly", "profile"]
+            .iter()
+            .any(|dir| name == *dir)
+        {
+            remove_path(&entry.path());
+        }
+    }
+}
+
+fn trim_lib(lib: &Path) {
+    let Ok(entries) = fs::read_dir(lib) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().eq_ignore_ascii_case("clang") {
+            remove_path(&entry.path());
+        }
+    }
+}
+
+fn trim_share(share: &Path) {
+    let Ok(entries) = fs::read_dir(share) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.to_ascii_lowercase().starts_with("cmake") {
+            remove_path(&entry.path());
+        }
+    }
+}
+
+fn trim_bin(bin: &Path) {
+    let Ok(entries) = fs::read_dir(bin) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if (is_llvm_tool(&name) && !bin_kept(&name)) || is_llvm_library(&name) {
+            remove_path(&entry.path());
+        }
+    }
+}
+
+fn bin_kept(name: &str) -> bool {
+    CLANG_KEEP
+        .iter()
+        .filter_map(|path| path.strip_prefix("bin/"))
+        .any(|kept| kept.eq_ignore_ascii_case(name))
+}
+
+fn is_llvm_tool(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("clang")
+        || name.starts_with("lld")
+        || name.starts_with("llvm")
+        || name.starts_with("ld.")
+        || name.starts_with("ld64")
+        || matches!(
+            name.as_str(),
+            "wasm-ld.exe"
+                | "dsymutil.exe"
+                | "opt.exe"
+                | "llc.exe"
+                | "bugpoint.exe"
+                | "c-index-test.exe"
+                | "diagtool.exe"
+                | "find-all-symbols.exe"
+                | "git-clang-format"
+                | "hmaptool.exe"
+                | "modularize.exe"
+                | "scan-build"
+                | "scan-view"
+                | "sancov.exe"
+                | "sanitizer-symbolizer.exe"
+                | "split-file.exe"
+                | "verify-uselistorder.exe"
+                | "yaml2obj.exe"
+                | "obj2yaml.exe"
+                | "pp-trace.exe"
+                | "lli.exe"
+                | "llubi.exe"
+                | "sanstats.exe"
+                | "offload-arch.exe"
+                | "nvptx-arch.exe"
+        )
+}
+
+fn is_llvm_library(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "libclang.dll" | "libclang-cpp.dll" | "lto.dll" | "llvm-c.dll" | "remarks.dll"
+    )
+}
+
+fn remove_path(path: &Path) {
+    if path.is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn clean_downloads() {
+    let Some(tools) = dir() else { return };
+    let downloads = tools.join("download");
+    let Ok(entries) = fs::read_dir(&downloads) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        if [".zip", ".xz", ".zst"].iter().any(|ext| name.ends_with(ext)) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let _ = fs::remove_dir(&downloads);
 }
 
 fn download(piece: &Piece, to: &Path, progress: &dyn Fn(f32, String)) -> Result<(), String> {
@@ -285,7 +567,7 @@ fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 }
 
 /// Moves everything in `from` into `to`, keeping subfolders. A hard link is instant and costs no space on one volume,
-/// which matters for LLVM's 900 MB; a copy is the fallback.
+/// which matters for LLVM's compiler executables; a copy is the fallback.
 fn merge_into(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
     for e in fs::read_dir(from).map_err(|e| format!("reading {}: {e}", from.display()))?.flatten() {
@@ -330,6 +612,83 @@ mod tests {
             assert!(p.url.starts_with("https://"), "{}", p.key);
             assert!(p.bytes > 0 && p.exe.ends_with(".exe"), "{}", p.key);
         }
+    }
+
+    #[test]
+    fn the_llvm_archive_is_the_smaller_zstd_one() {
+        let llvm = &PIECES[0];
+        assert!(llvm.file.ends_with(".tar.zst"));
+        assert!(llvm.bytes < 300_000_000, "the zstd release is 264 MB, not the 901 MB xz");
+        assert!(!llvm.keep.is_empty());
+    }
+
+    #[test]
+    fn only_the_builds_llvm_files_are_taken_from_the_archive() {
+        let top = Path::new("clang+llvm-23.1.5-x86_64-pc-windows-msvc");
+        let rel = |path: &str| archive_relative(&top.join(path)).expect("relative path");
+        let llvm = &PIECES[0];
+        assert!(kept(llvm, &rel("bin/clang-cl.exe")));
+        assert!(kept(llvm, &rel("bin/lld-link.exe")));
+        assert!(kept(llvm, &rel("bin/llvm-lib.exe")));
+        assert!(kept(llvm, &rel("bin/llvm-rc.exe")));
+        assert!(kept(llvm, &rel("bin/llvm-mt.exe")));
+        assert!(kept(llvm, &rel("lib/clang/23/include/stddef.h")));
+        assert!(!kept(llvm, &rel("bin/llvm-cvtres.exe")));
+        assert!(!kept(llvm, &rel("bin/clangd.exe")));
+        assert!(!kept(llvm, &rel("include/clang/AST/AST.h")));
+        assert!(!kept(llvm, &rel("lib/LLVMCodeGen.lib")));
+    }
+
+    #[test]
+    fn trimming_leaves_tools_that_are_not_llvm_alone() {
+        assert!(is_llvm_tool("clangd.exe"));
+        assert!(is_llvm_tool("ld.lld.exe"));
+        assert!(is_llvm_tool("ld64.lld.exe"));
+        assert!(is_llvm_tool("wasm-ld.exe"));
+        assert!(is_llvm_tool("llvm-cvtres.exe"));
+        assert!(is_llvm_library("LLVM-C.dll"));
+        for name in ["cmake.exe", "cmake-gui.exe", "ctest.exe", "ninja.exe", "python.exe", "python312.dll"] {
+            assert!(!is_llvm_tool(name), "{name} is not an LLVM tool");
+            assert!(!is_llvm_library(name), "{name} is not an LLVM library");
+        }
+    }
+
+    #[test]
+    fn zstd_unpack_takes_the_kept_files_only() {
+        let root = std::env::temp_dir().join(format!("emblemweave-unpack-test-{}", std::process::id()));
+        let archive = root.join("fixture.tar.zst");
+        let out = root.join("out");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&out).unwrap();
+
+        let file = fs::File::create(&archive).unwrap();
+        let encoder = zstd::stream::write::Encoder::new(file, 0).unwrap();
+        let mut tar = tar::Builder::new(encoder);
+        for (path, body) in [
+            ("top/bin/clang-cl.exe", b"compiler".as_slice()),
+            ("top/bin/clangd.exe", b"extra".as_slice()),
+            ("top/lib/clang/23/include/stddef.h", b"header".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, path, body).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+
+        unpack_zstd(&PIECES[0], &archive, &out).expect("the fixture unpacks");
+        assert!(out.join("bin/clang-cl.exe").is_file());
+        assert!(out.join("lib/clang/23/include/stddef.h").is_file());
+        assert!(!out.join("bin/clangd.exe").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_archive_cannot_escape_the_unpack_folder() {
+        assert!(archive_relative(Path::new("top/../evil")).is_none());
+        assert!(archive_relative(Path::new("../evil")).is_none());
+        assert_eq!(archive_relative(Path::new("top/bin/clang-cl.exe")), Some(PathBuf::from("bin/clang-cl.exe")));
     }
 
     #[test]

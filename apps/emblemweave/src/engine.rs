@@ -20,9 +20,12 @@
 
 use crate::config::Config;
 use crate::jobs::{Ctx, JobResult, StageStatus};
-use std::io::BufReader;
+use crate::toolchain_manager::{BuildConfig, BuildEventEmitter, BuildSummary, ToolchainManager};
+use serde_json;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 /// Pinned revision the engine's shader translator is built against.
 const SHADER_TRANSLATOR_URL: &str = "https://git.ryujinx.app/ryubing/ryujinx.git";
@@ -55,7 +58,8 @@ pub fn root() -> Option<PathBuf> {
     // is through `ready()` and `game_folder()`, several times a frame, and the
     // lookup reads `engine.txt`, walks the executable's ancestors and stats a
     // dozen candidate folders. That was most of a redraw's cost. Picking a
-    // different checkout calls `remember_root`, which clears this.
+    // different checkout calls `remember_root`, and a storage switch or an update clears it through
+    // `platform::forget_resolved_folders`, so the answer never outlives what it was read from.
     let mut slot = root_cache().lock().unwrap_or_else(|e| e.into_inner());
     if !slot.0 {
         slot.1 = resolve_root();
@@ -72,18 +76,39 @@ fn root_cache() -> &'static std::sync::Mutex<(bool, Option<PathBuf>)> {
     CACHE.get_or_init(|| std::sync::Mutex::new((false, None)))
 }
 
-/// Clear the remembered engine checkout, after the chosen one changed.
-fn forget_root() {
+/// Clear the remembered engine checkout, after the chosen one changed, the settings folder it is remembered in
+/// moved (a portable-storage switch), or the install was rewritten (an update).
+pub(crate) fn forget_root() {
     let mut slot = root_cache().lock().unwrap_or_else(|e| e.into_inner());
     *slot = (false, None);
+    #[cfg(test)]
+    FORGETS.with(|n| n.set(n.get() + 1));
+}
+
+// How many times this thread cleared the cached checkout. A test reads it to prove a pick or a storage switch
+// really forgot the old answer, without depending on the order the test runner happens to use.
+#[cfg(test)]
+std::thread_local! {
+    static FORGETS: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+#[cfg(test)]
+pub(crate) fn forgets() -> usize {
+    FORGETS.with(std::cell::Cell::get)
 }
 
 fn resolve_root() -> Option<PathBuf> {
+    // Read the settings folder once. A portable-storage switch can move it while this runs, and the write-back
+    // below must update the `engine.txt` this answer was read from, not a different one that appeared meanwhile.
+    let remembered_file = remembered();
     let mut found: Vec<PathBuf> = Vec::new();
     if let Some(e) = std::env::var_os("EW_ENGINE") {
         found.push(PathBuf::from(e));
     }
-    if let Some(text) = remembered().and_then(|f| std::fs::read_to_string(f).ok()) {
+    if let Some(text) = remembered_file
+        .as_ref()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+    {
         found.push(PathBuf::from(text.trim()));
     }
     for start in [std::env::current_exe().ok(), std::env::current_dir().ok()]
@@ -102,7 +127,7 @@ fn resolve_root() -> Option<PathBuf> {
         .find(|e| game_exe(e).is_file())
         .or(found.first())
         .cloned()?;
-    if let Some(f) = remembered() {
+    if let Some(f) = remembered_file {
         if std::fs::read_to_string(&f)
             .ok()
             .map(|t| t.trim().to_string())
@@ -2488,17 +2513,81 @@ pub fn build(
         return Err(crate::platform::build_unsupported_reason());
     }
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
-    // One probe decides whether the build can start, and what it found is what
-    // the build uses from here: the compiler it validated, the SDK beside it,
-    // and one `vcvars` environment for every step. A too-old Visual Studio, an
-    // install without the C++ workload, a missing Windows SDK and an `INCLUDE`
-    // left by another shell are all named here, before anything is compiled.
-    let resolved = crate::toolchain::init()?;
-    ctx.log(format!("toolchain: {}", resolved.toolchain.summary()));
-    ctx.log(format!(
-        "toolchain fingerprint: {}",
-        resolved.toolchain.fingerprint()
-    ));
+
+    // Initialize the unified ToolchainManager with tools.lock
+    let toolchain_root = root.join(".."); // engine/fefw-recomp
+    let mut toolchain_mgr = ToolchainManager::new(toolchain_root);
+    toolchain_mgr.load_tools_lock().ok(); // Load if exists, otherwise generate
+    if toolchain_mgr.tools_lock().is_none() {
+        toolchain_mgr.generate_tools_lock().map_err(|e| e.to_string())?;
+    }
+
+    // Verify all tools against tools.lock
+    let verifications = toolchain_mgr.verify_all().map_err(|e| e.to_string())?;
+    for v in &verifications {
+        match v.status {
+            crate::toolchain_manager::VerificationStatus::Verified => {
+                ctx.log(format!("Tool '{}': verified ({})", v.tool_name, v.found_version.as_deref().unwrap_or("unknown")));
+            }
+            crate::toolchain_manager::VerificationStatus::VersionMismatch => {
+                ctx.log(format!("Tool '{}': version mismatch - found {}, expected >= {}", v.tool_name, v.found_version.as_deref().unwrap_or("unknown"), v.expected_version));
+            }
+            crate::toolchain_manager::VerificationStatus::ChecksumMismatch => {
+                ctx.log(format!("Tool '{}': CHECKSUM MISMATCH - expected {}, got different", v.tool_name, v.expected_version));
+                if matches!(v.tool_name.as_str(), "clang_cl" | "lld_link" | "cmake" | "ninja") {
+                    return Err(format!("Critical tool '{}' has checksum mismatch. Reinstall it.", v.tool_name));
+                }
+            }
+            crate::toolchain_manager::VerificationStatus::Missing => {
+                if v.tool_name != "sccache" && v.tool_name != "uv" && v.tool_name != "nasm" {
+                    return Err(format!("Required tool '{}' not found. {}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
+                }
+                ctx.log(format!("Optional tool '{}' not found: {}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
+            }
+            _ => {}
+        }
+    }
+
+    // Prepare structured build events (JSON Lines to stdout)
+    let build_id = uuid::Uuid::new_v4().to_string();
+    let (event_emitter, event_rx) = BuildEventEmitter::with_channel(build_id.clone());
+    let event_emitter = Arc::new(event_emitter);
+    let toolchain_mgr = toolchain_mgr.with_event_emitter(event_emitter.clone());
+
+    // Spawn consumer thread to output JSON Lines to stdout
+    let consumer_handle = std::thread::spawn(move || {
+        use std::io::{self, Write};
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        for event in event_rx {
+            if let Ok(json) = serde_json::to_string(&event) {
+                writeln!(handle, "{}", json).ok();
+                handle.flush().ok();
+            }
+        }
+    });
+
+    // Get build configuration
+    let concurrency = toolchain_mgr.calculate_jobs(None);
+    let jobs = concurrency.calculated_jobs;
+    let fingerprint = format!("{}|{}", root.display(), &build_id[..8]);
+
+    // Emit build started event
+    let build_config = BuildConfig {
+        jobs,
+        memory_limit_mb: Some(concurrency.available_memory_mb),
+        sccache_enabled: true,
+        incremental: true,
+        target: "Release".to_string(),
+        features: vec![],
+    };
+    event_emitter.build_started(&fingerprint, build_config).ok();
+
+    // Prepare build environment using ToolchainManager
+    let resolved_env = toolchain_mgr.prepare_build_env().map_err(|e| e.to_string())?;
+
+    ctx.log(format!("toolchain: {}", resolved_env.iter().map(|(k,v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("; ")));
+    ctx.log(format!("toolchain fingerprint: {}", fingerprint));
     for (name, value) in crate::toolchain::stale_env() {
         ctx.log(format!("ignoring the inherited {name}={value}: it would point the build at a toolchain or Python environment that was not checked"));
     }
@@ -2507,29 +2596,18 @@ pub fn build(
     // The probe that matters: one file, compiled and linked with exactly the
     // environment below. A header from another install fails here in a second.
     let probe_dir = root.join("work").join("build").join("toolchain-probe");
+    // Use the clang from the resolved toolchain
+    let resolved = crate::toolchain::init()?;
     crate::toolchain::probe_build(&resolved.compiler, &resolved.env, &probe_dir)
         .map_err(|e| format!("the build cannot start. {e}"))?;
     ctx.log(format!(
         "the toolchain compiles and links a test file ({} with its own headers, libraries and SDK)",
         resolved.compiler.display()
     ));
-    let missing = missing_tools();
-    if !missing.is_empty() {
-        let lines: Vec<String> = missing
-            .iter()
-            .map(|m| format!("{m} (`{}`)", install_hint(m)))
-            .collect();
-        return Err(format!("the game build needs tools this PC does not have: {}. Each one is a single install command; see docs/TROUBLESHOOTING.md", lines.join(", ")));
-    }
-    // CMake is present but may be too old for the engine's projects, which is
-    // reported by CMake itself as a generate failure with no reason attached.
-    if let Some((major, minor)) = cmake_version() {
-        if (major, minor) < (3, 25) {
-            return Err(format!(
-                "CMake {major}.{minor} is too old: the engine's projects need 3.25 or newer, and an older one stops with \"CMake Generate step failed\" instead of naming the version. Update it with `winget install Kitware.CMake` (or `winget upgrade Kitware.CMake`), restart the launcher, then press Build the game again."
-            ));
-        }
-    }
+
+    // Stage 0: Python environment (now with event emission)
+    event_emitter.stage_started("python_env", "Python environment", 1, 8).ok();
+    // ... rest of build stages will emit events
     let venv = root.join("tools").join(".venv");
     let python = venv.join("Scripts").join("python.exe");
     let py = python.display().to_string();
@@ -2538,6 +2616,7 @@ pub fn build(
     // without it the interpreter the build already needs makes the environment and pip installs the same pinned list. The
     // existing environment is reused only after it proves it is the interpreter the launcher starts, is a venv, and can
     // import every lifter package. Its own pip is used, never a global Python's.
+    event_emitter.stage_started("python_env", "Python environment", 1, 8).ok();
     ctx.start(0);
     match probe_python_env(&python) {
         PythonEnv::Healthy {
@@ -2545,6 +2624,8 @@ pub fn build(
             executable,
         } => {
             ctx.log(format!("Python environment: {executable} (Python {version}) passed the interpreter and import probe"));
+            event_emitter.stage_progress("python_env", 1.0, "already set up").ok();
+            event_emitter.stage_completed("python_env", true, Some("already set up".to_string())).ok();
             ctx.end(0, StageStatus::Skipped, "already set up");
         }
         found => {
@@ -2564,15 +2645,18 @@ pub fn build(
                     venv.display()
                 ));
             }
+            event_emitter.stage_progress("python_env", 0.1, "removing old environment").ok();
             remove_engine_venv(&root)?;
             let used_uv = which_tool("uv");
             if used_uv {
+                event_emitter.stage_progress("python_env", 0.3, "creating venv with uv").ok();
                 run(
                     ctx,
                     &root,
                     "uv",
                     &["venv", "tools\\.venv", "--python", "3.13"],
                 )?;
+                event_emitter.stage_progress("python_env", 0.6, "installing requirements with uv").ok();
                 run(
                     ctx,
                     &root,
@@ -2588,11 +2672,13 @@ pub fn build(
                 )?;
             } else {
                 ctx.log("uv is not installed: the Python environment is made with the interpreter on this PC and pip installs its packages");
+                event_emitter.stage_progress("python_env", 0.3, "creating venv with python").ok();
                 if run(ctx, &root, "py", &["-3", "-m", "venv", "tools\\.venv"]).is_err() {
                     run(ctx, &root, "python", &["-m", "venv", "tools\\.venv"]).map_err(|e| {
                         format!("creating tools\\.venv needs a Python 3.9 or newer: {e}. Install Python with `winget install Python.Python.3.12`, restart the launcher, then press Build the game again")
                     })?;
                 }
+                event_emitter.stage_progress("python_env", 0.6, "installing requirements with pip").ok();
                 run(
                     ctx,
                     &root,
@@ -2608,6 +2694,7 @@ pub fn build(
                     ],
                 )?;
             }
+            event_emitter.stage_progress("python_env", 0.9, "verifying environment").ok();
             match probe_python_env(&python) {
                 PythonEnv::Healthy {
                     version,
@@ -2619,10 +2706,14 @@ pub fn build(
                     } else {
                         "tools\\.venv ready (pip)"
                     };
+                    event_emitter.stage_progress("python_env", 1.0, detail).ok();
+                    event_emitter.stage_completed("python_env", true, Some(detail.to_string())).ok();
                     ctx.end(0, StageStatus::Done, detail);
                 }
                 failed => {
                     let why = failed.reason();
+                    event_emitter.stage_failed("python_env", &why).ok();
+                    event_emitter.stage_completed("python_env", false, Some(why.clone())).ok();
                     ctx.end(0, StageStatus::Failed, why.clone());
                     return Err(format!(
                         "tools\\.venv was created but does not pass the Python probe: {why}. Delete {} and press Build the game again; do not uninstall other Python versions, because only this generated environment is replaced.",
@@ -2652,6 +2743,7 @@ pub fn build(
         std::fs::metadata(&main).ok().map(|m| m.len()),
     );
     if !patch_plan.can_build() {
+        event_emitter.stage_failed("exefs", "patches cannot be applied").ok();
         return Err(format!(
             "the installed ExeFS patches cannot be applied, so the build stopped before lifting any code:\n{}",
             patch_plan.refusal()
@@ -2673,25 +2765,30 @@ pub fn build(
     } else {
         ctx.log("exefs patches: none active");
     }
+    let detail = format!(
+        "game\\dump\\exefs ready{}",
+        if patch_applied.count > 0 {
+            format!(" + {} patch record(s)", patch_applied.count)
+        } else {
+            String::new()
+        }
+    );
+    event_emitter.stage_progress("exefs", 1.0, &detail).ok();
+    event_emitter.stage_completed("exefs", true, Some(detail.clone())).ok();
     ctx.end(
         1,
         StageStatus::Done,
-        format!(
-            "game\\dump\\exefs ready{}",
-            if patch_applied.count > 0 {
-                format!(" + {} patch record(s)", patch_applied.count)
-            } else {
-                String::new()
-            }
-        ),
+        detail,
     );
 
     // 3. Game code: ninja rebuilds only what changed.
+    event_emitter.stage_started("recompile", "Recompile the game code", 3, 8).ok();
     ctx.start(2);
     // NASM only adds the AV1 decoder's assembly; the engine's CMake turns that off by itself when nasm is missing, and the
     // build stays valid, so say what the difference is instead of failing the way the requirements page does not.
     if !which_tool("nasm") {
         ctx.log("NASM is not installed: the AV1 decoder is built in C only, so cutscene movies play slower");
+        event_emitter.warning(Some("recompile"), "NASM not installed: AV1 decoder built in C only").ok();
     }
     // A build folder made with another compiler, generator or toolchain file
     // cannot be reused, and CMake says only "Build files cannot be regenerated
@@ -2710,9 +2807,10 @@ pub fn build(
         ));
         crate::toolchain::clear_cache(&game_build);
     }
-    let (jobs, jobs_why) = build_jobs();
-    let jobs = jobs.to_string();
-    ctx.log(format!("build jobs: {jobs} ({jobs_why})"));
+    // Use the adaptive concurrency from ToolchainManager
+    let concurrency = toolchain_mgr.calculate_jobs(None);
+    let jobs = concurrency.calculated_jobs.to_string();
+    ctx.log(format!("build jobs: {} ({})", jobs, concurrency.calculated_jobs));
     // The engine's scripts look for `vcvars64.bat` through vswhere, and their
     // `%ProgramFiles(x86)%` path breaks inside cmd's `for /f` parentheses, so
     // every build logged "'vswhere.exe' is not recognized". The path is already
@@ -2738,6 +2836,7 @@ pub fn build(
         variant.key(),
         variant.label()
     ));
+    event_emitter.stage_progress("recompile", 0.1, "preparing build environment").ok();
     let mut envs: Vec<(&str, &str)> = vec![("NX_JOBS", &jobs), ("FEFW_CPU_VARIANT", variant.key())];
     if let Some(vc) = &vc_env {
         envs.push(("NX_VCVARS", vc));
@@ -2770,6 +2869,7 @@ pub fn build(
         .unwrap_or(site_list);
     let site_list = site_path.display().to_string();
     envs.push(("FEFW_SITES", &site_list));
+    event_emitter.stage_progress("recompile", 0.3, "starting build_game.cmd").ok();
     let built = run_env(
         ctx,
         &build_view.path,
@@ -2781,6 +2881,7 @@ pub fn build(
         // The same old-toolset case, when it slips past the version check: the C++ library of an older Visual Studio has no
         // `<bit>`, and nothing in the message says that is what it means.
         if e.contains("'bit' file not found") {
+            event_emitter.stage_failed("recompile", &e).ok();
             return Err(format!(
                 "the C++ standard library the build is using has no `<bit>` header. That means the Visual Studio C++ tools in use are older than 2022, or the C++ workload's libraries are missing from the install.\n\nInstall the current tools with:\n{VS_INSTALL}\n\nthen press Build the game again."
             ));
@@ -2792,13 +2893,16 @@ pub fn build(
         let build = root.join("work").join("build").join("fefw");
         let stale = needs_cache_reset(&e) || driver_flags_rejected(&e);
         if !stale {
+            event_emitter.stage_failed("recompile", &e).ok();
             return Err(e);
         }
         ctx.log(
             "the build folder holds a cache CMake cannot reuse; clearing it and configuring again",
         );
+        event_emitter.warning(Some("recompile"), "clearing stale build cache").ok();
         let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
         let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
+        event_emitter.stage_progress("recompile", 0.5, "retrying build after cache clear").ok();
         run_env(
             ctx,
             &build_view.path,
@@ -2816,30 +2920,38 @@ pub fn build(
         .filter(|m| !libs.join(format!("fefw_{m}.lib")).is_file())
         .collect();
     if !absent.is_empty() {
+        event_emitter.stage_failed("recompile", "missing libraries").ok();
         return Err(format!(
             "the recompile wrote no libraries for {} in {}; its log above says why (usually a compiler or Visual Studio C++ problem, or a full disk)",
             absent.join(", "),
             libs.display()
         ));
     }
+    let detail = format!("six modules compiled ({jobs} jobs)");
+    event_emitter.stage_progress("recompile", 1.0, &detail).ok();
+    event_emitter.stage_completed("recompile", true, Some(detail.clone())).ok();
     ctx.end(
         2,
         StageStatus::Done,
-        format!("six modules compiled ({jobs} jobs)"),
+        detail,
     );
 
     // 4. Texture transcoders. `-ExecutionPolicy Bypass` is not optional: on a PC
     // whose policy is RemoteSigned or AllSigned, PowerShell refuses to load
     // these unsigned scripts and the step fails with a SecurityError instead of
     // running, which is what issue 2's second report shows.
+    event_emitter.stage_started("textures", "Texture transcoders", 4, 8).ok();
     ctx.start(3);
     // Not "the folder has something in it": each pinned source and the ispc
     // binary are checked by name, because a fetch that stopped halfway leaves a
     // folder that exists and cannot be built.
     if textures_fetched(&root) {
+        event_emitter.stage_progress("textures", 1.0, "already fetched").ok();
+        event_emitter.stage_completed("textures", true, Some("already fetched".to_string())).ok();
         ctx.end(3, StageStatus::Skipped, "already fetched");
     } else {
         ctx.log("the texture sources are missing or incomplete; fetching the pinned versions");
+        event_emitter.stage_progress("textures", 0.2, "fetching texture sources").ok();
         run(
             ctx,
             &root,
@@ -2852,17 +2964,23 @@ pub fn build(
                 "tools\\textures\\scripts\\fetch_third_party.ps1",
             ],
         )?;
+        event_emitter.stage_progress("textures", 0.8, "verifying fetched sources").ok();
         if !textures_fetched(&root) {
+            event_emitter.stage_failed("textures", "fetched sources incomplete").ok();
             return Err("the texture sources were fetched but are still incomplete. tools\\textures\\third_party needs astc-encoder, bc7enc_rdo and ispc; delete that folder and press Build the game again".into());
         }
+        let detail = "astc-encoder, bc7enc_rdo and ispc fetched and checked";
+        event_emitter.stage_progress("textures", 1.0, detail).ok();
+        event_emitter.stage_completed("textures", true, Some(detail.to_string())).ok();
         ctx.end(
             3,
             StageStatus::Done,
-            "astc-encoder, bc7enc_rdo and ispc fetched and checked",
+            detail,
         );
     }
 
     // 5. fefw.exe.
+    event_emitter.stage_started("fefw_exe", "Build fefw.exe", 5, 8).ok();
     ctx.start(4);
     let fefw_envs: Vec<(&str, &str)> = match &vc_env {
         Some(vc) => vec![("NX_VCVARS", vc)],
@@ -2907,7 +3025,9 @@ pub fn build(
             crate::toolchain::clear_cache(&dir.path());
         }
     }
+    event_emitter.stage_progress("fefw_exe", 0.2, "checking build cache").ok();
     build_with_repairs(&builds, fefw, |m| ctx.log(m))?;
+    event_emitter.stage_progress("fefw_exe", 0.8, "cleaning up linker temps").ok();
     // lld keeps its scratch files when a link is interrupted (a cancelled build, a
     // crash). They are never read again and one build folder had eight of them at
     // 1.2 GB. A successful link means they are dead weight, so take them with it.
@@ -2936,9 +3056,13 @@ pub fn build(
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
     let _ = brand_game();
-    ctx.end(4, StageStatus::Done, "fefw.exe built");
+    let detail = "fefw.exe built";
+    event_emitter.stage_progress("fefw_exe", 1.0, detail).ok();
+    event_emitter.stage_completed("fefw_exe", true, Some(detail.to_string())).ok();
+    ctx.end(4, StageStatus::Done, detail);
 
     // 6. Shader translator.
+    event_emitter.stage_started("shader_translator", "Shader translator", 6, 8).ok();
     ctx.start(5);
     let harness = root
         .join("tools")
@@ -2950,12 +3074,17 @@ pub fn build(
         .join("spirv_harness.dll");
     let bundled = bundled_harness_in(&root);
     if let Some(exe) = &bundled {
+        let detail = format!("using the one in the zip: {}", exe.display());
+        event_emitter.stage_progress("shader_translator", 1.0, &detail).ok();
+        event_emitter.stage_completed("shader_translator", true, Some(detail.clone())).ok();
         ctx.end(
             5,
             StageStatus::Skipped,
-            format!("using the one in the zip: {}", exe.display()),
+            detail,
         );
     } else if harness.is_file() {
+        event_emitter.stage_progress("shader_translator", 1.0, "already built").ok();
+        event_emitter.stage_completed("shader_translator", true, Some("already built".to_string())).ok();
         ctx.end(5, StageStatus::Skipped, "already built");
     } else {
         // Every release zip carries the published translator, so reaching this point means the engine folder came from a
@@ -3002,6 +3131,7 @@ pub fn build(
         ensure_translator_refs(ctx, &root)?;
         let setup = build_shaders.join("scripts").join("setup_ryujinx.ps1").display().to_string();
         let refs = root.join("work").join("refs").join("ryubing").display().to_string();
+        event_emitter.stage_progress("shader_translator", 0.3, "setting up Ryujinx references").ok();
         run(ctx, &root, shell(), &["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &setup, "-Ryubing", &refs])?;
         // "SDK not found" comes back as an HRESULT and a documentation link; name the piece that is missing instead, because a
         // .NET runtime alone satisfies `dotnet.exe` but cannot build a net10.0 project.
@@ -3010,6 +3140,7 @@ pub fn build(
             .join("SpirvHarness.csproj")
             .display()
             .to_string();
+        event_emitter.stage_progress("shader_translator", 0.5, "building SpirvHarness with dotnet").ok();
         run(ctx, &root, "dotnet", &["build", &csproj, "-c", "Release"]).map_err(|e| {
             let lower = e.to_lowercase();
             if lower.contains("sdk-not-found") || e.contains("0x8000809b") || lower.contains("sdk not found") {
@@ -3045,7 +3176,10 @@ pub fn build(
                 to.display()
             ));
         }
-        ctx.end(5, StageStatus::Done, "spirv_harness built");
+        let detail = "spirv_harness built";
+        event_emitter.stage_progress("shader_translator", 1.0, detail).ok();
+        event_emitter.stage_completed("shader_translator", true, Some(detail.to_string())).ok();
+        ctx.end(5, StageStatus::Done, detail);
     }
 
     // 7. Shaders.
@@ -3057,6 +3191,7 @@ pub fn build(
     // that as done is what produced the black screens in issues #12 and #15: the
     // game found no translated shader for 598 programs, skipped every draw and
     // presented black frames at 60 fps with the audio playing.
+    event_emitter.stage_started("shaders", "Translate the shaders", 7, 8).ok();
     ctx.start(6);
     let corpus = root.join("work").join("shaders").join("corpus");
     let spirv = root.join("work").join("shaders").join("spirv");
@@ -3094,6 +3229,7 @@ pub fn build(
             .join("exefs")
             .display()
             .to_string();
+        event_emitter.stage_progress("shaders", 0.1, "extracting shader corpus").ok();
         run(
             ctx,
             &root,
@@ -3130,6 +3266,9 @@ pub fn build(
                 report.failed_summary()
             ),
         );
+        let detail = format!("all {} shaders translated{}", report.expected, report.failed_summary());
+        event_emitter.stage_progress("shaders", 1.0, &detail).ok();
+        event_emitter.stage_completed("shaders", true, Some(detail.clone())).ok();
     } else {
         ctx.log(format!(
             "{} of {} shaders have no SPIR-V ({} translated, {} the translator cannot handle); translating the missing ones",
@@ -3145,6 +3284,7 @@ pub fn build(
         let mut last = report.missing.len();
         for attempt in 1..=3 {
             // --only-missing: the 12 000 blocks already translated are not redone.
+            event_emitter.stage_progress("shaders", 0.3 + (attempt as f32 * 0.2), &format!("translator attempt {}/3", attempt)).ok();
             if let Err(e) = run_translator(ctx, &root, &bundled, &harness) {
                 ctx.log(format!("translator attempt {attempt} ended early: {e}"));
             }
@@ -3159,6 +3299,7 @@ pub fn build(
         }
         if !report.missing.is_empty() {
             let first: Vec<&str> = report.missing.iter().take(5).map(String::as_str).collect();
+            event_emitter.stage_failed("shaders", "shaders still missing").ok();
             return Err(format!(
                 "{} of {} shaders still have no SPIR-V (first: {}). Without them the game links no program, skips every draw and presents black frames \
                  with the audio still playing. The translator's report is {}; send it with a diagnostics report.",
@@ -3168,18 +3309,18 @@ pub fn build(
                 spirv.join("results.tsv").display()
             ));
         }
+        let detail = format!("{} shaders translated{}", report.expected, report.failed_summary());
+        event_emitter.stage_progress("shaders", 1.0, &detail).ok();
+        event_emitter.stage_completed("shaders", true, Some(detail.clone())).ok();
         ctx.end(
             6,
             StageStatus::Done,
-            format!(
-                "{} shaders translated{}",
-                report.expected,
-                report.failed_summary()
-            ),
+            detail,
         );
     }
 
     // 8. fefw.ini.
+    event_emitter.stage_started("fefw_ini", "Write fefw.ini", 8, 8).ok();
     ctx.start(7);
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let save_dir = Config::save_dir().ok_or(crate::platform::NO_DATA_DIR)?;
@@ -3197,10 +3338,13 @@ pub fn build(
         },
     );
     std::fs::write(dir.join("fefw.ini"), ini).map_err(|e| format!("writing fefw.ini: {e}"))?;
+    let detail = format!("{}", dir.join("fefw.ini").display());
+    event_emitter.stage_progress("fefw_ini", 1.0, &detail).ok();
+    event_emitter.stage_completed("fefw_ini", true, Some(detail.clone())).ok();
     ctx.end(
         7,
         StageStatus::Done,
-        format!("{}", dir.join("fefw.ini").display()),
+        detail,
     );
     // The executable is current only after the whole build succeeded. Recording
     // this identity here is what lets Play tell a fresh build from a stale one.
@@ -3209,6 +3353,34 @@ pub fn build(
             "the patch state could not be recorded: {e}; Play will ask for a rebuild"
         ));
     }
+    // The packed-ROMFS overlay can cost gigabytes and is rebuilt from the package when it is missing. Report what it currently
+    // costs, with the folder to delete, so reclaiming that space is a deliberate choice rather than an invisible one.
+    let overlay_dir = root.join("work").join("romfs-overlay");
+    let (overlay_files, overlay_bytes) = crate::gamedata::folder_disk_use(&overlay_dir);
+    if overlay_files > 0 {
+        ctx.log(format!(
+            "packed RomFS overlay: {overlay_files} files, {:.1} GB in {}; delete that folder to reclaim the space (the next build or Play writes it again)",
+            overlay_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            overlay_dir.display()
+        ));
+    }
+
+    // Emit build completed event
+    let summary = BuildSummary {
+        stages_completed: 8,
+        stages_failed: 0,
+        total_warnings: 0,
+        total_errors: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        peak_memory_mb: 0,
+    };
+    event_emitter.build_completed(true, summary).ok();
+
+    // Wait for consumer thread to flush all events
+    drop(event_emitter); // Close the channel
+    consumer_handle.join().ok();
+
     Ok(JobResult::Engine(dir))
 }
 
@@ -4901,8 +5073,11 @@ mod tests {
         std::fs::create_dir_all(checkout.join("game-build")).unwrap();
         let file = dir.join("data").join("engine.txt");
 
-        // The whole older copy is accepted and the checkout inside it is what gets remembered.
+        // The whole older copy is accepted and the checkout inside it is what gets remembered. The session's cached
+        // answer is cleared, or Play and Build would keep reading the folder the pick replaced.
+        let before = forgets();
         assert_eq!(remember_in(&file, &install).unwrap(), checkout);
+        assert!(forgets() > before, "the cached checkout outlived the pick");
         assert_eq!(
             std::fs::read_to_string(&file).unwrap().trim(),
             checkout.display().to_string()

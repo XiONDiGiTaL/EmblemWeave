@@ -1,0 +1,307 @@
+{
+  "version": 1,
+  "generated_at": "2026-11-21T04:50:00Z",
+  "git_commit": "phase-b-validation",
+  "platform": "windows",
+  "tools": [
+    {
+      "name": "visual_studio",
+      "display_name": "Visual Studio 2026 Community",
+      "category": "required",
+      "version": "18.0.0",
+      "min_version": "17.0.0",
+      "platform": "windows",
+      "source": {
+        "type": "system",
+        "hint": "Install via Visual Studio Installer with 'Desktop development with C++' workload"
+      },
+      "expected_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community",
+      "sha256": null,
+      "archive_sha256": null,
+      "version_cmd": [
+        "vswhere.exe",
+        "-property",
+        "installationVersion"
+      ],
+      "version_regex": "(\\d+\\.\\d+\\.\\d+\\.\\d+)",
+      "on_path": false,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Visual Studio C++ build tools"
+    },
+    {
+      "name": "msvc_toolset",
+      "display_name": "MSVC Toolset",
+      "category": "required",
+      "version": "14.52.37025",
+      "min_version": "14.30.0",
+      "platform": "windows",
+      "source": {
+        "type": "system",
+        "hint": "Part of Visual Studio C++ workload"
+      },
+      "expected_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.52.37025",
+      "sha256": null,
+      "archive_sha256": null,
+      "version_cmd": null,
+      "version_regex": null,
+      "on_path": false,
+      "env_vars": {},
+      "depends_on": [
+        "visual_studio"
+      ],
+      "description": "MSVC headers and libraries"
+    },
+    {
+      "name": "windows_sdk",
+      "display_name": "Windows 10/11 SDK",
+      "category": "required",
+      "version": "10.0.22621.0",
+      "min_version": "10.0.19041.0",
+      "platform": "windows",
+      "source": {
+        "type": "system",
+        "hint": "Install via Visual Studio Installer or Windows SDK installer - REQUIRED: 'Windows 10 SDK' component in VS Installer"
+      },
+      "expected_path": null,
+      "sha256": null,
+      "archive_sha256": null,
+      "version_cmd": null,
+      "version_regex": null,
+      "on_path": false,
+      "env_vars": {},
+      "depends_on": [
+        "visual_studio"
+      ],
+      "description": "Windows SDK headers and libraries - NOTE: Incomplete installation detected, requires 'Windows 10 SDK (10.0.22621.0)' component"
+    },
+    {
+      "name": "clang_cl",
+      "display_name": "LLVM clang-cl",
+      "category": "required",
+      "version": "23.1.5",
+      "min_version": "23.0.0",
+      "platform": "windows",
+      "source": {
+        "type": "winget",
+        "id": "LLVM.LLVM"
+      },
+      "expected_path": "C:\\Program Files\\LLVM\\bin\\clang-cl.exe",
+      "sha256": "B25538BFA8868CA51D99B0A6B90E21C2052BD14F42CC374D47AD2C10038B83E8",
+      "archive_sha256": null,
+      "version_cmd": [
+        "clang-cl.exe",
+        "--version"
+      ],
+      "version_regex": "clang version (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "C/C++ compiler compatible with MSVC"
+    },
+    {
+      "name": "lld_link",
+      "display_name": "LLVM lld-link",
+      "category": "required",
+      "version": "23.1.5",
+      "min_version": "23.0.0",
+      "platform": "windows",
+      "source": {
+        "type": "winget",
+        "id": "LLVM.LLVM"
+      },
+      "expected_path": "C:\\Program Files\\LLVM\\bin\\lld-link.exe",
+      "sha256": "EFA3313117AD50954F2545FA00883237B3AFF7741A82DD4285F065F46C66D75F",
+      "archive_sha256": null,
+      "version_cmd": [
+        "lld-link.exe",
+        "--version"
+      ],
+      "version_regex": "lld version (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [
+        "clang_cl"
+      ],
+      "description": "LLVM linker for clang-cl"
+    },
+    {
+      "name": "cmake",
+      "display_name": "CMake",
+      "category": "required",
+      "version": "4.3.1",
+      "min_version": "3.25.0",
+      "platform": "all",
+      "source": {
+        "type": "winget",
+        "id": "Kitware.CMake"
+      },
+      "expected_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
+      "sha256": "87FAFBE6507D4B23C38CCAF72A1859219D070ACB57EF0160332DF10945D2DFAC",
+      "archive_sha256": null,
+      "version_cmd": [
+        "cmake",
+        "--version"
+      ],
+      "version_regex": "cmake version (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Build system generator"
+    },
+    {
+      "name": "ninja",
+      "display_name": "Ninja Build System",
+      "category": "required",
+      "version": "1.13.2",
+      "min_version": "1.11.0",
+      "platform": "all",
+      "source": {
+        "type": "winget",
+        "id": "Ninja-build.Ninja"
+      },
+      "expected_path": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\Ninja\\ninja.exe",
+      "sha256": "9546466F0FECA6D62D7D4EA9B7FBC381F8E302CB7F02F4CE327A39D8577BB293",
+      "archive_sha256": null,
+      "version_cmd": [
+        "ninja",
+        "--version"
+      ],
+      "version_regex": "^(\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Fast build system for CMake"
+    },
+    {
+      "name": "dotnet",
+      "display_name": ".NET SDK",
+      "category": "required",
+      "version": "11.0.100",
+      "min_version": "8.0.0",
+      "platform": "all",
+      "source": {
+        "type": "winget",
+        "id": "Microsoft.DotNet.SDK.8"
+      },
+      "expected_path": null,
+      "sha256": "56428A0BBB054F1B4A9D4FB221AA3C008B1A7579090D14A246294107F05ACB66",
+      "archive_sha256": null,
+      "version_cmd": [
+        "dotnet",
+        "--version"
+      ],
+      "version_regex": "^(\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Required for SpirvHarness shader translator - NOTE: .NET 11 detected, .NET 8+ required"
+    },
+    {
+      "name": "python",
+      "display_name": "Python 3.11+",
+      "category": "required",
+      "version": "3.14.7",
+      "min_version": "3.11.0",
+      "platform": "all",
+      "source": {
+        "type": "winget",
+        "id": "Python.Python.3.11"
+      },
+      "expected_path": null,
+      "sha256": "4942B86A6597E5AEE0128DAA00050ED79BC21F6E709A78EB19CBFEB0C2F39AC9",
+      "archive_sha256": null,
+      "version_cmd": [
+        "python",
+        "--version"
+      ],
+      "version_regex": "Python (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Required for nxrecomp recompiler - NOTE: Python 3.14 detected, 3.11+ required"
+    },
+    {
+      "name": "sccache",
+      "display_name": "sccache",
+      "category": "optional",
+      "version": "0.8.1",
+      "min_version": "0.7.0",
+      "platform": "all",
+      "source": {
+        "type": "winget",
+        "id": "Mozilla.sccache"
+      },
+      "expected_path": null,
+      "sha256": null,
+      "archive_sha256": "36fa3e7bcd0e85590b6f16e14c44ac4ee4b28163509157cc5d7286cb0015578b",
+      "version_cmd": [
+        "sccache",
+        "--version"
+      ],
+      "version_regex": "sccache (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {
+        "SCCACHE_DIR": "%LOCALAPPDATA%\\sccache",
+        "SCCACHE_CACHE_SIZE": "4G",
+        "SCCACHE_IDLE_TIMEOUT": "600"
+      },
+      "depends_on": [],
+      "description": "Compiler cache for Rust and C++ - NOT INSTALLED"
+    },
+    {
+      "name": "uv",
+      "display_name": "uv Python package manager",
+      "category": "optional",
+      "version": "0.13.8",
+      "min_version": "0.3.0",
+      "platform": "all",
+      "source": {
+        "type": "download",
+        "url": "https://github.com/astral-sh/uv/releases/download/0.13.8/uv-x86_64-pc-windows-msvc.zip",
+        "archive_type": "zip"
+      },
+      "expected_path": "tools\\bin\\uv.exe",
+      "sha256": "03FA174894B9D0CBE08762D40D1C2C64D10E875BD56F1A1E334EE1E00D60CDBE",
+      "archive_sha256": "529e78a9cec6cd7e3e014f7ecd8bda0c113969d4ed0f2efeedb85c30943325b8",
+      "version_cmd": [
+        "uv",
+        "--version"
+      ],
+      "version_regex": "uv (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Fast Python package manager for engine's Python environment"
+    },
+    {
+      "name": "nasm",
+      "display_name": "NASM Assembler",
+      "category": "optional",
+      "version": "2.16.01",
+      "min_version": "2.15.00",
+      "platform": "all",
+      "source": {
+        "type": "winget",
+        "id": "NASM.NASM"
+      },
+      "expected_path": null,
+      "sha256": null,
+      "archive_sha256": null,
+      "version_cmd": [
+        "nasm",
+        "-v"
+      ],
+      "version_regex": "NASM version (\\d+\\.\\d+\\.\\d+)",
+      "on_path": true,
+      "env_vars": {},
+      "depends_on": [],
+      "description": "Assembler for optimized SIMD routines - NOT INSTALLED"
+    }
+  ],
+  "metadata": {
+    "schema_version": "1",
+    "description": "Toolchain lockfile for EmblemWeave build reproducibility - Updated to match actual VS 2026 environment"
+  }
+}
+

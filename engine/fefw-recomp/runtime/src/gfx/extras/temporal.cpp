@@ -16,6 +16,17 @@
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 
+// Feature gate macros for optional upscaler backends
+#ifndef NXRT_UPSCALER_FSR
+#define NXRT_UPSCALER_FSR 0
+#endif
+#ifndef NXRT_UPSCALER_DLSS
+#define NXRT_UPSCALER_DLSS 0
+#endif
+#ifndef NXRT_UPSCALER_XESS
+#define NXRT_UPSCALER_XESS 0
+#endif
+
 namespace nxrt::extras {
 namespace {
 
@@ -378,9 +389,17 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
         }
         return VK_NULL_HANDLE;
     }
-    TemporalBackend* be = mode == UpscaleMode::Fsr4 || mode == UpscaleMode::Fsr3 ? temporal_ffx(gfx_device)
-                        : mode == UpscaleMode::Xess                             ? temporal_xess(gfx_device)
-                                                                                : temporal_dlss(gfx_device, mode == UpscaleMode::Dlaa);
+    TemporalBackend* be = nullptr;
+#if NXRT_UPSCALER_FSR
+    if (mode == UpscaleMode::Fsr4 || mode == UpscaleMode::Fsr3) be = temporal_ffx(gfx_device);
+#endif
+#if NXRT_UPSCALER_XESS
+    if (!be && mode == UpscaleMode::Xess) be = temporal_xess(gfx_device);
+#endif
+#if NXRT_UPSCALER_DLSS
+    if (!be && (mode == UpscaleMode::Dlss || mode == UpscaleMode::Dlaa)) be = temporal_dlss(gfx_device, mode == UpscaleMode::Dlaa);
+#endif
+    if (!be) return VK_NULL_HANDLE;
     if (!be) return VK_NULL_HANDLE;
     if (!ensure(s, s.color, render, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal colour") || !ensure(s, s.depth, render, VK_FORMAT_R32_SFLOAT, "temporal depth") ||
         !ensure(s, s.motion, render, VK_FORMAT_R16G16_SFLOAT, "temporal motion") || !ensure(s, s.output, out, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal output"))
@@ -539,3 +558,37 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
 }
 
 }  // namespace nxrt::extras
+
+// Stub implementations for when feature gates are disabled
+#if !NXRT_UPSCALER_FSR
+namespace nxrt::extras {
+TemporalBackend* temporal_ffx(void*) { return nullptr; }
+bool temporal_ffx_available() { return false; }
+bool temporal_ffx_fsr4() { return false; }
+}
+#endif
+
+#if !NXRT_UPSCALER_DLSS
+namespace nxrt::extras {
+TemporalBackend* temporal_dlss(void*, bool) { return nullptr; }
+bool temporal_dlss_available() { return false; }
+bool temporal_dlss_started() { return false; }
+bool streamline_framegen_files() { return false; }
+PFN_vkGetInstanceProcAddr streamline_preinit() { return nullptr; }
+bool streamline_framegen_available() { return false; }
+void streamline_check_framegen(VkPhysicalDevice) {}
+void streamline_shutdown() {}
+void* streamline_proc(const char*) { return nullptr; }
+}
+#endif
+
+#if !NXRT_UPSCALER_XESS
+namespace nxrt::extras {
+TemporalBackend* temporal_xess(void*) { return nullptr; }
+bool temporal_xess_available() { return false; }
+bool temporal_xess_ready() { return false; }
+void xess_instance_setup(const std::vector<VkExtensionProperties>&, std::vector<const char*>&) {}
+void xess_device_setup(VkInstance, VkPhysicalDevice, const std::vector<VkExtensionProperties>&, std::vector<const char*>&, void**) {}
+void xess_shutdown() {}
+}
+#endif

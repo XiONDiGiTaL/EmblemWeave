@@ -110,8 +110,9 @@ try {
         # (issues #16 and #17). The two fetched trees are named instead, and the runtime's own is shipped.
         (Join-Path $repo 'engine\fefw-recomp\tools\textures\third_party'),
         (Join-Path $repo 'engine\fefw-recomp\tools\shaders\third_party'),
-        # The fetched toolchain archives (LLVM alone is ~900 MB) are inputs to a local build, not runtime files. The
-        # launcher carries the extracted tools in tools\bin; shipping the downloads would double the zip for no player.
+        # The fetched toolchain archives (LLVM alone is 264 MB) are inputs to a local build, not runtime files. The
+        # launcher downloads only the pieces a PC lacks and trims LLVM into tools\bin on first run; shipping the downloads
+        # or extracted tools would bloat the zip for every player.
         (Join-Path $repo 'engine\fefw-recomp\tools\download'),
         'build', 'node_modules', 'shader_cache', 'bc7_cache', '.venv', 'refs', '.git', 'obj', 'bin',
         '.github', '.vscode', '.pytest_cache', '.mypy_cache', '__pycache__', '*.egg-info'

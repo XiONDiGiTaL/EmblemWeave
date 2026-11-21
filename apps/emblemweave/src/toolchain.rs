@@ -233,15 +233,20 @@ fn build_tool_path() -> String {
             dirs.push(bin.display().to_string());
         }
     }
-    dirs.push(r"C:\Program Files\LLVM\bin".to_string());
-    dirs.push(r"C:\Program Files\CMake\bin".to_string());
+    // `Program Files` is not always on C:, and winget puts LLVM, CMake, dotnet, PowerShell, Git and NASM under whatever
+    // folder Windows reports. A literal `C:\Program Files` hid every one of them on a PC whose system drive is D: (issue 73).
+    for root in program_files_roots() {
+        dirs.push(root.join("LLVM").join("bin").display().to_string());
+        dirs.push(root.join("CMake").join("bin").display().to_string());
+        dirs.push(root.join("dotnet").display().to_string());
+        dirs.push(root.join("PowerShell").join("7").display().to_string());
+        dirs.push(root.join("Git").join("cmd").display().to_string());
+        dirs.push(root.join("NASM").display().to_string());
+    }
     // CMake bundled with Visual Studio lives here and reaches PATH only after `vcvars` runs. The dependency page runs it and the
     // build probe did not, so the page said "installed" while the build said "CMake was not found on PATH" (issue 30).
     for vs in vs_installs() {
         dirs.push(vs.path.join(r"Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin").display().to_string());
-    }
-    if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
-        dirs.push(format!(r"{pf86}\CMake\bin"));
     }
     if let Ok(program_data) = std::env::var("ProgramData") {
         dirs.push(format!(r"{program_data}\chocolatey\bin"));
@@ -249,7 +254,6 @@ fn build_tool_path() -> String {
     if let Ok(home) = std::env::var("USERPROFILE") {
         dirs.push(format!(r"{home}\scoop\shims"));
     }
-    dirs.push(r"C:\Program Files\dotnet".to_string());
     dirs.push(format!(r"{local}\Microsoft\WinGet\Links"));
     dirs.push(format!(r"{local}\bin\NASM"));
     if let Ok(home) = std::env::var("USERPROFILE") {
@@ -263,7 +267,32 @@ fn build_tool_path() -> String {
 }
 
 fn program_files_x86() -> PathBuf {
-    std::env::var("ProgramFiles(x86)").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(r"C:\Program Files (x86)"))
+    std::env::var("ProgramFiles(x86)")
+        .or_else(|_| std::env::var("ProgramFiles"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(r"C:\Program Files (x86)"))
+}
+
+/// Every `Program Files` folder this machine reports. Windows can be installed on a drive other than `C:`, and
+/// winget installs into the folder both `ProgramFiles` variables name; a literal `C:\Program Files` looked at the
+/// wrong drive on such a PC (issue 73).
+pub(crate) fn program_files_roots() -> Vec<PathBuf> {
+    program_files_roots_from(|k| std::env::var_os(k))
+}
+
+fn program_files_roots_from(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        let Some(dir) = get(key).map(PathBuf::from) else { continue };
+        if dir.as_os_str().is_empty() || roots.contains(&dir) {
+            continue;
+        }
+        roots.push(dir);
+    }
+    if roots.is_empty() {
+        roots.push(PathBuf::from(r"C:\Program Files"));
+    }
+    roots
 }
 
 /// `vswhere.exe`, the only supported way to ask where Visual Studio is.
@@ -445,7 +474,9 @@ pub fn clang_candidates() -> Vec<PathBuf> {
     if let Some(root) = crate::engine::root() {
         dirs.push(root.join("tools").join("bin"));
     }
-    dirs.push(PathBuf::from(r"C:\Program Files\LLVM\bin"));
+    for root in program_files_roots() {
+        dirs.push(root.join("LLVM").join("bin"));
+    }
     if let Ok(path) = std::env::var("PATH") {
         dirs.extend(path.split(';').filter(|d| !d.trim().is_empty()).map(PathBuf::from));
     }
@@ -577,8 +608,8 @@ pub fn probe() -> Toolchain {
     }
     match &tc.clang {
         None => tc.problems.push(
-            "clang-cl was not found. Looked in `NX_LLVM`, `NX_TOOLCHAIN\\llvm\\bin`, `C:\\Program Files\\LLVM\\bin` and \
-             PATH. Install LLVM 23 or newer with `winget install LLVM.LLVM`"
+            "clang-cl was not found. Looked in `NX_LLVM`, `NX_TOOLCHAIN\\llvm\\bin`, the LLVM folder under `Program \
+             Files` and PATH. Install LLVM 23 or newer with `winget install LLVM.LLVM`"
                 .into(),
         ),
         Some(c) if c.major < MIN_CLANG_MAJOR => tc.problems.push(format!(
@@ -960,6 +991,27 @@ mod tests {
         assert_eq!(got, None);
         let other = cache_mismatch(&facts, compiler, "Ninja", "C:/other/recomp/cmake/clang-cl.cmake");
         assert!(other.is_some(), "a toolchain file in another checkout is still a mismatch");
+    }
+
+    #[test]
+    fn program_files_folders_follow_the_system_drive() {
+        let roots = program_files_roots_from(|key| match key {
+            "ProgramFiles" | "ProgramW6432" => Some(std::ffi::OsString::from(r"D:\Program Files")),
+            "ProgramFiles(x86)" => Some(std::ffi::OsString::from(r"D:\Program Files (x86)")),
+            _ => None,
+        });
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from(r"D:\Program Files"),
+                PathBuf::from(r"D:\Program Files (x86)")
+            ]
+        );
+        // With nothing reported, the old default still gives one place to look.
+        assert_eq!(
+            program_files_roots_from(|_| None),
+            vec![PathBuf::from(r"C:\Program Files")]
+        );
     }
 
     #[test]

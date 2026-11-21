@@ -52,6 +52,17 @@ pub fn reshade_ini() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// A font from the Windows folder this machine actually uses. Windows can be installed on a drive other than `C:`, so
+/// `C:\Windows\Fonts` is not a safe path any more than `C:\Program Files` was (issue 73).
+fn windows_font_from(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let path = root.join("Fonts").join(name);
+    path.is_file().then_some(path)
+}
+
+fn windows_font(name: &str) -> Option<PathBuf> {
+    windows_font_from(&PathBuf::from(std::env::var_os("SystemRoot")?), name)
+}
+
 /// Writes the XiØN palette into ReShade's documented custom style
 /// (`[STYLE] StyleIndex=4`, the `Col*` ImGui colour keys). ReShade's source
 /// reads these keys for that style; no binary is touched and nothing is
@@ -162,8 +173,8 @@ pub fn apply_reshade_theme() -> Result<String, String> {
     ] {
         out = crate::engine::set_ini_key(&out, "STYLE", key, value);
     }
-    if std::path::Path::new("C:\\Windows\\Fonts\\segoeui.ttf").is_file() {
-        out = crate::engine::set_ini_key(&out, "STYLE", "Font", "C:\\Windows\\Fonts\\segoeui.ttf");
+    if let Some(font) = windows_font("segoeui.ttf") {
+        out = crate::engine::set_ini_key(&out, "STYLE", "Font", &font.display().to_string());
         out = crate::engine::set_ini_key(&out, "STYLE", "FontSize", "16.000000");
     }
     std::fs::write(&path, out).map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -232,6 +243,17 @@ mod tests {
         assert_eq!(d.get("gfx.residency").map(String::as_str), Some("auto"));
         assert_eq!(d.get("gfx.residency_percent").map(String::as_str), Some("80"));
         assert!(!d.contains_key("nvn.gpl_threads"), "Graphics owns the shared shader worker cap");
+    }
+
+    #[test]
+    fn a_style_font_is_found_under_the_reported_windows_folder() {
+        let dir = std::env::temp_dir().join(format!("ew-font-{}", std::process::id()));
+        let fonts = dir.join("Fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        std::fs::write(fonts.join("segoeui.ttf"), "font").unwrap();
+        assert_eq!(windows_font_from(&dir, "segoeui.ttf"), Some(fonts.join("segoeui.ttf")));
+        assert_eq!(windows_font_from(&dir, "missing.ttf"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

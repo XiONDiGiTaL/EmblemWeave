@@ -51,7 +51,63 @@ set(NXRT_A2B_DLLS "${NXRT_A2B_DLLS}" CACHE INTERNAL "astcdec DLLs of the prebuil
 file(GLOB_RECURSE NXRT_GFX_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/*.cpp")
 list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "nvn_gpu_stub[.]cpp$")   # unit-test stand-in of the GPU boundary (scripts/nvn_unit.ps1)
 list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "nvn_a2b_off[.]cpp$")    # the transcoder's stand-in (NXRT_ASTC2BC7=OFF above)
+# Filter out optional upscaler backends based on feature gates
+if(NOT NXRT_UPSCALER_FSR)
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "temporal_ffx[.]cpp$")
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "framegen_ffx[.]cpp$")
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "ffx_files[.]cpp$")
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "ffx_device_proc[.][ch]$")
+endif()
+if(NOT NXRT_UPSCALER_DLSS)
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "temporal_dlss[.]cpp$")
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "streamline_preinit[.]cpp$")
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "upscaler_paths[.]cpp$")
+endif()
+if(NOT NXRT_UPSCALER_XESS)
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "temporal_xess[.]cpp$")
+endif()
+if(NOT NXRT_UPSCALER_NIS)
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "nis_spatial[.]cpp$")
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "nis_shaders[.]inc$")
+endif()
+if(NOT NXRT_UPSCALER_MAKO)
+    list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "mako_spatial[.]cpp$")
+endif()
+
+# Precompiled header for graphics (heavy headers: SDL3, Vulkan, ImGui, VMA, Volk)
+if(NXRT_PCH)
+    set(NXRT_GFX_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/nxrt_gfx_pch.h")
+    file(WRITE "${NXRT_GFX_PCH_HEADER}"
+        "// nxrt_gfx precompiled header\n"
+        "#include <SDL3/SDL.h>\n"
+        "#include <SDL3/SDL_vulkan.h>\n"
+        "#include <vulkan/vulkan.h>\n"
+        "#include <volk.h>\n"
+        "#include <vk_mem_alloc.h>\n"
+        "#include <imgui.h>\n"
+        "#include <imgui_impl_vulkan.h>\n"
+        "#include <algorithm>\n"
+        "#include <atomic>\n"
+        "#include <chrono>\n"
+        "#include <cstdint>\n"
+        "#include <cstring>\n"
+        "#include <memory>\n"
+        "#include <mutex>\n"
+        "#include <string>\n"
+        "#include <string_view>\n"
+        "#include <vector>\n"
+        "#include <unordered_map>\n"
+        "#include <array>\n"
+    )
+endif()
+
 add_library(nxrt_gfx STATIC ${NXRT_GFX_SOURCES})
+if(NXRT_PCH)
+    target_precompile_headers(nxrt_gfx PRIVATE "${NXRT_GFX_PCH_HEADER}")
+endif()
+if(NXRT_UNITY_BUILD)
+    set_target_properties(nxrt_gfx PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 4)
+endif()
 # The About page of the F1 menu shows the commit this build was made from (read when CMake configures; absent without git).
 find_package(Git QUIET)
 if(GIT_FOUND)
@@ -63,6 +119,7 @@ if(GIT_FOUND)
 endif()
 target_include_directories(nxrt_gfx PUBLIC include src/gfx/nvn/third_party PRIVATE src/gfx src/gfx/nvn)
 target_link_libraries(nxrt_gfx PUBLIC nxrt nxrt_volk nxrt_vma nxrt_imgui nxrt_tiling nxrt_astc2bc7 nxrt_zstd SDL3::SDL3-static)
+# Upscaler feature gates are propagated from nxrt (main CMakeLists.txt converts ON/OFF to 1/0)
 # BC1 encoder for [gfx] astc_bc = bc1 (src/gfx/nvn/nvn_bc1.cpp): rgbcx of bc7enc_rdo (MIT), fetched with the transcoder's sources. Without it the
 # setting falls back to off.
 set(_nxrt_rgbcx "${NXRT_TOOLS_DIR}/textures/third_party/bc7enc_rdo")

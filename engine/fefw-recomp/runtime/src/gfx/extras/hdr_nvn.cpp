@@ -9,8 +9,12 @@
 #include "nxrt/extras.h"
 #include "nxrt/log.h"
 #include "extras/fsr1_spatial.h"
+#if NXRT_UPSCALER_MAKO
 #include "extras/mako_spatial.h"
+#endif
+#if NXRT_UPSCALER_NIS
 #include "extras/nis_spatial.h"
+#endif
 #include "extras/hdr_tonemap_patch.h"
 #include "extras/extras_shaders.inc"
 
@@ -115,16 +119,35 @@ bool hdr_is_tonemap(const std::vector<uint32_t>& words, const std::string& hash)
 
 bool scene_upscale_wanted() {
     const UpscaleMode m = upscale_mode();
-    return m == UpscaleMode::Fsr1 || m == UpscaleMode::Nis || m == UpscaleMode::Mako;
+    bool want = m == UpscaleMode::Fsr1;
+#if NXRT_UPSCALER_NIS
+    want = want || m == UpscaleMode::Nis;
+#endif
+#if NXRT_UPSCALER_MAKO
+    want = want || m == UpscaleMode::Mako;
+#endif
+    return want;
 }
 
 SpatialUpscaler* scene_upscaler(void* gfx_device, VkExtent2D in, VkExtent2D out) {
     static Fsr1Spatial* fsr = nullptr;
+#if NXRT_UPSCALER_NIS
     static NisSpatial* nis = nullptr;
+#endif
+#if NXRT_UPSCALER_MAKO
     static MakoSpatial* mako = nullptr;
-    static bool tried_fsr = false, tried_nis = false, tried_mako = false, told_range = false;
+#endif
+    static bool tried_fsr = false;
+#if NXRT_UPSCALER_NIS
+    static bool tried_nis = false;
+#endif
+#if NXRT_UPSCALER_MAKO
+    static bool tried_mako = false;
+#endif
+    static bool told_range = false;
     if (!gfx_device) return nullptr;
     gfx::Device& dev = *static_cast<gfx::Device*>(gfx_device);
+#if NXRT_UPSCALER_MAKO
     if (upscale_mode() == UpscaleMode::Mako) {
         if (!tried_mako) {
             tried_mako = true;
@@ -134,6 +157,8 @@ SpatialUpscaler* scene_upscaler(void* gfx_device, VkExtent2D in, VkExtent2D out)
         }
         if (mako) return mako;
     }
+#endif
+#if NXRT_UPSCALER_NIS
     if (upscale_mode() == UpscaleMode::Nis) {
         if (!tried_nis) {
             tried_nis = true;
@@ -147,6 +172,7 @@ SpatialUpscaler* scene_upscaler(void* gfx_device, VkExtent2D in, VkExtent2D out)
             NXLOG_I("hdr", "scene upscale %ux%u -> %ux%u is beyond NIS's 2x: FSR 1 is used for it", in.width, in.height, out.width, out.height);
         }
     }
+#endif
     if (!tried_fsr) {
         tried_fsr = true;
         auto* f = new Fsr1Spatial();

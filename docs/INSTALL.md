@@ -97,25 +97,36 @@ player to install what the zip can carry:
 The launcher now does that itself (`apps/emblemweave/src/portable.rs`). `toolchain::tool_path` puts
 `engine/fefw-recomp/tools\bin` first on the PATH every probe and every build step uses, so a piece that lands there is
 found before anything installed on the PC, and the Requirements page reports it as **Carried** rather than installed.
-On first run a copy without that folder fetches the four pieces in the background (`tools\fetch.log` records the
-progress); `EmblemWeave.exe --fetch-tools` does the same in the foreground, which is what a build machine should run.
+On first run it fetches **only the pieces the PC does not already have**: LLVM 23, CMake 3.25+, Ninja and Python 3.9+
+are checked first, so a machine that already has them downloads nothing. `EmblemWeave.exe --fetch-tools` forces the
+four pinned pieces into the foreground, which is what a build machine should run. Progress from the automatic fetch goes
+to `tools\fetch.log`.
 
 | Piece | Archive | Pinned SHA-256 |
 | --- | --- | --- |
-| LLVM `clang-cl` + `lld-link` 23.1.5 | `clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.xz` (901 MB) | `62fdada7…11c6d4` |
+| LLVM `clang-cl`, `lld-link`, `llvm-rc` 23.1.5 | `clang+llvm-23.1.5-x86_64-pc-windows-msvc.tar.zst` (264 MB) | `b2be3338…5029d7` |
 | CMake 3.31.6 | `cmake-3.31.6-windows-x86_64.zip` (46 MB) | `d163cd3a…e4f836` |
 | Ninja 1.13.1 | `ninja-win.zip` (0.3 MB) | `26a40fa8…74ae25bf` |
 | Python 3.12.8 (embeddable) | `python-3.12.8-embed-amd64.zip` (11 MB) | `8d3f33be…e3ced2fb` |
 
-Each archive is checked against the hash pinned in the table before it is unpacked, so a truncated or substituted
+The first run downloads about **320 MB** when it needs all four pieces, instead of the 1 GB the old full LLVM `.tar.xz`
+cost. Each archive is checked against the hash pinned in the table before it is unpacked, so a truncated or substituted
 download stops with a message instead of filling `tools\bin` with something that half works. Anything that fails the
 check is deleted and fetched again on the next run. The executables are linked into `tools\bin` (a hard link, which is
 instant and costs no extra space) with LLVM's `lib` and CMake's `share` beside it, because both look for their files next
-to their own `bin`.
+to their own `bin`. Only the LLVM files the build invokes are unpacked (about 320 MB instead of 3.4 GB), and a successful
+install deletes its archive, so a first run leaves neither a second copy of LLVM nor a full LLVM tool directory behind.
+Older full LLVM installs are trimmed on the next start; CMake, Python and Ninja are left alone.
+
+The `.tar.zst` is decoded by the launcher itself (`zstd` + `tar`), so no 7-Zip, `zstd` or other program is needed. The
+LLVM release uses a 1 GiB zstd window; unpacking it briefly uses about 1 GB of memory, then that memory is released.
 
 Removing Visual Studio as well is the bigger prize and the bigger job: it means building the runtime and every static
 dependency with clang against MinGW-w64 or libc++, which is the same ABI change a Linux build needs ([LINUX.md](LINUX.md)
-phase 3). It should be done once, for both platforms, rather than twice.
+phase 3). It should be done once, for both platforms, rather than twice. The smaller `llvm-mingw` compiler used by
+Hookshot cannot replace this toolchain by itself: it ships `clang`/`clang++` and `ld.lld`, but not the `clang-cl` driver or
+`lld-link` that the engine's MSVC ABI and CMake toolchain use. Recompia's Zig toolchain avoids Visual Studio because its
+runtime is built for the MinGW ABI; that is the same port, not a drop-in package swap.
 
 ## Portable mode
 

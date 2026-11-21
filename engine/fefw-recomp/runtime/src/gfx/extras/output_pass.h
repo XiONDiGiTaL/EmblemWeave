@@ -17,12 +17,26 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 
 #include "nxrt/extras.h"
 #include "nxrt/gfx.h"
 #include "extras/fsr1_spatial.h"
-#include "extras/mako_spatial.h"
+
+// Feature gate macros for optional spatial upscalers
+#ifndef NXRT_UPSCALER_NIS
+#define NXRT_UPSCALER_NIS 0
+#endif
+#ifndef NXRT_UPSCALER_MAKO
+#define NXRT_UPSCALER_MAKO 0
+#endif
+
+#if NXRT_UPSCALER_NIS
 #include "extras/nis_spatial.h"
+#endif
+#if NXRT_UPSCALER_MAKO
+#include "extras/mako_spatial.h"
+#endif
 
 namespace nxrt::extras {
 
@@ -40,8 +54,16 @@ struct OutputParams {
     bool dither = false;                     // [hdr] dither: +-1 code value of noise before the target's 10/8-bit quantisation
     float gamut_expand = 0;                  // HDR output: 0 = the exact BT.709 colours, up to 1 = saturated colours pushed toward DCI-P3
     bool fsr1 = false;                       // upscale with FSR 1 when the picture is larger than the source
+#if NXRT_UPSCALER_NIS
     bool nis = false;                        // upscale with NVIDIA Image Scaling instead (FSR 1 when the scale is beyond 2x)
+#else
+    bool nis = false;
+#endif
+#if NXRT_UPSCALER_MAKO
     bool mako = false;                       // upscale with the MAKO single-pass sharpened-cubic filter instead
+#else
+    bool mako = false;
+#endif
     float sharpness = 0.8f;                  // 0..1 (RCAS / NIS / MAKO)
     bool picture = false;                    // apply the picture controls (nxrt/extras.h PictureSettings) in the encode
     float pic[4] = {1, 1, 0, 1};             // contrast, saturation, black, gamma
@@ -63,8 +85,16 @@ public:
 
     // Counters for the log and the tests.
     uint32_t fsr_frames() const { return fsr_.frames(); }
-    uint32_t nis_frames() const { return nis_.frames(); }
-    uint32_t mako_frames() const { return mako_.frames(); }
+#if NXRT_UPSCALER_NIS
+    uint32_t nis_frames() const { return nis_ ? nis_->frames() : 0; }
+#else
+    uint32_t nis_frames() const { return 0; }
+#endif
+#if NXRT_UPSCALER_MAKO
+    uint32_t mako_frames() const { return mako_ ? mako_->frames() : 0; }
+#else
+    uint32_t mako_frames() const { return 0; }
+#endif
 
     static constexpr uint32_t kSetRing = 16;
 
@@ -84,8 +114,16 @@ private:
     VkDescriptorSet enc_sets_[kSetRing] = {};
     uint32_t next_enc_ = 0;
     Fsr1Spatial fsr_;
-    NisSpatial nis_;
-    MakoSpatial mako_;
+#if NXRT_UPSCALER_NIS
+    std::unique_ptr<NisSpatial> nis_;
+#else
+    std::unique_ptr<SpatialUpscaler> nis_;  // nullptr when disabled; same layout, correct destruction via virtual dtor
+#endif
+#if NXRT_UPSCALER_MAKO
+    std::unique_ptr<MakoSpatial> mako_;
+#else
+    std::unique_ptr<SpatialUpscaler> mako_;  // nullptr when disabled; same layout, correct destruction via virtual dtor
+#endif
     bool nis_tried_ = false;   // NIS and MAKO start on first use (most players never pick them)
     bool mako_tried_ = false;
 };

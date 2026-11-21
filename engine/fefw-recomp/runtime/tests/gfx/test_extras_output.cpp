@@ -565,6 +565,7 @@ NXTEST(fsr1_upscales_a_gradient) {
 
 // ---- 5b: MAKO upscales a gradient in one pass ----------------------------------------------------------------------------------------
 
+#if NXRT_UPSCALER_MAKO
 NXTEST(mako_upscales_a_gradient) {
     Rig r;
     Teardown td{r};
@@ -632,6 +633,7 @@ NXTEST(mako_upscales_a_gradient) {
     CHECK(last_min >= 230);
     CHECK(mean_abs < 12.0);
 }
+#endif
 
 // ---- 6: FSR 1 in HDR keeps highlights -----------------------------------------------------------------------------------------------
 

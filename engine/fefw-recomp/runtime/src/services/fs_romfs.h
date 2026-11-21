@@ -63,6 +63,7 @@ public:
         uint64_t data_offset = 0;                           // header.file_partition_ofs
         uint32_t overlay_files = 0;                         // files served from overlays (replaced or added)
         uint32_t installed_mod_files = 0;                   // of those, files taken from installed mods
+        uint32_t mod_added_files = 0;                       // of those, files whose paths installed mods added (not replacements)
         uint32_t package_overlay_files = 0;                 // of those, files taken from the launcher's package overlay
         uint32_t shadowed_mod_files = 0;                    // mod files a later overlay replaced
         uint32_t edited_files = 0;                          // files served from memory after an edit (RomfsEdits)

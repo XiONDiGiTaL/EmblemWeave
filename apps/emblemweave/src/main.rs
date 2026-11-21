@@ -43,7 +43,17 @@ mod shell;
 mod sites;
 mod snapshots;
 mod theme;
+mod build_versioning;
+mod build_versioning_cli;
+mod object_store;
+mod object_store_cli;
+mod pipeline_cache;
+mod pipeline_cache_cli;
+mod romfs_store;
+mod storage_manager;
+mod storage_manager_cli;
 mod toolchain;
+mod toolchain_manager;
 mod updater;
 mod widgets;
 
@@ -990,6 +1000,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod toolchain_manager_tests;
+
 /// A byte count for people: megabytes below a gigabyte, else gigabytes.
 pub fn fmt_size(bytes: u64) -> String {
     const MB: f64 = 1024.0 * 1024.0;
@@ -1571,12 +1584,16 @@ fn main() -> eframe::Result<()> {
     }
     // Before anything reads the settings: a fresh copy keeps its data beside the program, so the first run writes its config there.
     platform::adopt_portable_on_first_run();
-    // A copy without `tools\bin` carries the toolchain into it on first run, in the background; the Requirements page
-    // reports the pieces as Carried once they land. `--fetch-tools` does the same in the foreground.
-    portable::auto_start();
+    // A copy without `tools\bin` carries the missing toolchain pieces into it on first run, in the background; the
+    // Requirements page reports them as Carried once they land. Pieces the PC already has are not downloaded. `--fetch-tools`
+    // forces all four in the foreground, so do not start the background fetch as well: both would download the same archives.
+    let fetch_tools = args.iter().any(|a| a == "--fetch-tools");
+    if !fetch_tools {
+        portable::auto_start();
+    }
     // Carry the toolchain the release ships: the same four downloads the launcher would do on first run, runnable from a
     // console so a build machine can prepare `tools\bin` without opening the window.
-    if args.iter().any(|a| a == "--fetch-tools") {
+    if fetch_tools {
         let last = std::cell::RefCell::new(String::new());
         let r = portable::install_all(&|f, line| {
             if *last.borrow() != line {

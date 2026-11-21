@@ -6,7 +6,7 @@ rem Intermediate object goes to %TEMP%\nxrt_fixture_build and is deleted at the 
 setlocal EnableExtensions
 
 set "HERE=%~dp0"
-set "LLVM=C:\Program Files\LLVM\bin"
+set "LLVM=%ProgramFiles%\LLVM\bin"
 set "SRC=%HERE%fixture.c"
 set "OUTDIR=%HERE%..\data"
 set "WORK=%TEMP%\nxrt_fixture_build"

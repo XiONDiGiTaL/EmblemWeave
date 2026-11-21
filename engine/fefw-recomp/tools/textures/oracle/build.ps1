@@ -3,8 +3,8 @@
 $ErrorActionPreference = 'Stop'
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $build  = [System.IO.Path]::GetFullPath((Join-Path $here '..\build\oracle'))
-$cmake  = 'C:\Program Files\CMake\bin\cmake.exe'
-$clang  = 'C:\Program Files\LLVM\bin\clang-cl.exe'
+$cmake  = Join-Path $env:ProgramFiles 'CMake\bin\cmake.exe'
+$clang  = Join-Path $env:ProgramFiles 'LLVM\bin\clang-cl.exe'
 $ninja  = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\ninja.exe'
 $vcvars = Join-Path (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath) 'VC\Auxiliary\Build\vcvars64.bat'
 

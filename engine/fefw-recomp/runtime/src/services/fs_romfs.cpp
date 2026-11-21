@@ -342,9 +342,10 @@ void note_shadows(const Node& n, size_t layer, const std::vector<RomfsOverlay>& 
     for (const Node& k : n.kids) note_shadows(k, layer, overlays, shadows);
 }
 
-// Lays the overlay directory `add` over `base`. `taken` counts the files taken from the overlay.
+// Lays the overlay directory `add` over `base`. `taken` counts the files taken from the overlay; `added` counts the files whose paths
+// the overlay introduced, as opposed to replacing a file the base already had.
 bool merge(Node& base, Node& add, size_t layer, const std::vector<RomfsOverlay>& overlays, std::map<size_t, ShadowInfo>& shadows,
-           uint32_t& taken, std::string& msg) {
+           uint32_t& taken, uint32_t& added, std::string& msg) {
     for (Node& k : add.kids) {
         auto it = std::find_if(base.kids.begin(), base.kids.end(), [&](const Node& b) { return b.name == k.name; });
         if (it == base.kids.end())
@@ -352,10 +353,12 @@ bool merge(Node& base, Node& add, size_t layer, const std::vector<RomfsOverlay>&
         if (it == base.kids.end()) {
             if (!repath(k, base.path, msg)) return false;
             set_overlay(k, layer);
-            taken += count_files(k);
+            const uint32_t n = count_files(k);
+            taken += n;
+            added += n;
             base.kids.push_back(std::move(k));
         } else if (it->is_dir && k.is_dir) {
-            if (!merge(*it, k, layer, overlays, shadows, taken, msg)) return false;
+            if (!merge(*it, k, layer, overlays, shadows, taken, added, msg)) return false;
         } else if (!it->is_dir && !k.is_dir) {
             // The overlay's file becomes a host file. Clear every source marker the base may have carried: an
             // archived (.nx) or packed (.nup) file would otherwise still be read from its archive/package.
@@ -378,7 +381,9 @@ bool merge(Node& base, Node& add, size_t layer, const std::vector<RomfsOverlay>&
             it->name = name;
             if (!repath(*it, base.path, msg)) return false;
             set_overlay(*it, layer);
-            taken += count_files(*it);
+            const uint32_t n = count_files(*it);
+            taken += n;
+            if (n > 1) added += n - 1;   // the base had one file here; a folder with several replaces it
         }
     }
     return true;
@@ -485,7 +490,7 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
         L.archive = std::move(archive);
         NXLOG_I("fs", "nx: %s, %zu top-level RomFS entries", host_dir.c_str(), root.kids.size());
     }
-    uint32_t taken = 0, installed_mod_files = 0, package_overlay_files = 0, shadowed_mod_files = 0;
+    uint32_t taken = 0, installed_mod_files = 0, installed_mod_added_files = 0, package_overlay_files = 0, shadowed_mod_files = 0;
     for (size_t i = 0; i < overlays.size(); i++) {
         const RomfsOverlay& o = overlays[i];
         std::wstring wo;
@@ -505,17 +510,18 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
         }
         // merge into a copy, so an overlay that fails halfway (a path too long) leaves the tree as it was
         Node merged = root;
-        uint32_t n = 0;
+        uint32_t n = 0, added = 0;
         std::map<size_t, ShadowInfo> shadows;
-        if (!merge(merged, ov, i, overlays, shadows, n, omsg)) {
+        if (!merge(merged, ov, i, overlays, shadows, n, added, omsg)) {
             NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.path.c_str(), omsg.c_str());
             continue;
         }
         root = std::move(merged);
         taken += n;
-        if (o.installed_mod)
+        if (o.installed_mod) {
             installed_mod_files += n;
-        else
+            installed_mod_added_files += added;
+        } else
             package_overlay_files += n;
         if (o.installed_mod)
             NXLOG_I("mods", "mod '%s': %u file(s) from RomFS", o.name.c_str(), n);
@@ -694,6 +700,7 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
     L.stats.data_offset = kPartitionOfs;
     L.stats.overlay_files = taken;
     L.stats.installed_mod_files = installed_mod_files;
+    L.stats.mod_added_files = installed_mod_added_files;
     L.stats.package_overlay_files = package_overlay_files;
     L.stats.shadowed_mod_files = shadowed_mod_files;
     L.stats.edited_files = edited;
