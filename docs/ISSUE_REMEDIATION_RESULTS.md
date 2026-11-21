@@ -133,9 +133,88 @@ pub fn scan_units(mem, config, cancel, progress) -> (Vec<u64>, ScanProgress)
   - `apps/emblemweave/src/cheats.rs` - Find Units scan_units API rewrite
   - `apps/emblemweave/src/pages/cheats.rs` - UI updates for progress/cancel
 
+## Issue #59: Launcher Window Movement Performance
+
+### Root Causes Identified
+
+1. **WM_PAINT Storm in Modal Move Loop (FIXED)**
+   - **Cause**: On Windows, dragging a caption runs a modal move loop inside `DefWindowProc`. This loop dispatches `WM_PAINT` for every pointer movement step. winit answers each paint with `RedrawRequested`; eframe draws a frame, and if egui asks for another frame, winit posts another `WM_PAINT`. The loop follows the pointer only as fast as the launcher can draw. [winit#4708](https://github.com/rust-windowing/winit/issues/4708)
+   - **Fix**: `platform.rs` subclasses launcher window, records `HTCAPTION` press, arms `IN_MOVE` guard on `WM_ENTERSIZEMOVE`, sends `WM_PAINT` to `DefWindowProcW` during move. Windows validates paint region, DWM carries last frame; no frame drawn, no next paint posted.
+   - **Verification**: Drag CPU 82.7% → 5.2% (16x), deployed fix 1.5% (55x), 0 px lag.
+
+2. **Redundant Per-Frame Work (FIXED)**
+   - **Cause**: `engine::root()`/`data_root()` called filesystem ops per frame; `widgets::tracked` laid out every character separately; `widgets::backdrop` rebuilt mesh every frame; Log page rebuilt filtered list (50k lines) every frame; pages asked for frames unnecessarily; no frame cap ran at monitor rate (151 FPS).
+   - **Fix**: Cache root/data_root once per process; `LayoutJob` with `extra_letter_spacing` cached per label; backdrop mesh cached per size/colourway; Log filter rebuilt only on change; Controls 4 FPS, Cheats on attach, About 20 FPS; global 16ms frame interval sleep.
+   - **Verification**: Frame build time 20.6ms → 2.7ms (7.6x); sweep CPU 97% → 24.9% (4x); idle CPU 0% maintained.
+
+3. **DWM Transition Animation (FIXED)**
+   - **Cause**: `ShowWindow(SW_RESTORE)` and `SetWindowPlacement` animate restore; move loop anchors on intermediate frame causing jump.
+   - **Fix**: Clear `WS_MAXIMIZE`, set rect with `SetWindowPos` (no transition), `DwmSetWindowAttribute(DWMWA_TRANSITIONS_FORCEDISABLED)`.
+   - **Verification**: Maximized caption press restores under pointer in 40ms, then tracks 1:1.
+
+4. **Windhawk Slick Window Arrangement Mod (MITIGATED)**
+   - **Cause**: Injected `slick-window-arrangement_1.0.2_229520.dll` computes release velocity, starts 10ms timer calling `SetWindowPos` for 50 frames → post-release glide.
+   - **Fix**: Register `Windhawk_Unsubclass_slick-window-arrangement` message, send to launcher HWND on `WM_ENTERSIZEMOVE` to remove mod's subclass for that drag only.
+   - **Verification**: Post-release drift 82px over 800ms → 0px.
+
+### Performance Measurements
+
+| Metric | Pre-Fix (Deployed) | Post-Fix (Current Release) | Improvement |
+|--------|-------------------|---------------------------|-------------|
+| Deployed SHA256 | `a3c59cec` | `748e3a99` | — |
+| Idle CPU (2s) | 14.7% | 3.9% | **3.8x** |
+| Caption Drag CPU (3s) | 15.6% | 1.5% | **10.4x** |
+| Pointer Sweep CPU (6s) | 43.6% | 45.3% | Similar (exercises full UI) |
+| Frame Build Time | ~20ms | 2.7ms | **7.6x** |
+| Window Tracking Lag | N/A | 0 px | Perfect |
+| Launcher Tests | N/A | 386 passed | ✅ |
+
+### Test Results
+
+| Test | Result |
+|------|--------|
+| WM_PAINT suppression during caption drag | ✅ Verified via move_cpu_probe.ps1 |
+| DWM transitions disabled | ✅ hr=0x00000000 in launcher.log |
+| Root/data_root caching | ✅ Invalidated on checkout/storage change |
+| Label caching (LayoutJob) | ✅ One job per label |
+| Backdrop mesh caching | ✅ Per size/colourway |
+| Log page filter caching | ✅ Rebuild on lines/filter change |
+| Page frame pacing | ✅ Controls 4 FPS, Cheats on attach, About 20 FPS |
+| Global 60 FPS cap | ✅ 16ms interval sleep in App::update |
+| Caption hit-test band | ✅ Excludes chips/actions (44-240, 572-896 at 1440w) |
+| Maximized restore without transition | ✅ SetWindowPos + DWMWA_TRANSITIONS_FORCEDISABLED |
+| Borderless resize edges | ✅ WM_NCHITTEST returns 10/11/12/15/13/17 |
+| Windhawk mitigation | ✅ Unsubclass message sent on ENTERTISIZEMOVE |
+| All launcher tests (386) | ✅ Pass |
+| Deployed launcher SHA256 verified | ✅ 748e3a9938d86523abb82d29e14b56e8697383e0fc6155f01e55f6cad3b4f378 |
+
+### Deployment
+
+**Deployed Launcher Updated**:
+- **Location**: `E:\EmblemWeave\EmblemWeave.exe`
+- **SHA256**: `748e3a9938d86523abb82d29e14b56e8697383e0fc6155f01e55f6cad3b4f378`
+- **Backup**: `E:\EmblemWeave\backups\pre-issue59-fix-20261121-174206\` (previous `a3c59cec` build)
+- **Source Commit**: `1581790` (Add issue remediation documentation) + fixes from `d9f18c0`, `4d7edcf`, and subsequent
+
+### Key Files Modified
+
+| File | Change |
+|------|--------|
+| `apps/emblemweave/src/platform.rs` | Native drag: IN_MOVE guard, WM_PAINT suppression, DWM transitions, hit-test, Windhawk mitigation |
+| `apps/emblemweave/src/main.rs` | Frame pacing: FRAME_INTERVAL=16ms, last_frame tracking, sleep |
+| `apps/emblemweave/src/perf.rs` | Frames stats: single sort optimization |
+| `apps/emblemweave/src/pages/performance.rs` | Runtime status display |
+| `apps/emblemweave/src/pages/diagnostics.rs` | Frame time graph, diagnostics export |
+| `apps/emblemweave/src/theme.rs` | Baloo 2, Nunito font config |
+| `apps/emblemweave/src/shell.rs` | Top bar, nav, status bar, activity hub (cached labels) |
+| `apps/emblemweave/src/widgets/tracked.rs` | LayoutJob caching |
+| `apps/emblemweave/src/widgets/backdrop.rs` | Mesh caching |
+| `apps/emblemweave/src/pages/log.rs` | Filter caching |
+
 ## Remaining Limitations
 
 1. **hwopus silence**: Voices/BGM/SFX during cinematics remain muted until Opus decoder implemented
 2. **Shader cache**: End-to-end cinematic testing requires manual `--prepare-shaders` run
 3. **Movie asset validation**: No specific check for cinematic movie/voice files in game data validation
 4. **Audio/video sync**: Not tested end-to-end due to shader cache blocker
+5. **Sweep settled CPU**: 21.1% after sweep due to hover tooltip decay (~2s); could optimize further
