@@ -65,7 +65,8 @@ public:
 };
 
 void set_sink(std::shared_ptr<AudioSink> s);          // replaces the active sink (closing the old one)
-// Never null. [audio] sink: auto (default: XAudio2 when it can open the default output device, else the null sink), xaudio2 (the same,
+// Never null. [audio] sink: auto (default: XAudio2 when the system has an output endpoint, else the null sink; the device itself is
+// opened by the first open() and kept), xaudio2 (the same,
 // but a failure is a warning), paced (a simulated device), null (discard). With [audio] wav_dump set, the chosen sink is wrapped in
 // a WAV tee (make_wav_tee).
 std::shared_ptr<AudioSink> sink();
