@@ -1,7 +1,7 @@
 //! Cheats: Atmosphere cheat codes to switch on and off, and Cheat Engine
 //! tables with live, editable and freezable values.
 
-use crate::cheats::{self, Code, Entry, Memory, Table};
+use crate::cheats::{self, Code, Entry, Memory, Table, ScanCancelToken, ScanProgress, ScanUnitsConfig};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
@@ -9,6 +9,7 @@ use eframe::egui::{self};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 struct CodeFile {
     name: String,
@@ -41,7 +42,13 @@ pub struct Ui {
     runner: Option<cheats::Handle>,
     /// Unit records found in the game's memory, and the search under way.
     units: Vec<u64>,
-    searching: Option<Arc<Mutex<Option<Vec<u64>>>>>,
+    searching: Option<Arc<Mutex<Option<Result<Vec<u64>, String>>>>>,
+    /// Cancellation token for the unit scan.
+    scan_cancel: Option<Arc<ScanCancelToken>>,
+    /// Progress of the current unit scan.
+    scan_progress: Option<Arc<Mutex<ScanProgress>>>,
+    /// When the scan started.
+    scan_start: Option<Instant>,
     /// Per unit: infinite HP, quick level-up, max stats.
     unit_cheats: HashMap<u64, [bool; 3]>,
     /// Item pickup multiplier and its live convoy search.
@@ -62,6 +69,9 @@ impl Ui {
         self.units.clear();
         self.unit_cheats.clear();
         self.searching = None;
+        self.scan_cancel = None;
+        self.scan_progress = None;
+        self.scan_start = None;
         self.item_on = false;
         self.item_search = None;
         self.item_status = "Start the game and load a save, then switch the multiplier on again.".into();
@@ -653,27 +663,99 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                 .size(12.5)
                 .color(p.body),
         );
+
+        let busy = app.cheats_ui.searching.is_some();
         ui.horizontal(|ui| {
-            let busy = app.cheats_ui.searching.is_some();
-            if widgets::button(ui, &p, if busy { "Searching…" } else { "Find units" }, game.is_some() && !busy).clicked() {
-                let g = game.clone().unwrap();
-                let slot: Arc<Mutex<Option<Vec<u64>>>> = Default::default();
-                let out = slot.clone();
-                std::thread::spawn(move || {
-                    let v = cheats::scan_units(g.as_ref());
-                    *out.lock().unwrap() = Some(v);
-                });
-                app.cheats_ui.searching = Some(slot);
+            if busy {
+                // Show progress and cancel button while scanning.
+                let cancel = app.cheats_ui.scan_cancel.clone();
+                let progress = app.cheats_ui.scan_progress.clone();
+                let start = app.cheats_ui.scan_start;
+
+                let (completed, total, found, elapsed, cancelled, timed_out) = if let Some(p) = progress {
+                    let pg = p.lock().unwrap();
+                    (pg.completed_pieces, pg.total_pieces, pg.units_found, pg.elapsed_secs, pg.cancelled, pg.timed_out)
+                } else {
+                    (0, 0, 0, 0.0, false, false)
+                };
+
+                let status = if timed_out {
+                    "Timed out"
+                } else if cancelled {
+                    "Cancelled"
+                } else if total > 0 {
+                    &format!("Scanning… {}/{} pieces, {} units found ({:.1}s)", completed, total, found, elapsed)
+                } else {
+                    "Searching…"
+                };
+
+                if widgets::button(ui, &p, "Cancel", true).clicked() {
+                    if let Some(c) = cancel {
+                        c.cancel();
+                    }
+                }
+                ui.label(crate::i18n::text(status).color(p.muted));
+            } else {
+                if widgets::button(ui, &p, "Find units", game.is_some()).clicked() {
+                    if let Some(g) = game.clone() {
+                        let cancel = Arc::new(ScanCancelToken::new());
+                        let progress = Arc::new(Mutex::new(ScanProgress {
+                            total_pieces: 0,
+                            completed_pieces: 0,
+                            units_found: 0,
+                            elapsed_secs: 0.0,
+                            cancelled: false,
+                            timed_out: false,
+                        }));
+                        let start = Instant::now();
+                        let out_cancel = cancel.clone();
+                        let out_progress = progress.clone();
+                        let slot: Arc<Mutex<Option<Result<Vec<u64>, String>>>> = Default::default();
+                        let out_slot = slot.clone();
+
+                        std::thread::spawn(move || {
+                            let config = ScanUnitsConfig::default();
+                            let (units, prog) = cheats::scan_units(g.as_ref(), config, Some(&out_cancel), Some(&out_progress));
+                            let result = if prog.cancelled {
+                                Err("Scan cancelled by user".into())
+                            } else if prog.timed_out {
+                                Err(format!("Scan timed out after {:.1}s ({} units found)", prog.elapsed_secs, units.len()))
+                            } else {
+                                Ok(units)
+                            };
+                            *out_slot.lock().unwrap() = Some(result);
+                        });
+
+                        app.cheats_ui.searching = Some(slot);
+                        app.cheats_ui.scan_cancel = Some(cancel);
+                        app.cheats_ui.scan_progress = Some(progress);
+                        app.cheats_ui.scan_start = Some(start);
+                    }
+                }
             }
             if game.is_none() {
                 ui.label(crate::i18n::text("Start the game first.").color(p.muted));
             }
         });
+
+        // Check for completed scan.
         if let Some(done) = app.cheats_ui.searching.as_ref().and_then(|s| s.lock().unwrap().take()) {
             app.cheats_ui.searching = None;
-            app.cheats_ui.units = done.into_iter().take(40).collect();
-            app.cheats_ui.unit_cheats.retain(|k, _| app.cheats_ui.units.contains(k));
+            app.cheats_ui.scan_cancel = None;
+            app.cheats_ui.scan_progress = None;
+            app.cheats_ui.scan_start = None;
+            match done {
+                Ok(units) => {
+                    app.cheats_ui.units = units.into_iter().take(40).collect();
+                    app.cheats_ui.unit_cheats.retain(|k, _| app.cheats_ui.units.contains(k));
+                    app.notify(String::from("Unit scan complete"), Tone::Ok);
+                }
+                Err(e) => {
+                    app.notify(format!("Unit scan failed: {e}"), Tone::Bad);
+                }
+            }
         }
+
         let Some(g) = game.as_deref() else { return };
         egui::Grid::new("quick-units").num_columns(6).spacing([12.0, 6.0]).striped(true).show(ui, |ui| {
             if !app.cheats_ui.units.is_empty() {

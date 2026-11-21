@@ -347,59 +347,249 @@ pub fn looks_like_unit(b: &[u8]) -> bool {
 
 /// Every unit record in the game's memory, lowest address first.
 ///
-/// The guest range is searched first. When it holds nothing — the engine may
-/// map the guest somewhere other than the addresses these constants assume —
-/// every committed read-write region of the process is searched instead.
-pub fn scan_units(mem: &(dyn Memory + Sync)) -> Vec<u64> {
-    let found = scan_units_in(mem, GUEST_RANGE);
-    if found.is_empty() {
-        scan_units_in(mem, (0x1_0000, 0x7FFF_FFFF_FFFF))
-    } else {
-        found
+/// Configuration for unit scanning.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanUnitsConfig {
+    /// Maximum time to spend scanning (seconds).
+    pub timeout_secs: f64,
+    /// Maximum committed memory to scan in fallback mode (bytes).
+    /// Default: 2 GB (prevents scanning excessive memory on systems with large heaps).
+    pub max_fallback_bytes: u64,
+    /// Thread priority hint: "low", "normal", "high".
+    pub thread_priority: &'static str,
+    /// Maximum number of threads to use (0 = auto).
+    pub max_threads: usize,
+}
+
+impl Default for ScanUnitsConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 30.0,
+            max_fallback_bytes: 2 * 1024 * 1024 * 1024,
+            thread_priority: "low",
+            max_threads: 0,
+        }
     }
 }
 
-fn scan_units_in(mem: &(dyn Memory + Sync), range: (u64, u64)) -> Vec<u64> {
-    const PIECE: u64 = 64 << 20;
+/// Cancellation token for long-running scans.
+#[derive(Debug, Default)]
+pub struct ScanCancelToken {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl ScanCancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Progress report for a unit scan.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanProgress {
+    /// Total pieces to scan.
+    pub total_pieces: usize,
+    /// Pieces completed so far.
+    pub completed_pieces: usize,
+    /// Units found so far.
+    pub units_found: usize,
+    /// Elapsed time in seconds.
+    pub elapsed_secs: f64,
+    /// Whether the scan was cancelled.
+    pub cancelled: bool,
+    /// Whether the scan timed out.
+    pub timed_out: bool,
+}
+
+/// Scan for unit records in the game's memory.
+///
+/// Searches the guest range first. If nothing is found, falls back to scanning
+/// committed read-write regions of the process, with configurable limits.
+///
+/// Returns a tuple of (units found, progress info). The progress info reflects
+/// the final state of the scan.
+pub fn scan_units(
+    mem: &(dyn Memory + Sync),
+    config: ScanUnitsConfig,
+    cancel: Option<&ScanCancelToken>,
+    progress: Option<&std::sync::Mutex<ScanProgress>>,
+) -> (Vec<u64>, ScanProgress) {
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs_f64(config.timeout_secs);
+
+    // First pass: guest range only.
+    let (mut units, mut prog) = scan_units_in(mem, GUEST_RANGE, &config, cancel, &deadline, progress);
+    if units.is_empty() && !prog.cancelled && !prog.timed_out {
+        // Fallback: scan committed RW regions, but limit total bytes.
+        let fallback_range = (0x1_0000, 0x7FFF_FFFF_FFFF);
+        let mut fallback_config = config;
+        // For fallback, we use the regions() iterator which already limits to committed RW.
+        // We additionally cap by max_fallback_bytes in scan_units_in.
+        let (more, prog2) = scan_units_in(
+            mem,
+            fallback_range,
+            &fallback_config,
+            cancel,
+            &deadline,
+            progress,
+        );
+        units.extend(more);
+        prog = prog2;
+    }
+
+    prog.elapsed_secs = start.elapsed().as_secs_f64();
+    (units, prog)
+}
+
+fn scan_units_in(
+    mem: &(dyn Memory + Sync),
+    range: (u64, u64),
+    config: &ScanUnitsConfig,
+    cancel: Option<&ScanCancelToken>,
+    deadline: &std::time::Instant,
+    progress: Option<&std::sync::Mutex<ScanProgress>>,
+) -> (Vec<u64>, ScanProgress) {
+    const PIECE: u64 = 64 << 20; // 64 MiB pieces
+
+    // Collect all pieces from committed RW regions.
     let mut pieces = Vec::new();
+    let mut total_bytes = 0u64;
     for (s, e) in mem.regions(range.0, range.1) {
+        if total_bytes >= config.max_fallback_bytes {
+            break;
+        }
         let mut a = s;
         while a < e {
-            pieces.push((a, (a + PIECE + unit::LEN as u64).min(e)));
+            let piece_end = (a + PIECE + unit::LEN as u64).min(e);
+            let piece_bytes = piece_end - a;
+            if total_bytes + piece_bytes > config.max_fallback_bytes {
+                break;
+            }
+            pieces.push((a, piece_end));
+            total_bytes += piece_bytes;
             a += PIECE;
         }
+        if total_bytes >= config.max_fallback_bytes {
+            break;
+        }
     }
+
+    let total_pieces = pieces.len();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let found = std::sync::Mutex::new(Vec::new());
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+
+    let max_threads = if config.max_threads == 0 {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)
+    } else {
+        config.max_threads.min(8)
+    };
+
+    // Spawn worker threads with lower priority.
     std::thread::scope(|sc| {
-        for _ in 0..threads {
-            sc.spawn(|| {
-                let mut buf = Vec::new();
-                loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(&(a, b)) = pieces.get(i) else { return };
-                    buf.resize((b - a) as usize, 0);
-                    if !mem.read(a, &mut buf) {
-                        continue;
+        for _ in 0..max_threads {
+            let _ = std::thread::Builder::new()
+                .name("feu-scan".into())
+                .spawn_scoped(sc, || {
+                    // Set thread priority to low on Windows.
+                    #[cfg(windows)]
+                    {
+                        use windows_sys::Win32::System::Threading::{
+                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                            THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_IDLE,
+                        };
+                        let priority = match config.thread_priority {
+                            "low" => THREAD_PRIORITY_BELOW_NORMAL,
+                            "idle" => THREAD_PRIORITY_IDLE,
+                            _ => THREAD_PRIORITY_BELOW_NORMAL,
+                        };
+                        unsafe { SetThreadPriority(GetCurrentThread(), priority) };
                     }
-                    let mut local = Vec::new();
-                    let mut o = 0usize;
-                    while o + unit::LEN <= buf.len() {
-                        if buf[o + 5] == 0 && buf[o + 6] == 0 && buf[o + 7] == 0 && looks_like_unit(&buf[o..o + unit::LEN]) {
-                            local.push(a + o as u64);
+
+                    let mut buf = Vec::new();
+                    loop {
+                        // Check cancellation and timeout.
+                        if cancel.map_or(false, |c| c.is_cancelled()) {
+                            return;
                         }
-                        o += 4;
+                        if std::time::Instant::now() >= *deadline {
+                            return;
+                        }
+
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(a, b)) = pieces.get(i) else { return };
+
+                        let piece_size = (b - a) as usize;
+                        if piece_size == 0 || piece_size > 256 * 1024 * 1024 {
+                            // Sanity check: skip impossibly large pieces.
+                            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            continue;
+                        }
+
+                        buf.resize(piece_size, 0);
+                        if !mem.read(a, &mut buf) {
+                            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // Update progress periodically.
+                            if completed.load(std::sync::atomic::Ordering::Relaxed) % 16 == 0 {
+                                if let Some(p) = progress {
+                                    let mut pg = p.lock().unwrap();
+                                    pg.completed_pieces = completed.load(std::sync::atomic::Ordering::Relaxed);
+                                    pg.units_found = found.lock().unwrap().len();
+                                    pg.elapsed_secs = deadline.duration_since(std::time::Instant::now()).as_secs_f64().abs();
+                                }
+                            }
+                            continue;
+                        }
+
+                        let mut local = Vec::new();
+                        let mut o = 0usize;
+                        while o + unit::LEN <= buf.len() {
+                            if buf[o + 5] == 0 && buf[o + 6] == 0 && buf[o + 7] == 0 && looks_like_unit(&buf[o..o + unit::LEN]) {
+                                local.push(a + o as u64);
+                            }
+                            o += 4;
+                        }
+
+                        if !local.is_empty() {
+                            found.lock().unwrap().extend(local);
+                        }
+
+                        completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // Update progress every 16 pieces.
+                        if completed.load(std::sync::atomic::Ordering::Relaxed) % 16 == 0 {
+                            if let Some(p) = progress {
+                                let mut pg = p.lock().unwrap();
+                                pg.completed_pieces = completed.load(std::sync::atomic::Ordering::Relaxed);
+                                pg.units_found = found.lock().unwrap().len();
+                                pg.elapsed_secs = deadline.duration_since(std::time::Instant::now()).as_secs_f64().abs();
+                            }
+                        }
                     }
-                    found.lock().unwrap().extend(local);
-                }
-            });
+                });
         }
     });
+
     let mut v = found.into_inner().unwrap();
     v.sort_unstable();
     v.dedup();
-    v
+
+    let prog = ScanProgress {
+        total_pieces,
+        completed_pieces: completed.load(std::sync::atomic::Ordering::Relaxed),
+        units_found: v.len(),
+        elapsed_secs: deadline.duration_since(std::time::Instant::now()).as_secs_f64().abs(),
+        cancelled: cancel.map_or(false, |c| c.is_cancelled()),
+        timed_out: std::time::Instant::now() >= *deadline,
+    };
+
+    (v, prog)
 }
 
 /// Where one convoy row's quantity, tag and item id sit in the live process.
@@ -1590,7 +1780,8 @@ unregistersymbol(diet)
         // The tables' record for Cai sits at 0x14633BEB1CC: 4-byte aligned,
         // not 8, which the old every-8 scan missed.
         m.write(HEAP_BASE + 0x804, &cai_record());
-        assert_eq!(scan_units(&m), vec![HEAP_BASE + 0x804]);
+        let (units, _) = scan_units(&m, ScanUnitsConfig::default(), None, None);
+        assert_eq!(units, vec![HEAP_BASE + 0x804]);
     }
 
     #[test]
@@ -1601,7 +1792,8 @@ unregistersymbol(diet)
         dead[unit::HP as usize..unit::HP as usize + 2].copy_from_slice(&0u16.to_le_bytes());
         m.write(at, &dead);
         assert!(looks_like_unit(&dead), "a unit at 0 HP is still a unit");
-        assert_eq!(scan_units(&m), vec![at]);
+        let (units, _) = scan_units(&m, ScanUnitsConfig::default(), None, None);
+        assert_eq!(units, vec![at]);
 
         let mut rejected = 0;
         let c = UnitCheats { infinite_hp: true, quick_level: true, max_stats: true };
@@ -1741,8 +1933,8 @@ unregistersymbol(diet)
         let pid = process::find(GAME_EXE).expect("start the game first");
         let p = process::Process::open(pid).unwrap();
         let t = std::time::Instant::now();
-        let units = scan_units(&p);
-        println!("{} unit records in {:?}", units.len(), t.elapsed());
+        let (units, prog) = scan_units(&p, ScanUnitsConfig::default(), None, None);
+        println!("{} unit records in {:?} (progress: {}/{})", units.len(), t.elapsed(), prog.completed_pieces, prog.total_pieces);
         for a in units.iter().take(40) {
             let mut b = [0u8; unit::LEN];
             p.read(*a, &mut b);
