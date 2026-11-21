@@ -18,7 +18,7 @@ import sys
 try:
     import zbic
 except ImportError:  # pragma: no cover
-    sys.exit("the `zbic` package is required: pip install zbic")
+    sys.exit(f"the `zbic` package is required: {sys.executable} pip install zbic")
 
 SEGMENTS = ("text", "rodata", "data")
 
