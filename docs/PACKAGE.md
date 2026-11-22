@@ -12,6 +12,8 @@ after the zip is published.
 
 ```
 EmblemWeave-vX.Y.Z-windows-x64.zip
+release-manifest.json    sidecar: SHA-256 of every file, plus source/build provenance
+SHA256SUMS               combined checksums for the zip, translator and manifest
 ├── EmblemWeave.exe        the launcher (Rust, Release build) - this is the program you run
 ├── portable.txt           keeps settings, saves and build output in data/ beside the exe
 ├── LICENSE                EmblemWeave's own licence
@@ -19,8 +21,10 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
 ├── docs/                  every guide page the README links, the changelog and its screenshots
 │   ├── PACKAGE.md         this file
 │   ├── INSTALL.md, USAGE.md, BUILDING.md, SECURITY.md, TERMS.md, PRIVACY.md, LEGAL.md, DMCA.md
+│   ├── RELEASE_VALIDATION.md, PORTABLE_INSTALLATION.md, UPGRADE_AND_RECOVERY.md
 │   ├── changelog/         what changed in each release, newest first
 │   └── screenshots/       the images the README shows
+├── tools/                 offline archive, manifest and install verifiers (Python standard library)
 ├── upscalers/
 │   └── ffmpeg/            the bundled FFmpeg 8.1 DLLs, GPLv3 text, hashes and source notes
 └── engine/
@@ -32,11 +36,22 @@ EmblemWeave-vX.Y.Z-windows-x64.zip
         ├── runtime/       the runtime: Vulkan renderer, audio, HLE services, the F1 menu, the tests
         └── tools/
             ├── shaders/   the shader translator sources, the reference corpus, and
-            │   └── prebuilt/win-x64/spirv_harness.exe   the translator, published with its own .NET runtime
+            │   └── prebuilt/win-x64/   the translator, published with its own .NET runtime:
+            │       ├── spirv_harness.exe
+            │       ├── LICENSE.Ryujinx.MIT.txt
+            │       ├── DOTNET-LICENSE.txt
+            │       └── DOTNET-THIRD-PARTY-NOTICES.txt
             ├── textures/  the texture transcoders (astc-encoder, bc7enc_rdo, ispc are fetched, not shipped)
             ├── tiling/    the tiling/layout tools
             └── nso/       the NSO/module helpers
 ```
+
+The engine tree is not a filesystem copy. `tools/package_release.ps1` asks `tools/verify_engine_tree.py` for the
+`git ls-files` list, copies exactly those files, adds only the generated Windows shader translator and its notices, and then verifies
+the copied tree has no untracked extras. The dump, `work`, `.github`, fetched texture/shader/download trees and the Linux
+translator are not part of that list. A local object file or experimental source file therefore cannot enter a release
+even when it sits in `engine/fefw-recomp`. The generated translator is accompanied by its Ryujinx MIT notice and the
+Microsoft .NET redistribution notices; all three are required by archive verification.
 
 ## Deliberately not in the zip
 
@@ -147,8 +162,18 @@ Each release note carries the `sha256` of its zip. On Windows:
 Get-FileHash EmblemWeave-vX.Y.Z-windows-x64.zip -Algorithm SHA256
 ```
 
-Compare it with the value in the release notes. The source for the tag is public, so the strongest check is to build
-the launcher yourself (`cargo build --release -p emblemweave`) and compare behaviour.
+Compare it with the value in the release notes. The release also publishes `release-manifest.json`, which lists every
+file and its own SHA-256, plus a combined `SHA256SUMS`. The zip carries the same verifiers under `tools/`:
+
+```powershell
+python tools\verify_archive.py EmblemWeave-vX.Y.Z-windows-x64.zip
+python tools\release_manifest.py verify --archive EmblemWeave-vX.Y.Z-windows-x64.zip --manifest release-manifest.json
+python tools\verify_install.py --root . --manifest ..\release-manifest.json
+```
+
+The last command checks an unpacked install against the manifest; user data and generated build output are ignored. See
+[RELEASE_VALIDATION.md](RELEASE_VALIDATION.md) for the full checklist. The source for the tag is public, so the strongest
+check is to build the launcher yourself (`cargo build --release -p emblemweave`) and compare behaviour.
 
 ## Rebuilding the package
 

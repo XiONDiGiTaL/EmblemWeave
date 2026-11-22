@@ -24,13 +24,19 @@ import argparse
 import gzip
 import os
 import re
+import stat
 import sys
 import tarfile
+import unicodedata
 import zipfile
 
 DRIVE = re.compile(r'^[A-Za-z]:')
 # A name a Win32 call would cut at its first NUL, or that no filesystem accepts.
 CONTROL = re.compile(r'[\x00-\x1f]')
+# Characters Win32 does not allow in a file name. A release zip is opened on Windows by definition; an entry that
+# cannot be created there is a packaging bug, not a platform preference.
+WINDOWS_BAD = set('<>:"|?*')
+WINDOWS_RESERVED = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
 
 
 def problems_for_name(name, where):
@@ -49,17 +55,30 @@ def problems_for_name(name, where):
     parts = name.rstrip('/').split('/')
     if any(p in ('..',) for p in parts):
         out.append(f'{where}: {name!r} walks up with ".."')
+    if any(p == '.' for p in parts):
+        out.append(f'{where}: {name!r} has a "." path segment')
     if any(p == '' for p in parts[:-1]):
         out.append(f'{where}: {name!r} has an empty path segment')
     if parts and parts[0] == '.':
         out.append(f'{where}: {name!r} starts with "./"')
     if name.startswith('~'):
         out.append(f'{where}: {name!r} starts with a tilde; it is not a relative path')
+    for part in parts:
+        if not part:
+            continue
+        if part[-1] in ' .':
+            out.append(f'{where}: {name!r} has a segment ending in a space or dot; Windows strips it')
+        bad = sorted(WINDOWS_BAD.intersection(part))
+        if bad:
+            out.append(f'{where}: {name!r} holds {bad!r}, which Win32 does not allow in a name')
+        stem = part.split('.')[0].upper()
+        if stem in WINDOWS_RESERVED:
+            out.append(f'{where}: {name!r} uses the reserved Windows name {stem!r}')
     return out
 
 
 def check_zip(path, extract, required):
-    problems, files, dirs, names = [], {}, set(), {}
+    problems, files, dirs, names, normalized, seen = [], {}, set(), {}, {}, set()
     with zipfile.ZipFile(path) as z:
         entries = z.infolist()
         if not entries:
@@ -67,9 +86,22 @@ def check_zip(path, extract, required):
         for e in entries:
             name = e.filename
             problems.extend(problems_for_name(name, path))
+            if name in seen:
+                problems.append(f'{path}: duplicate archive entry {name!r}')
+            seen.add(name)
+            if e.flag_bits & 0x1:
+                problems.append(f'{path}: {name!r} is encrypted; a release entry must be readable')
+            mode = (e.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(mode):
+                problems.append(f'{path}: {name!r} is a symbolic link; the release ships plain files')
             key = name.rstrip('/').lower()
             if key in names and names[key] != name:
-                problems.append(f'{path}: {names[key]!r} and {name!r} differ only in case; one filesystem merges them and another does not')
+                problems.append(f'{path}: {names[key]!r} and {name!r} collide after case folding; one filesystem merges them and another does not')
+            folded = unicodedata.normalize('NFC', key)
+            previous = normalized.get(folded)
+            if previous is not None and previous.casefold() != name.casefold():
+                problems.append(f'{path}: {name!r} collides with another name after Unicode normalization')
+            normalized[folded] = name
             names[key] = name
             if name.endswith('/'):
                 dirs.add(name.rstrip('/').lower())
@@ -93,12 +125,16 @@ def check_zip(path, extract, required):
                     problems.append(f'{path}: {name!r} would extract outside {extract}')
                     continue
                 os.makedirs(os.path.dirname(target), exist_ok=True)
-                with z.open(name) as src, open(target, 'wb') as dst:
-                    while True:
-                        chunk = src.read(1 << 20)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
+                try:
+                    with z.open(name) as src, open(target, 'wb') as dst:
+                        while True:
+                            chunk = src.read(1 << 20)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                except (OSError, RuntimeError) as e:
+                    problems.append(f'{path}: {name!r} could not be extracted: {e}')
+                    continue
                 if os.path.getsize(target) != size:
                     problems.append(f'{path}: {name!r} extracted as {os.path.getsize(target)} bytes, the entry says {size}')
             missing = [n for n in files if not os.path.isfile(os.path.join(root, *n.split('/')))]
@@ -107,7 +143,7 @@ def check_zip(path, extract, required):
 
 
 def check_tar(path, extract, required):
-    problems, files, dirs, names, modes = [], {}, set(), {}, {}
+    problems, files, dirs, names, normalized, modes, seen = [], {}, set(), {}, {}, {}, set()
     opener = gzip.open if path.endswith(('.gz', '.tgz')) else open
     with opener(path, 'rb') as raw, tarfile.open(fileobj=raw, mode='r:') as t:
         members = t.getmembers()
@@ -116,9 +152,17 @@ def check_tar(path, extract, required):
         for m in members:
             name = m.name
             problems.extend(problems_for_name(name, path))
+            if name in seen:
+                problems.append(f'{path}: duplicate archive entry {name!r}')
+            seen.add(name)
             key = name.rstrip('/').lower()
             if key in names and names[key] != name:
                 problems.append(f'{path}: {names[key]!r} and {name!r} differ only in case')
+            folded = unicodedata.normalize('NFC', key)
+            previous = normalized.get(folded)
+            if previous is not None and previous.casefold() != name.casefold():
+                problems.append(f'{path}: {name!r} collides with another name after Unicode normalization')
+            normalized[folded] = name
             names[key] = name
             if m.isdir():
                 dirs.add(name.rstrip('/').lower())
@@ -142,7 +186,10 @@ def check_tar(path, extract, required):
                 target = os.path.realpath(os.path.join(root, *name.split('/')))
                 if target != root and not target.startswith(root + os.sep):
                     problems.append(f'{path}: {name!r} would extract outside {extract}')
-            t.extractall(root, filter='data') if hasattr(tarfile, 'data_filter') else t.extractall(root)
+            try:
+                t.extractall(root, filter='data') if hasattr(tarfile, 'data_filter') else t.extractall(root)
+            except (OSError, tarfile.TarError) as e:
+                problems.append(f'{path}: extraction failed: {e}')
             for name, size in files.items():
                 got = os.path.join(root, *name.split('/'))
                 if not os.path.isfile(got) or os.path.getsize(got) != size:

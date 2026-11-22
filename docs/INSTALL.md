@@ -44,7 +44,9 @@ the update card links to its release page instead of trying to install it. A fai
 and writes the reason to `logs\update.log`.
 
 The launcher is the small part; the engine build and the fetched build tools are the expensive part, and a new release zip is
-mostly a new launcher and engine sources. There is no need to delete the old folder and start again.
+mostly a new launcher and engine sources. There is no need to delete the old folder and start again. The exact layout,
+preserved folders, verification command and recovery steps are in [PORTABLE_INSTALLATION.md](PORTABLE_INSTALLATION.md)
+and [UPGRADE_AND_RECOVERY.md](UPGRADE_AND_RECOVERY.md).
 
 **Updating by hand.** This is the fallback when the launcher cannot update itself, for example on a read-only folder:
 

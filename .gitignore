@@ -11,6 +11,10 @@
 # Python bridge environment
 /.venv/
 
+# Python bytecode from the release/validation tools
+__pycache__/
+*.pyc
+
 # Local settings and generated scan reports
 *.json
 # The tested-build manifest is data the launcher ships, not a report.

@@ -61,6 +61,9 @@ jobs:
       - name: Check every release pointer names this version
         run: python tools/check_release.py
 
+      - name: Release validation tests
+        run: python3 -m unittest discover -s tools/tests -v
+
   windows:
     needs: prepare
     runs-on: windows-latest
@@ -94,7 +97,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          pwsh -NoProfile -File tools/package_release.ps1 -Version '${{ needs.prepare.outputs.version }}'
+          pwsh -NoProfile -File tools/package_release.ps1 -Version '${{ needs.prepare.outputs.version }}' -RequireConfigureCheck
           if ($LASTEXITCODE -ne 0) { throw "package_release.ps1 failed ($LASTEXITCODE)" }
           Get-Content target/pkg/manifest.json
       - uses: actions/upload-artifact@v4
@@ -104,6 +107,7 @@ jobs:
           path: |
             target/pkg/*.zip
             target/pkg/manifest.json
+            target/pkg/release-manifest.json
 
   linux-translator:
     needs: prepare
@@ -184,9 +188,21 @@ jobs:
             --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/swresample-6.dll" \
             --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/LICENSE.txt" \
             --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/SHA256SUMS" \
-            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/README.md"
+            --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/README.md" \
+            --require "EmblemWeave-v${VERSION}/docs/RELEASE_VALIDATION.md" \
+            --require "EmblemWeave-v${VERSION}/tools/verify_install.py" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/LICENSE.Ryujinx.MIT.txt" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt"
+          python tools/release_manifest.py verify \
+            --archive "dist/EmblemWeave-v${VERSION}-windows-x64.zip" \
+            --manifest dist/release-manifest.json
           python tools/verify_archive.py "dist/EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" --require linux-x64/spirv_harness
-          sha256sum dist/*
+          (cd dist && sha256sum \
+            "EmblemWeave-v${VERSION}-windows-x64.zip" \
+            "EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" \
+            release-manifest.json > SHA256SUMS)
+          cat dist/SHA256SUMS
       - name: Write the notes
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -209,11 +225,11 @@ jobs:
           tag="v${VERSION}"
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
             gh release edit "$tag" --repo "$REPO" --title "EmblemWeave $VERSION" --notes-file "dist/release-notes-$VERSION.md"
-            gh release upload "$tag" --repo "$REPO" --clobber dist/*.zip dist/*.tar.gz
+            gh release upload "$tag" --repo "$REPO" --clobber dist/*.zip dist/*.tar.gz dist/release-manifest.json dist/SHA256SUMS
           else
             gh release create "$tag" --repo "$REPO" --verify-tag \
               --title "EmblemWeave $VERSION" --notes-file "dist/release-notes-$VERSION.md" \
-              dist/*.zip dist/*.tar.gz
+              dist/*.zip dist/*.tar.gz dist/release-manifest.json dist/SHA256SUMS
           fi
           gh release view "$tag" --repo "$REPO" --json tagName,isDraft,isPrerelease,assets \
             --jq '{tag: .tagName, draft: .isDraft, pre: .isPrerelease, assets: [.assets[] | {name, digest}]}'
