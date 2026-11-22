@@ -1250,18 +1250,29 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
     if (first / chunk_pages != last / chunk_pages) { g_use_skip[use]++; g_skip_why[3]++; return out; }
     const VkBuffer cb = mirror_chunk(*m, first);
     if (!cb) { g_use_skip[use]++; g_skip_why[4]++; return out; }
-    if (range_valid(*m, first, last - first + 1) || (out_lazy() && new_servable(*m, first, last))) {
+    const bool rv = range_valid(*m, first, last - first + 1);
+    if (rv || (out_lazy() && new_servable(*m, first, last))) {
         out.buffer = cb;
         out.offset = poff - (first / chunk_pages) * kChunkBytes;
         out.avail = std::min<uint64_t>(kChunkBytes, m->pool_bytes - (first / chunk_pages) * kChunkBytes) - out.offset;
         for (uint64_t p = first; p <= last; ++p) bit_put(m->used, p, true);
         if (hot_copy_on()) {
             const uint8_t sb = static_cast<uint8_t>(1u << std::min<uint32_t>(g_sub_idx, 7));
-            bool via_tv = false;
-            for (uint64_t p = first; p <= last; ++p) { if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb; via_tv |= !page_valid(*m, p); }
-            if (via_tv) ++g_hotcopy_binds;
+            if (rv) {
+                if (!m->sig_pages.empty()) {
+                    for (uint64_t p = first; p <= last; ++p)
+                        if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb;
+                }
+            } else {
+                bool via_tv = false;
+                for (uint64_t p = first; p <= last; ++p) {
+                    if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb;
+                    via_tv |= !page_valid(*m, p);
+                }
+                if (via_tv) ++g_hotcopy_binds;
+            }
         }
-        g_st_dev_binds.fetch_add(1, std::memory_order_relaxed);
+        g_st_dev_binds.store(g_st_dev_binds.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         g_use_dev[use]++;
         return out;
     }
@@ -1825,60 +1836,68 @@ bool out_exact(uint64_t addr, VkDeviceSize size, VkBuffer* buf, VkDeviceSize* of
     return false;
 }
 
+namespace {
+constexpr size_t kOutBloomWords = 512;
+constexpr uint64_t kOutBloomMaxPages = 8192;
+struct OutOverlapCache {
+    uint64_t gen = ~0ull;
+    uint64_t bloom[kOutBloomWords] = {};
+    std::vector<uint64_t> a0, a1max;
+    std::vector<std::pair<uint64_t, uint64_t>> iv;
+    OutOverlapSnap snap;
+};
+const OutOverlapSnap& out_cache_snap() {
+    thread_local OutOverlapCache oc;
+    const uint64_t cur = g_out_gen.load(std::memory_order_acquire);
+    if (oc.gen != cur) {
+        std::lock_guard<std::mutex> lk(g_out_mu);
+        oc.iv.clear();
+        for (const OutEntry& e : g_out)
+            if (!e.flushed || e.pending) oc.iv.emplace_back(e.addr & ~(kPageBytes - 1), (e.addr + e.size + kPageBytes - 1) & ~(kPageBytes - 1));
+        std::sort(oc.iv.begin(), oc.iv.end());
+        oc.a0.resize(oc.iv.size());
+        oc.a1max.resize(oc.iv.size());
+        uint64_t m = 0;
+        for (size_t i = 0; i < oc.iv.size(); ++i) {
+            oc.a0[i] = oc.iv[i].first;
+            m = std::max(m, oc.iv[i].second);
+            oc.a1max[i] = m;
+        }
+        std::memset(oc.bloom, 0, sizeof oc.bloom);
+        bool bloom_valid = true;
+        uint64_t pages = 0;
+        for (const auto& r : oc.iv) {
+            pages += (r.second - r.first) / kPageBytes;
+            if (pages > kOutBloomMaxPages) { bloom_valid = false; break; }
+            for (uint64_t pa = r.first; pa < r.second; pa += kPageBytes) {
+                const size_t h = static_cast<size_t>(((pa >> 12) * 0x9e3779b97f4a7c15ull) >> 49);
+                oc.bloom[h >> 6] |= uint64_t{1} << (h & 63);
+            }
+        }
+        oc.gen = g_out_gen.load(std::memory_order_relaxed);
+        oc.snap.gen = oc.gen;
+        oc.snap.lo = oc.iv.empty() ? 0 : oc.a0.front();
+        oc.snap.hi = m;
+        oc.snap.bloom_valid = bloom_valid;
+        oc.snap.bloom = oc.bloom;
+        oc.snap.a0 = oc.a0.data();
+        oc.snap.a1max = oc.a1max.data();
+        oc.snap.count = oc.a0.size();
+    }
+    return oc.snap;
+}
+}  // namespace
+
+const OutOverlapSnap* out_overlap_snap() {
+    if (!out_any()) return nullptr;
+    return &out_cache_snap();
+}
+
 bool out_overlaps(uint64_t addr, uint64_t size) {
     if (!out_any() || !size) return false;
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = size >= UINT64_MAX - addr ? UINT64_MAX : (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     if (hi <= (g_out_lo.load(std::memory_order_relaxed) & ~(kPageBytes - 1)) || lo >= g_out_hi.load(std::memory_order_relaxed) + kPageBytes) return false;
-    // The live entries (not copied back, or written again) as page ranges sorted by start, with the running maximum of their ends: a binary
-    // search instead of a walk over every held result for every buffer a draw binds (the walk was 15 % of the render thread in Dagsion
-    // with about 160 results held, notes/pacing.md). Rebuilt when g_out_gen moved. The index is per thread and searched without the lock
-    // (the lock on every query was ~3 % of the render thread, notes/perf.md); a change right after the check is the same as one right after
-    // the lock was released.
-    thread_local uint64_t gen = ~0ull;
-    thread_local std::vector<uint64_t> a0, a1max;
-    thread_local std::vector<std::pair<uint64_t, uint64_t>> iv;
-    // The live pages hashed into 2^15 bits: a query of a few pages whose bits are all clear holds no result (the common answer; rt agent,
-    // notes/rt.md). Empty when the live entries span too many pages to say anything.
-    constexpr size_t kBloomWords = 512;
-    constexpr uint64_t kBloomMaxPages = 8192;
-    thread_local std::vector<uint64_t> bloom;
-    auto bloom_bit = [](uint64_t page_addr) { return static_cast<size_t>(((page_addr >> 12) * 0x9e3779b97f4a7c15ull) >> 49); };
-    if (gen != g_out_gen.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lk(g_out_mu);
-        iv.clear();
-        for (const OutEntry& e : g_out)
-            if (!e.flushed || e.pending) iv.emplace_back(e.addr & ~(kPageBytes - 1), (e.addr + e.size + kPageBytes - 1) & ~(kPageBytes - 1));
-        std::sort(iv.begin(), iv.end());
-        a0.resize(iv.size());
-        a1max.resize(iv.size());
-        uint64_t m = 0;
-        for (size_t i = 0; i < iv.size(); ++i) {
-            a0[i] = iv[i].first;
-            m = std::max(m, iv[i].second);
-            a1max[i] = m;
-        }
-        bloom.assign(kBloomWords, 0);
-        uint64_t pages = 0;
-        for (const auto& r : iv) {
-            pages += (r.second - r.first) / kPageBytes;
-            if (pages > kBloomMaxPages) { bloom.clear(); break; }
-            for (uint64_t pa = r.first; pa < r.second; pa += kPageBytes) {
-                const size_t h = bloom_bit(pa);
-                bloom[h >> 6] |= uint64_t{1} << (h & 63);
-            }
-        }
-        gen = g_out_gen.load(std::memory_order_relaxed);
-    }
-    if (!bloom.empty() && hi - lo <= 16 * kPageBytes) {
-        bool any = false;
-        for (uint64_t pa = lo; pa < hi && !any; pa += kPageBytes) {
-            const size_t h = bloom_bit(pa);
-            any = (bloom[h >> 6] >> (h & 63)) & 1;
-        }
-        if (!any) return false;
-    }
-    const size_t k = static_cast<size_t>(std::lower_bound(a0.begin(), a0.end(), hi) - a0.begin());   // the entries that start below hi
-    return k > 0 && a1max[k - 1] > lo;
+    return out_snap_overlaps(out_cache_snap(), addr, size);
 }
 
 uint64_t out_gen() { return g_out_gen.load(std::memory_order_acquire); }

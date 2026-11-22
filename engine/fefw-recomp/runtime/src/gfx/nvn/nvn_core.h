@@ -203,6 +203,7 @@ struct TexturePool : Obj {
     // Registrations so far and the ids of the latest ones, oldest first (changes.back() is registration `version`): the pool descriptor
     // arrays (nvn_pipeline.cpp) write only the ids changed since they were last current. Under `lock`.
     uint64_t version = 0;
+    std::atomic<uint64_t> seq{0};           // odd while a registration writes `entries`, even when stable (render-thread cache)
     std::vector<uint32_t> changes;
     std::shared_mutex lock;
 };
@@ -216,6 +217,7 @@ struct SamplerPool : Obj {
     std::vector<SamplerInfo> entries;
     std::vector<uint8_t> used;
     uint64_t version = 0;                   // as TexturePool's
+    std::atomic<uint64_t> seq{0};           // as TexturePool's
     std::vector<uint32_t> changes;
     std::shared_mutex lock;
 };

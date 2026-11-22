@@ -338,6 +338,10 @@ bool occ_ready() {
 uint8_t g_key_dummy_binding = 0;      // 1 + the binding that feeds the defaults of unset vertex attributes (0: none)
 bool g_want_depth_ro = false;         // some texture this draw samples is the current depth attachment
 bool g_vb_bound_in_cb = false;        // vkCmdBindVertexBuffers2 was called in this command buffer (dynamic strides need one)
+struct BoundVb { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize off = 0, size = 0, stride = 0; };
+VkCommandBuffer g_vb_cb = VK_NULL_HANDLE;
+BoundVb g_bound_vb[16];
+uint32_t g_bound_vb_mask = 0;
 
 // [nvn] trace_frame = N (NXRT_NVN_TRACE_FRAME): every draw, clear, copy and dispatch of the frame that is presented as number N is logged
 // at Info ("trace ..." lines): programs, render targets, sampled textures, blend and depth state. For finding out what a frame does.
@@ -780,6 +784,8 @@ void maybe_split() {
     g_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
     g_restart_valid = false;
     g_vb_bound_in_cb = false;
+    g_vb_cb = VK_NULL_HANDLE;
+    g_bound_vb_mask = 0;
     g_split_t0 = now;
     g_split_draws = 0;
 }
@@ -946,7 +952,137 @@ struct TexResolved {
     SamplerInfo smp;
     bool has_sampler = false;
     bool sid0 = false;    // the handle's sampler id is 0: a texel-fetch handle (reserved_sampler)
+    VkSampler vk_smp = VK_NULL_HANDLE;
+    VkSampler vk_smp_unfilt = VK_NULL_HANDLE;
 };
+
+// Render-thread direct-mapped caches for TexturePool and SamplerPool lookups, invalidated in O(1) via epoch when pool->seq moves.
+struct TPoolCache {
+    static constexpr size_t kSlots = 2048;
+    struct Slot {
+        uint64_t epoch = 0;
+        uint32_t tid = 0;
+        Texture* tex = nullptr;
+        TextureViewInfo view;
+        bool has_view = false;
+    };
+    const TexturePool* tp = nullptr;
+    uint64_t seq = ~0ull;
+    uint64_t epoch = 1;
+    Slot slots[kSlots];
+    void clear() { tp = nullptr; seq = ~0ull; ++epoch; }
+    void lookup(const TexturePool* pool, uint32_t tid, TexResolved& r) {
+        if (!pool || static_cast<int>(tid) >= pool->count) return;
+        const uint64_t s = pool->seq.load(std::memory_order_acquire);
+        if ((s & 1) == 0) {
+            if (pool != tp || s != seq) { tp = pool; seq = s; ++epoch; }
+            Slot& sl = slots[tid & (kSlots - 1)];
+            if (sl.epoch == epoch && sl.tid == tid) {
+                r.tex = sl.tex;
+                if (sl.has_view) { r.view = sl.view; r.has_view = true; }
+                return;
+            }
+            std::shared_lock<std::shared_mutex> lk(const_cast<TexturePool*>(pool)->lock);
+            const TexturePool::Entry& e = pool->entries[tid];
+            if (e.used && e.tex) {
+                r.tex = e.tex.get();
+                r.view = e.view;
+                r.has_view = e.has_view;
+            }
+            if (pool->seq.load(std::memory_order_relaxed) == s) {
+                sl.epoch = epoch;
+                sl.tid = tid;
+                sl.tex = r.tex;
+                sl.has_view = r.has_view;
+                if (r.has_view) sl.view = r.view;
+            }
+            return;
+        }
+        std::shared_lock<std::shared_mutex> lk(const_cast<TexturePool*>(pool)->lock);
+        const TexturePool::Entry& e = pool->entries[tid];
+        if (e.used && e.tex) {
+            r.tex = e.tex.get();
+            r.view = e.view;
+            r.has_view = e.has_view;
+        }
+    }
+};
+TPoolCache g_tpool_cache;
+
+SamplerInfo unfiltered(SamplerInfo s);
+struct SPoolCache {
+    static constexpr size_t kSlots = 256;
+    struct Slot {
+        uint64_t epoch = 0;
+        uint32_t sid = 0;
+        bool used = false;
+        SamplerInfo smp;
+        VkSampler vk_smp = VK_NULL_HANDLE;
+        VkSampler vk_smp_unfilt = VK_NULL_HANDLE;
+        int aniso = -1;
+        float bias = 0.0f;
+    };
+    const SamplerPool* sp = nullptr;
+    uint64_t seq = ~0ull;
+    uint64_t epoch = 1;
+    Slot slots[kSlots];
+    void clear() { sp = nullptr; seq = ~0ull; ++epoch; }
+    void lookup(const SamplerPool* pool, uint32_t sid, TexResolved& r) {
+        if (!pool || static_cast<int>(sid) >= pool->count) return;
+        const uint64_t s = pool->seq.load(std::memory_order_acquire);
+        if ((s & 1) == 0) {
+            if (pool != sp || s != seq) { sp = pool; seq = s; ++epoch; }
+            Slot& sl = slots[sid & (kSlots - 1)];
+            if (sl.epoch == epoch && sl.sid == sid) {
+                if (sl.used) {
+                    r.smp = sl.smp;
+                    r.has_sampler = true;
+                    const int aniso = nxrt::gfx::tuning().anisotropy.load(std::memory_order_relaxed);
+                    const float bias = nxrt::gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+                    if (sl.aniso != aniso || sl.bias != bias) {
+                        sl.vk_smp = sampler_for(sl.smp);
+                        sl.vk_smp_unfilt = VK_NULL_HANDLE;
+                        sl.aniso = aniso;
+                        sl.bias = bias;
+                    }
+                    r.vk_smp = sl.vk_smp;
+                    r.vk_smp_unfilt = sl.vk_smp_unfilt;
+                }
+                return;
+            }
+            std::shared_lock<std::shared_mutex> lk(const_cast<SamplerPool*>(pool)->lock);
+            const bool used = pool->used[sid] != 0;
+            if (used) {
+                r.smp = pool->entries[sid];
+                r.has_sampler = true;
+            }
+            if (pool->seq.load(std::memory_order_relaxed) == s) {
+                sl.epoch = epoch;
+                sl.sid = sid;
+                sl.used = used;
+                sl.vk_smp = VK_NULL_HANDLE;
+                sl.vk_smp_unfilt = VK_NULL_HANDLE;
+                sl.aniso = -1;
+                if (used) {
+                    sl.smp = r.smp;
+                    const int aniso = nxrt::gfx::tuning().anisotropy.load(std::memory_order_relaxed);
+                    const float bias = nxrt::gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+                    sl.vk_smp = sampler_for(sl.smp);
+                    sl.aniso = aniso;
+                    sl.bias = bias;
+                    r.vk_smp = sl.vk_smp;
+                }
+            }
+            return;
+        }
+        std::shared_lock<std::shared_mutex> lk(const_cast<SamplerPool*>(pool)->lock);
+        if (pool->used[sid]) {
+            r.smp = pool->entries[sid];
+            r.has_sampler = true;
+        }
+    }
+};
+SPoolCache g_spool_cache;
 
 // The scale nxrt/gfx_tuning.h asks for on uniform block `idx` of this binding's shader (1 = none): only the chosen fragment shader's block.
 float ufs_scale_for(const BindingDesc& d, int idx) {
@@ -1079,22 +1215,8 @@ TexResolved resolve_texture_raw(const BindingDesc& d) {
     }
     const uint32_t tid = handle_texture_id(handle), sid = handle_sampler_id(handle);
     r.sid0 = sid == 0;
-    if (S.tpool && static_cast<int>(tid) < S.tpool->count) {
-        std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
-        const TexturePool::Entry& e = S.tpool->entries[tid];
-        if (e.used && e.tex) {
-            r.tex = e.tex.get();
-            r.view = e.view;
-            r.has_view = e.has_view;
-        }
-    }
-    if (S.spool && static_cast<int>(sid) < S.spool->count) {
-        std::shared_lock<std::shared_mutex> lk(S.spool->lock);
-        if (S.spool->used[sid]) {
-            r.smp = S.spool->entries[sid];
-            r.has_sampler = true;
-        }
-    }
+    g_tpool_cache.lookup(S.tpool.get(), tid, r);
+    g_spool_cache.lookup(S.spool.get(), sid, r);
     return r;
 }
 
@@ -1161,15 +1283,7 @@ TexResolved resolve_image_raw(const BindingDesc& d) {
         handle = read_handle_word(d.nvn_stage, b.nvn.bank, b.nvn.word);
     }
     const uint32_t tid = handle_texture_id(handle);
-    if (S.tpool && static_cast<int>(tid) < S.tpool->count) {
-        std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
-        const TexturePool::Entry& e = S.tpool->entries[tid];
-        if (e.used && e.tex) {
-            r.tex = e.tex.get();
-            r.view = e.view;
-            r.has_view = e.has_view;
-        }
-    }
+    g_tpool_cache.lookup(S.tpool.get(), tid, r);
     return r;
 }
 
@@ -1845,15 +1959,17 @@ void out_dirty_clear() {
     for (int i = 0; i < g_out_dirty_n; ++i) g_out_dirty[g_out_dirty_list[i]] = 0;
     g_out_dirty_n = 0;
 }
-void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why, uint64_t gen) {
+void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why, uint64_t gen, const OutOverlapSnap*& snap) {
     if (!b.addr) return;
+    const uint64_t sz = b.size ? b.size : 65536;
     if (m.gen != ~0ull && m.addr == b.addr && m.size == b.size &&
-        (m.gen == gen || out_clear_since(b.addr, b.size ? b.size : 65536, m.gen))) {   // clear then, and nothing held there was added since
-        if (rt_check()) chk(!out_overlaps(b.addr, b.size ? b.size : 65536), "out memo");
+        (m.gen == gen || out_clear_since(b.addr, sz, m.gen))) {   // clear then, and nothing held there was added since
+        if (rt_check()) chk(!out_overlaps(b.addr, sz), "out memo");
         m.gen = gen;
         return;
     }
-    if (!out_overlaps(b.addr, b.size ? b.size : 65536)) {
+    const bool ov = snap ? out_snap_overlaps(*snap, b.addr, sz) : out_overlaps(b.addr, sz);
+    if (!ov) {
         m.addr = b.addr;
         m.size = b.size;
         m.gen = gen;
@@ -1861,6 +1977,7 @@ void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why
     }
     m.gen = ~0ull;
     out_draw_read(b.addr, b.size, copy_ok, why);
+    snap = out_overlap_snap();
 }
 
 bool out_masks_on() {
@@ -1876,7 +1993,7 @@ void out_masks_check() {
 }
 
 // One slot of out_draw_bindings by index (the same order as its full pass).
-void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua) {
+void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua, const OutOverlapSnap*& snap) {
     const GState::Bind* b;
     bool copy_ok;
     int why;
@@ -1891,7 +2008,7 @@ void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua) {
         b = &S.xfb[idx - 16 - kCompute * 32], copy_ok = false, why = kOutStorageXfb;
     }
     OutSlot& m = g_out_slot[idx];
-    out_draw_read_slot(m, *b, copy_ok, why, gen);
+    out_draw_read_slot(m, *b, copy_ok, why, gen, snap);
     if (b->addr && m.gen == ~0ull) {
         g_out_unmemo = true;
         out_held_note(idx, m, b->addr);
@@ -1899,9 +2016,11 @@ void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua) {
 }
 
 // The reads of a draw's bound buffers (out_before_op).
-void out_draw_bindings() {
+const OutOverlapSnap* out_draw_bindings() {
     if (out_memo_on()) {
-        const uint64_t gen = out_gen();
+        const OutOverlapSnap* snap = out_overlap_snap();
+        if (!snap) return nullptr;
+        const uint64_t gen = snap->gen;
         const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
         const bool held_path = out_memo_held_on() && g_out_held_ok;
         if (rs_on()) {
@@ -1917,8 +2036,8 @@ void out_draw_bindings() {
             if (pn) std::memcpy(prev, g_out_held_list, static_cast<size_t>(pn) * sizeof prev[0]);
             g_out_held_n = 0;
             g_out_unmemo = false;
-            for (int i = 0; i < g_out_dirty_n; ++i) out_check_slot(g_out_dirty_list[i], gen, ua);
-            for (int i = 0; i < pn; ++i) if (!g_out_dirty[prev[i]]) out_check_slot(prev[i], gen, ua);
+            for (int i = 0; i < g_out_dirty_n; ++i) out_check_slot(g_out_dirty_list[i], gen, ua, snap);
+            for (int i = 0; i < pn; ++i) if (!g_out_dirty[prev[i]]) out_check_slot(prev[i], gen, ua, snap);
             if (rt_check()) {     // [nvn] rt_check: a slot the fast path skipped must have nothing held in its range
                 uint8_t was_held[kOutSlots] = {};
                 for (int i = 0; i < pn; ++i) was_held[prev[i]] = 1;
@@ -1931,9 +2050,9 @@ void out_draw_bindings() {
                 }
             }
             out_dirty_clear();
-            if (out_gen() != gen) g_out_all = true;     // a flush in it moved the generation
+            if (!snap || snap->gen != gen) g_out_all = true;     // a flush in it moved the generation
             g_out_held_ok = true;
-            return;
+            return snap;
         }
         g_out_unmemo = false;
         g_out_held_n = 0;
@@ -1946,7 +2065,7 @@ void out_draw_bindings() {
             for (uint32_t mk = S.vtx_mask; mk; mk &= mk - 1) {
                 const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
                 OutSlot& m = m0[k];
-                out_draw_read_slot(m, S.vtx[k], true, kOutDrawBuffer, gen);
+                out_draw_read_slot(m, S.vtx[k], true, kOutDrawBuffer, gen, snap);
                 g_out_unmemo |= m.gen == ~0ull;
                 out_held_note(static_cast<int>(k), m, S.vtx[k].addr);
             }
@@ -1956,13 +2075,13 @@ void out_draw_bindings() {
                 for (uint32_t mk = S.ubo_mask[st]; mk; mk &= mk - 1) {
                     const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
                     const GState::Bind& b = S.ubo[st][k];
-                    out_draw_read_slot(ms[k], b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen);
+                    out_draw_read_slot(ms[k], b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen, snap);
                     g_out_unmemo |= ms[k].gen == ~0ull;
                     out_held_note(16 + st * 32 + static_cast<int>(k), ms[k], b.addr);
                 }
                 for (uint32_t mk = S.ssbo_mask[st]; mk; mk &= mk - 1) {
                     const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
-                    out_draw_read_slot(ms[16 + k], S.ssbo[st][k], true, kOutStorageXfb, gen);
+                    out_draw_read_slot(ms[16 + k], S.ssbo[st][k], true, kOutStorageXfb, gen, snap);
                     g_out_unmemo |= ms[16 + k].gen == ~0ull;
                     out_held_note(16 + st * 32 + 16 + static_cast<int>(k), ms[16 + k], S.ssbo[st][k].addr);
                 }
@@ -1970,26 +2089,26 @@ void out_draw_bindings() {
             OutSlot* mx = m0 + 16 + kCompute * 32;
             for (uint32_t mk = S.xfb_mask; mk; mk &= mk - 1) {
                 const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
-                out_draw_read_slot(mx[k], S.xfb[k], false, kOutStorageXfb, gen);
+                out_draw_read_slot(mx[k], S.xfb[k], false, kOutStorageXfb, gen, snap);
                 g_out_unmemo |= mx[k].gen == ~0ull;
                 out_held_note(16 + kCompute * 32 + static_cast<int>(k), mx[k], S.xfb[k].addr);
             }
             g_out_held_ok = true;            // the walk saw every bound slot
         } else {
             OutSlot* m = g_out_slot;
-            for (const GState::Bind& b : S.vtx) { out_draw_read_slot(*m, b, true, kOutDrawBuffer, gen); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
+            for (const GState::Bind& b : S.vtx) { out_draw_read_slot(*m, b, true, kOutDrawBuffer, gen, snap); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
             for (int st = 0; st < kCompute; ++st) {
                 if (!S.stage[st]) { m += 32; continue; }
-                for (const GState::Bind& b : S.ubo[st]) { out_draw_read_slot(*m, b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
-                for (const GState::Bind& b : S.ssbo[st]) { out_draw_read_slot(*m, b, true, kOutStorageXfb, gen); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
+                for (const GState::Bind& b : S.ubo[st]) { out_draw_read_slot(*m, b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen, snap); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
+                for (const GState::Bind& b : S.ssbo[st]) { out_draw_read_slot(*m, b, true, kOutStorageXfb, gen, snap); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
             }
-            for (const GState::Bind& b : S.xfb) { out_draw_read_slot(*m, b, false, kOutStorageXfb, gen); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
+            for (const GState::Bind& b : S.xfb) { out_draw_read_slot(*m, b, false, kOutStorageXfb, gen, snap); g_out_unmemo |= b.addr && m->gen == ~0ull; ++m; }
         }
         g_out_all = false;
-        g_out_last_gen = out_gen();     // after the pass: a flush in it may have moved the generation
+        g_out_last_gen = snap ? snap->gen : out_gen();     // after the pass: a flush in it may have moved the generation
         if (g_out_last_gen != gen) g_out_all = true;
         out_dirty_clear();
-        return;
+        return snap;
     }
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
     const VkDeviceSize ualign = device().properties().limits.minUniformBufferOffsetAlignment;
@@ -1999,6 +2118,7 @@ void out_draw_bindings() {
         for (const GState::Bind& b : S.ssbo[st]) out_draw_read(b.addr, b.size, true, kOutStorageXfb);   // bound from the copy (build_set)
     }
     for (const GState::Bind& b : S.xfb) out_draw_read(b.addr, b.size, false, kOutStorageXfb);
+    return out_overlap_snap();
 }
 
 const uint8_t* cpu_view(uint64_t addr, uint64_t size);   // below
@@ -2048,11 +2168,13 @@ void out_before_op(const RecordReader& r) {
             return;
         case Op::DrawArrays:
         case Op::DrawElements: {
-            out_draw_bindings();
-            if (r.op() == Op::DrawElements) {
+            const OutOverlapSnap* snap = out_draw_bindings();
+            if (r.op() == Op::DrawElements && snap) {
                 const auto& p = r.payload<P_DrawElements>();
                 const uint32_t isz = index_size_bytes(static_cast<int>(p.type));
-                out_draw_read(p.index_address, static_cast<uint64_t>(p.count) * (isz ? isz : 4), true, kOutDrawBuffer);
+                const uint64_t ib_bytes = static_cast<uint64_t>(p.count) * (isz ? isz : 4);
+                if (p.index_address && out_snap_overlaps(*snap, p.index_address, ib_bytes ? ib_bytes : 65536))
+                    out_draw_read(p.index_address, ib_bytes, true, kOutDrawBuffer);
             }
             return;
         }
@@ -2291,134 +2413,31 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
     if (t_set_scratch.size() <= t_set_depth) t_set_scratch.push_back(std::make_unique<SetScratch>());
     SetScratch& sc = *t_set_scratch[t_set_depth];
     struct Depth { Depth() { ++t_set_depth; } ~Depth() { --t_set_depth; } } depth;
-    std::vector<VkWriteDescriptorSet>& writes = sc.writes;
-    std::vector<VkDescriptorBufferInfo>& binfo = sc.binfo;
+    const bool is_push0 = (set == 0 && pl.push_set0);
+    std::vector<VkWriteDescriptorSet>& writes = is_push0 ? g_push0.writes : sc.writes;
+    std::vector<VkDescriptorBufferInfo>& binfo = is_push0 ? g_push0.binfo : sc.binfo;
     std::vector<VkDescriptorImageInfo>& iinfo = sc.iinfo;
     std::vector<VkBufferView>& tinfo = sc.tinfo;
     writes.clear();
     binfo.clear();
-    iinfo.clear();
-    tinfo.clear();
-    const size_t nb = pl.bindings.size();
+    const uint32_t b_beg = pl.set_begin[set], b_end = pl.set_end[set];
+    const size_t nb = static_cast<size_t>(b_end - b_beg);
+    writes.reserve(nb);
     binfo.reserve(nb);
-    iinfo.reserve(nb);
-    tinfo.reserve(nb);
-    uint64_t key = 1469598103934665603ull + set;
-    auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
-    mix(reinterpret_cast<uint64_t>(pl.layout));
-
-    // Fast path: use pre-computed write templates (Phase 2.2)
-    // This avoids the per-binding loop for static parts of VkWriteDescriptorSet.
-    // Only handles "simple" buffer source classes: SupportBuffer(7), DriverConstants(6),
-    // PushConstants(5), ConstantData(8), UniformBlock/HandleInUniform(9).
-    // Falls through to original loop for complex cases: UniformAsStorage(10),
-    // StorageBuffer(0), and all image/sampler/texel types.
-    // Also disabled for push descriptor sets (set 0 with pl.push_set0) which work differently.
-    if (pl.templates_built && set < 4 && !pl.set_templates[set].empty() && !(set == 0 && pl.push_set0)) {
-        // First, check if all templates in this set have handled source classes
-        bool all_simple = true;
-        for (const auto& wt : pl.set_templates[set]) {
-            if (wt.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || wt.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-                // Buffer types: only simple source classes are handled
-                if (wt.source_class != 7 && wt.source_class != 6 && wt.source_class != 5 &&
-                    wt.source_class != 8 && wt.source_class != 9) {
-                    all_simple = false;
-                    break;
-                }
-            } else {
-                // Image/sampler/texel types not handled in fast path
-                all_simple = false;
-                break;
-            }
-        }
-
-        if (all_simple) {
-            // All templates in this set are simple buffer types - use fast path
-            for (const auto& wt : pl.set_templates[set]) {
-                VkWriteDescriptorSet w = wt.write;  // Copy static template
-                // Find the actual binding descriptor for dynamic data
-                const BindingDesc* bd = nullptr;
-                for (const auto& d : pl.bindings) {
-                    if (d.set == set && d.binding == wt.binding) { bd = &d; break; }
-                }
-                if (!bd) continue;
-
-                if (wt.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || wt.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-                    VkDescriptorBufferInfo bi = {dummy_buffer(), 0, 65536};
-                    // Fast source classification dispatch
-                    switch (wt.source_class) {
-                        case 7: // SupportBuffer
-                            bi = g_draw_support ? VkDescriptorBufferInfo{g_draw_support.buffer, g_draw_support.offset, sizeof(SupportBuffer)}
-                                                : VkDescriptorBufferInfo{g_support.buffer, g_support.offset, sizeof(SupportBuffer)};
-                            break;
-                        case 6: // DriverConstants
-                            if (wt.nvn_stage == kCompute && g_cs_c0) {
-                                bi = {g_cs_c0.buffer, g_cs_c0.offset, g_cs_c0.size};
-                            } else {
-                                VkDeviceSize range = 0;
-                                VkBuffer buf = driver_constants_buffer(&range);
-                                if (buf) bi = {buf, 0, range};
-                            }
-                            break;
-                        case 5: // PushConstants
-                            if (wt.source_index >= 0 && wt.source_index < 8) {
-                                UploadAlloc& u = g_push_buf[wt.source_index];
-                                if (!u) {
-                                    u = F->upload(256, std::max<VkDeviceSize>(device().properties().limits.minUniformBufferOffsetAlignment, 256));
-                                    if (u) std::memcpy(u.ptr, S.push_gfx[wt.source_index], 256);
-                                }
-                                if (u) bi = {u.buffer, u.offset, 256};
-                            }
-                            break;
-                        case 8: // ConstantData
-                            {
-                                VkDeviceSize range = 0;
-                                VkBuffer buf = constant_data_buffer(bd->shader, &range);
-                                if (buf) bi = {buf, 0, range};
-                            }
-                            break;
-                        case 9: // UniformBlock / HandleInUniform (simple: uses S.ubo)
-                            if (wt.source_index >= 0 && wt.source_index < 16) {
-                                const GState::Bind& bind = S.ubo[wt.nvn_stage][wt.source_index];
-                                if (bind.addr) {
-                                    if (wt.nvn_stage == kCompute || !out_lazy()) {
-                                        const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
-                                        out_draw_read(bind.addr, bind.size ? bind.size : 65536, ua && (bind.addr % ua) == 0, kOutDrawBuffer);
-                                    }
-                                    BufRef br = resolve_read(bind.addr, bind.size, kReadUniform);
-                                    const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
-                                    if (br.ok && (br.offset % align) == 0) {
-                                        bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
-                                    } else if (br.ok) {
-                                        const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, 65536);
-                                        UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
-                                        if (u) {
-                                            std::memcpy(u.ptr, host_ptr(bind.addr), n);
-                                            bi = {u.buffer, u.offset, n};
-                                        }
-                                    }
-                                }
-                            }
-                            break;
-                        default:
-                            break;
-                    }
-                    binfo.push_back(bi);
-                    w.pBufferInfo = &binfo.back();
-                    mix(reinterpret_cast<uint64_t>(bi.buffer)); mix(bi.offset); mix(bi.range);
-                    writes.push_back(w);
-                }
-            }
-            // All templates handled - skip the original loop
-        } else {
-            // Fall through to original loop for any unhandled bindings
-            // (key already has correct initial value since we didn't mix anything)
-        }
+    if (!is_push0) {
+        iinfo.clear();
+        tinfo.clear();
+        iinfo.reserve(nb);
+        tinfo.reserve(nb);
     }
-
-    // Original per-binding loop (for unhandled cases or when templates not available)
-    for (const BindingDesc& d : pl.bindings) {
-        if (d.set != set) continue;
+    const VkDeviceSize ubo_align = device().properties().limits.minUniformBufferOffsetAlignment;
+    const bool tsr_wanted = extras::temporal_wanted() && S.depth_tex;
+    const uint64_t ufs_want = nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed);
+    uint64_t key = 1469598103934665603ull + set;
+    auto mix = [&](uint64_t v) { if (!is_push0) key = (key ^ v) * 1099511628211ull; };
+    if (!is_push0) mix(reinterpret_cast<uint64_t>(pl.layout));
+    for (uint32_t bi_idx = b_beg; bi_idx < b_end; ++bi_idx) {
+        const BindingDesc& d = pl.bindings[bi_idx];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstBinding = d.binding;
@@ -2467,9 +2486,9 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                             out_draw_read(bind.addr, bind.size ? bind.size : 65536, ua && (bind.addr % ua) == 0, kOutDrawBuffer);   // resolve_read serves the copy
                         }
                         BufRef br = resolve_read(bind.addr, bind.size, kReadUniform);
-                        const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
-                        const float ufs = ufs_scale_for(d, idx);
-                        const bool tsr = d.nvn_stage == kVertex && idx == 0 && bind.size >= 272 && extras::temporal_wanted() && S.depth_tex;
+                        const VkDeviceSize align = ubo_align;
+                        const float ufs = ufs_want ? ufs_scale_for(d, idx) : 1.0f;
+                        const bool tsr = tsr_wanted && d.nvn_stage == kVertex && idx == 0 && bind.size >= 272;
                         if (br.ok && (ufs != 1.0f || tsr)) {
                             // the game's scale on some floats of this block (nxrt/gfx_tuning.h): bound from a patched copy in the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536});
@@ -2578,25 +2597,32 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
             const uint8_t int_comp = int_sampler_for(pl, d);    // the integer sampler variant of a compute shader (do_dispatch)
             const int component = int_comp ? int_comp : b.image.component == ScalarType::Sint ? 2 : b.image.component == ScalarType::Uint ? 3 : 1;
             VkDescriptorImageInfo ii = {dummy_sampler(), dummy_view(view_type_for(b), b.image.depth, component), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            TexResolved r = resolve_texture(d);
-            if (r.tex && !g_fb_use.empty()) {
-                const auto fb = g_fb_use.find(r.tex);
-                if (fb != g_fb_use.end()) r.tex = fb->second;      // a feedback draw samples the copy made before it
+            TexResolved r_tmp;
+            const TexResolved* rp = &resolve_texture_ref(d, r_tmp);
+            auto ensure_mut = [&]() -> TexResolved& {
+                if (rp != &r_tmp) { r_tmp = *rp; rp = &r_tmp; }
+                return r_tmp;
+            };
+            if (rp->tex && !g_fb_use.empty()) {
+                const auto fb = g_fb_use.find(rp->tex);
+                if (fb != g_fb_use.end()) ensure_mut().tex = fb->second;      // a feedback draw samples the copy made before it
             }
-            if (r.tex && !g_vol3d_use.empty() && wants_vol3d(b, r)) {   // a sampler3D over 2D storage samples the 3D copy (vol3d_prepare)
-                const auto vc = g_vol3d_use.find(r.tex);
+            if (rp->tex && !g_vol3d_use.empty() && wants_vol3d(b, *rp)) {   // a sampler3D over 2D storage samples the 3D copy (vol3d_prepare)
+                const auto vc = g_vol3d_use.find(rp->tex);
                 if (vc != g_vol3d_use.end()) {
-                    r.tex = vc->second;
-                    r.view.has_layers = false;                     // the copy is the chosen layer, one slice deep
+                    TexResolved& rm = ensure_mut();
+                    rm.tex = vc->second;
+                    rm.view.has_layers = false;                     // the copy is the chosen layer, one slice deep
                 }
             }
             // [nvn] debug_null_format = "BPTC_UFLOAT" or "RGBA8:256x64": every sampled texture of that NVN format (and size) gets the dummy view
             // (term isolation, debugging only)
             static const std::string null_fmt = nxrt::config_get_str("nvn", "debug_null_format", "");
-            if (r.tex && !null_fmt.empty() && r.tex->fmt) {
-                const std::string sized = std::string(r.tex->fmt->name) + ":" + std::to_string(r.tex->b.width) + "x" + std::to_string(r.tex->b.height);
-                if (null_fmt == r.tex->fmt->name || null_fmt == sized) r.tex = nullptr;
+            if (rp->tex && !null_fmt.empty() && rp->tex->fmt) {
+                const std::string sized = std::string(rp->tex->fmt->name) + ":" + std::to_string(rp->tex->b.width) + "x" + std::to_string(rp->tex->b.height);
+                if (null_fmt == rp->tex->fmt->name || null_fmt == sized) ensure_mut().tex = nullptr;
             }
+            const TexResolved& r = *rp;
             // a first upload held back for a later frame ([nvn] bound_upload_defer): its image holds nothing yet, the dummy stands in
             const bool waiting = r.tex && tex_layout(r.tex) == VK_IMAGE_LAYOUT_UNDEFINED && tex_first_upload_deferrable(r.tex);
             // a compute dispatch is never inside the graphics pass: a colour attachment of the last pass is an ordinary texture to it. Not
@@ -2616,7 +2642,10 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                     // takes the nearest texel of them anyway. [nvn] int_view_nearest = false: the game's sampler as before.
                     static const bool int_nearest = nxrt::config_get_bool("nvn", "int_view_nearest", true);
                     const bool int_view = int_comp || (int_nearest && component >= 2);
-                    if (r.has_sampler) ii.sampler = sampler_for(int_view ? unfiltered(r.smp) : r.smp);
+                    if (r.has_sampler) {
+                        if (!int_view && r.vk_smp) ii.sampler = r.vk_smp;
+                        else ii.sampler = sampler_for(int_view ? unfiltered(r.smp) : r.smp);
+                    }
                     // [nvn] reserved_sampler (default on): a texel-fetch handle (sampler id 0, the driver's reserved range) sampled with filtering
                     // gets the linear reserved sampler, as on the console; integer and depth textures keep the nearest dummy
                     else if (r.sid0 && component == 1 && !(tex_aspect(r.tex) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
@@ -2653,7 +2682,8 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
         } else if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
             const VkFormat shader_fmt = image_format_vk(b.image.format);
             VkDescriptorImageInfo ii = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL};
-            TexResolved r = resolve_image(d);
+            TexResolved r_tmp;
+            const TexResolved& r = resolve_image_ref(d, r_tmp);
             if (r.tex && tex_gpu(r.tex) && tex_has_storage(r.tex)) {
                 ViewRequest q = make_request(b, r);
                 q.swizzle = {};
@@ -2683,7 +2713,8 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
             const VkFormat shader_fmt = storage ? image_format_vk(b.image.format) : VK_FORMAT_UNDEFINED;
             const int component = storage ? 0 : b.image.component == ScalarType::Float ? 1 : b.image.component == ScalarType::Sint ? 2
                                   : b.image.component == ScalarType::Uint ? 3 : 0;
-            TexResolved r = storage ? resolve_image(d) : resolve_texture(d);
+            TexResolved r_tmp;
+            const TexResolved& r = storage ? resolve_image_ref(d, r_tmp) : resolve_texture_ref(d, r_tmp);
             uint64_t addr = 0, bytes = 0;
             VkFormat vfmt = VK_FORMAT_UNDEFINED;
             VkBufferView v = r.tex ? tex_buffer_view(r.tex, r.has_view ? &r.view : nullptr, component, shader_fmt, storage, &addr, &bytes, &vfmt) : VK_NULL_HANDLE;
@@ -2729,13 +2760,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
         writes.push_back(w);
     }
     ++g_rs.sets;
-    if (set == 0 && pl.push_set0) {   // pushed by bind_sets: no set to find or make (every write of set 0 is a buffer, prog_layout)
-        g_push0.binfo.assign(binfo.begin(), binfo.end());
-        g_push0.writes.assign(writes.begin(), writes.end());
-        for (VkWriteDescriptorSet& w : g_push0.writes) {
-            w.dstSet = VK_NULL_HANDLE;
-            if (w.pBufferInfo) w.pBufferInfo = g_push0.binfo.data() + (w.pBufferInfo - binfo.data());
-        }
+    if (is_push0) {   // pushed by bind_sets: writes and binfo were built directly in g_push0
         g_push0.ready = true;
         g_rs.set_writes += writes.size();
         return VK_NULL_HANDLE;
@@ -2868,7 +2893,7 @@ void push_set0(VkPipelineBindPoint bp, const ProgLayout& pl, std::vector<VkWrite
     if (writes.empty()) return;   // a push of no writes is not allowed
     PushedSet0& ps = g_pushed0;
     bool plain = bp != VK_PIPELINE_BIND_POINT_GRAPHICS || !lean_on();
-    if (!plain)
+    if (!plain && !pl.push_set0)
         for (const VkWriteDescriptorSet& w : writes) plain |= !w.pBufferInfo || w.descriptorCount != 1;
     if (plain) {
         if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS) ps.cb = VK_NULL_HANDLE;
@@ -3770,10 +3795,15 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                     S.tess_outer[0], S.tess_outer[1], S.tess_outer[2], S.tess_outer[3], S.tess_inner[0], S.tess_inner[1]);
     }
     if (g_dirty & (kVb | kPipe)) {
-        // each binding's buffer, then consecutive bindings in one call
+        // each binding's buffer, then consecutive changed bindings in one call
+        if (g_vb_cb != F->cb) {
+            g_vb_cb = F->cb;
+            g_bound_vb_mask = 0;
+        }
         VkBuffer vbuf[16];
         VkDeviceSize voff[16], vsize[16], vstride[16];
         bool vset[16] = {};
+        bool vchg[16] = {};
         for (uint32_t i = 0; i < g_key_attr_count; ++i) {
             const uint32_t binding = g_key_binding[i];
             if (binding >= 16 || vset[binding]) continue;
@@ -3783,19 +3813,25 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
                 voff[binding] = kDummyAttrFloatOffset;
                 vsize[binding] = 32;
                 vstride[binding] = 0;
-                continue;
+            } else {
+                const GState::Bind& vb = S.vtx[binding];
+                BufRef br = vb.addr ? resolve_read(vb.addr, vb.size, kReadVertex) : BufRef{dummy_buffer(), 0, 65536, false};
+                vbuf[binding] = br.buffer;
+                voff[binding] = br.offset;
+                vsize[binding] = vb.size ? std::min<VkDeviceSize>(vb.size, br.avail) : br.avail;
+                vstride[binding] = static_cast<VkDeviceSize>(S.stream[binding].stride);
             }
-            const GState::Bind& vb = S.vtx[binding];
-            BufRef br = vb.addr ? resolve_read(vb.addr, vb.size, kReadVertex) : BufRef{dummy_buffer(), 0, 65536, false};
-            vbuf[binding] = br.buffer;
-            voff[binding] = br.offset;
-            vsize[binding] = vb.size ? std::min<VkDeviceSize>(vb.size, br.avail) : br.avail;
-            vstride[binding] = static_cast<VkDeviceSize>(S.stream[binding].stride);
+            const BoundVb& cur = g_bound_vb[binding];
+            if (!((g_bound_vb_mask >> binding) & 1u) || cur.buf != vbuf[binding] || cur.off != voff[binding] || cur.size != vsize[binding] || cur.stride != vstride[binding]) {
+                vchg[binding] = true;
+                g_bound_vb[binding] = {vbuf[binding], voff[binding], vsize[binding], vstride[binding]};
+                g_bound_vb_mask |= (1u << binding);
+            }
         }
         for (uint32_t b = 0; b < 16;) {
-            if (!vset[b]) { ++b; continue; }
+            if (!vchg[b]) { ++b; continue; }
             uint32_t e = b + 1;
-            while (e < 16 && vset[e]) ++e;
+            while (e < 16 && vchg[e]) ++e;
             vkCmdBindVertexBuffers2(F->cb, b, e - b, vbuf + b, voff + b, vsize + b, vstride + b);
             g_vb_bound_in_cb = true;
             b = e;
@@ -3805,6 +3841,8 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             VkBuffer dummy = dummy_buffer();
             VkDeviceSize off = 0, size = 65536, stride = 0;
             vkCmdBindVertexBuffers2(F->cb, 0, 1, &dummy, &off, &size, &stride);
+            g_bound_vb[0] = {dummy, off, size, stride};
+            g_bound_vb_mask |= 1u;
             g_vb_bound_in_cb = true;
         }
     }
@@ -5222,14 +5260,15 @@ void run_list(const CmdList& list, int depth) {
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
     for (RecordReader r(list); r.next();) {
         mark_dirty(r);
-        if (g_cs_open && !cs_keeps_open(r.op())) cs_close();
-        if (g_wm_open && !wm_keeps_open(r.op())) wm_close();
-        {
+        const Op op = r.op();
+        if (g_cs_open && !cs_keeps_open(op)) cs_close();
+        if (g_wm_open && !wm_keeps_open(op)) wm_close();
+        if (op >= Op::DrawArrays || (!out_lazy() && (op == Op::SetRenderEnable || op == Op::SetRenderTargets))) {
             RsScope rs(kRsOut);
             if (out_lazy()) out_before_op(r);                                               // compute shadows: results back to the pool first
-            else if (out_any() && !compute_out_may_wait(r.op())) flush_compute_out(kOutOther);
+            else if (out_any() && !compute_out_may_wait(op)) flush_compute_out(kOutOther);
         }
-        switch (r.op()) {
+        switch (op) {
             case Op::Nop: break;
             case Op::BindProgram: apply_bind_program(r.payload<P_BindProgram>()); break;
             case Op::BindBuffers: {
@@ -5239,21 +5278,29 @@ void run_list(const CmdList& list, int depth) {
                     const uint32_t k = p.first + i;
                     const uint32_t bit = 1u << (k & 31), on = rg[i].address ? bit : 0u;
                     if (p.kind == kBufVertex && k < 16) {
-                        S.vtx[k] = {rg[i].address, rg[i].size};
-                        S.vtx_mask = (S.vtx_mask & ~bit) | on;
-                        out_slot_changed(static_cast<int>(k));
+                        if (S.vtx[k].addr != rg[i].address || S.vtx[k].size != rg[i].size) {
+                            S.vtx[k] = {rg[i].address, rg[i].size};
+                            S.vtx_mask = (S.vtx_mask & ~bit) | on;
+                            out_slot_changed(static_cast<int>(k));
+                        }
                     } else if (p.kind == kBufUniform && p.stage < 6 && k < 16) {
-                        S.ubo[p.stage][k] = {rg[i].address, rg[i].size};
-                        S.ubo_mask[p.stage] = (S.ubo_mask[p.stage] & ~bit) | on;
-                        if (p.stage < kCompute) out_slot_changed(16 + static_cast<int>(p.stage) * 32 + static_cast<int>(k));
+                        if (S.ubo[p.stage][k].addr != rg[i].address || S.ubo[p.stage][k].size != rg[i].size) {
+                            S.ubo[p.stage][k] = {rg[i].address, rg[i].size};
+                            S.ubo_mask[p.stage] = (S.ubo_mask[p.stage] & ~bit) | on;
+                            if (p.stage < kCompute) out_slot_changed(16 + static_cast<int>(p.stage) * 32 + static_cast<int>(k));
+                        }
                     } else if (p.kind == kBufStorage && p.stage < 6 && k < 16) {
-                        S.ssbo[p.stage][k] = {rg[i].address, rg[i].size};
-                        S.ssbo_mask[p.stage] = (S.ssbo_mask[p.stage] & ~bit) | on;
-                        if (p.stage < kCompute) out_slot_changed(16 + static_cast<int>(p.stage) * 32 + 16 + static_cast<int>(k));
+                        if (S.ssbo[p.stage][k].addr != rg[i].address || S.ssbo[p.stage][k].size != rg[i].size) {
+                            S.ssbo[p.stage][k] = {rg[i].address, rg[i].size};
+                            S.ssbo_mask[p.stage] = (S.ssbo_mask[p.stage] & ~bit) | on;
+                            if (p.stage < kCompute) out_slot_changed(16 + static_cast<int>(p.stage) * 32 + 16 + static_cast<int>(k));
+                        }
                     } else if (p.kind == kBufXfb && k < 4) {
-                        S.xfb[k] = {rg[i].address, rg[i].size};
-                        S.xfb_mask = (S.xfb_mask & ~bit) | on;
-                        out_slot_changed(16 + kCompute * 32 + static_cast<int>(k));
+                        if (S.xfb[k].addr != rg[i].address || S.xfb[k].size != rg[i].size) {
+                            S.xfb[k] = {rg[i].address, rg[i].size};
+                            S.xfb_mask = (S.xfb_mask & ~bit) | on;
+                            out_slot_changed(16 + kCompute * 32 + static_cast<int>(k));
+                        }
                     }
                 }
                 break;
@@ -5843,6 +5890,8 @@ void replay_begin_submit(Frame& f) {
     g_topo = g_pipe_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
     g_restart_valid = false;
     g_vb_bound_in_cb = false;
+    g_vb_cb = VK_NULL_HANDLE;
+    g_bound_vb_mask = 0;
     g_want_depth_ro = false;
     g_fb_use.clear();
     g_fb_seen = false;
@@ -5972,6 +6021,8 @@ void replay_abort_submit() {
 }
 
 void replay_shutdown() {
+    g_tpool_cache.clear();
+    g_spool_cache.clear();
     if (g_xfb_counter) device().destroy_buffer(g_xfb_counter);
     g_xfb_counter = gfx::Buffer();
     g_xfb_began = g_xfb_active = g_xfb_have_counter = false;

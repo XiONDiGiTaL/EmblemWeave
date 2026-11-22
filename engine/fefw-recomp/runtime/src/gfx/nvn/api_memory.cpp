@@ -405,6 +405,7 @@ void texture_pool_register(const NVNtexturePool* pool, int id, const NVNtexture*
     Texture* t = host_of<Texture>(texture);
     const TextureViewInfo info = view ? decode(view) : TextureViewInfo{};
     std::unique_lock<std::shared_mutex> lk(tp->lock);
+    tp->seq.fetch_add(1, std::memory_order_release);   // odd: write in progress
     TexturePool::Entry& e = tp->entries[static_cast<size_t>(id)];
     e.tex = Ref<Texture>::share(t);
     e.view = info;
@@ -413,6 +414,7 @@ void texture_pool_register(const NVNtexturePool* pool, int id, const NVNtexture*
     e.used = true;
     if (t) t->registered_ms.store(texture_clock_ms(), std::memory_order_relaxed);
     pool_note_change(*tp, id);
+    tp->seq.fetch_add(1, std::memory_order_release);   // even: stable
     be::tx_mark("tx.reg", t);
     be::g_tex_scan_epoch.fetch_add(1, std::memory_order_relaxed);   // a new texture sits behind this id now
     if (t && gpu::active()) gpu::texture_registered(t);   // registered: it is going to be sampled (background preparation, nvn_texprep.h)
@@ -485,10 +487,12 @@ void sampler_pool_store(const NVNsamplerPool* pool, int id, const SamplerInfo& i
         return;
     }
     std::unique_lock<std::shared_mutex> lk(sp->lock);
+    sp->seq.fetch_add(1, std::memory_order_release);   // odd: write in progress
     sp->entries[static_cast<size_t>(id)] = info;
     if (!sp->used[static_cast<size_t>(id)]) g_sampler_handles.add(1);
     sp->used[static_cast<size_t>(id)] = 1;
     pool_note_change(*sp, id);
+    sp->seq.fetch_add(1, std::memory_order_release);   // even: stable
 }
 
 void nvnSamplerPoolRegisterSampler(const NVNsamplerPool* pool, int id, const NVNsampler* sampler) {

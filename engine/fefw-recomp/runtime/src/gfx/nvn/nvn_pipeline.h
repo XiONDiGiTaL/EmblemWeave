@@ -39,7 +39,9 @@ struct BindingDesc {
 struct ProgLayout {
     VkDescriptorSetLayout sets[5] = {};         // 0..3 the program's own; kPoolSet (4) the shared pool arrays, when a stage samples through them
     VkPipelineLayout layout = VK_NULL_HANDLE;
-    std::vector<BindingDesc> bindings;          // every used descriptor of every stage, sorted by (set, binding)
+    std::vector<BindingDesc> bindings;          // every used descriptor of every stage, grouped by set (0..3, kPoolSet)
+    uint16_t set_begin[5] = {};                 // [set_begin[s], set_end[s]) in `bindings` for set s
+    uint16_t set_end[5] = {};
     bool has_set[5] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
