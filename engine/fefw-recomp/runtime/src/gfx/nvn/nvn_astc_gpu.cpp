@@ -24,8 +24,10 @@
 #include <thread>
 
 #include "nxrt/config.h"
+#include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
+#include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/renderer_profiling.h"
 #include "astc2bc7.h"
@@ -982,7 +984,15 @@ void tick_present() {
 
 double budget_now() {
     State& s = S();
-    return s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    double b = s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    // During paced gameplay (not loading), don't let slow frames inflate the ASTC GPU budget and compound GPU overload;
+    // under high OS VRAM pressure (>= 92%), cap further so WDDM paging doesn't turn a pass into a 30-50 ms stall.
+    if (!nxrt::frame_limiter_unpaced()) {
+        b = std::min(b, s.budget_ms);
+        const int os_pct = nxrt::gfx::video_usage_percent();
+        if (os_pct >= 92) b = std::min(b, 2.0);
+    }
+    return b;
 }
 
 double rate_now() { return S().rate / S().slow; }

@@ -121,6 +121,7 @@ struct TexGpu {
     // tex_demote shrank it (0: whole)
     std::atomic<uint32_t> seen_ms{0};
     uint32_t demoted_ms = 0;
+    uint32_t promoted_ms = 0;       // resid_ms when tex_promote restored it (cooldown against demote/promote thrash)
 };
 
 // A virtual-pool texture too big to back fully (Mario Kart World's terrain virtual texture caches: 8192x8192 arrays of 68 layers, 1.4 to
@@ -2171,6 +2172,7 @@ bool tex_promote(Texture* t, Frame& f) {
         counters().textures_failed.fetch_sub(1);
         return false;
     }
+    ng->promoted_ms = resid_ms();
     tex_ensure_current(t, f);
     pool_texture_remade(t);
     destroy_texture_gpu(old);
@@ -2224,6 +2226,12 @@ void tex_residency_tick(Frame& f) {
         Texture* t = const_cast<Texture*>(ct);
         const TexGpu* g = t->gpu;
         if (!demotable(t, g)) continue;
+        // Cooldown: avoid bouncing recently-promoted active-scene textures back into demotion after urgent_idle_s (10 s)
+        // while VRAM is under 96% (emergency OOM territory still allows demoting them).
+        if (pct < 96 && g->promoted_ms) {
+            const uint32_t since_prom = now - g->promoted_ms;
+            if (since_prom < 30000u) continue;
+        }
         const uint32_t age = now - g->seen_ms.load(std::memory_order_relaxed);
         if (age < idle_ms || age > 0x80000000u) continue;
         cand.emplace_back(age, t);
@@ -2286,43 +2294,66 @@ void tex_residency_restore(Frame& f) {
     static uint32_t st_worst_us = 0, st_worst_wait = 0, st_last = 0, st_frames = 0, st_catchup = 0;
     size_t waiting = want.size();
     if (!want.empty() && static_cast<int32_t>(now - hold_until) >= 0) {
-        std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return static_cast<int32_t>(a.first - b.first) > 0; });
-        const bool catchup = longest >= static_cast<uint32_t>(cfg.catchup_ms);
-        const int max_n = cfg.restore_max * (catchup ? 4 : 1);
-        const uint64_t max_bytes = (static_cast<uint64_t>(cfg.restore_mb) << 20) * (catchup ? 4 : 1);
-        const auto t0 = std::chrono::steady_clock::now();
-        std::vector<size_t> done;
-        uint64_t bytes = 0;
-        for (const auto& [seen, i] : want) {
-            Demoted& d = g_demoted[i];
-            if (static_cast<int>(done.size()) >= max_n || (!done.empty() && bytes + d.full > max_bytes)) break;
-            if (!tex_promote(d.t.get(), f)) {
-                hold_until = now + 1000;
-                break;
+        int os_pct = nxrt::gfx::video_usage_percent();
+        if (os_pct >= 0) {
+            static const uint64_t test_mb = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0)));
+            const uint64_t real_budget = nxrt::gfx::video_budget_bytes();
+            if (test_mb && real_budget && (test_mb << 20) < real_budget) {
+                os_pct = static_cast<int>(real_budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
             }
-            bytes += d.full;
-            const uint32_t waited = now - d.want_ms;
-            st_wait_ms += waited;
-            st_worst_wait = std::max(st_worst_wait, waited);
-            g_gauge_promotions.add(1);
-            done.push_back(i);
         }
-        if (!done.empty()) {
-            const uint32_t us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
-            st_n += done.size();
-            st_bytes += bytes;
-            st_us += us;
-            st_worst_us = std::max(st_worst_us, us);
-            ++st_frames;
-            st_catchup += catchup ? 1 : 0;
-        }
-        waiting -= done.size();
-        std::sort(done.begin(), done.end(), std::greater<size_t>());   // swap-remove from the back first: the indexes stay valid
-        for (size_t i : done) {
-            g_gauge_demoted.sub(1);
-            g_gauge_demoted_mb.sub(static_cast<int64_t>(g_demoted[i].saved >> 20));
-            g_demoted[i] = std::move(g_demoted.back());
-            g_demoted.pop_back();
+        const int os_warn = std::min(100, std::max(cfg.percent + 5, 85));
+        if (os_pct >= 96) {
+            // Near-OOM territory: hold off promoting demoted textures until VRAM drops below 96%.
+            hold_until = now + 1000;
+        } else {
+            std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return static_cast<int32_t>(a.first - b.first) > 0; });
+            // Disable 4x catch-up burst under VRAM pressure: bursting restores at 92%+ VRAM triggers a
+            // demote -> restore -> GPU ASTC transcode thrash loop and WDDM paging spikes.
+            const bool catchup = (os_pct < os_warn) && (longest >= static_cast<uint32_t>(cfg.catchup_ms));
+            int max_n = cfg.restore_max * (catchup ? 4 : 1);
+            uint64_t max_bytes = (static_cast<uint64_t>(cfg.restore_mb) << 20) * (catchup ? 4 : 1);
+            if (os_pct >= cfg.urgent_percent) {
+                max_n = std::min(max_n, 1);
+                max_bytes = std::min<uint64_t>(max_bytes, 2ull << 20);
+            } else if (os_pct >= os_warn) {
+                max_n = std::min(max_n, 2);
+                max_bytes = std::min<uint64_t>(max_bytes, 4ull << 20);
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<size_t> done;
+            uint64_t bytes = 0;
+            for (const auto& [seen, i] : want) {
+                Demoted& d = g_demoted[i];
+                if (static_cast<int>(done.size()) >= max_n || (!done.empty() && bytes + d.full > max_bytes)) break;
+                if (!tex_promote(d.t.get(), f)) {
+                    hold_until = now + 1000;
+                    break;
+                }
+                bytes += d.full;
+                const uint32_t waited = now - d.want_ms;
+                st_wait_ms += waited;
+                st_worst_wait = std::max(st_worst_wait, waited);
+                g_gauge_promotions.add(1);
+                done.push_back(i);
+            }
+            if (!done.empty()) {
+                const uint32_t us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+                st_n += done.size();
+                st_bytes += bytes;
+                st_us += us;
+                st_worst_us = std::max(st_worst_us, us);
+                ++st_frames;
+                st_catchup += catchup ? 1 : 0;
+            }
+            waiting -= done.size();
+            std::sort(done.begin(), done.end(), std::greater<size_t>());   // swap-remove from the back first: the indexes stay valid
+            for (size_t i : done) {
+                g_gauge_demoted.sub(1);
+                g_gauge_demoted_mb.sub(static_cast<int64_t>(g_demoted[i].saved >> 20));
+                g_demoted[i] = std::move(g_demoted.back());
+                g_demoted.pop_back();
+            }
         }
     }
     if (st_n && now - st_last >= 10000) {
