@@ -1546,6 +1546,10 @@ void stop() {
         st.dirty = false;
     }
     st.limiter.set_pre_frame_hook(nullptr, nullptr);
+    // Restore windowed mode on exit to ensure Windows HDR state is restored (Issue #78)
+    if (st.window && platform::fullscreen_mode() != platform::FullscreenMode::Windowed) {
+        platform::set_fullscreen(platform::FullscreenMode::Windowed);
+    }
     st.started = false;
 }
 
