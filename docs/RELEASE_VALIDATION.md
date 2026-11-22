@@ -11,6 +11,7 @@ work on Windows, Linux and macOS (the PowerShell packaging step is Windows-only)
 | `tools/verify_archive.py` | Archive paths are relative and `/`-separated, no traversal, no exact duplicate, no case or Unicode-normalization collision, no Windows-reserved name, no symlink/encrypted entry, required files exist, and extraction stays inside the chosen folder. |
 | `tools/release_manifest.py` | Every file in the zip is listed with its size and SHA-256; the archive hash, source commit, dirty flag and launcher build stamp are recorded. `verify` recomputes all of it. |
 | `tools/verify_install.py` | An unpacked install matches a release manifest. Missing or changed release files fail; unknown extras are reported, while documented user data and generated build output are ignored. |
+| `tools/verify_engine_tree.py` | Packaging-side: enumerates the `git ls-files` engine tree, excludes fetched/generated trees, allows only the generated Windows translator, and proves the copied engine has no untracked files. |
 
 The three verifier scripts are also included at `tools/` inside the release zip, so a player can check a download
 without cloning the repository.
@@ -25,7 +26,7 @@ python tools/check_release.py
 
 The tests build temporary zips; they do not touch a real installation. They cover unsafe paths, exact duplicates,
 case and Unicode collisions, symlinks, required files, traversal extraction, manifest creation/verification, tampering,
-extra/missing files, install matching and user-data exemptions.
+extra/missing files, tracked-engine copying/exclusions, install matching and user-data exemptions.
 
 On Windows, validate the packaging scripts without running them:
 
@@ -74,6 +75,22 @@ python tools/verify_archive.py EmblemWeave-v0.1.41-windows-x64.zip \
 
 Add `--extract <empty-folder>` to unpack and check every size. Use a new empty folder; the verifier does not clear an
 existing one.
+
+## Verify the engine copy
+
+The engine tree is copied from Git, not from the working directory. To inspect the list or check a copied tree by hand:
+
+```sh
+python tools/verify_engine_tree.py list --source .
+python tools/verify_engine_tree.py verify --source . \
+  --root target/pkg/EmblemWeave-v0.1.41/engine/fefw-recomp \
+  --allow tools/shaders/prebuilt/win-x64/spirv_harness.exe
+```
+
+`list` emits a JSON array of paths relative to `engine/fefw-recomp/`. The package script uses that same list to copy,
+then runs `verify`; a missing tracked file or any extra file (other than the explicitly allowed translator) fails the
+package before the zip is written. Fetched texture/shader/download trees, `.github`, `game`, `work` and the Linux
+translator are excluded by the tool's shared policy.
 
 ```sh
 python tools/release_manifest.py verify \

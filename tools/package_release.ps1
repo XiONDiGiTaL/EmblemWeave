@@ -178,28 +178,33 @@ try {
         if ($sums[$f] -ne $ffmpegHashes[$f]) { throw "upscalers\ffmpeg\SHA256SUMS does not pin $f to $($ffmpegHashes[$f])" }
     }
 
-    # The dump, the build output and the fetched third-party sources stay out.
-    $xd = @(
-        (Join-Path $repo 'engine\fefw-recomp\game'),
-        (Join-Path $repo 'engine\fefw-recomp\work'),
-        # The Linux translator ships as its own tarball: a Windows player cannot run 41 MB of ELF.
-        (Join-Path $repo 'engine\fefw-recomp\tools\shaders\prebuilt\linux-x64'),
-        # The bare name `third_party` stripped `runtime/third_party` too (dav1d, FSR 1, NIS, Streamline, the
-        # ffx API): every build from a zip then died at `add_subdirectory .../runtime/cmake/../third_party/dav1d`
-        # (issues #16 and #17). The two fetched trees are named instead, and the runtime's own is shipped.
-        (Join-Path $repo 'engine\fefw-recomp\tools\textures\third_party'),
-        (Join-Path $repo 'engine\fefw-recomp\tools\shaders\third_party'),
-        # The fetched toolchain archives (LLVM alone is 264 MB) are inputs to a local build, not runtime files. The
-        # launcher downloads only the pieces a PC lacks and trims LLVM into tools\bin on first run; shipping the downloads
-        # or extracted tools would bloat the zip for every player.
-        (Join-Path $repo 'engine\fefw-recomp\tools\download'),
-        'build', 'node_modules', 'shader_cache', 'bc7_cache', '.venv', 'refs', '.git', 'obj', 'bin',
-        '.github', '.vscode', '.pytest_cache', '.mypy_cache', '__pycache__', '*.egg-info'
-    )
-    $xf = @('*.obj', '*.pdb', '*.lib', '*.ilk', '*.exp', '*.map', '*.iobj', '*.ipdb', '*.pyc', '*.pyo')
-    $dst = Join-Path $pkg 'engine\fefw-recomp'
-    robocopy 'engine\fefw-recomp' $dst /E /NFL /NDL /NJH /NJS /NP /XD @xd /XF @xf | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
+    # The engine tree is copied from Git's tracked list, not from the working directory. An untracked object file,
+    # fetched toolchain or experimental source file cannot silently enter a release. The only generated exception is
+    # the Windows shader translator, which is built beside the tree and added explicitly below; the verifier proves the
+    # copied tree contains nothing else. The list is produced by the same Python tool that verifies it, so the excluded
+    # fetched/generated paths are defined in one place.
+    $engineRel = 'engine\fefw-recomp'
+    $engineRoot = Join-Path $repo $engineRel
+    $engineDst = Join-Path $pkg 'engine\fefw-recomp'
+    New-Item -ItemType Directory -Force $engineDst | Out-Null
+    $engineList = @(& $pyCheck.Source 'tools/verify_engine_tree.py' 'list' '--source' $repo)
+    if ($LASTEXITCODE -ne 0) { throw 'could not enumerate the tracked engine tree (tools/verify_engine_tree.py list)' }
+    $engineFiles = @($engineList | ConvertFrom-Json)
+    if ($engineFiles.Count -eq 0) { throw 'the tracked engine file list is empty' }
+    foreach ($rel in $engineFiles) {
+        $rel = [string]$rel
+        $src = Join-Path $engineRoot $rel.Replace('/', '\')
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "tracked engine file is missing from the working tree: $src" }
+        $dstFile = Join-Path $engineDst $rel.Replace('/', '\')
+        New-Item -ItemType Directory -Force (Split-Path $dstFile) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dstFile -Force
+    }
+    $translatorRel = 'tools/shaders/prebuilt/win-x64/spirv_harness.exe'
+    $translatorDst = Join-Path $engineDst $translatorRel.Replace('/', '\')
+    New-Item -ItemType Directory -Force (Split-Path $translatorDst) | Out-Null
+    Copy-Item -LiteralPath $translator -Destination $translatorDst -Force
+    & $pyCheck.Source 'tools/verify_engine_tree.py' 'verify' '--source' $repo '--root' $engineDst '--allow' $translatorRel
+    if ($LASTEXITCODE -ne 0) { throw 'the copied engine tree contains missing or untracked files; refusing to package it' }
 
     # 4. The zip, written entry by entry. `Compress-Archive` decides its own separators, and Windows' own zippers have
     # written `engine\recomp\foo.cpp` for years: an archive of those unpacks on Linux and macOS as a flat pile of files

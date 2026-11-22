@@ -23,6 +23,7 @@ if str(TOOLS) not in sys.path:
 
 import release_manifest  # noqa: E402
 import verify_archive  # noqa: E402
+import verify_engine_tree  # noqa: E402
 import verify_install  # noqa: E402
 
 VERSION = "0.1.40"
@@ -268,6 +269,54 @@ class InstallTests(unittest.TestCase):
         (self.install / "docs" / "PACKAGE.md").unlink()
         failures, _ = verify_install.verify_install(self.install, self.manifest)
         self.assertTrue(any("missing docs/PACKAGE.md" in f for f in failures), failures)
+
+
+class EngineTreeTests(unittest.TestCase):
+    def test_relative_list_excludes_fetched_and_github_trees(self):
+        paths = [
+            verify_engine_tree.ENGINE_PREFIX + "runtime/CMakeLists.txt",
+            verify_engine_tree.ENGINE_PREFIX + "game-build/fefw/CMakeLists.txt",
+            verify_engine_tree.ENGINE_PREFIX + ".github/ISSUE_TEMPLATE/bug.yml",
+            verify_engine_tree.ENGINE_PREFIX + "tools/shaders/third_party/x",
+            verify_engine_tree.ENGINE_PREFIX + "tools/shaders/prebuilt/linux-x64/x",
+            verify_engine_tree.ENGINE_PREFIX + "tools/textures/third_party/x",
+            verify_engine_tree.ENGINE_PREFIX + "tools/download/x",
+            verify_engine_tree.ENGINE_PREFIX + "game/x",
+            verify_engine_tree.ENGINE_PREFIX + "work/x",
+        ]
+        self.assertEqual(
+            verify_engine_tree.package_paths(paths),
+            ["game-build/fefw/CMakeLists.txt", "runtime/CMakeLists.txt"],
+        )
+
+    def test_relative_path_rejects_escape(self):
+        with self.assertRaises(verify_engine_tree.EngineTreeError):
+            verify_engine_tree.relative_paths([verify_engine_tree.ENGINE_PREFIX + "../escape"])
+
+    def test_matching_tree_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "runtime").mkdir()
+            (root / "runtime" / "a.cpp").write_bytes(b"source")
+            self.assertEqual(verify_engine_tree.verify_tree(root, ["runtime/a.cpp"]), [])
+
+    def test_untracked_file_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "local.obj").write_bytes(b"object")
+            problems = verify_engine_tree.verify_tree(root, [])
+            self.assertTrue(any("untracked" in p and "local.obj" in p for p in problems), problems)
+
+    def test_missing_tracked_file_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            problems = verify_engine_tree.verify_tree(Path(tmp), ["runtime/a.cpp"])
+            self.assertTrue(any("missing" in p and "runtime/a.cpp" in p for p in problems), problems)
+
+    def test_allowed_generated_translator_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "spirv_harness.exe").write_bytes(b"translator")
+            self.assertEqual(verify_engine_tree.verify_tree(root, [], ["spirv_harness.exe"]), [])
 
 
 if __name__ == "__main__":

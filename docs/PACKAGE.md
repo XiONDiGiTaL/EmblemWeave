@@ -42,6 +42,12 @@ SHA256SUMS               combined checksums for the zip, translator and manifest
             └── nso/       the NSO/module helpers
 ```
 
+The engine tree is not a filesystem copy. `tools/package_release.ps1` asks `tools/verify_engine_tree.py` for the
+`git ls-files` list, copies exactly those files, adds only the generated Windows shader translator, and then verifies
+the copied tree has no untracked extras. The dump, `work`, `.github`, fetched texture/shader/download trees and the Linux
+translator are not part of that list. A local object file or experimental source file therefore cannot enter a release
+even when it sits in `engine/fefw-recomp`.
+
 ## Deliberately not in the zip
 
 | Left out | Why |
