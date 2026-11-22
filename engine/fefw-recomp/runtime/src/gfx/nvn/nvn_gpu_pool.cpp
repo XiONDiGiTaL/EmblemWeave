@@ -20,6 +20,7 @@
 #include <windows.h>
 
 #include "nxrt/config.h"
+#include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/log.h"
 #include "nxrt/gauge.h"
@@ -783,6 +784,9 @@ struct Mirror {
     // compute out (below): pages where a compute result in the copy is newer than the pool, and pages the CPU has read compute results
     // from (any thread sets them; atomics)
     std::unique_ptr<std::atomic<uint64_t>[]> gpu_new, cpu_read;
+    // Number of synchronous CPU guard faults taken on this pool's lazy compute outputs; once >= 2, small (<= 64 KiB) outputs on this pool
+    // are copied back eagerly at out_end_submit instead of stalling the game thread with repeated 10 ms guard faults.
+    std::atomic<uint32_t> cpu_faults{0};
 };
 
 namespace {
@@ -932,17 +936,37 @@ bool range_valid(const Mirror& m, uint64_t first, uint64_t count) {
     return true;
 }
 
+// Per-present caps on synchronous mirror/chunk creation during paced gameplay (prevents 15-30 on-demand mirrors from bursting in one frame
+// when walking/turning the camera; unpaced area loads stay uncapped).
+uint32_t g_mirror_new_present = ~0u;
+int g_mirror_new_count = 0;
+int g_mirror_chunks_new_count = 0;
+void mirror_present_budget_tick() {
+    const uint32_t now = presents_now();
+    if (now != g_mirror_new_present) {
+        g_mirror_new_present = now;
+        g_mirror_new_count = 0;
+        g_mirror_chunks_new_count = 0;
+    }
+}
+
 Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     for (const PoolChunk& c : pg->chunks) if (c.copy.buffer) return nullptr;
     for (const PoolChunk& c : pg->spans) if (c.copy.buffer) return nullptr;
     if (pg->mirror || pg->mirror_tried) return pg->mirror;
-    pg->mirror_tried = true;
-    if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) return nullptr;
+    if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) { pg->mirror_tried = true; return nullptr; }
     // Tracked copies change the protection of the CPU's view of the pages. With [nvn] pool_view = false the GPU import is that same view;
     // that combination is not tried: no copy.
-    if (!pg->viewed) return nullptr;
+    if (!pg->viewed) { pg->mirror_tried = true; return nullptr; }
     const uint64_t budget = mirror_cap_bytes();
-    if (budget == 0) return nullptr;
+    if (budget == 0) { pg->mirror_tried = true; return nullptr; }
+    if (!nxrt::frame_limiter_unpaced()) {
+        static const int cap = static_cast<int>(std::max<int64_t>(0, config_get_int("nvn", "mirror_new_per_present", 4)));
+        mirror_present_budget_tick();
+        if (cap > 0 && g_mirror_new_count >= cap) return nullptr;   // defer to a later present without setting mirror_tried
+        ++g_mirror_new_count;
+    }
+    pg->mirror_tried = true;
 
     auto m = std::make_unique<Mirror>();
     // Without tracking of the CPU's writes there is no copy: a copy that misses a write serves old vertices and indices, and after an area
@@ -1194,6 +1218,12 @@ VkBuffer mirror_chunk(Mirror& m, uint64_t page) {
             g_st_live_bytes.store(static_cast<int64_t>(g_mirror_bytes), std::memory_order_relaxed);
             return c.buffer;
         }
+    }
+    if (!nxrt::frame_limiter_unpaced()) {
+        static const int cap = static_cast<int>(std::max<int64_t>(0, config_get_int("nvn", "mirror_chunks_per_present", 4)));
+        mirror_present_budget_tick();
+        if (cap > 0 && g_mirror_chunks_new_count >= cap) return VK_NULL_HANDLE;
+        ++g_mirror_chunks_new_count;
     }
     if (device().create_buffer(bytes, kMirrorUsage, gfx::MemoryUse::GpuOnly, &c, "nvn pool mirror") != VK_SUCCESS) {
         c = gfx::Buffer{};
@@ -1980,8 +2010,14 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             OutEntry& e = g_out[i];
             if (!e.pending) continue;
             bool hold = out_lazy() && e.m && e.m->ww;
-            if (hold && bits_any(e.m->cpu_read.get(), e.first, e.last)) { hold = false; g_on_eager_read.fetch_add(1, std::memory_order_relaxed); }
-            else if (hold && !e.guarded && !mem::ww::guard(e.m->ww, e.first, e.last - e.first + 1)) { hold = false; g_on_eager_noguard.fetch_add(1, std::memory_order_relaxed); }
+            if (hold && (bits_any(e.m->cpu_read.get(), e.first, e.last) ||
+                         (e.size <= 65536 && e.m->cpu_faults.load(std::memory_order_relaxed) >= 2))) {
+                hold = false;
+                g_on_eager_read.fetch_add(1, std::memory_order_relaxed);
+            } else if (hold && !e.guarded && !mem::ww::guard(e.m->ww, e.first, e.last - e.first + 1)) {
+                hold = false;
+                g_on_eager_noguard.fetch_add(1, std::memory_order_relaxed);
+            }
             if (hold) {
                 e.guarded = true;
                 e.pending = false;
@@ -2045,6 +2081,10 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
         for (size_t i = 0; i < g_out.size(); ++i) {
             const OutEntry& e = g_out[i];
             if (!overlaps(e, lo, hi) || !(e.guarded || e.serial)) continue;   // only in the submission being recorded: it goes back at its end
+            if (by_fault && e.m) {
+                bits_set(e.m->cpu_read.get(), e.first, e.last, true);
+                if (waits == 0) e.m->cpu_faults.fetch_add(1, std::memory_order_relaxed);
+            }
             idx.push_back(i);
             // a copy-back is recorded already (flushed): once that submission is done the pool is current, and later pool writes there
             // (a clear, a copy, an update) must not be overwritten with the held result. Only when this thread is the one recording it
