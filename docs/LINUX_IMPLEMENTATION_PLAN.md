@@ -29,23 +29,26 @@ Each phase ends with something that was built and run. A phase is not done becau
 * `platform_selftest` passes (1/1 CTest).
 * `nxrt_linux_probe` builds and reports a real Vulkan device (lavapipe) and the XDG roots.
 * Launcher `cargo check -p emblemweave --target x86_64-unknown-linux-gnu` passes natively (0 errors).
+* After the GUI packages were installed, the debug launcher **links** and opens a 1440x900 window under WSLg on both
+  X11 and Wayland (Wayland surface configure/ack observed; no errors).
 * The same platform layer still builds and passes its self-test with MSVC/clang-cl on Windows, so the shared header and
 test change did not regress the Windows side.
 
 **Acceptance met.** This is the baseline every later phase builds on.
 
-### P1 — Launcher runs on a Linux desktop
+### P1 — Launcher runs on a Linux desktop (started)
 
-1. Install the distribution's GUI development packages (Wayland/X11/xkbcommon/EGL) and build the launcher with
-   `cargo build --release --target x86_64-unknown-linux-gnu`.
-2. Add a Linux `build_supported()` reason: "the engine build is not available on Linux yet", with the existing
+1. ~~Install the GUI development packages and build the launcher.~~ Done: debug link verified (release not attempted).
+2. ~~Open a window on X11 and Wayland.~~ Done under WSLg: 1440x900 X11 window, and a Wayland `xdg_toplevel` with
+   configure/ack on both backends.
+3. Add a Linux `build_supported()` reason: "the engine build is not available on Linux yet", with the existing
    Requirements page naming the missing pieces.
-3. Route every write through `platform.rs`; verify no `%APPDATA%` string remains on the Linux path.
-4. Replace `explorer`/`notepad` with `xdg-open`/`$EDITOR`; `tasklist`/`taskkill` with `/proc`.
-5. Run it on X11 and Wayland; open Game Setup, read a folder, confirm the build refusal is the only blocked action.
+4. Route every write through `platform.rs`; verify no `%APPDATA%` string remains on the Linux path.
+5. Replace `explorer`/`notepad` with `xdg-open`/`$EDITOR`; `tasklist`/`taskkill` with `/proc`.
+6. Open Game Setup, read a folder, confirm the build refusal is the only blocked action and that settings persist.
 
 **Exit:** a window opens, settings persist under `$XDG_CONFIG_HOME`, and Play is refused with an accurate sentence.
-**Blocked by:** GUI dev packages on the test host (not installed here).
+**Remaining:** steps 3–6, a release link, and a real desktop (WSLg is a software-GL launch, not a desktop GPU test).
 
 ### P2 — Native engine platform layer
 
@@ -112,7 +115,7 @@ real Steam installation before it is advertised.
 | No GPU passthrough in WSL (lavapipe only) | No rendering/performance test | Real desktop or Deck required |
 | No Steam Runtime / pressure-vessel in WSL | Full Proton session not established | Test on a Steam installation |
 | No Steam Deck | Deck claims impossible | Mark pending |
-| GUI dev packages absent in WSL | Launcher link not attempted | Install them or test on a desktop |
+| WSLg has no passed-through GPU | The launcher opens, but this is not a desktop GPU or render test | Use a real desktop or Deck for performance and gameplay |
 
 ## 5. Testing requirements
 

@@ -10,7 +10,8 @@ finishes rather than a sentence in a README.
 > [LINUX_ARCHITECTURE.md](LINUX_ARCHITECTURE.md), [LINUX_IMPLEMENTATION_PLAN.md](LINUX_IMPLEMENTATION_PLAN.md) and
 > [LINUX_COMPATIBILITY_TEST_MATRIX.md](LINUX_COMPATIBILITY_TEST_MATRIX.md). Build commands are in
 > [LINUX_BUILD.md](LINUX_BUILD.md). As of that work, the POSIX platform layer builds and passes its self-test on
-> Linux and the launcher type-checks for Linux; the engine still does not build there.
+> Linux, and the launcher links and opens a window under WSLg on X11 and Wayland; the engine still does not build
+> there and no gameplay has been tested.
 
 ## What already works on Linux
 

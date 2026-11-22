@@ -95,15 +95,25 @@ CARGO_TARGET_DIR=~/ew-linux/cargo-target \
 
 Expected: `Finished dev profile ...`, exit 0. This is verified on Ubuntu 26.04 with rustc 1.100.0.
 
-To link and run on a desktop (not verified in WSL):
+Link and run (verified under WSLg, debug profile):
 
 ```bash
-cargo build --release -p emblemweave --target x86_64-unknown-linux-gnu
-./target/x86_64-unknown-linux-gnu/release/EmblemWeave
+CARGO_TARGET_DIR=~/ew-linux/cargo-target \
+  cargo build -p emblemweave --target x86_64-unknown-linux-gnu
+~/ew-linux/cargo-target/x86_64-unknown-linux-gnu/debug/EmblemWeave
 ```
 
-On Linux the launcher's Game Setup **refuses Build the game** by design: the engine build path does not exist yet.
-That refusal is the correct current behaviour, not a bug to work around.
+On WSLg the window opened on both backends. If the default GL stack prints `ZINK: failed to choose pdev`, force the
+software renderer or X11:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe ./EmblemWeave   # llvmpipe
+unset WAYLAND_DISPLAY DISPLAY=:0 ./EmblemWeave                              # force X11
+```
+
+The launch test opened the first window only; it did not click through the UI. On Linux the launcher's Game Setup
+**refuses Build the game** by design: the engine build path does not exist yet. That refusal is the correct current
+behaviour, not a bug to work around.
 
 ## 5. Proton compatibility mode (unverified)
 

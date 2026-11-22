@@ -28,7 +28,7 @@ Everything below was measured, not estimated:
 
 | Area | State | Evidence |
 | --- | --- | --- |
-| Launcher UI (`eframe`/`egui`) | Portable; compiles for Linux | `cargo check -p emblemweave --target x86_64-unknown-linux-gnu` exits 0, 0 errors, 49.5 s, 139 warnings |
+| Launcher UI (`eframe`/`egui`) | Portable; links and opens on Linux | `cargo check` exits 0 (49.5 s); debug `cargo build` links (58.3 s); 1440x900 window under WSLg on X11 and Wayland |
 | Launcher data root | `platform::data_root()` → `$XDG_CONFIG_HOME/EmblemWeave` or `~/.config/EmblemWeave` | `apps/emblemweave/src/platform.rs`, exercised by the probe's config-root line |
 | Shader translator | .NET publishes a self-contained `linux-x64` ELF | Existing `docs/LINUX.md`, release asset |
 | Window creation | SDL3 (`SDL_WINDOW_VULKAN`), already used by `runtime/src/gfx/platform.cpp` | Source; SDL3 is fetched by CMake |
@@ -123,9 +123,10 @@ probe, not by flipping those booleans.
 
 ## 5. Native Linux feasibility
 
-**Launcher: feasible and now compiled.** `cargo check` for `x86_64-unknown-linux-gnu` passes with 0 errors under
-native Linux (rustc 1.100.0). Linking a GUI build needs the distribution's Wayland/X11/xkbcommon development
-packages; that link was not attempted here.
+**Launcher: feasible, linked and opened.** `cargo check` for `x86_64-unknown-linux-gnu` passes with 0 errors under
+native Linux (rustc 1.100.0). With the distribution's Wayland/X11/xkbcommon/EGL development packages installed, the
+debug binary links and opens a 1440x900 window under WSLg on X11 and on Wayland. The window was not clicked through, a
+release link was not attempted, and WSLg's software Vulkan is not a desktop GPU test.
 
 **Engine: partially feasible, not yet buildable.** The platform layer builds and passes, but the rest of `nxrt` still
 includes `<windows.h>` in 80 files and makes 700 calls. The two hardest items are not in that count:

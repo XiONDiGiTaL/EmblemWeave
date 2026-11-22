@@ -9,6 +9,8 @@ session produced evidence; everything else is PENDING or NOT RUN, including thin
 | --- | --- |
 | Host | Windows 11, project at `C:\Users\xiond\.config\freebuff-desktop\local-projects\413b2383-4be0-4b3c-b36e-5f485402a327` |
 | Linux | WSL2 Ubuntu 26.04.1 LTS, kernel `6.6.87.2-microsoft-standard-WSL2`, x86_64 |
+| GUI stack | WSLg: Weston compositor, Xwayland, `DISPLAY=:0`, `WAYLAND_DISPLAY=wayland-0`, `XDG_RUNTIME_DIR=/run/user/1000` |
+| GUI packages | `libxkbcommon-dev`, `libwayland-dev`, `wayland-protocols`, `libx11-dev`, `libxcb*-dev`, `libxcursor-dev`, `libxi-dev`, `libxrandr-dev`, `libegl1-mesa-dev`, `libgl1-mesa-dev`, `libfontconfig1-dev`, `libfreetype-dev`, plus `x11-utils`, `xdotool`, `mesa-utils` |
 | Compiler | Ubuntu clang 21.1.8 |
 | Build tools | CMake 4.2.3, Ninja 1.13.2, pkg-config 2.5.1 |
 | Vulkan | loader 1.4.341, Mesa ICDs present; device: `llvmpipe (LLVM 21.1.8, 256 bits)`, API 1.4.335, vendor `0x10005` |
@@ -23,7 +25,7 @@ session produced evidence; everything else is PENDING or NOT RUN, including thin
 
 | Environment | Build | Launcher | Vulkan | Engine | Gameplay | Saves | Audio | Video |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| WSL2 Ubuntu 26.04 (lavapipe) | PASS (platform layer) | PASS (compile only) | PASS (enumerate) | NOT RUN (blocked) | PENDING | PENDING | PENDING | PENDING |
+| WSL2 Ubuntu 26.04 (lavapipe) | PASS (platform layer) | PASS (linked + window, X11 and Wayland) | PASS (enumerate) | NOT RUN (blocked) | PENDING | PENDING | PENDING | PENDING |
 | Windows 11 (clang-cl/MSVC) | PASS (platform layer) | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | Desktop Linux, AMD | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 | Desktop Linux, NVIDIA | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
@@ -33,7 +35,8 @@ session produced evidence; everything else is PENDING or NOT RUN, including thin
 | Wayland | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 | X11 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 
-"PASS (compile only)" for the launcher means it type-checks; it was not linked or opened on a Linux desktop.
+For the launcher, PASS now means the debug binary links and its first window opens; it does not mean the UI was
+clicked through or that a release build was made.
 
 ## 3. Evidence
 
@@ -76,7 +79,9 @@ PROBE_EXIT=0
 This proves the loader is discoverable and device enumeration works on Linux. It does **not** prove the engine's
 renderer, because the engine was not built.
 
-### 3.3 Launcher type-check — PASS
+### 3.3 Launcher: type-check, link and window — PASS
+
+Type-check, before the GUI packages were installed:
 
 ```
 $ source ~/.cargo/env && cd ew-linux
@@ -85,9 +90,62 @@ $ CARGO_TARGET_DIR=~/ew-linux/cargo-target cargo check -p emblemweave --target x
 EXIT=0
 ```
 
-0 errors. The log has 139 warnings (the same warnings the Windows build reports; not introduced by this work). A
-release **link** and a window launch were not attempted, because the WSL image lacks the Wayland/X11 development
-packages `eframe` needs to link.
+0 errors, 139 warnings (the same warnings the Windows build reports; not introduced by this work).
+
+After installing the Wayland/X11 development packages, the debug binary **links**:
+
+```
+$ CARGO_TARGET_DIR=~/ew-linux/cargo-target cargo build -p emblemweave --target x86_64-unknown-linux-gnu
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 58.31s
+BUILD_EXIT=0
+
+$ file ~/ew-linux/cargo-target/x86_64-unknown-linux-gnu/debug/EmblemWeave
+ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked,
+interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 3.2.0, with debug_info, not stripped
+
+size: 376652016 bytes
+```
+
+This is a debug build; a release link was not attempted.
+
+**X11 launch — PASS.** With `WAYLAND_DISPLAY` unset, `DISPLAY=:0`, `XDG_RUNTIME_DIR=/run/user/1000`:
+
+```
+PROCESS=RUNNING            (still alive after 12 s)
+WINDOW_ID=6291460          (xdotool search --name EmblemWeave)
+name: EmblemWeave
+geometry: 1440x900
+log: empty
+```
+
+The same result was obtained with `LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` and without it.
+`xwininfo -root -tree` shows the window as a 1440x900 child of a 1504x964 frame, titled `EmblemWeave`.
+
+**Wayland launch — PASS.** With `DISPLAY` unset, `WAYLAND_DISPLAY=wayland-0`, and `WAYLAND_DEBUG=1`:
+
+```
+PROCESS=RUNNING
+the client creates wl_surface, xdg_surface and xdg_toplevel, sets the title "EmblemWeave"
+and min size 1120x720, and completes 4 xdg_surface.configure / ack_configure cycles
+no EGL, Mesa or protocol errors in the log
+```
+
+The same run also succeeds without `WAYLAND_DEBUG`; the trace is how the surface creation was observed, since an
+X11 tool such as `xdotool` cannot see a native Wayland window.
+
+**One failure mode was observed and is reproducible in this environment.** The first attempt exported both
+`DISPLAY` and `WAYLAND_DISPLAY` without `MESA_LOADER_DRIVER_OVERRIDE`; the process stayed alive but printed:
+
+```
+libEGL warning: failed to get driver name for fd -1
+libEGL warning: MESA-LOADER: failed to retrieve device information
+MESA: error: ZINK: failed to choose pdev
+libEGL warning: egl: failed to create dri2 screen
+```
+
+No X11 window existed, because winit had selected Wayland; that surface was not visible to `xdotool`. Isolated X11
+and Wayland runs then completed as above. The launcher was not clicked through or exercised beyond opening its first
+window; this is a launch test, not a UI test.
 
 ### 3.4 Proton Wine — INCONCLUSIVE
 
@@ -150,8 +208,8 @@ All were found by the Linux compiler or by reading the POSIX backend against its
 
 | Test | Why pending |
 | --- | --- |
-| Launcher link + window on X11 | GUI dev packages absent in WSL |
-| Launcher link + window on Wayland | Same |
+| Launcher interaction (menus, Game Setup, settings persistence) | Window opened, but no clicks were performed |
+| Launcher release link | Only the debug profile was linked |
 | Native engine build | 700 calls, MSVC-lifted libs, MSVC linker flags |
 | First frame / title screen | Depends on the engine build |
 | Actual gameplay | Depends on the first frame |
