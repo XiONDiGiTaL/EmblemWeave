@@ -4652,7 +4652,15 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     bind_sets(*pl, VK_PIPELINE_BIND_POINT_COMPUTE);
     g_int_pl = nullptr;
     if (g_sh_copied) {
-        memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
+        VkMemoryBarrier2 mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(F->cb, &di);     // the copies into the shadows before the dispatch reads them
         gstamp("shadow in");
     }
     cs_before_dispatch(*pl, indirect);
@@ -4896,7 +4904,16 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
 void do_copy_texture_texture(const P_CopyTexTex& p) {
     Texture *s = p.src, *d = p.dst;
     if (!s || !d || !tex_gpu(s) || !tex_gpu(d)) return;
-    end_pass();
+    const bool same = s == d;
+    if (g_tracked && !same) {
+        end_pass(true);
+        if (pending_conflict(s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) || pending_conflict(d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)) {
+            memory_barrier(F->cb);
+            g_pending.clear();
+        }
+    } else {
+        end_pass();
+    }
     SubRes ss = sub_of(p.src_view, p.has_src_view), ds = sub_of(p.dst_view, p.has_dst_view);
     const VkExtent3D se = tex_extent(s, ss.level), de = tex_extent(d, ds.level);
     if (ss.level < tex_level_drop(s) || ds.level < tex_level_drop(d)) {   // an image stored without its top level: no texels to copy there
@@ -4929,7 +4946,6 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
     }
     tex_ensure_exact(s, *F);
     if (s != d) tex_ensure_exact(d, *F);
-    const bool same = s == d;
     tex_transition(s, *F, same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     if (!same) tex_transition(d, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     tev(d, "copy_texture_to_texture", reinterpret_cast<uint64_t>(s), 0);
@@ -4966,7 +4982,13 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
         const bool linear = (p.flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) || (tex_scale(s) != tex_scale(d) && !tex_is_depth(s) && !tex_is_depth(d));
         vkCmdBlitImage(F->cb, tex_image(s), sl, tex_image(d), dl, 1, &b, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
-    memory_barrier(F->cb);
+    if (g_tracked && !same) {
+        bool already = false;
+        for (const PendingWrite& w : g_pending) if (w.tex.get() == d && w.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) { already = true; break; }
+        if (!already) g_pending.push_back({Ref<Texture>::share(d), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL});
+    } else {
+        memory_barrier(F->cb);
+    }
     counters().copies.fetch_add(1, std::memory_order_relaxed);
     if (gpass_on()) {
         char lb[96];
@@ -4978,7 +5000,15 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
 void do_downsample(const P_Downsample& p) {
     Texture *s = p.src, *d = p.dst;
     if (!s || !d || !tex_gpu(s) || !tex_gpu(d)) return;
-    end_pass();
+    if (g_tracked && s != d) {
+        end_pass(true);
+        if (pending_conflict(s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) || pending_conflict(d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)) {
+            memory_barrier(F->cb);
+            g_pending.clear();
+        }
+    } else {
+        end_pass();
+    }
     if (tex_is_depth(s)) { note_unsupported("Downsample of a depth texture"); return; }
     tex_transition(s, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     tex_transition(d, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -4990,7 +5020,13 @@ void do_downsample(const P_Downsample& p) {
     const VkExtent3D e = tex_image_extent(d, 0), es = tex_image_extent(s, 0);
     rs.extent = {std::min(e.width, es.width), std::min(e.height, es.height), 1};
     vkCmdResolveImage(F->cb, tex_image(s), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex_image(d), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rs);
-    memory_barrier(F->cb);
+    if (g_tracked && s != d) {
+        bool already = false;
+        for (const PendingWrite& w : g_pending) if (w.tex.get() == d && w.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) { already = true; break; }
+        if (!already) g_pending.push_back({Ref<Texture>::share(d), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL});
+    } else {
+        memory_barrier(F->cb);
+    }
     counters().copies.fetch_add(1, std::memory_order_relaxed);
     gstamp("downsample");
 }
@@ -5012,14 +5048,25 @@ bool wm_batch_on() {
 void wm_close() {
     if (!g_wm_open) return;
     g_wm_open = false;
-    if (F && F->cb == g_wm_cb && memory_barrier_count(F->cb) == g_wm_mark) memory_barrier(F->cb);
+    if (F && F->cb == g_wm_cb && memory_barrier_count(F->cb) == g_wm_mark) {
+        VkMemoryBarrier2 mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(F->cb, &di);
+    }
     g_wm_ranges.clear();
 }
 
 bool wm_keeps_open(Op op) {
     if (op < Op::DrawArrays) return true;
     switch (op) {
-        case Op::UpdateUniformBuffer: case Op::FenceSync: case Op::WaitSync: case Op::PushDebugGroup: case Op::PopDebugGroup: case Op::PushConstants:
+        case Op::UpdateUniformBuffer: case Op::ReportCounter: case Op::ReportValue: case Op::SignalEvent:
+        case Op::FenceSync: case Op::WaitSync: case Op::PushDebugGroup: case Op::PopDebugGroup: case Op::PushConstants:
         case Op::DiscardColor: case Op::DiscardDepthStencil:
             return true;
         default: return false;
@@ -5504,6 +5551,7 @@ void run_list(const CmdList& list, int depth) {
                 const auto& p = r.payload<P_Counter>();
                 struct { uint64_t counter, timestamp; } rep = {1, timestamp_ns()};   // counters other than the ones handled below are reported as non-zero
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
+                    wm_close();
                     end_pass();
                     if (g_occ_active >= 0) {
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
@@ -5526,6 +5574,7 @@ void run_list(const CmdList& list, int depth) {
                 if (p.type == NVN_COUNTER_TYPE_PRIMITIVES_GENERATED || p.type == NVN_COUNTER_TYPE_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) {
                     CounterWindow& cw = g_cw[p.type == NVN_COUNTER_TYPE_PRIMITIVES_GENERATED ? 0 : 1];
                     if (cw.active >= 0) {   // the GPU counted this window (it holds indirect or feedback draws): the report is the query's result
+                        wm_close();
                         end_pass();
                         cw_end_query(cw, &cw == &g_cw[1]);
                         cw.last = cw.active;
@@ -5546,7 +5595,7 @@ void run_list(const CmdList& list, int depth) {
                     }
                     rep.counter = p.type == NVN_COUNTER_TYPE_PRIMITIVES_GENERATED ? g_prims_generated : g_prims_xfb;
                     note_report(p.address, rep.counter);
-                    if (p.address) do_write_memory(p.address, &rep, sizeof rep);
+                    if (p.address) do_write_memory(p.address, &rep, sizeof rep, true);
                     break;
                 }
                 // TIMESTAMP_TOP is a timestamp too (taken when the command reaches the top of the pipe): its counter word is 0 like TIMESTAMP's
@@ -5570,19 +5619,20 @@ void run_list(const CmdList& list, int depth) {
                 }
                 if (stamp) rep.counter = 0;
                 note_report(p.address, rep.counter);
-                if (p.address) do_write_memory(p.address, &rep, sizeof rep);
+                if (p.address) do_write_memory(p.address, &rep, sizeof rep, true);
                 break;
             }
             case Op::ReportValue: {
                 const auto& p = r.payload<P_ReportValue>();
                 struct { uint64_t counter, timestamp; } rep = {p.value, timestamp_ns()};
                 note_report(p.address, rep.counter);
-                if (p.address) do_write_memory(p.address, &rep, sizeof rep);
+                if (p.address) do_write_memory(p.address, &rep, sizeof rep, true);
                 break;
             }
             case Op::ResetCounter: {
                 const auto& p = r.payload<P_Counter>();
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
+                    wm_close();
                     end_pass();
                     if (g_occ_active >= 0) vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
                     const uint32_t slot = g_occ_next++ % kOccSlots;
@@ -5645,7 +5695,7 @@ void run_list(const CmdList& list, int depth) {
                     }
                     ev->shadow.store(v);
                     ev->shadow_valid.store(true);
-                    do_write_memory(ev->pool->gpu_base + static_cast<uint64_t>(ev->offset), &v, 4);
+                    do_write_memory(ev->pool->gpu_base + static_cast<uint64_t>(ev->offset), &v, 4, true);
                 }
                 break;
             }
