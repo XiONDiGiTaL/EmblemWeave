@@ -187,6 +187,11 @@ struct Texture : Obj {
     bool sparse_all = true;
 };
 
+inline uint64_t next_pool_uid() {
+    static std::atomic<uint64_t> n{1};
+    return n.fetch_add(1, std::memory_order_relaxed);
+}
+
 struct TexturePool : Obj {
     static constexpr Kind kKind = Kind::TexturePool;
     TexturePool() : Obj(kKind) {}
@@ -196,6 +201,7 @@ struct TexturePool : Obj {
         bool has_view = false;
         bool used = false;
     };
+    const uint64_t uid = next_pool_uid();   // unique per-lifetime id so address reuse cannot alias render-thread caches
     MemoryPool* mem = nullptr;
     int64_t offset = 0;
     int count = 0;
@@ -211,6 +217,7 @@ struct TexturePool : Obj {
 struct SamplerPool : Obj {
     static constexpr Kind kKind = Kind::SamplerPool;
     SamplerPool() : Obj(kKind) {}
+    const uint64_t uid = next_pool_uid();   // as TexturePool's
     MemoryPool* mem = nullptr;
     int64_t offset = 0;
     int count = 0;

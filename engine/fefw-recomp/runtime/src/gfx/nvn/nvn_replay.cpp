@@ -983,16 +983,16 @@ struct TPoolCache {
         TextureViewInfo view;
         bool has_view = false;
     };
-    const TexturePool* tp = nullptr;
+    uint64_t uid = 0;
     uint64_t seq = ~0ull;
     uint64_t epoch = 1;
     Slot slots[kSlots];
-    void clear() { tp = nullptr; seq = ~0ull; ++epoch; }
+    void clear() { uid = 0; seq = ~0ull; ++epoch; }
     void lookup(const TexturePool* pool, uint32_t tid, TexResolved& r) {
         if (!pool || static_cast<int>(tid) >= pool->count) return;
         const uint64_t s = pool->seq.load(std::memory_order_acquire);
         if ((s & 1) == 0) {
-            if (pool != tp || s != seq) { tp = pool; seq = s; ++epoch; }
+            if (pool->uid != uid || s != seq) { uid = pool->uid; seq = s; ++epoch; }
             Slot& sl = slots[tid & (kSlots - 1)];
             if (sl.epoch == epoch && sl.tid == tid) {
                 r.tex = sl.tex;
@@ -1039,16 +1039,16 @@ struct SPoolCache {
         int aniso = -1;
         float bias = 0.0f;
     };
-    const SamplerPool* sp = nullptr;
+    uint64_t uid = 0;
     uint64_t seq = ~0ull;
     uint64_t epoch = 1;
     Slot slots[kSlots];
-    void clear() { sp = nullptr; seq = ~0ull; ++epoch; }
+    void clear() { uid = 0; seq = ~0ull; ++epoch; }
     void lookup(const SamplerPool* pool, uint32_t sid, TexResolved& r) {
         if (!pool || static_cast<int>(sid) >= pool->count) return;
         const uint64_t s = pool->seq.load(std::memory_order_acquire);
         if ((s & 1) == 0) {
-            if (pool != sp || s != seq) { sp = pool; seq = s; ++epoch; }
+            if (pool->uid != uid || s != seq) { uid = pool->uid; seq = s; ++epoch; }
             Slot& sl = slots[sid & (kSlots - 1)];
             if (sl.epoch == epoch && sl.sid == sid) {
                 if (sl.used) {
