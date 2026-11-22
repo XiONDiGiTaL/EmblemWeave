@@ -190,7 +190,10 @@ jobs:
             --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/SHA256SUMS" \
             --require "EmblemWeave-v${VERSION}/upscalers/ffmpeg/README.md" \
             --require "EmblemWeave-v${VERSION}/docs/RELEASE_VALIDATION.md" \
-            --require "EmblemWeave-v${VERSION}/tools/verify_install.py"
+            --require "EmblemWeave-v${VERSION}/tools/verify_install.py" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/LICENSE.Ryujinx.MIT.txt" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt" \
+            --require "EmblemWeave-v${VERSION}/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt"
           python tools/release_manifest.py verify \
             --archive "dist/EmblemWeave-v${VERSION}-windows-x64.zip" \
             --manifest dist/release-manifest.json

@@ -88,9 +88,11 @@ python tools/verify_engine_tree.py verify --source . \
 ```
 
 `list` emits a JSON array of paths relative to `engine/fefw-recomp/`. The package script uses that same list to copy,
-then runs `verify`; a missing tracked file or any extra file (other than the explicitly allowed translator) fails the
-package before the zip is written. Fetched texture/shader/download trees, `.github`, `game`, `work` and the Linux
-translator are excluded by the tool's shared policy.
+then runs `verify`; a missing tracked file or any extra file (other than the explicitly allowed translator and its
+notices) fails the package before the zip is written. Fetched texture/shader/download trees, `.github`, `game`, `work`
+and the Linux translator are excluded by the tool's shared policy. The Windows translator folder must contain
+`LICENSE.Ryujinx.MIT.txt`, `DOTNET-LICENSE.txt` and `DOTNET-THIRD-PARTY-NOTICES.txt`; archive and CI verification require
+those paths explicitly.
 
 ```sh
 python tools/release_manifest.py verify \

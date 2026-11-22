@@ -223,7 +223,7 @@ This project stands on the work of others. Thank you.
   shader-stutter diagnostics were reviewed for this work, with no code copied.
 - [Eglantine](https://github.com/Eglantine-Community/Eglantine) (GPL-3.0-or-later): an emulator whose renderer, texture and upscaler work
   was reviewed for portable findings, with no code copied; its Fire Emblem DLSS preset finding sets the default below.
-- [Shader translator source](https://git.ryujinx.app/ryubing/ryujinx) (MIT): the shader translator and tiling code; [Mesa](https://gitlab.freedesktop.org/mesa/mesa) NAK (MIT).
+- [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) (MIT): shader translator (and tiling reference code); [Mesa](https://gitlab.freedesktop.org/mesa/mesa) NAK (MIT).
 - SuperMarioWonderRecomp (MIT); smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0); [yuzu and Eden](https://git.eden-emu.dev/eden-emu/eden)
   (GPL); libnx (ISC); LLVM libc++abi (Apache-2.0 with LLVM exceptions).
 - [Hookshot](https://github.com/NotRexed/Hookshot) (GPL-3.0) and SkyboundTotk: the RomFS mod folder layout and rules followed here, so

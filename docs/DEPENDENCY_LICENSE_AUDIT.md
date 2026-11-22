@@ -11,7 +11,11 @@ is an inventory and distribution-compliance review, not legal advice. It does no
 - Ran `cargo metadata --locked --format-version 1` against the locked tree: 464 packages, all with a declared license
   expression or license file.
 - Read the license files under `engine/fefw-recomp/runtime/third_party/`, `upscalers/ffmpeg/`, the root `LICENSE`, and
-  `docs/LEGAL.md`, `docs/THIRD_PARTY.md`.
+  `docs/LEGAL.md`, `docs/THIRD_PARTY.md`, and the translator notices under
+  `engine/fefw-recomp/tools/shaders/licenses/`.
+- The Microsoft .NET files are the SDK's `LICENSE.txt` and `ThirdPartyNotices.txt`, copied as
+  `DOTNET-LICENSE.txt` and `DOTNET-THIRD-PARTY-NOTICES.txt`. The Ryujinx MIT text is copied from the pinned translator
+  source's licence.
 - Compared the package layout in `tools/package_release.ps1` with those files. The package ships engine sources and the
   runtime third-party licenses; it does not ship the fetched texture/shader third-party source trees.
 
@@ -71,8 +75,8 @@ by the public repository and the release zip's engine sources. Keep the root `LI
 | renhdrum | vendored | MIT OR Apache-2.0 | source + both licenses + NOTICE | Keep all three. |
 | FFmpeg public headers | `runtime/third_party/ffmpeg` | LGPL-2.1-or-later | source + `COPYING.LGPLv2.1`/`COPYING.LGPLv3` | Used to compile the dynamic loader. |
 | FFmpeg 8.1 shared libraries | `upscalers/ffmpeg` | GPL-2.0-or-later | `avcodec-62.dll`, `avutil-60.dll`, `swresample-6.dll` + `LICENSE.txt`, `COPYING.GPLv3`, `README.md`, `SHA256SUMS` | The build includes libx264/libx265 (GPL). The folder must include the GPL text and the corresponding-source links/offer. |
-| Ryujinx shader translator sources | pinned Ryujinx commit, MIT | MIT | translator binary; source tree excluded | The binary is built from Ryujinx code. MIT requires the copyright/permission notice in binary distributions; see gap G3. |
-| .NET runtime | self-contained single-file translator | MIT + Microsoft third-party notices | inside `spirv_harness.exe` | Microsoft's .NET redistribution terms require its notices; see gap G4. |
+| Ryujinx shader translator sources | pinned Ryujinx commit, MIT | MIT | translator binary + `LICENSE.Ryujinx.MIT.txt` beside it | The binary is built from Ryujinx code. The notice is now shipped and required by package verification. |
+| .NET runtime | self-contained single-file translator | Microsoft .NET Library terms + Microsoft third-party notices | inside `spirv_harness.exe` + `DOTNET-LICENSE.txt`, `DOTNET-THIRD-PARTY-NOTICES.txt` beside it | The Microsoft .NET redistribution terms and third-party notices are now shipped and required by package verification. |
 
 AMD, NVIDIA and Intel upscaler DLLs are **not** shipped; the player supplies them. The engine's headers and notices are
 shipped because the engine source tree is in the zip.
@@ -106,8 +110,8 @@ and `tools/zbic_extract.py` paths are development tools, not package contents.
 - [x] FFmpeg DLL folder contains `LICENSE.txt`, `COPYING.GPLv3`, `README.md` with source/build links, and `SHA256SUMS`.
 - [x] Package verifies the three FFmpeg DLL hashes and that `SHA256SUMS` pins the same values.
 - [x] `docs/LEGAL.md` and `docs/THIRD_PARTY.md` are copied as tracked docs.
-- [ ] Add a Ryujinx MIT notice beside `spirv_harness.exe` or in a package `LICENSES/` folder (gap G3).
-- [ ] Add the .NET runtime/third-party notices for the self-contained translator (gap G4).
+- [x] Translator folder contains `LICENSE.Ryujinx.MIT.txt`, `DOTNET-LICENSE.txt` and
+      `DOTNET-THIRD-PARTY-NOTICES.txt` beside `spirv_harness.exe`; the package script and CI require all three.
 - [ ] Add upstream notices for fetched-but-compiled zstd/SDL3/Vulkan/volk/VMA/ImGui if the project wants a single
       consolidated notice file; the upstream licenses already apply.
 - [ ] Keep the corresponding-source offer for the GPL FFmpeg build available; a source link that disappears must be
@@ -126,15 +130,14 @@ reverse engineering/decompilation and modification. It is not compatible with ad
 work in a way that ignores those terms. Keep it as a separate vendored SDK/header with its `LICENSE.txt`; do not modify
 it. The actual XeSS runtime DLL is user-supplied and is not in the zip.
 
-**G3 — Ryujinx translator notice.** The Windows translator is a self-contained binary built from MIT-licensed Ryujinx
-sources. The package excludes `tools/shaders/third_party`, so the source license is not next to the binary. Add an MIT
-notice with the Ryujinx copyright and permission text beside `spirv_harness.exe` (or in `LICENSES/`), and have the
-packaging script require it.
+**G3 — Ryujinx translator notice — resolved.** The Windows translator is built from MIT-licensed Ryujinx sources. The
+package now places `LICENSE.Ryujinx.MIT.txt` next to `spirv_harness.exe`; the text is the Ryujinx MIT copyright and
+permission notice, also kept under `tools/shaders/licenses/` for source builds. The archive and CI verification require
+the file.
 
-**G4 — .NET self-contained runtime notices.** A self-contained single-file .NET publish embeds the runtime and Microsoft
-third-party components. Microsoft's .NET redistribution terms require the applicable notices. Add the SDK's
-`LICENSE.txt`/`ThirdPartyNotices.txt` (or the runtime pack's notice) to the translator folder and require it in the
-package verification.
+**G4 — .NET self-contained runtime notices — resolved.** The translator folder now includes `DOTNET-LICENSE.txt`
+(Microsoft .NET Library terms) and `DOTNET-THIRD-PARTY-NOTICES.txt` (Microsoft's .NET runtime third-party notices),
+beside `spirv_harness.exe`. Both are tracked source files and are required by archive and CI verification.
 
 **G5 — Upstream licenses for fetched build inputs.** zstd, SDL3, Vulkan-Headers, volk, VMA and ImGui are fetched during a
 build rather than vendored as license files in this repository. Their licenses are compatible (BSD/MIT/Apache/Zlib), but
@@ -161,6 +164,10 @@ PY
 git ls-files upscalers/ffmpeg
 git ls-files engine/fefw-recomp/runtime/third_party | rg 'LICENSE|COPYING|NOTICE'
 python tools/verify_archive.py <zip> --require <prefix>/upscalers/ffmpeg/LICENSE.txt
+python tools/verify_archive.py <zip> \
+  --require <prefix>/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/LICENSE.Ryujinx.MIT.txt \
+  --require <prefix>/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt \
+  --require <prefix>/engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt
 ```
 
 This audit is a snapshot. Re-run it when a packaged dependency, codec build, SDK header or translator source changes.

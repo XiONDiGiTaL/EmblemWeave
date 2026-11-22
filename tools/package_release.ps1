@@ -179,9 +179,9 @@ try {
     }
 
     # The engine tree is copied from Git's tracked list, not from the working directory. An untracked object file,
-    # fetched toolchain or experimental source file cannot silently enter a release. The only generated exception is
-    # the Windows shader translator, which is built beside the tree and added explicitly below; the verifier proves the
-    # copied tree contains nothing else. The list is produced by the same Python tool that verifies it, so the excluded
+    # fetched toolchain or experimental source file cannot silently enter a release. The only generated exceptions are
+    # the Windows shader translator and its notices, which are added explicitly below; the verifier proves the copied
+    # tree contains nothing else. The list is produced by the same Python tool that verifies it, so the excluded
     # fetched/generated paths are defined in one place.
     $engineRel = 'engine\fefw-recomp'
     $engineRoot = Join-Path $repo $engineRel
@@ -199,11 +199,24 @@ try {
         New-Item -ItemType Directory -Force (Split-Path $dstFile) | Out-Null
         Copy-Item -LiteralPath $src -Destination $dstFile -Force
     }
-    $translatorRel = 'tools/shaders/prebuilt/win-x64/spirv_harness.exe'
-    $translatorDst = Join-Path $engineDst $translatorRel.Replace('/', '\')
-    New-Item -ItemType Directory -Force (Split-Path $translatorDst) | Out-Null
+    $translatorDir = Join-Path $engineDst 'tools\shaders\prebuilt\win-x64'
+    $translatorDst = Join-Path $translatorDir 'spirv_harness.exe'
+    New-Item -ItemType Directory -Force $translatorDir | Out-Null
     Copy-Item -LiteralPath $translator -Destination $translatorDst -Force
-    & $pyCheck.Source 'tools/verify_engine_tree.py' 'verify' '--source' $repo '--root' $engineDst '--allow' $translatorRel
+    # The translator binary carries Ryujinx and .NET code. These notices travel beside it; the source copies are also
+    # tracked under tools/shaders/licenses, but a player looking at the binary must not have to find that tree.
+    $translatorNoticeDir = Join-Path $repo 'engine\fefw-recomp\tools\shaders\licenses'
+    $translatorNotices = @('LICENSE.Ryujinx.MIT.txt', 'DOTNET-LICENSE.txt', 'DOTNET-THIRD-PARTY-NOTICES.txt')
+    foreach ($notice in $translatorNotices) {
+        $noticeSrc = Join-Path $translatorNoticeDir $notice
+        if (-not (Test-Path -LiteralPath $noticeSrc -PathType Leaf)) { throw "missing translator notice $noticeSrc" }
+        Copy-Item -LiteralPath $noticeSrc -Destination (Join-Path $translatorDir $notice) -Force
+    }
+    $engineVerify = @('tools/verify_engine_tree.py', 'verify', '--source', $repo, '--root', $engineDst)
+    foreach ($notice in @('spirv_harness.exe') + $translatorNotices) {
+        $engineVerify += @('--allow', "tools/shaders/prebuilt/win-x64/$notice")
+    }
+    & $pyCheck.Source @engineVerify
     if ($LASTEXITCODE -ne 0) { throw 'the copied engine tree contains missing or untracked files; refusing to package it' }
 
     # 4. The zip, written entry by entry. `Compress-Archive` decides its own separators, and Windows' own zippers have
@@ -272,7 +285,10 @@ try {
         'upscalers/ffmpeg/LICENSE.txt',
         'upscalers/ffmpeg/SHA256SUMS',
         'engine/fefw-recomp/tools/shaders/ampere/extract_corpus.py',
-        'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/spirv_harness.exe'
+        'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/spirv_harness.exe',
+        'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/LICENSE.Ryujinx.MIT.txt',
+        'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt',
+        'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt'
     )
     $unpacked = Join-Path $repo 'target\pkg\verify-unpacked'
     if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked }

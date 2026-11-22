@@ -318,6 +318,16 @@ class EngineTreeTests(unittest.TestCase):
             (root / "spirv_harness.exe").write_bytes(b"translator")
             self.assertEqual(verify_engine_tree.verify_tree(root, [], ["spirv_harness.exe"]), [])
 
+    def test_default_allowances_include_translator_notices(self):
+        allowed = set(verify_engine_tree.DEFAULT_ALLOWED)
+        for name in (
+            "tools/shaders/prebuilt/win-x64/spirv_harness.exe",
+            "tools/shaders/prebuilt/win-x64/LICENSE.Ryujinx.MIT.txt",
+            "tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt",
+            "tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt",
+        ):
+            self.assertIn(name, allowed)
+
 
 if __name__ == "__main__":
     unittest.main()

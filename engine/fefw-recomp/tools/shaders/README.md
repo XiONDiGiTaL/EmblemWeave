@@ -95,6 +95,10 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
 | `corpus/sascha_dksh/*.dksh` | compiled from SaschaWillems/Vulkan GLSL by `uam` 1.0.0 | sources MIT (Sascha Willems); `uam` is zlib-style plus Mesa MIT; output carries the source licence |
 | `ampere/decoder/*.cs` (decode rules) | inverted from Mesa NAK `src/nouveau/compiler/nak/sm70_encode.rs` (no code copied); gaps filled by nvdisasm bit probing (`ampere/probe`) | MIT, Copyright © 2022 Collabora, Ltd. (`licenses/LICENSE.mesa-nak.MIT`) |
 
+The Windows package copies `licenses/LICENSE.Ryujinx.MIT.txt`, `licenses/DOTNET-LICENSE.txt` and
+`licenses/DOTNET-THIRD-PARTY-NOTICES.txt` beside `prebuilt/win-x64/spirv_harness.exe`; package verification requires all
+three. The Ryujinx text covers the translator sources, and the Microsoft files cover the self-contained .NET runtime.
+
 ## Changes for the NVN back end (S4d)
 
 - `harness/translator/spirv-pixld-*.patch` (five files): PIXLD.MY_INDEX reads `gl_SampleID` (new `IoVariable.SampleId`), `gl_PerVertex` declares `ClipDistance[7]`. Before the patch 33,361 of 33,744 pixel blocks hit "Shader instruction Pixld is not implemented"; after it none do.

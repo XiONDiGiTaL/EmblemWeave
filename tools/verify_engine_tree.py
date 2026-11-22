@@ -7,7 +7,7 @@ an experimental source file that happens to be in the working directory. The
 packaging script uses ``list`` to enumerate exactly the tracked engine files
 (apart from fetched/generated trees and the GitHub templates) and ``verify`` to
 prove the copied tree has no extras other than the generated Windows shader
-translator.
+translator and its redistribution notices.
 
     python tools/verify_engine_tree.py list --source .
     python tools/verify_engine_tree.py verify --source . --root target/pkg/.../engine/fefw-recomp
@@ -39,7 +39,12 @@ EXCLUDED_PREFIXES = (
     ENGINE_PREFIX + "tools/shaders/prebuilt/linux-x64/",
 )
 
-DEFAULT_ALLOWED = ("tools/shaders/prebuilt/win-x64/spirv_harness.exe",)
+DEFAULT_ALLOWED = (
+    "tools/shaders/prebuilt/win-x64/spirv_harness.exe",
+    "tools/shaders/prebuilt/win-x64/LICENSE.Ryujinx.MIT.txt",
+    "tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt",
+    "tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt",
+)
 
 
 class EngineTreeError(Exception):

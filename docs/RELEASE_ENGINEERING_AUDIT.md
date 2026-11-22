@@ -39,11 +39,12 @@ The release path is:
 | R8 | Medium | Zip entry timestamps came from the checkout, so two identical trees produced different zip bytes. | Zip writer used each file's `LastWriteTime`. | Fixed for the metadata: `-Deterministic` pins entry times to 1980-01-01. .NET's deflate output can still differ between runtime versions. |
 | R9 | High | The launcher updater does not verify a manifest or per-file hash before overlaying a download, and the overlay is not a single transaction. A disk-full or permission failure can leave some release files replaced and others old while the old launcher starts. Only the executable is backed up. | `updater.rs`: `download()` uses `curl` and `tar`; `overlay_tree()` copies file by file; `backups\EmblemWeave.exe.old` is the only saved release component. | Not changed here. This is launcher update logic; the owner should add manifest preflight and an all-file staging/rollback step. Until then, use the recovery procedure in [UPGRADE_AND_RECOVERY.md](UPGRADE_AND_RECOVERY.md) and verify the install afterward. |
 | R10 | Medium | There was no way to answer "does this folder match the published release?" after an update, a manual overlay or a support report. | No install-side checker. | Fixed: `tools/verify_install.py` checks every manifest file, reports missing/changed files and lists unknown extras while ignoring documented user-data/generated paths. |
-| R11 | Medium | The release tooling had no automated tests and CI ran none. | No `tools/tests`; release workflow built and published only. | Fixed: 29 standard-library tests and a fast `.github/workflows/release-validation.yml` for Python and PowerShell syntax. |
-| R12 | Medium | The engine source tree is copied with `robocopy`, not from Git's tracked file list. An ignored but present generated file is excluded by name, but a non-ignored untracked engine file is only caught by the dirty-tree guard. | `robocopy 'engine/fefw-recomp' ...`. | Fixed: `tools/verify_engine_tree.py` supplies the tracked list, explicitly adds the generated Windows translator, and verifies the copied tree has no untracked files. `.github` and fetched/generated trees are excluded by one shared policy. |
+| R11 | Medium | The release tooling had no automated tests and CI ran none. | No `tools/tests`; release workflow built and published only. | Fixed: 30 standard-library tests and a fast `.github/workflows/release-validation.yml` for Python and PowerShell syntax. |
+| R12 | Medium | The engine source tree is copied with `robocopy`, not from Git's tracked file list. An ignored but present generated file is excluded by name, but a non-ignored untracked engine file is only caught by the dirty-tree guard. | `robocopy 'engine/fefw-recomp' ...`. | Fixed: `tools/verify_engine_tree.py` supplies the tracked list, explicitly adds the generated Windows translator and notices, and verifies the copied tree has no untracked files. `.github` and fetched/generated trees are excluded by one shared policy. |
 | R13 | Low | `verify_archive.py --extract` reuses an existing directory, so a stale file can be mistaken for an extracted one. | `os.makedirs(extract, exist_ok=True)`. | Remaining. The package script removes its extraction directory first; standalone users should use a new empty path. |
 | R14 | Low | Required-file lists are duplicated between the package script and the release workflow. | Two hand-written `--require` lists. | Partially reduced: the package now uses one list for verify and manifest. CI still repeats a subset. |
 | R15 | Low | The zip's Windows version resource is not cross-checked against `Cargo.toml`. The source stamp catches a stale build, but a hand-copied executable with the same stamp would not be caught by version metadata alone. | `build.rs` embeds icon and description; no package-side `VersionInfo` check. | Remaining. The build stamp and manifest are the current provenance guard. |
+| R16 | High | The self-contained shader translator shipped without its Ryujinx MIT and Microsoft .NET redistribution notices beside the binary. | Translator is built from Ryujinx sources and embeds the .NET runtime; the package only carried source-tree licences. | Fixed: `LICENSE.Ryujinx.MIT.txt`, `DOTNET-LICENSE.txt` and `DOTNET-THIRD-PARTY-NOTICES.txt` are copied beside `spirv_harness.exe`; archive and CI verification require them, and engine-tree verification allows them as generated companions. |
 
 ## What changed
 
@@ -60,6 +61,8 @@ The release path is:
 - The engine tree is copied from `tools/verify_engine_tree.py list`, never with `robocopy`. The list comes from
   `git ls-files`; `.github`, the dump/work trees, fetched texture/shader/download trees and the Linux translator are
   excluded. The generated Windows translator is added explicitly and the copied tree is verified before archiving.
+- The translator's Ryujinx MIT notice and Microsoft .NET license/third-party notices are tracked under
+  `engine/fefw-recomp/tools/shaders/licenses/`, copied beside `spirv_harness.exe`, and named in the required-file checks.
 - `tools/release.ps1` writes `SHA256SUMS`, verifies the manifest before upload and publishes the zip, manifest and sums.
 - `tools/install_local.ps1` stages the new launcher beside the target, verifies its hash, atomically replaces the target
   and restores the pre-install copy if the replacement or final hash check fails.
@@ -92,7 +95,7 @@ python tools/verify_install.py --root verify/EmblemWeave-v0.1.41 --manifest rele
 
 ## Verification performed
 
-- `python -m unittest discover -s tools/tests -v`: 29 tests passed.
+- `python -m unittest discover -s tools/tests -v`: 30 tests passed.
 - `python -m py_compile tools/*.py`: passed.
 - `python tools/check_release.py`: release metadata agrees on 0.1.41.
 - PowerShell parser: `package_release.ps1`, `release.ps1` and `install_local.ps1` parse.
@@ -100,8 +103,8 @@ python tools/verify_install.py --root verify/EmblemWeave-v0.1.41 --manifest rele
   save entry; worker read its own RomFS entry).
 
 A synthetic end-to-end package was also run with a fake launcher and fake translator, the real tracked docs and engine
-tree, `-SkipConfigureCheck`, `-AllowDirty` and `-AllowStaleBuild`: the engine check accepted 1,735 tracked files plus the
-translator, the archive had 1,841 files (46.7 MB), and archive verification, manifest creation/verification and a strict
+tree, `-SkipConfigureCheck`, `-AllowDirty` and `-AllowStaleBuild`: the engine check accepted 1,738 tracked files plus the
+translator and its notices, the archive had 1,847 files (46.7 MB), and archive verification, manifest creation/verification and a strict
 install check all passed. This exercised the packaging/verifier wiring, not a real launcher or translator.
 `tools/install_local.ps1` was tested against temporary installs for both a replacement
 (with a pre-install backup) and a fresh target (no backup). The first test found a real bug: `File.Replace` cannot take a

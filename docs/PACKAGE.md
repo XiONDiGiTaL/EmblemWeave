@@ -36,17 +36,22 @@ SHA256SUMS               combined checksums for the zip, translator and manifest
         ├── runtime/       the runtime: Vulkan renderer, audio, HLE services, the F1 menu, the tests
         └── tools/
             ├── shaders/   the shader translator sources, the reference corpus, and
-            │   └── prebuilt/win-x64/spirv_harness.exe   the translator, published with its own .NET runtime
+            │   └── prebuilt/win-x64/   the translator, published with its own .NET runtime:
+            │       ├── spirv_harness.exe
+            │       ├── LICENSE.Ryujinx.MIT.txt
+            │       ├── DOTNET-LICENSE.txt
+            │       └── DOTNET-THIRD-PARTY-NOTICES.txt
             ├── textures/  the texture transcoders (astc-encoder, bc7enc_rdo, ispc are fetched, not shipped)
             ├── tiling/    the tiling/layout tools
             └── nso/       the NSO/module helpers
 ```
 
 The engine tree is not a filesystem copy. `tools/package_release.ps1` asks `tools/verify_engine_tree.py` for the
-`git ls-files` list, copies exactly those files, adds only the generated Windows shader translator, and then verifies
+`git ls-files` list, copies exactly those files, adds only the generated Windows shader translator and its notices, and then verifies
 the copied tree has no untracked extras. The dump, `work`, `.github`, fetched texture/shader/download trees and the Linux
 translator are not part of that list. A local object file or experimental source file therefore cannot enter a release
-even when it sits in `engine/fefw-recomp`.
+even when it sits in `engine/fefw-recomp`. The generated translator is accompanied by its Ryujinx MIT notice and the
+Microsoft .NET redistribution notices; all three are required by archive verification.
 
 ## Deliberately not in the zip
 
