@@ -272,7 +272,24 @@ bool gw_settled(uint64_t addr, uint64_t size) {
     return true;
 }
 
+// Per-submission cache of TSR-jittered Vertex UBO 0 uploads (invalidated on any GPU buffer write or new submission).
+struct TsrUboCacheEntry {
+    uint64_t serial = 0;
+    uint64_t tsr_frame = 0;
+    uint32_t w = 0, h = 0;
+    uint64_t addr = 0;
+    VkDeviceSize n = 0;
+    uint32_t in_head[68] = {};
+    UploadAlloc u;
+};
+constexpr int kTsrUboCacheN = 8;
+TsrUboCacheEntry g_tsr_ubo_cache[kTsrUboCacheN];
+int g_tsr_ubo_cache_n = 0;
+int g_tsr_ubo_cache_next = 0;
+uint64_t g_tsr_ubo_cache_serial = ~0ull;
+
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
+    g_tsr_ubo_cache_n = 0;
     note_gw(addr, size);
     if (note_gpu_write(addr, size, use)) {
         g_dirty |= kVb | kDesc;
@@ -1299,20 +1316,29 @@ bool shares_image(Texture* a, const Texture* b) {
 // True when a texture the program samples is the depth attachment of the current target set: the draw then runs in a pass whose depth
 // attachment is read-only (DEPTH_STENCIL_READ_ONLY_OPTIMAL serves as attachment and as sampled layout).
 bool samples_depth_target(const ProgLayout& pl) {
-    if (!S.depth_tex) return false;
-    for (const BindingDesc& d : pl.bindings) {
-        if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+    Texture* dt = S.depth_tex.get();
+    if (!dt || pl.sampled_tex_bindings.empty()) return false;
+    const TexGpu* dg = dt->gpu;
+    for (uint16_t bi : pl.sampled_tex_bindings) {
+        const BindingDesc& d = pl.bindings[bi];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (b.nvn.source == NvnSource::ImageBinding) continue;
         TexResolved tmp;
-        if (shares_image(resolve_texture_ref(d, tmp).tex, S.depth_tex.get())) return true;
+        Texture* rt = resolve_texture_ref(d, tmp).tex;
+        if (!rt) continue;
+        if (rt == dt) return true;
+        if (dg && rt->gpu) {
+            if (rt->gpu == dg) return true;
+            continue;
+        }
+        if (shares_image(rt, dt)) return true;
     }
     return false;
 }
 
 // A colour attachment cannot be sampled in the pass that renders to it (no feedback loops): the binding gets the dummy view.
 bool is_color_feedback(Texture* t) {
-    if (!t) return false;
+    if (!t || !S.ncolor) return false;
     static const bool fast = nxrt::config_get_bool("nvn", "feedback_fast", true);
     if (!fast) {
         for (uint32_t i = 0; i < S.ncolor; ++i) {
@@ -1322,21 +1348,21 @@ bool is_color_feedback(Texture* t) {
         }
         return false;
     }
-    // [nvn] feedback_fast (default on): the same answer with one image lookup of t instead of one per attachment (shares_image looked t's
-    // image up for every colour target; with five G-buffer targets and three calls a binding per draw that was ~15 lookups of a cold
-    // object). Every attachment gets its image first, so t finds an attachment it aliases exactly as before.
+    // [nvn] feedback_fast (default on): single-pass check when t->gpu is already live (the common case after attach_targets).
+    const TexGpu* tg = t->gpu;
     bool any = false;
     for (uint32_t i = 0; i < S.ncolor; ++i) {
         Texture* a = S.color_tex[i].get();
         if (!a) continue;
         if (!a->gpu) tex_gpu_attachment(a);   // an attachment gets its image (or the one it shares) here, not later in ensure_pass (S4g)
-        if (a == t) return true;
+        if (a == t || (tg && a->gpu == tg)) return true;
         any = true;
     }
-    if (!any || !tex_gpu(t) || !t->gpu) return false;
+    if (tg || !any || !tex_gpu(t) || !t->gpu) return false;
+    tg = t->gpu;
     for (uint32_t i = 0; i < S.ncolor; ++i) {
         const Texture* a = S.color_tex[i].get();
-        if (a && a->gpu == t->gpu) return true;
+        if (a && a->gpu == tg) return true;
     }
     return false;
 }
@@ -1431,12 +1457,13 @@ void fb_level_range(const ProgLayout& pl, Texture* t, uint32_t* lo, uint32_t* hi
 }
 
 void feedback_prepare(const ProgLayout& pl) {
-    g_fb_use.clear();
+    if (!g_fb_use.empty()) g_fb_use.clear();
+    if (!S.ncolor || pl.sampled_tex_bindings.empty()) { g_fb_seen = false; return; }
     bool any = false;
-    for (const BindingDesc& d : pl.bindings) {
-        if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+    for (uint16_t bi : pl.sampled_tex_bindings) {
+        const BindingDesc& d = pl.bindings[bi];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (b.nvn.source == NvnSource::ImageBinding) continue;
         TexResolved tmp;
         struct { Texture* tex; } const r = {resolve_texture_ref(d, tmp).tex};   // only the texture is used below
         if (!r.tex || !tex_gpu(r.tex) || !is_color_feedback(r.tex) || r.tex->b.samples > 1 || g_fb_use.count(r.tex)) continue;
@@ -1497,11 +1524,12 @@ bool wants_vol3d(const DescriptorBinding& b, const TexResolved& r) {
 }
 
 void vol3d_prepare(const ProgLayout& pl) {
-    g_vol3d_use.clear();
-    for (const BindingDesc& d : pl.bindings) {
-        if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+    if (!g_vol3d_use.empty()) g_vol3d_use.clear();
+    if (!pl.has_3d_sampler) return;
+    for (uint16_t bi : pl.sampled_tex_bindings) {
+        const BindingDesc& d = pl.bindings[bi];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform) continue;
+        if (b.image.dim != 2 || b.nvn.source == NvnSource::ImageBinding) continue;
         TexResolved tmp;
         const TexResolved& r = resolve_texture_ref(d, tmp);   // nothing below begins a MemoScope, so the entry stays
         if (!wants_vol3d(b, r) || g_vol3d_use.count(r.tex) || !tex_gpu(r.tex)) continue;
@@ -1578,25 +1606,26 @@ void prepare_textures(const ProgLayout& pl) {
     need.clear();
     need_storage.clear();
     storage_bound.clear();
-    for (const BindingDesc& d : pl.bindings) {
+    for (uint16_t bi : pl.storage_img_bindings) {
+        const BindingDesc& d = pl.bindings[bi];
         TexResolved tmp;
-        if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
-            const TexResolved& r = resolve_image_ref(d, tmp);
-            if (!r.tex || !tex_gpu(r.tex) || !tex_has_storage(r.tex)) continue;
-            storage_bound.push_back(r.tex);
-            // [gfx] float16_scene: an R11G11B10F image becomes RGBA16F at its first store, unless the shader declares its format (a view of
-            // another format than the declared one is not allowed)
-            bool f16 = tex_f16_on_store(r.tex);
-            if (f16 && image_format_vk(d.shader->refl.bindings[d.index].image.format) == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
-                tex_f16_keep(r.tex);
-                f16 = false;
-            }
-            if (f16 || r.tex->cpu_dirty.load() || tex_layout(r.tex) != VK_IMAGE_LAYOUT_GENERAL || tex_scale(r.tex) != 1.0f) need_storage.push_back(r.tex);
-            continue;
+        const TexResolved& r = resolve_image_ref(d, tmp);
+        if (!r.tex || !tex_gpu(r.tex) || !tex_has_storage(r.tex)) continue;
+        storage_bound.push_back(r.tex);
+        // [gfx] float16_scene: an R11G11B10F image becomes RGBA16F at its first store, unless the shader declares its format (a view of
+        // another format than the declared one is not allowed)
+        bool f16 = tex_f16_on_store(r.tex);
+        if (f16 && image_format_vk(d.shader->refl.bindings[d.index].image.format) == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+            tex_f16_keep(r.tex);
+            f16 = false;
         }
-        if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform && b.nvn.source != NvnSource::ImageBinding) continue;
+        if (f16 || r.tex->cpu_dirty.load() || tex_layout(r.tex) != VK_IMAGE_LAYOUT_GENERAL || tex_scale(r.tex) != 1.0f) need_storage.push_back(r.tex);
+    }
+    Texture* dt = S.depth_tex.get();
+    const TexGpu* dg = dt ? dt->gpu : nullptr;
+    for (uint16_t bi : pl.sampled_tex_bindings) {
+        const BindingDesc& d = pl.bindings[bi];
+        TexResolved tmp;
         const TexResolved& r = resolve_texture_ref(d, tmp);
         if (!r.tex) continue;
         if (!r.tex->gpu && tex_first_upload_deferrable(r.tex)) {   // an asset with no image yet: made when its upload runs (it may wait)
@@ -1605,10 +1634,14 @@ void prepare_textures(const ProgLayout& pl) {
         }
         if (!tex_gpu(r.tex)) continue;
         // owned by the pass; a compute dispatch runs outside every pass, so the graphics attachments do not own what it samples
-        if (shares_image(r.tex, S.depth_tex.get()) || (d.nvn_stage != kCompute && is_color_feedback(r.tex))) continue;
+        const bool is_depth = dt && (r.tex == dt || (dg && r.tex->gpu == dg) || (!dg && shares_image(r.tex, dt)));
+        if (is_depth || (d.nvn_stage != kCompute && is_color_feedback(r.tex))) continue;
         if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != tex_sampled_layout(r.tex)) {
             need.push_back(r.tex);
-            if (r.tex->cpu_dirty.load() && ft::on()) ft::mark(b.nvn.source == NvnSource::SamplerBinding ? "tx.dirty_bind" : "tx.dirty_uniform", r.tex->id);
+            if (r.tex->cpu_dirty.load() && ft::on()) {
+                const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+                ft::mark(b.nvn.source == NvnSource::SamplerBinding ? "tx.dirty_bind" : "tx.dirty_uniform", r.tex->id);
+            }
         }
     }
     size_t pool_from = need.size();   // need[pool_from..]: textures only needed because the pools hold them
@@ -2002,7 +2035,7 @@ void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua, const OutOverlapSnap
     } else if (idx < 16 + kCompute * 32) {
         const int st = (idx - 16) / 32, j = (idx - 16) % 32;
         if (!S.stage[st]) return;                   // as the full pass: an inactive stage's slots are not read by the draw
-        if (j < 16) b = &S.ubo[st][j], copy_ok = ua && (b->addr % ua) == 0, why = kOutDrawBuffer;
+        if (j < 16) b = &S.ubo[st][j], copy_ok = ua && ((ua & (ua - 1)) == 0 ? (b->addr & (ua - 1)) == 0 : (b->addr % ua) == 0), why = kOutDrawBuffer;
         else b = &S.ssbo[st][j - 16], copy_ok = true, why = kOutStorageXfb;
     } else {
         b = &S.xfb[idx - 16 - kCompute * 32], copy_ok = false, why = kOutStorageXfb;
@@ -2075,7 +2108,7 @@ const OutOverlapSnap* out_draw_bindings() {
                 for (uint32_t mk = S.ubo_mask[st]; mk; mk &= mk - 1) {
                     const unsigned k = static_cast<unsigned>(std::countr_zero(mk));
                     const GState::Bind& b = S.ubo[st][k];
-                    out_draw_read_slot(ms[k], b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen, snap);
+                    out_draw_read_slot(ms[k], b, ua && ((ua & (ua - 1)) == 0 ? (b.addr & (ua - 1)) == 0 : (b.addr % ua) == 0), kOutDrawBuffer, gen, snap);
                     g_out_unmemo |= ms[k].gen == ~0ull;
                     out_held_note(16 + st * 32 + static_cast<int>(k), ms[k], b.addr);
                 }
@@ -2487,22 +2520,21 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                         }
                         BufRef br = resolve_read(bind.addr, bind.size, kReadUniform);
                         const VkDeviceSize align = ubo_align;
+                        const bool aligned = (align & (align - 1)) == 0 ? (br.offset & (align - 1)) == 0 : (br.offset % align) == 0;
                         const float ufs = ufs_want ? ufs_scale_for(d, idx) : 1.0f;
                         const bool tsr = tsr_wanted && d.nvn_stage == kVertex && idx == 0 && bind.size >= 272;
+                        bool bound_patched = false;
                         if (br.ok && (ufs != 1.0f || tsr)) {
-                            // the game's scale on some floats of this block (nxrt/gfx_tuning.h): bound from a patched copy in the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536});
-                            UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
-                            if (u) {
-                                std::memcpy(u.ptr, host_ptr(bind.addr), n);
-                                // The patches work on a copy of the block's head in cached memory and write it back: the upload ring is
-                                // write-combined (device-local through the BAR on most GPUs), and every read of it stalls. Reading the camera
-                                // block back from it for each draw was over half the render thread's time in busy map scenes.
-                                uint32_t head[68];
-                                const size_t hn = static_cast<size_t>(std::min<VkDeviceSize>(n, sizeof head));
-                                std::memcpy(head, host_ptr(bind.addr), hn);
-                                bool patched = tsr && n >= 272 && tsr_jitter(head, 68);   // temporal upscaling
-                                const uint32_t mask = ufs != 1.0f ? nxrt::gfx::tuning().ufs_mask.load(std::memory_order_relaxed) : 0u;
+                            const uint8_t* src = static_cast<const uint8_t*>(host_ptr(bind.addr));
+                            uint32_t in_head[68];
+                            uint32_t head[68];
+                            const size_t hn = static_cast<size_t>(std::min<VkDeviceSize>(n, sizeof head));
+                            std::memcpy(in_head, src, hn);
+                            std::memcpy(head, in_head, hn);
+                            bool patched = tsr && n >= 272 && tsr_jitter(head, 68);   // temporal upscaling
+                            if (ufs != 1.0f) {
+                                const uint32_t mask = nxrt::gfx::tuning().ufs_mask.load(std::memory_order_relaxed);
                                 for (uint32_t i = 0; i < 32; ++i) {
                                     if (!(mask & (1u << i)) || (i + 1) * 4 > n) continue;
                                     float v;
@@ -2511,12 +2543,57 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                                     std::memcpy(&head[i], &v, 4);
                                     patched = true;
                                 }
-                                if (patched) std::memcpy(u.ptr, head, hn);
-                                bi = {u.buffer, u.offset, n};
                             }
-                        } else if (br.ok && (br.offset % align) == 0) {
+                            if (patched) {
+                                // Per-submission upload cache for TSR-jittered camera UBOs: avoids re-allocating and copying
+                                // the same camera block into write-combined BAR memory on every draw, and lets push_set0 skip
+                                // re-pushing unchanged set-0 bindings.
+                                const bool can_cache = (ufs == 1.0f) && S.depth_tex && tex_gpu(S.depth_tex.get());
+                                VkExtent3D de = {0, 0, 0};
+                                if (can_cache) {
+                                    if (g_tsr_ubo_cache_serial != F->serial) {
+                                        g_tsr_ubo_cache_serial = F->serial;
+                                        g_tsr_ubo_cache_n = 0;
+                                        g_tsr_ubo_cache_next = 0;
+                                    }
+                                    de = tex_image_extent(S.depth_tex.get(), 0);
+                                    for (int ci = 0; ci < g_tsr_ubo_cache_n; ++ci) {
+                                        const TsrUboCacheEntry& e = g_tsr_ubo_cache[ci];
+                                        if (e.addr == bind.addr && e.n == n && e.tsr_frame == g_tsr_frame && e.w == de.width && e.h == de.height &&
+                                            std::memcmp(e.in_head, in_head, hn) == 0) {
+                                            bi = {e.u.buffer, e.u.offset, n};
+                                            bound_patched = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!bound_patched) {
+                                    UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
+                                    if (u) {
+                                        uint8_t* dst = static_cast<uint8_t*>(u.ptr);
+                                        std::memcpy(dst, head, hn);
+                                        if (n > hn) std::memcpy(dst + hn, src + hn, static_cast<size_t>(n - hn));
+                                        bi = {u.buffer, u.offset, n};
+                                        bound_patched = true;
+                                        if (can_cache) {
+                                            const int slot = g_tsr_ubo_cache_n < kTsrUboCacheN ? g_tsr_ubo_cache_n++ : (g_tsr_ubo_cache_next++ & (kTsrUboCacheN - 1));
+                                            TsrUboCacheEntry& e = g_tsr_ubo_cache[slot];
+                                            e.serial = F->serial;
+                                            e.tsr_frame = g_tsr_frame;
+                                            e.w = de.width;
+                                            e.h = de.height;
+                                            e.addr = bind.addr;
+                                            e.n = n;
+                                            std::memcpy(e.in_head, in_head, hn);
+                                            e.u = u;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!bound_patched && br.ok && aligned) {
                             bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
-                        } else if (br.ok) {
+                        } else if (!bound_patched && br.ok) {
                             // unaligned binding: copy into the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, 65536);
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
@@ -2596,7 +2673,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
         } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             const uint8_t int_comp = int_sampler_for(pl, d);    // the integer sampler variant of a compute shader (do_dispatch)
             const int component = int_comp ? int_comp : b.image.component == ScalarType::Sint ? 2 : b.image.component == ScalarType::Uint ? 3 : 1;
-            VkDescriptorImageInfo ii = {dummy_sampler(), dummy_view(view_type_for(b), b.image.depth, component), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkDescriptorImageInfo ii = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
             TexResolved r_tmp;
             const TexResolved* rp = &resolve_texture_ref(d, r_tmp);
             auto ensure_mut = [&]() -> TexResolved& {
@@ -2618,7 +2695,8 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
             // [nvn] debug_null_format = "BPTC_UFLOAT" or "RGBA8:256x64": every sampled texture of that NVN format (and size) gets the dummy view
             // (term isolation, debugging only)
             static const std::string null_fmt = nxrt::config_get_str("nvn", "debug_null_format", "");
-            if (rp->tex && !null_fmt.empty() && rp->tex->fmt) {
+            static const bool has_null_fmt = !null_fmt.empty();
+            if (has_null_fmt && rp->tex && rp->tex->fmt) {
                 const std::string sized = std::string(rp->tex->fmt->name) + ":" + std::to_string(rp->tex->b.width) + "x" + std::to_string(rp->tex->b.height);
                 if (null_fmt == rp->tex->fmt->name || null_fmt == sized) ensure_mut().tex = nullptr;
             }
@@ -2674,6 +2752,8 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                             r.has_view && r.view.has_layers ? r.view.min_layer : -1, r.has_view && r.view.has_layers ? r.view.num_layers : -1);
                 }
             }
+            if (!ii.imageView) ii.imageView = dummy_view(view_type_for(b), b.image.depth, component);
+            if (!ii.sampler) ii.sampler = dummy_sampler();
             iinfo.push_back(ii);
             w.pImageInfo = &iinfo.back();
             mix(reinterpret_cast<uint64_t>(ii.imageView));

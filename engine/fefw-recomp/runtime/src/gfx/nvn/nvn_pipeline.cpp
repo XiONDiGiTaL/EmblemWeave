@@ -836,59 +836,19 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
     pl.push_bytes = pcr.size;
     // Per-program invariant (ProgLayout::writes_storage): begin_draw used to walk every binding of the program for this on each draw.
     static const bool ssbo_ro_pass = config_get_bool("nvn", "gfx_ssbo_readonly", true);
-    for (const BindingDesc& d : pl.bindings) {
-        const bool storage_image = d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        const bool written_ssbo = d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && !(ssbo_ro_pass && !d.shader->refl.bindings[d.index].written);
-        pl.writes_storage = pl.writes_storage || storage_image || written_ssbo;
-    }
-
-    // Build invariant write templates for fast descriptor set construction (Phase 2.2)
-    // This avoids the per-binding loop in build_set for the static parts of VkWriteDescriptorSet.
-    for (const BindingDesc& d : pl.bindings) {
-        if (d.set >= 4) continue;  // Only sets 0..3 have templates (kPoolSet is shared)
-        ProgLayout::WriteTemplate wt;
-        wt.write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        wt.write.dstBinding = d.binding;
-        wt.write.descriptorCount = 1;
-        wt.write.descriptorType = d.type;
-        wt.binding = d.binding;
-        wt.type = d.type;
-        wt.nvn_stage = d.nvn_stage;
-
-        // Classify the source for fast dynamic data lookup
+    for (uint32_t bi = 0; bi < pl.bindings.size(); ++bi) {
+        const BindingDesc& d = pl.bindings[bi];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-            switch (b.nvn.source) {
-                case NvnSource::SupportBuffer: wt.source_class = 7; break;
-                case NvnSource::DriverConstants: wt.source_class = 6; break;
-                case NvnSource::PushConstants: wt.source_class = 5; wt.source_index = b.nvn.index; break;
-                case NvnSource::ConstantData: wt.source_class = 8; break;
-                case NvnSource::UniformBlock:
-                case NvnSource::HandleInUniform:
-                    wt.source_class = 9; wt.source_index = b.nvn.index; break;  // Simple: uses S.ubo
-                case NvnSource::UniformAsStorage:
-                    wt.source_class = 10; wt.source_index = b.nvn.index; break; // Complex: needs resolve_buffer + held_or_pool
-                case NvnSource::StorageBuffer:
-                    wt.source_class = 0; break;  // Complex: needs resolve_buffer + shadowing + gfx_ssbo_readonly
-                default: wt.source_class = 0; break;
-            }
-        } else if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
-            wt.source_class = 2; wt.source_index = b.nvn.index;
-        } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
-                   d.type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
-                   d.type == VK_DESCRIPTOR_TYPE_SAMPLER) {
-            wt.source_class = 3; wt.source_index = b.nvn.index;
-        } else if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
-                   d.type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
-            wt.source_class = 4; wt.source_index = b.nvn.index;
-        } else {
-            wt.source_class = 0;
+        pl.writes_storage |= (d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && !(ssbo_ro_pass && !b.written)) ||
+                             d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+            pl.storage_img_bindings.push_back(static_cast<uint16_t>(bi));
+        } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+                   (b.nvn.source == NvnSource::SamplerBinding || b.nvn.source == NvnSource::HandleInUniform || b.nvn.source == NvnSource::ImageBinding)) {
+            pl.sampled_tex_bindings.push_back(static_cast<uint16_t>(bi));
+            if (b.image.dim == 2 && b.nvn.source != NvnSource::ImageBinding) pl.has_3d_sampler = true;
         }
-
-        pl.set_templates[d.set].push_back(std::move(wt));
     }
-    pl.templates_built = true;
-
     return &g_layouts.emplace(key, std::move(pl)).first->second;
 }
 
