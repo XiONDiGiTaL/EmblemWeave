@@ -25,14 +25,361 @@
 
 #include "nxrt/log.h"
 #include "nxrt/tt.h"
+#include "nxrt/config.h"
 #include "services_internal.h"
 
 #include <windows.h>
 #include <bcrypt.h>
+#include <filesystem>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+#include <libavutil/error.h>
+#include <libavutil/frame.h>
+#include <libavutil/version.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
+}
 
 #pragma comment(lib, "bcrypt")
 
 namespace nxrt::services {
+
+// ---- FFmpeg Opus decoder (dynamically loaded, like movie_ffmpeg.cpp) ------------------------------------
+namespace {
+namespace fs = std::filesystem;
+
+constexpr const char* kOpusTag = "hwopus";
+
+struct OpusApi {
+    HMODULE util_mod = nullptr, codec_mod = nullptr;
+    decltype(&::avutil_version) avutil_version = nullptr;
+    decltype(&::avcodec_version) avcodec_version = nullptr;
+    decltype(&::av_version_info) av_version_info = nullptr;
+    decltype(&::av_log_set_level) av_log_set_level = nullptr;
+    decltype(&::av_strerror) av_strerror = nullptr;
+    decltype(&::av_mallocz) av_mallocz = nullptr;
+    decltype(&::avcodec_find_decoder_by_name) avcodec_find_decoder_by_name = nullptr;
+    decltype(&::avcodec_alloc_context3) avcodec_alloc_context3 = nullptr;
+    decltype(&::avcodec_free_context) avcodec_free_context = nullptr;
+    decltype(&::avcodec_open2) avcodec_open2 = nullptr;
+    decltype(&::avcodec_send_packet) avcodec_send_packet = nullptr;
+    decltype(&::avcodec_receive_frame) avcodec_receive_frame = nullptr;
+    decltype(&::av_packet_alloc) av_packet_alloc = nullptr;
+    decltype(&::av_packet_free) av_packet_free = nullptr;
+    decltype(&::av_new_packet) av_new_packet = nullptr;
+    decltype(&::av_packet_unref) av_packet_unref = nullptr;
+    decltype(&::av_frame_alloc) av_frame_alloc = nullptr;
+    decltype(&::av_frame_free) av_frame_free = nullptr;
+    decltype(&::av_frame_unref) av_frame_unref = nullptr;
+    decltype(&::av_samples_get_buffer_size) av_samples_get_buffer_size = nullptr;
+    decltype(&::av_channel_layout_default) av_channel_layout_default = nullptr;
+};
+
+std::mutex g_opus_mu;
+const OpusApi* g_opus_api = nullptr;
+std::string g_opus_version;
+
+template <typename T>
+bool resolve_opus(HMODULE module, const char* name, T& fn) {
+    fn = reinterpret_cast<T>(GetProcAddress(module, name));
+    return fn != nullptr;
+}
+
+std::wstring widen_opus(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return w;
+}
+
+std::wstring lower_opus(std::wstring s) {
+    for (wchar_t& c : s)
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+    return s;
+}
+
+bool dll_named_opus(const fs::path& p, const wchar_t* prefix, std::wstring& name) {
+    name = lower_opus(p.filename().wstring());
+    const std::wstring pre(prefix);
+    return name.size() > pre.size() + 4 && name.compare(0, pre.size(), pre) == 0 &&
+           name.compare(name.size() - 4, 4, L".dll") == 0;
+}
+
+bool pair_in_opus(const fs::path& dir, fs::path& codec, fs::path& util) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return false;
+    std::vector<fs::path> codecs, utils;
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; it != end && !ec; it.increment(ec)) {
+        std::wstring name;
+        if (dll_named_opus(it->path(), L"avcodec-", name)) codecs.push_back(it->path());
+        else if (dll_named_opus(it->path(), L"avutil-", name)) utils.push_back(it->path());
+    }
+    std::sort(codecs.begin(), codecs.end());
+    std::sort(utils.begin(), utils.end());
+    // Prefer the major pair this build's headers describe (avcodec-62 / avutil-60)
+    for (const auto& c : codecs)
+        for (const auto& u : utils) {
+            const std::wstring cn = lower_opus(c.filename().wstring()), un = lower_opus(u.filename().wstring());
+            if (cn == L"avcodec-62.dll" && un == L"avutil-60.dll") {
+                codec = c;
+                util = u;
+                return true;
+            }
+        }
+    if (!codecs.empty() && !utils.empty()) {
+        codec = codecs.front();
+        util = utils.front();
+        return true;
+    }
+    return false;
+}
+
+const OpusApi* load_opus_pair(const fs::path& codec, const fs::path& util, std::string& why) {
+    HMODULE u = LoadLibraryExW(util.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!u) {
+        why = "avutil could not be loaded (" + std::to_string(GetLastError()) + ")";
+        return nullptr;
+    }
+    const fs::path dir = codec.parent_path();
+    DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(dir.c_str());
+    HMODULE c = LoadLibraryExW(codec.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!c) c = LoadLibraryExW(codec.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (cookie) RemoveDllDirectory(cookie);
+    if (!c) {
+        why = "avcodec could not be loaded (" + std::to_string(GetLastError()) + "); keep avutil-60.dll and swresample-6.dll beside it";
+        FreeLibrary(u);
+        return nullptr;
+    }
+    auto* api = new OpusApi();
+    api->util_mod = u;
+    api->codec_mod = c;
+    auto fail = [&](const char* missing) {
+        why = std::string("a function is missing: ") + missing;
+        FreeLibrary(c);
+        FreeLibrary(u);
+        delete api;
+        return static_cast<const OpusApi*>(nullptr);
+    };
+    if (!resolve_opus(u, "avutil_version", api->avutil_version)) return fail("avutil_version");
+    if (!resolve_opus(c, "avcodec_version", api->avcodec_version)) return fail("avcodec_version");
+    const unsigned uv = api->avutil_version(), cv = api->avcodec_version();
+    if (AV_VERSION_MAJOR(uv) != LIBAVUTIL_VERSION_MAJOR || AV_VERSION_MAJOR(cv) != LIBAVCODEC_VERSION_MAJOR) {
+        why = "version " + std::to_string(AV_VERSION_MAJOR(cv)) + "." + std::to_string(AV_VERSION_MINOR(cv)) +
+              " does not match this build's " + std::to_string(LIBAVCODEC_VERSION_MAJOR) + ".x";
+        FreeLibrary(c);
+        FreeLibrary(u);
+        delete api;
+        return nullptr;
+    }
+    if (!resolve_opus(u, "av_version_info", api->av_version_info)) return fail("av_version_info");
+    if (!resolve_opus(u, "av_log_set_level", api->av_log_set_level)) return fail("av_log_set_level");
+    if (!resolve_opus(u, "av_strerror", api->av_strerror)) return fail("av_strerror");
+    if (!resolve_opus(u, "av_mallocz", api->av_mallocz)) return fail("av_mallocz");
+    if (!resolve_opus(c, "avcodec_find_decoder_by_name", api->avcodec_find_decoder_by_name)) return fail("avcodec_find_decoder_by_name");
+    if (!resolve_opus(c, "avcodec_alloc_context3", api->avcodec_alloc_context3)) return fail("avcodec_alloc_context3");
+    if (!resolve_opus(c, "avcodec_free_context", api->avcodec_free_context)) return fail("avcodec_free_context");
+    if (!resolve_opus(c, "avcodec_open2", api->avcodec_open2)) return fail("avcodec_open2");
+    if (!resolve_opus(c, "avcodec_send_packet", api->avcodec_send_packet)) return fail("avcodec_send_packet");
+    if (!resolve_opus(c, "avcodec_receive_frame", api->avcodec_receive_frame)) return fail("avcodec_receive_frame");
+    if (!resolve_opus(c, "av_packet_alloc", api->av_packet_alloc)) return fail("av_packet_alloc");
+    if (!resolve_opus(c, "av_packet_free", api->av_packet_free)) return fail("av_packet_free");
+    if (!resolve_opus(c, "av_new_packet", api->av_new_packet)) return fail("av_new_packet");
+    if (!resolve_opus(c, "av_packet_unref", api->av_packet_unref)) return fail("av_packet_unref");
+    if (!resolve_opus(u, "av_frame_alloc", api->av_frame_alloc)) return fail("av_frame_alloc");
+    if (!resolve_opus(u, "av_frame_free", api->av_frame_free)) return fail("av_frame_free");
+    if (!resolve_opus(u, "av_frame_unref", api->av_frame_unref)) return fail("av_frame_unref");
+    if (!resolve_opus(u, "av_samples_get_buffer_size", api->av_samples_get_buffer_size)) return fail("av_samples_get_buffer_size");
+    if (!resolve_opus(u, "av_channel_layout_default", api->av_channel_layout_default)) return fail("av_channel_layout_default");
+    api->av_log_set_level(AV_LOG_ERROR);
+    g_opus_version = api->av_version_info() ? api->av_version_info() : "";
+    return api;
+}
+
+const OpusApi* find_opus_api() {
+    std::lock_guard<std::mutex> lk(g_opus_mu);
+    if (g_opus_api) return g_opus_api;
+    if (g_opus_version == "!") return nullptr;   // a previous attempt failed; do not rescan on every decoder
+    std::vector<fs::path> dirs;
+    const std::string configured = config_get_str("media", "ffmpeg_dir", "");
+    if (!configured.empty()) dirs.emplace_back(widen_opus(configured));
+    wchar_t exe[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
+        const fs::path base = fs::path(exe).parent_path();
+        dirs.push_back(base / L"upscalers" / L"ffmpeg");
+        dirs.push_back(base / L"upscalers");
+        dirs.push_back(base);
+    }
+    std::string first_why;
+    for (const fs::path& dir : dirs) {
+        fs::path codec, util;
+        if (!pair_in_opus(dir, codec, util)) continue;
+        std::string why;
+        if (const OpusApi* api = load_opus_pair(codec, util, why)) {
+            NXLOG_I(kOpusTag, "FFmpeg %s loaded from %s (libavcodec %u, libavutil %u)", g_opus_version.c_str(), dir.string().c_str(),
+                    api->avcodec_version() >> 16, api->avutil_version() >> 16);
+            g_opus_api = api;
+            return g_opus_api;
+        }
+        if (first_why.empty()) first_why = why + " (" + codec.filename().string() + ", " + util.filename().string() + ")";
+    }
+    g_opus_version = "!";
+    if (!first_why.empty()) NXLOG_W(kOpusTag, "FFmpeg is not usable for Opus: %s", first_why.c_str());
+    else NXLOG_W(kOpusTag, "FFmpeg is not installed: put avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg");
+    return nullptr;
+}
+
+void opus_log_error(const char* what, int err) {
+    char text[AV_ERROR_MAX_STRING_SIZE] = {};
+    if (g_opus_api && g_opus_api->av_strerror) g_opus_api->av_strerror(err, text, sizeof text);
+    NXLOG_W(kOpusTag, "FFmpeg %s: %s (%d)", what, text[0] ? text : "error", err);
+}
+
+struct OpusDecoder {
+    const OpusApi* api = nullptr;
+    AVCodecContext* ctx = nullptr;
+    AVPacket* pkt = nullptr;
+    AVFrame* frame = nullptr;
+    uint32_t rate = 48000;
+    uint32_t channels = 2;
+    bool opened = false;
+};
+
+void opus_close(OpusDecoder* d);  // forward declaration for OpusDecoderOwner
+
+// Helper to ensure OpusDecoder is closed when the last Service reference is released.
+// MSVC doesn't support the 3-argument shared_ptr aliasing constructor with deleter.
+struct OpusDecoderOwner {
+    OpusDecoder* opus = nullptr;
+    std::shared_ptr<ipc::Service> svc;
+    explicit OpusDecoderOwner(OpusDecoder* o, std::shared_ptr<ipc::Service> s) : opus(o), svc(std::move(s)) {}
+    ~OpusDecoderOwner() { if (opus) opus_close(opus); }
+};
+
+OpusDecoder* opus_open(uint32_t rate, uint32_t channels) {
+    const OpusApi* api = find_opus_api();
+    if (!api) return nullptr;
+    const AVCodec* codec = api->avcodec_find_decoder_by_name("libopus");
+    if (!codec) codec = api->avcodec_find_decoder_by_name("opus");
+    if (!codec) {
+        NXLOG_W(kOpusTag, "FFmpeg has no Opus decoder");
+        return nullptr;
+    }
+    auto* d = new OpusDecoder();
+    d->api = api;
+    d->rate = rate ? rate : 48000;
+    d->channels = (channels && channels <= 8) ? channels : 2;
+    d->ctx = api->avcodec_alloc_context3(codec);
+    if (!d->ctx) {
+        NXLOG_W(kOpusTag, "avcodec_alloc_context3 failed");
+        delete d;
+        return nullptr;
+    }
+    d->ctx->sample_rate = d->rate;
+    d->ctx->ch_layout.nb_channels = d->channels;
+    api->av_channel_layout_default(&d->ctx->ch_layout, d->channels);
+    d->ctx->pkt_timebase = AVRational{1, 1000000};
+    int r = api->avcodec_open2(d->ctx, codec, nullptr);
+    if (r < 0) {
+        opus_log_error("avcodec_open2", r);
+        api->avcodec_free_context(&d->ctx);
+        delete d;
+        return nullptr;
+    }
+    d->pkt = api->av_packet_alloc();
+    d->frame = api->av_frame_alloc();
+    if (!d->pkt || !d->frame) {
+        NXLOG_W(kOpusTag, "FFmpeg could not allocate packet/frame");
+        if (d->pkt) api->av_packet_free(&d->pkt);
+        if (d->frame) api->av_frame_free(&d->frame);
+        api->avcodec_free_context(&d->ctx);
+        delete d;
+        return nullptr;
+    }
+    d->opened = true;
+    NXLOG_I(kOpusTag, "Opus decoder opened: %u Hz, %u channels, using %s", d->rate, d->channels, codec->name);
+    return d;
+}
+
+void opus_close(OpusDecoder* d) {
+    if (!d) return;
+    if (d->api) {
+        if (d->ctx) d->api->avcodec_free_context(&d->ctx);
+        if (d->pkt) d->api->av_packet_free(&d->pkt);
+        if (d->frame) d->api->av_frame_free(&d->frame);
+    }
+    delete d;
+}
+
+// Decode one Opus packet (with Nintendo's 8-byte header: u32 BE size, u32 final_range) into the output buffer.
+// Returns true on success, false on failure (output buffer is zeroed on failure).
+bool opus_decode_packet(OpusDecoder* d, const uint8_t* in_data, size_t in_size, int16_t* out_pcm, uint32_t out_frames) {
+    if (!d || !d->opened || !d->ctx || !in_data || in_size < 8) return false;
+    const uint32_t size = (uint32_t(in_data[0]) << 24) | (uint32_t(in_data[1]) << 16) | (uint32_t(in_data[2]) << 8) | in_data[3];
+    if (size > in_size - 8) return false;
+    const uint8_t* opus_data = in_data + 8;
+    int r = d->api->av_new_packet(d->pkt, static_cast<int>(size));
+    if (r < 0) {
+        opus_log_error("av_new_packet", r);
+        return false;
+    }
+    std::memcpy(d->pkt->data, opus_data, size);
+    r = d->api->avcodec_send_packet(d->ctx, d->pkt);
+    d->api->av_packet_unref(d->pkt);
+    if (r < 0) {
+        opus_log_error("avcodec_send_packet", r);
+        return false;
+    }
+    r = d->api->avcodec_receive_frame(d->ctx, d->frame);
+    if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) {
+        // No output frame ready yet
+        return false;
+    }
+    if (r < 0) {
+        opus_log_error("avcodec_receive_frame", r);
+        return false;
+    }
+    // Frame is ready - copy planar float to interleaved int16
+    if (d->frame->format != AV_SAMPLE_FMT_FLTP) {
+        NXLOG_W(kOpusTag, "Unexpected sample format %d, expected FLTP", d->frame->format);
+        d->api->av_frame_unref(d->frame);
+        return false;
+    }
+    const int frame_samples = d->frame->nb_samples;
+    const int ch = std::min<int>(d->channels, d->frame->ch_layout.nb_channels);
+    const uint32_t copy_frames = std::min<uint32_t>(frame_samples, out_frames);
+    for (int c = 0; c < ch; ++c) {
+        const float* src = reinterpret_cast<const float*>(d->frame->extended_data[c]);
+        int16_t* dst = out_pcm + c;
+        for (uint32_t i = 0; i < copy_frames; ++i) {
+            float v = src[i] * 32767.0f;
+            if (v > 32767.0f) v = 32767.0f;
+            else if (v < -32768.0f) v = -32768.0f;
+            dst[i * d->channels] = static_cast<int16_t>(std::lrint(v));
+        }
+    }
+    // Zero any remaining channels/frames
+    if (ch < static_cast<int>(d->channels)) {
+        for (int c = ch; c < static_cast<int>(d->channels); ++c) {
+            int16_t* dst = out_pcm + c;
+            for (uint32_t i = 0; i < copy_frames; ++i) dst[i * d->channels] = 0;
+        }
+    }
+    if (copy_frames < out_frames) {
+        for (uint32_t c = 0; c < d->channels; ++c) {
+            int16_t* dst = out_pcm + c;
+            for (uint32_t i = copy_frames; i < out_frames; ++i) dst[i * d->channels] = 0;
+        }
+    }
+    d->api->av_frame_unref(d->frame);
+    return true;
+}
+
+}  // namespace
 
 namespace {
 
@@ -266,10 +613,13 @@ uint32_t opus_packet_samples(const uint8_t* p, size_t n, uint32_t rate) {
 std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
     if (rate == 0) rate = 48000;
     if (channels == 0 || channels > 8) channels = 2;
-    return make_iface("IHardwareOpusDecoder", [rate, channels](Service& s) {
-        // Decode*: consumed bytes, samples per channel [, performance time]; the PCM (s16 interleaved) is zero.
-        auto decode = [rate, channels](bool perf) -> Handler {
-            return [rate, channels, perf](Request& req, Response& rsp) -> uint32_t {
+    // Create the Opus decoder once per service instance
+    OpusDecoder* opus = opus_open(rate, channels);
+    // Use make_iface to create the service with all command handlers
+    auto svc = make_iface("IHardwareOpusDecoder", [rate, channels, opus](Service& s) {
+        // Decode*: consumed bytes, samples per channel [, performance time]; the PCM (s16 interleaved) is decoded Opus audio.
+        auto decode = [rate, channels, opus](bool perf) -> Handler {
+            return [rate, channels, perf, opus](Request& req, Response& rsp) -> uint32_t {
                 const ipc::Buffer in = req.in_buf(0), out = req.out_buf(0);
                 const uint8_t* src = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(in.addr));
                 uint32_t consumed = 0, samples = 0;
@@ -280,7 +630,16 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
                         samples = opus_packet_samples(src + 8, size, rate);
                     }
                 }
-                if (out.addr && out.size) {
+                if (out.addr && out.size && opus && samples > 0) {
+                    const uint64_t bytes = std::min<uint64_t>(out.size, uint64_t(samples) * channels * 2);
+                    samples = static_cast<uint32_t>(bytes / (channels * 2));
+                    int16_t* pcm = reinterpret_cast<int16_t*>(static_cast<uintptr_t>(out.addr));
+                    if (!opus_decode_packet(opus, src, in.size, pcm, samples)) {
+                        // Decode failed, fall back to silence
+                        std::memset(pcm, 0, static_cast<size_t>(bytes));
+                    }
+                } else if (out.addr && out.size) {
+                    // No Opus decoder available or no samples, output silence
                     const uint64_t bytes = std::min<uint64_t>(out.size, uint64_t(samples) * channels * 2);
                     samples = static_cast<uint32_t>(bytes / (channels * 2));
                     std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(out.addr)), 0, static_cast<size_t>(out.size));
@@ -302,6 +661,11 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
         s.add_cmd(8, "DecodeInterleaved", decode(true));
         s.add_cmd(9, "DecodeInterleavedForMultiStream", decode(true));
     });
+    // Wrap with OpusDecoderOwner to ensure opus_close is called when the last reference is released.
+    // Use the 2-argument aliasing constructor (supported by MSVC): share ownership with the wrapper,
+    // but return a shared_ptr<Service> pointing to the Service.
+    auto owner = std::make_shared<OpusDecoderOwner>(opus, svc);
+    return std::shared_ptr<ipc::Service>(owner, owner->svc.get());
 }
 
 std::shared_ptr<Service> make_hwopus() {
@@ -323,7 +687,7 @@ std::shared_ptr<Service> make_hwopus() {
                 }
                 static std::atomic<int> logs{0};
                 if (logs.fetch_add(1) < 4)
-                    NXLOG_I("hwopus", "Opus decoder opened (cmd %u, %u Hz, %u channels): no Opus decoder here, it decodes silence", req.cmd, rate, ch);
+                    NXLOG_I("hwopus", "Opus decoder opened (cmd %u, %u Hz, %u channels): using FFmpeg libopus", req.cmd, rate, ch);
                 rsp.push_object(make_hwopus_decoder(rate, ch));
                 return 0;
             };
