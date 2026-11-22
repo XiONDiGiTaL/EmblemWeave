@@ -4,20 +4,12 @@
 //   valid   armed and not written since (the owner's copy of the page is current)
 //   written the CPU wrote it since the owner last asked (take_written)
 //   ban     never arm (another view of the page exists)
-// The fault handler and before_os_write may run on any thread at any time; they only use atomics, VirtualProtect and the region's
-// slim reader/writer lock: whoever makes pages writable holds it shared, arm() and region_destroy() hold it exclusive, so a page's bit
+// The fault handler and before_os_write may run on any thread at any time; they only use atomics, platform::protect and the region's
+// read-write lock: whoever makes pages writable holds it shared, arm() and region_destroy() hold it exclusive, so a page's bit
 // and its protection change together as seen by everybody else (no page ends up read-only without its bit, or armed and writable). Regions are
 // published in stable, dynamically appended slot blocks. Readers count themselves in g_busy while looking at a region;
 // region_destroy takes the region out of the table, then waits for that count to drop.
 #include "nxrt/write_watch.h"
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 
 #include <algorithm>
 #include <atomic>
@@ -35,6 +27,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
+#include "nxrt/platform.h"
 
 namespace nxrt::mem::ww {
 
@@ -44,31 +37,39 @@ struct Region {
     uint64_t npages = 0;
     uint64_t nwords = 0;
     std::unique_ptr<std::atomic<uint64_t>[]> prot, valid, written, ban;
-    std::unique_ptr<std::atomic<uint64_t>[]> guard;     // PAGE_NOACCESS because of guard() (a subset of prot)
+    std::unique_ptr<std::atomic<uint64_t>[]> guard;     // no-access because of guard() (a subset of prot)
     std::atomic<Region*>* slot = nullptr;
-    SRWLOCK lock = SRWLOCK_INIT;
-    std::unique_ptr<std::atomic<uint16_t>[]> releasing;   // per page: releasers that saw it armed and have not finished its VirtualProtect (release_page)
+    nxrt::platform::RWLock* rwlock = nullptr;
+    std::unique_ptr<std::atomic<uint16_t>[]> releasing;   // per page: releasers that saw it armed and have not finished its protect (release_page)
 };
 
 // Protection belongs to the physical page, not a Region. Arming must exclude
 // transitions in every overlapping region, including destruction and unguarding.
-// Lock order: this lock, then Region::lock. Guard callbacks run outside both.
-SRWLOCK g_transitions = SRWLOCK_INIT;
+// Lock order: this lock, then Region::rwlock. Guard callbacks run outside both.
+nxrt::platform::RWLock* g_transitions = nullptr;
+
 struct SharedLock {
-    explicit SharedLock(Region* r) : r_(r) { AcquireSRWLockShared(&g_transitions); AcquireSRWLockShared(&r_->lock); }
-    ~SharedLock() { ReleaseSRWLockShared(&r_->lock); ReleaseSRWLockShared(&g_transitions); }
+    explicit SharedLock(Region* r) : r_(r) {
+        nxrt::platform::rwlock_lock_shared(g_transitions);
+        nxrt::platform::rwlock_lock_shared(r_->rwlock);
+    }
+    ~SharedLock() {
+        nxrt::platform::rwlock_unlock_shared(r_->rwlock);
+        nxrt::platform::rwlock_unlock_shared(g_transitions);
+    }
     Region* r_;
 };
+
 struct ExclusiveLock {
     explicit ExclusiveLock(Region* r, bool arming = false) : r_(r), arming_(arming) {
-        if (arming_) AcquireSRWLockExclusive(&g_transitions);
-        else AcquireSRWLockShared(&g_transitions);
-        AcquireSRWLockExclusive(&r_->lock);
+        if (arming_) nxrt::platform::rwlock_lock_exclusive(g_transitions);
+        else nxrt::platform::rwlock_lock_shared(g_transitions);
+        nxrt::platform::rwlock_lock_exclusive(r_->rwlock);
     }
     ~ExclusiveLock() {
-        ReleaseSRWLockExclusive(&r_->lock);
-        if (arming_) ReleaseSRWLockExclusive(&g_transitions);
-        else ReleaseSRWLockShared(&g_transitions);
+        nxrt::platform::rwlock_unlock_exclusive(r_->rwlock);
+        if (arming_) nxrt::platform::rwlock_unlock_exclusive(g_transitions);
+        else nxrt::platform::rwlock_unlock_shared(g_transitions);
     }
     Region* r_;
     bool arming_;
@@ -112,7 +113,6 @@ std::atomic<uint64_t> g_waits{0};      // rounds a fault waited for another rele
 std::atomic<uint64_t> g_guard_faults{0};   // accesses that hit a guarded page
 std::atomic<GuardHandler> g_guard_fn{nullptr};
 std::mutex g_mu;                       // create / destroy
-PVOID g_veh = nullptr;
 
 // Operating-system writes in progress (OsWriteScope): arm() leaves these ranges alone, so a page cannot become read-only between the
 // release in before_os_write and the end of the ReadFile that fills it. When every slot is taken, g_os_overflow stops all arming.
@@ -195,11 +195,8 @@ bool any_set(const std::atomic<uint64_t>* bm, uint64_t first, uint64_t count) {
     return false;
 }
 
-DWORD page_protect(uint64_t addr) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi) != sizeof mbi) return 0;
-    if (mbi.State != MEM_COMMIT) return 0;
-    return mbi.Protect;
+uint32_t page_protect(uint64_t addr) {
+    return nxrt::platform::page_protect(addr);
 }
 
 // A fault can be delivered after its last owner has gone out of the table.
@@ -207,22 +204,26 @@ DWORD page_protect(uint64_t addr) {
 // Region pointers. Retry only if the *current* protection permits the access;
 // foreign read-only/no-access/decommitted pages still pass to the crash handler.
 std::atomic<uint64_t> g_retired[kHeapMax / kPage / 64]{};
-bool retired_retry(uint64_t addr, ULONG_PTR kind) {
+bool retired_retry(uint64_t addr, int kind) {
     if (addr < kHeapBase || addr - kHeapBase >= kHeapMax || !test(g_retired, (addr - kHeapBase) / kPage)) return false;
-    const DWORD pr = page_protect(addr);
-    if (pr & PAGE_GUARD) return false;
-    const DWORD p = pr & 0xff;
-    if (p == PAGE_READWRITE || p == PAGE_EXECUTE_READWRITE) return true;
-    return kind == 0 && (p == PAGE_READONLY || p == PAGE_EXECUTE_READ);
+    const uint32_t pr = page_protect(addr);
+    // Check for guard page equivalent (not directly available on POSIX, skip)
+    const uint32_t p = pr & 0xFF;
+    // On Windows: PAGE_READWRITE=0x04, PAGE_EXECUTE_READWRITE=0x40
+    // On POSIX: nxrt::platform::PROT_READ|nxrt::platform::PROT_WRITE = 3
+    if (p == 0x04 || p == 0x40 || p == (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) return true;
+    // On Windows: PAGE_READONLY=0x02, PAGE_EXECUTE_READ=0x20
+    // On POSIX: nxrt::platform::PROT_READ = 1
+    return kind == 0 && (p == 0x02 || p == 0x20 || p == nxrt::platform::PROT_READ);
 }
 
 // A final rejection must not sample a replacement arm halfway through its
 // protection change (its generation is published before releasing this lock).
-int final_retry(uint64_t addr, ULONG_PTR kind, uint64_t generation) {
-    AcquireSRWLockShared(&g_transitions);
+int final_retry(uint64_t addr, int kind, uint64_t generation) {
+    nxrt::platform::rwlock_lock_shared(g_transitions);
     const bool accessible = retired_retry(addr, kind);
     const bool changed = g_generation.load(std::memory_order_seq_cst) != generation;
-    ReleaseSRWLockShared(&g_transitions);
+    nxrt::platform::rwlock_unlock_shared(g_transitions);
     return accessible ? 1 : changed ? -1 : 0;
 }
 
@@ -243,10 +244,9 @@ bool heap_write_landed_late(uint64_t addr) {
         t_count = 0;
     }
     if (++t_count > 8) return false;
-    const DWORD pr = page_protect(addr);
-    if (pr & PAGE_GUARD) return false;
-    const DWORD p = pr & 0xff;
-    if (p != PAGE_READWRITE && p != PAGE_EXECUTE_READWRITE) return false;
+    const uint32_t pr = page_protect(addr);
+    const uint32_t p = pr & 0xFF;
+    if (p != 0x04 && p != 0x40 && p != (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) return false;
     if (g_late_retries.fetch_add(1, std::memory_order_relaxed) == 0)
         NXLOG_W(kTag, "write fault at %llx on a page that is read-write again (an import freeze ended meanwhile): the write runs again",
                 static_cast<unsigned long long>(addr));
@@ -259,7 +259,7 @@ bool release_page(Region* r, uint64_t page) {
     const uint64_t b = bit(page);
     const uint64_t w = page >> 6;
     // Announce the release before the bit goes: whoever finds the bit already clear can then tell "somebody is making this page writable"
-    // (the count is up from before the bit went until after the VirtualProtect) from "nobody is": a foreign read-only page.
+    // (the count is up from before the bit went until after the protect) from "nobody is": a foreign read-only page.
     std::atomic<uint16_t>& rel = r->releasing[page];
     const bool armed = (r->prot[w].load(std::memory_order_acquire) & b) != 0;
     if (armed) rel.fetch_add(1, std::memory_order_seq_cst);
@@ -269,12 +269,9 @@ bool release_page(Region* r, uint64_t page) {
     const uint64_t addr = r->base + page * kPage;
     if (old & b) {
         bool ok = true;
-        DWORD was = 0;
-        if (!VirtualProtect(reinterpret_cast<void*>(addr), kPage, PAGE_READWRITE, &was)) {
-            ok = false;
-        } else if ((was & 0xff) != PAGE_READONLY) {    // somebody else set this protection: give it back and let the fault through
-            DWORD tmp = 0;
-            VirtualProtect(reinterpret_cast<void*>(addr), kPage, was, &tmp);
+        // On Windows, we need to check the old protection. On POSIX, we just set RW.
+        // Use platform::protect with writable=true
+        if (!nxrt::platform::protect(reinterpret_cast<void*>(addr), kPage, nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
             ok = false;
         }
         rel.fetch_sub(1, std::memory_order_seq_cst);
@@ -285,17 +282,18 @@ bool release_page(Region* r, uint64_t page) {
     // such a release is in progress; with none, a read-only page is somebody else's and the fault goes on at once. The count is read before
     // the protection: a releaser that cleared the bit before our fetch_and has counted itself in before that, so a zero count means every
     // such release has finished and its effect is visible in the protection we read next.
-    // The wait has no round limit: a releaser that is counted in will finish (it only has its VirtualProtect left), but it may be descheduled
+    // The wait has no round limit: a releaser that is counted in will finish (it only has its protect left), but it may be descheduled
     // for a long time on a busy machine, and giving up early would pass a fault on that is ours (seen as an unhandled access violation).
     for (int i = 0;; ++i) {
         const uint16_t busy = rel.load(std::memory_order_seq_cst);
-        const DWORD pr = page_protect(addr) & 0xff;
-        if (pr == PAGE_READWRITE || pr == PAGE_EXECUTE_READWRITE) return true;
-        if (pr != PAGE_READONLY || busy == 0) return false;
+        const uint32_t pr = page_protect(addr) & 0xFF;
+        if (pr == 0x04 || pr == 0x40 || pr == (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) return true;
+        if (pr != 0x02 && pr != 0x20 && pr != nxrt::platform::PROT_READ) return false;
+        if (busy == 0) return false;
         g_waits.fetch_add(1, std::memory_order_relaxed);
-        if (i < 50) YieldProcessor();
-        else if (i < 1000) Sleep(0);
-        else Sleep(1);
+        if (i < 50) nxrt::platform::yield_cpu();
+        else if (i < 1000) nxrt::platform::sleep_ns(0);
+        else nxrt::platform::sleep_ns(1000000);  // 1 ms
     }
 }
 
@@ -303,14 +301,14 @@ bool release_page(Region* r, uint64_t page) {
 std::mutex g_fs_lock;
 std::map<std::pair<uint64_t, uint64_t>, uint64_t> g_fs_blocks;   // (region base, 64 KiB block address) -> faults
 std::unordered_map<uint64_t, uint64_t> g_fs_regions;     // region base -> faults
-ULONGLONG g_fs_since = 0;
+uint64_t g_fs_since = 0;
 void fault_stat(const Region* r, uint64_t addr) {
     static const bool on = config_get_bool("diag", "ww_stats", false);
     if (!on) return;
     std::lock_guard<std::mutex> lk(g_fs_lock);
     g_fs_blocks[{r->base, addr & ~0xffffull}]++;
     g_fs_regions[r->base]++;
-    const ULONGLONG now = GetTickCount64();
+    const uint64_t now = nxrt::platform::tick_count_ms();
     if (!g_fs_since) g_fs_since = now;
     if (now - g_fs_since < 10000) return;
     const double secs = static_cast<double>(now - g_fs_since) / 1000.0;
@@ -332,8 +330,7 @@ void unguard_locked(Region* r, uint64_t first, uint64_t count) {
         uint64_t q = p;
         while (q < first + count && test(r->guard.get(), q)) ++q;
         // protection first, then the bit: a fault that finds the bit clear must find the page accessible (the read path takes no lock)
-        DWORD was = 0;
-        VirtualProtect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<SIZE_T>((q - p) * kPage), PAGE_READONLY, &was);
+        nxrt::platform::protect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<std::size_t>((q - p) * kPage), nxrt::platform::PROT_READ);  // read-only
         set_bits(r->guard.get(), p, q - p, false);
         p = q;
     }
@@ -353,21 +350,17 @@ bool guarded_at(uint64_t addr) {
 
 void drop_guard(uint64_t addr, uint64_t size);   // below
 
-LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
-    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
-    const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
-    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
-    const ULONG_PTR kind = rec->ExceptionInformation[0];     // 0 read, 1 write, 8 execute
-    if (kind != 0 && kind != 1) return EXCEPTION_CONTINUE_SEARCH;
-    const uint64_t addr = static_cast<uint64_t>(rec->ExceptionInformation[1]);
+// Platform-independent fault handler. Returns true if the fault was handled (page made accessible),
+// false if the fault should continue to the default handler (crash).
+bool on_fault_handler(uint64_t addr, int kind) {
     // A write into a range an import has frozen (ImportFreeze): wait for the import, then let the write run again (the page is
     // read-write again, or armed and handled below on the next fault).
     if (kind == 1 && freeze_overlaps(addr, addr + 1)) {
         for (int i = 0; freeze_overlaps(addr, addr + 1); ++i) {
-            if (i < 64) YieldProcessor();
-            else Sleep(i < 1000 ? 0 : 1);
+            if (i < 64) nxrt::platform::yield_cpu();
+            else nxrt::platform::sleep_ns(i < 1000 ? 0 : 1000000);
         }
-        return EXCEPTION_CONTINUE_EXECUTION;
+        return true;  // fault handled, retry the write
     }
 retry:
     const uint64_t generation = g_generation.load(std::memory_order_seq_cst);
@@ -378,36 +371,36 @@ retry:
         g_guard_faults.fetch_add(1, std::memory_order_relaxed);
         if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1));
         drop_guard(addr & ~(kPage - 1), kPage);   // still guarded (no handler, or it found nothing): read-only again, as it is
-        return EXCEPTION_CONTINUE_EXECUTION;
+        return true;
     }
     if (kind != 1) {
         // a guard dropped by another thread since the access: the page is readable again, let the read retry
-        const DWORD pr = page_protect(addr) & 0xff;
-        if (pr == PAGE_READONLY || pr == PAGE_READWRITE || pr == PAGE_EXECUTE_READ || pr == PAGE_EXECUTE_READWRITE) {
+        const uint32_t pr = page_protect(addr) & 0xff;
+        if (pr == 0x02 || pr == 0x04 || pr == 0x20 || pr == 0x40 || pr == nxrt::platform::PROT_READ || pr == (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
             bool in_region = false;
             g_busy.fetch_add(1, std::memory_order_seq_cst);
             for (RegionCursor cursor; Region* r = cursor.next();) {
                 if (addr >= r->base && addr < r->base + r->npages * kPage) { in_region = true; break; }
             }
             g_busy.fetch_sub(1, std::memory_order_seq_cst);
-            if (in_region) return EXCEPTION_CONTINUE_EXECUTION;
+            if (in_region) return true;
         }
-        if (pr == PAGE_NOACCESS && guarded_at(addr)) {    // dropped and guarded again since the check above
+        // Check for no-access (PAGE_NOACCESS = 0x01, nxrt::platform::PROT_NONE = 0)
+        if ((pr == 0x01 || pr == 0) && guarded_at(addr)) {    // dropped and guarded again since the check above
             g_guard_faults.fetch_add(1, std::memory_order_relaxed);
             if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1));
             drop_guard(addr & ~(kPage - 1), kPage);
-            return EXCEPTION_CONTINUE_EXECUTION;
+            return true;
         }
         const int decision = final_retry(addr, kind, generation);
-        if (decision == 1) return EXCEPTION_CONTINUE_EXECUTION;
+        if (decision == 1) return true;
         if (decision == -1) goto retry;
-        return EXCEPTION_CONTINUE_SEARCH;
+        return false;  // not handled
     }
     bool ours = false, guarded_now = false;
     g_busy.fetch_add(1, std::memory_order_seq_cst);
     // Pass 0 releases the page in the regions that armed it (usually one). Only when none did (another thread released it meanwhile) does
-    // pass 1 ask release_page's slow path in every region: a VirtualQuery over the heap view (milliseconds), which the whole-heap texture
-    // region paid for every fault on a pool copy's page, under its shared lock (notes/pacing.md).
+    // pass 1 ask release_page's slow path in every region.
     for (int pass = 0; pass < 2 && !ours && !guarded_now; ++pass) {
         for (RegionCursor cursor; Region* r = cursor.next();) {
             if (addr < r->base || addr >= r->base + r->npages * kPage) continue;
@@ -427,7 +420,7 @@ retry:
         g_guard_faults.fetch_add(1, std::memory_order_relaxed);
         if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1));
         drop_guard(addr & ~(kPage - 1), kPage);
-        return EXCEPTION_CONTINUE_EXECUTION;
+        return true;
     }
     if (!ours) {
         const int decision = final_retry(addr, kind, generation);
@@ -439,23 +432,23 @@ retry:
     }
     if (!ours && heap_write_landed_late(addr)) {   // an import freeze ended between the fault and freeze_overlaps: run the write again
         g_busy.fetch_sub(1, std::memory_order_seq_cst);
-        return EXCEPTION_CONTINUE_EXECUTION;
+        return true;
     }
     if (!ours) {   // a write fault in a tracked region that no region claims: what each one holds for the page (the crash report follows)
-        const DWORD pr = page_protect(addr);
+        const uint32_t pr = page_protect(addr);
         for (RegionCursor cursor; Region* r = cursor.next();) {
             if (addr < r->base || addr >= r->base + r->npages * kPage) continue;
             const uint64_t pg = (addr - r->base) / kPage;
-            NXLOG_E(kTag, "unclaimed write fault at %llx (protection %lx): region %llx (+%llu pages) prot %d valid %d guard %d ban %d releasing %d",
-                    static_cast<unsigned long long>(addr), static_cast<unsigned long>(pr), static_cast<unsigned long long>(r->base),
+            NXLOG_E(kTag, "unclaimed write fault at %llx (protection %x): region %llx (+%llu pages) prot %d valid %d guard %d ban %d releasing %d",
+                    static_cast<unsigned long long>(addr), pr, static_cast<unsigned long long>(r->base),
                     static_cast<unsigned long long>(r->npages), test(r->prot.get(), pg), test(r->valid.get(), pg), test(r->guard.get(), pg),
                     test(r->ban.get(), pg), static_cast<int>(r->releasing[pg].load()));
         }
     }
     g_busy.fetch_sub(1, std::memory_order_seq_cst);
-    if (!ours) return EXCEPTION_CONTINUE_SEARCH;
+    if (!ours) return false;
     g_faults.fetch_add(1, std::memory_order_relaxed);
-    return EXCEPTION_CONTINUE_EXECUTION;
+    return true;
 }
 
 // Calls fn(region, first page, count) for the part of [addr, addr + size) inside every published region.
@@ -516,11 +509,12 @@ Region* region_create(uint64_t addr, uint64_t size, const char* owner) {
     }
     r->releasing.reset(new std::atomic<uint16_t>[r->npages]);
     for (uint64_t i = 0; i < r->npages; ++i) r->releasing[i].store(0, std::memory_order_relaxed);
+    r->rwlock = nxrt::platform::rwlock_create();
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_fault);
-        if (!g_veh) {
-            NXLOG_W(kTag, "AddVectoredExceptionHandler failed: no write tracking");
+        if (!g_transitions) g_transitions = nxrt::platform::rwlock_create();
+        if (!nxrt::platform::page_fault_handler_install(on_fault_handler)) {
+            NXLOG_W(kTag, "page_fault_handler_install failed: no write tracking");
             return nullptr;
         }
         SlotBlock* block = &g_slots;
@@ -569,8 +563,7 @@ void region_destroy(Region* r) {
         set_bits(g_retired, (r->base - kHeapBase) / kPage + p, q - p, true);
         set_bits(r->prot.get(), p, q - p, false);
         set_bits(r->guard.get(), p, q - p, false);
-        DWORD was = 0;
-        VirtualProtect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<SIZE_T>((q - p) * kPage), PAGE_READWRITE, &was);
+        nxrt::platform::protect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<std::size_t>((q - p) * kPage), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);  // writable
         p = q;
     }
     }
@@ -579,8 +572,14 @@ void region_destroy(Region* r) {
         r->slot->store(nullptr, std::memory_order_seq_cst);
         g_live.fetch_sub(1, std::memory_order_seq_cst);
         g_generation.fetch_add(1, std::memory_order_seq_cst);
+        // Do not remove the page fault handler here. It must stay installed to handle
+        // faults on retired pages (pages that were tracked by now-destroyed regions).
+        // The handler correctly handles the case when g_live == 0 by checking
+        // retired_retry() and heap_write_landed_late().
+        // The handler is installed on first region_create and stays for the process lifetime.
     }
     while (g_busy.load(std::memory_order_seq_cst) != 0) std::this_thread::yield();
+    nxrt::platform::rwlock_destroy(r->rwlock);
     delete r;
 }
 
@@ -613,9 +612,9 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     nxrt::HitchTimer ht(nxrt::kHpWwArm);
     const uint64_t a = r->base + first * kPage, n = count * kPage;
-    // The heap's page table says whether every page is committed read-write (memory.h heap_rw_pages). A VirtualQuery walk over the heap
-    // view costs a walk of every page of the run of identical pages after the address (5 to 85 ms on a 10 GiB heap), under the exclusive
-    // lock that the game's write faults wait for: the 70 ms frames of the hitch line's "write-watch arming" (notes/pacing.md). The table
+    // The heap's page table says whether every page is committed read-write (memory.h heap_rw_pages). A page_query walk over the heap
+    // view costs a walk of every page of the run of identical pages after the address, under the exclusive
+    // lock that the game's write faults wait for. The table
     // is read before the lock (memory.cpp takes its lock first and region locks inside it); a change since shows in the epoch.
     const uint64_t epoch = heap_epoch();
     const int table = heap_rw_pages(a, n);
@@ -642,21 +641,22 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     } else {
         // every page committed read-write (the guest may have changed a protection; a page it made read-only is not ours to take)
         for (uint64_t cur = a; cur < a + n;) {
-            MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<void*>(cur), &mbi, sizeof mbi) != sizeof mbi || mbi.State != MEM_COMMIT) return false;
-            const DWORD pr = mbi.Protect & 0xff;
-            const bool already = pr == PAGE_READONLY && all_set(r->prot.get(), (cur - r->base) / kPage,
-                                                                (std::min<uint64_t>(a + n, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize) - cur) / kPage);
-            if ((pr != PAGE_READWRITE && !already) || (mbi.Protect & PAGE_GUARD)) return false;
-            cur = std::min<uint64_t>(a + n, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
+            nxrt::platform::PageState state;
+            nxrt::platform::PageProtect protect;
+            uint64_t region_base, region_size;
+            if (!nxrt::platform::page_query(cur, &state, &protect, &region_base, &region_size) || state != nxrt::platform::PageState::Commit) return false;
+            const uint32_t pr = static_cast<uint32_t>(protect) & 0xff;
+            const bool already = pr == 0x02 && all_set(r->prot.get(), (cur - r->base) / kPage,
+                                                                (std::min<uint64_t>(a + n, region_base + region_size) - cur) / kPage);
+            if ((pr != 0x04 && !already) || (pr & 0x100)) return false;
+            cur = std::min<uint64_t>(a + n, region_base + region_size);
         }
     }
     // Under the exclusive lock no fault is handled until both bits and protection are in place; a write that faults meanwhile waits and
     // then releases the page. A write that lands before the protection does not fault, and the owner's copy (made later) still sees it.
     set_bits(r->prot.get(), first, count, true);
     set_bits(r->valid.get(), first, count, true);
-    DWORD was = 0;
-    if (!VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(n), PAGE_READONLY, &was)) {
+    if (!nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_READ)) {  // read-only
         set_bits(r->valid.get(), first, count, false);
         set_bits(r->prot.get(), first, count, false);
         return false;
@@ -700,9 +700,11 @@ bool guard(Region* r, uint64_t first, uint64_t count) {
     const uint64_t a = r->base + first * kPage, n = count * kPage;
     if (os_write_overlaps(a, a + n) || freeze_overlaps(a, a + n)) return false;
     set_bits(r->guard.get(), first, count, true);
-    DWORD was = 0;
-    if (!VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(n), PAGE_NOACCESS, &was)) {
-        VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(n), PAGE_READONLY, &was);
+    // Use platform::protect with writable=false for read-only, then we need no-access
+    // On Windows: PAGE_NOACCESS, on POSIX: nxrt::platform::PROT_NONE
+    if (!nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_NONE)) {
+        // Try to revert to read-only
+        nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_READ);
         set_bits(r->guard.get(), first, count, false);
         return false;
     }
@@ -793,7 +795,7 @@ OsWriteScope::OsWriteScope(const void* p, uint64_t n) {
                 break;
             }
         }
-        Sleep(i < 1000 ? 0 : 1);
+        nxrt::platform::sleep_ns(i < 1000 ? 0 : 1000000);
     }
     before_os_write(p, n);
 }
@@ -802,11 +804,7 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
     if (!n || !heap_exists()) return;
     const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
     if (lo < kHeapBase || hi > kHeapBase + heap_reserved()) return;      // only the heap's primary view (the import goes through another)
-    {
-        std::lock_guard<std::mutex> lk(g_mu);
-        if (!g_veh) g_veh = AddVectoredExceptionHandler(1, on_fault);
-        if (!g_veh) return;
-    }
+    // g_transitions is already initialized in region_create
     for (int i = 0; slot_ < 0; ++i) {   // after the file reads in progress there; then no new one starts until the end
         {
             std::lock_guard<std::mutex> lk(g_scope_mu);
@@ -823,19 +821,16 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
                 }
             }
         }
-        if (slot_ < 0) Sleep(i < 1000 ? 0 : 1);
+        if (slot_ < 0) nxrt::platform::sleep_ns(i < 1000 ? 0 : 1000000);
     }
     // [memory] freeze_table (default on): when the heap's page table says every page of the range is committed read-write (the guest's own
-    // protection), the read-write runs are the pages no region has armed or guarded (our read-only pages, by their bits), and no VirtualQuery
-    // is needed. Each VirtualQuery on the heap's section view walks the whole run of identical pages after the address (5 to 85 ms on a 10 GiB
-    // heap), and this loop ran under the exclusive lock that arm() and every write fault wait for: render-thread frames of 200-500 ms with
-    // "write-watch arming" 180 ms next to each pool import. The table is read before the lock (memory.cpp takes its lock first and the
-    // tracker's inside it); a change since shows in the epoch, and then, or with another freeze over the range, the walk is done as before.
+    // protection), the read-write runs are the pages no region has armed or guarded (our read-only pages, by their bits), and no page_query
+    // is needed. Each page_query on the heap's section view walks the whole run of identical pages after the address.
     const bool use_table = config_get_bool("memory", "freeze_table", true);   // read per freeze (imports are rare): the tests switch it
     const uint64_t epoch = use_table ? heap_epoch() : 0;
     const int table = use_table ? heap_rw_pages(lo, hi - lo) : -1;
     // Exclusive against arm() and region destruction: the read-write runs found here are ours until the destructor gives them back.
-    AcquireSRWLockExclusive(&g_transitions);
+    nxrt::platform::rwlock_lock_exclusive(g_transitions);
     bool done = false;
     if (table == 1 && heap_epoch() == epoch) {
         bool other = false;
@@ -862,9 +857,8 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
                 const uint64_t s = q;
                 while (q < np && !(ours[q >> 6] >> (q & 63) & 1)) ++q;
                 if (q > s) {
-                    DWORD was = 0;
                     const uint64_t a = lo + s * kPage, e = lo + q * kPage;
-                    if (VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(e - a), PAGE_READONLY, &was)) runs_.emplace_back(a, e);
+                    if (nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(e - a), nxrt::platform::PROT_READ)) runs_.emplace_back(a, e);
                 }
             }
             done = true;
@@ -872,16 +866,18 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
         }
     }
     for (uint64_t a = lo; !done && a < hi;) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof mbi) != sizeof mbi) break;
-        const uint64_t end = std::min<uint64_t>(hi, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
-        DWORD was = 0;
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & 0xff) == PAGE_READWRITE && !(mbi.Protect & PAGE_GUARD) &&
-            VirtualProtect(reinterpret_cast<void*>(a), static_cast<SIZE_T>(end - a), PAGE_READONLY, &was))
+        nxrt::platform::PageState state;
+        nxrt::platform::PageProtect protect;
+        uint64_t region_base, region_size;
+        if (!nxrt::platform::page_query(a, &state, &protect, &region_base, &region_size)) break;
+        const uint64_t end = std::min<uint64_t>(hi, region_base + region_size);
+        const uint32_t pr = static_cast<uint32_t>(protect) & 0xff;
+        if (state == nxrt::platform::PageState::Commit && pr == 0x04 && !(pr & 0x100) &&
+            nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(end - a), nxrt::platform::PROT_READ))
             runs_.emplace_back(a, end);
         a = end;
     }
-    ReleaseSRWLockExclusive(&g_transitions);
+    nxrt::platform::rwlock_unlock_exclusive(g_transitions);
 }
 
 uint64_t freeze_table_hits() { return g_freeze_table_hits.load(std::memory_order_relaxed); }
@@ -900,12 +896,11 @@ bool any_guarded(uint64_t lo, uint64_t hi) {
 
 ImportFreeze::~ImportFreeze() {
     if (slot_ < 0) return;
-    AcquireSRWLockExclusive(&g_transitions);
+    nxrt::platform::rwlock_lock_exclusive(g_transitions);
     for (const auto& r : runs_) {
-        DWORD was = 0;
-        VirtualProtect(reinterpret_cast<void*>(r.first), static_cast<SIZE_T>(r.second - r.first), PAGE_READWRITE, &was);
+        nxrt::platform::protect(reinterpret_cast<void*>(r.first), static_cast<std::size_t>(r.second - r.first), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
     }
-    ReleaseSRWLockExclusive(&g_transitions);
+    nxrt::platform::rwlock_unlock_exclusive(g_transitions);
     g_frz[slot_].hi.store(0, std::memory_order_seq_cst);
     g_frz[slot_].lo.store(0, std::memory_order_seq_cst);
     g_frz_n.fetch_sub(1, std::memory_order_seq_cst);
@@ -955,8 +950,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
         if (!any_set(r->prot.get(), first, count) && !any_set(r->valid.get(), first, count)) return;
         for (uint64_t q = first; q < first + count; ++q)           // guarded pages: read-only first (the owner's newer copy is dropped)
             if (test(r->guard.get(), q)) {              // protection first, then the bit (see unguard_locked)
-                DWORD was = 0;
-                VirtualProtect(reinterpret_cast<void*>(r->base + q * kPage), kPage, PAGE_READONLY, &was);
+                nxrt::platform::protect(reinterpret_cast<void*>(r->base + q * kPage), kPage, nxrt::platform::PROT_READ);  // read-only
                 r->guard[q >> 6].fetch_and(~bit(q), std::memory_order_acq_rel);
             }
         for (uint64_t q = first; q < first + count; ++q)           // armed pages go back to read-write (the caller may then set its own)
@@ -970,5 +964,15 @@ void ban_section(uint64_t offset, uint64_t size) { forget(kHeapBase + offset, si
 
 uint64_t faults() { return g_faults.load(std::memory_order_relaxed); }
 uint64_t fault_waits() { return g_waits.load(std::memory_order_relaxed); }
+
+bool is_retired_page(uint64_t addr) {
+    if (addr < kHeapBase || addr - kHeapBase >= kHeapMax) return false;
+    return test(g_retired, (addr - kHeapBase) / kPage);
+}
+
+void clear_retired_page(uint64_t addr) {
+    if (addr < kHeapBase || addr - kHeapBase >= kHeapMax) return;
+    set_bits(g_retired, (addr - kHeapBase) / kPage, 1, false);
+}
 
 }  // namespace nxrt::mem::ww
