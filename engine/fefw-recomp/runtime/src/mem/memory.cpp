@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Guest address space on the host (layout and contract: include/nxrt/memory.h).
 //  - fixed reservations at exact addresses (images, stacks, the kernel region), committed on demand;
-//  - the heap: one pagefile-backed section (SEC_RESERVE) with a primary view at kHeapBase and alias views of the same
+//  - the heap: one shared memory section with a primary view at kHeapBase and alias views of the same
 //    section pages, so one physical page can be seen at two guest addresses;
 //  - a Horizon-style vm map kept beside the real mappings for svcQueryMemory.
 #include "nxrt/game.h"
@@ -11,8 +11,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/write_watch.h"
-
-#include <windows.h>
+#include "nxrt/platform.h"
 
 #include <algorithm>
 #include <atomic>
@@ -22,12 +21,15 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace nxrt::mem {
 namespace {
 
 constexpr const char* kTag = "mem";
-constexpr uint64_t kAddrLimit = 0x800000000000ull;  // user-mode address limit of x64 Windows (47 bits)
+constexpr uint64_t kAddrLimit = 0x800000000000ull;  // user-mode address limit of x64 (47 bits)
 constexpr uint64_t kVmEnd = 0x8000000000ull;         // end of the address space reported by vm_query
 constexpr int kAliasTries = 16;
 
@@ -41,15 +43,16 @@ bool page_span(uint64_t addr, uint64_t size, uint64_t* start, uint64_t* end) {
     return true;
 }
 
-DWORD protect_of(Prot p) {
+// Platform-independent protection flags
+int protect_of(Prot p) {
     switch (p) {
-        case Prot::R: return PAGE_READONLY;
-        case Prot::RW: return PAGE_READWRITE;
-        case Prot::RX: return PAGE_EXECUTE_READ;
-        case Prot::RWX: return PAGE_EXECUTE_READWRITE;
+        case Prot::R: return 1;      // read-only
+        case Prot::RW: return 3;     // read-write
+        case Prot::RX: return 5;     // read-execute
+        case Prot::RWX: return 7;    // read-write-execute
         case Prot::None: break;
     }
-    return PAGE_NOACCESS;
+    return 0;  // no access
 }
 
 // ---- fixed reservations (guarded by g_fixed_mu) ----
@@ -73,14 +76,12 @@ std::map<uint64_t, VmInfo> g_vm;          // start -> block, guarded by g_vm_mu
 
 // ---- heap (guarded by g_heap_mu) ----
 std::mutex g_heap_mu;
-HANDLE g_section = nullptr;
+nxrt::platform::Section* g_section = nullptr;
 uint64_t g_heap_size = 0;                 // 0 = no heap; otherwise the section size = size of the primary view
 std::vector<uint64_t> g_commit_bits;      // one bit per 4 KiB page of the section, set by heap_commit
 uint64_t g_committed = 0;                 // bytes of pages whose bit is set
 // Per 4 KiB page of the section, what the host reports for it: 0 never committed, 1 committed but no-access (a decommitted page or one
-// the guest made inaccessible), 2 committed and accessible but not writable, 3 committed read-write. VirtualQuery over the section view
-// walks every page table entry of the run of identical pages (about 75 ms for a 3 GiB committed heap), so is_mapped, protect and the
-// write tracker's arm (heap_rw_pages) answer heap ranges from this table.
+// the guest made inaccessible), 2 committed and accessible but not writable, 3 committed read-write.
 std::vector<uint8_t> g_heap_cls;
 std::atomic<uint64_t> g_heap_epoch{0};    // bumped by every change of the table, inside the change's OsWriteScope
 struct Alias {
@@ -210,23 +211,20 @@ void shutdown() {
         std::lock_guard hl(g_heap_mu);
         for (auto& [view, rec] : g_aliases) {
             (void)rec;
-            if (!UnmapViewOfFile(reinterpret_cast<void*>(view))) {
-                DWORD e = GetLastError();
-                NXLOG_E(kTag, "shutdown: UnmapViewOfFile(alias %llx) failed, error %lu",
-                        static_cast<unsigned long long>(view), static_cast<unsigned long>(e));
+            if (!nxrt::platform::section_unmap_view(view, rec.size)) {
+                NXLOG_E(kTag, "shutdown: section_unmap_view(alias %llx) failed", static_cast<unsigned long long>(view));
             }
         }
         g_aliases.clear();
         g_alias_used.clear();
         if (g_heap_size && !g_section) {
-            VirtualFree(reinterpret_cast<void*>(kHeapBase), 0, MEM_RELEASE);   // the private heap (heap_create)
+            nxrt::platform::release(reinterpret_cast<void*>(kHeapBase), 0);
         } else if (g_heap_size) {
-            if (!UnmapViewOfFile(reinterpret_cast<void*>(kHeapBase))) {
-                DWORD e = GetLastError();
-                NXLOG_E(kTag, "shutdown: UnmapViewOfFile(heap) failed, error %lu", static_cast<unsigned long>(e));
+            if (!nxrt::platform::section_unmap_view(kHeapBase, g_heap_size)) {
+                NXLOG_E(kTag, "shutdown: section_unmap_view(heap) failed");
             }
         }
-        if (g_section) CloseHandle(g_section);
+        nxrt::platform::section_destroy(g_section);
         g_section = nullptr;
         g_heap_size = 0;
         g_commit_bits.clear();
@@ -236,12 +234,7 @@ void shutdown() {
     {
         std::lock_guard fl(g_fixed_mu);
         for (auto& [addr, f] : g_fixed) {
-            (void)f;
-            if (!VirtualFree(reinterpret_cast<void*>(addr), 0, MEM_RELEASE)) {
-                DWORD e = GetLastError();
-                NXLOG_E(kTag, "shutdown: VirtualFree(%llx) failed, error %lu", static_cast<unsigned long long>(addr),
-                        static_cast<unsigned long>(e));
-            }
+            nxrt::platform::release(reinterpret_cast<void*>(addr), f.size);
         }
         g_fixed.clear();
     }
@@ -271,16 +264,14 @@ bool reserve_fixed(uint64_t addr, uint64_t size, const char* tag) {
     }
     size = align_up(size, kPage);
     std::lock_guard lk(g_fixed_mu);
-    void* p = VirtualAlloc(reinterpret_cast<void*>(addr), static_cast<SIZE_T>(size), MEM_RESERVE, PAGE_NOACCESS);
+    void* p = nxrt::platform::reserve_fixed(reinterpret_cast<void*>(addr), static_cast<std::size_t>(size));
     if (!p) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "reserve %llx (+%llx) %s: VirtualAlloc failed, error %lu",
-                static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size), tag ? tag : "",
-                static_cast<unsigned long>(e));
+        NXLOG_E(kTag, "reserve %llx (+%llx) %s: platform::reserve_fixed failed",
+                static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size), tag ? tag : "");
         return false;
     }
-    if (reinterpret_cast<uint64_t>(p) != addr) {  // cannot happen with MEM_RESERVE at a fixed address; never accept it
-        VirtualFree(p, 0, MEM_RELEASE);
+    if (reinterpret_cast<uint64_t>(p) != addr) {
+        nxrt::platform::release_fixed(p, size);
         NXLOG_E(kTag, "reserve %llx %s: got %p instead", static_cast<unsigned long long>(addr), tag ? tag : "", p);
         return false;
     }
@@ -297,10 +288,8 @@ bool release_fixed(uint64_t addr) {
         NXLOG_W(kTag, "release %llx: no reservation of this module starts there", static_cast<unsigned long long>(addr));
         return false;
     }
-    if (!VirtualFree(reinterpret_cast<void*>(addr), 0, MEM_RELEASE)) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "release %llx: VirtualFree failed, error %lu", static_cast<unsigned long long>(addr),
-                static_cast<unsigned long>(e));
+    if (!nxrt::platform::release_fixed(reinterpret_cast<void*>(addr), it->second.size)) {
+        NXLOG_E(kTag, "release %llx: platform::release_fixed failed", static_cast<unsigned long long>(addr));
         return false;
     }
     g_fixed.erase(it);
@@ -311,11 +300,23 @@ bool commit(uint64_t addr, uint64_t size, Prot p) {
     uint64_t start = 0, end = 0;
     if (!page_span(addr, size, &start, &end)) return false;
     if (start == end) return true;
-    const ww::OsWriteScope wws(reinterpret_cast<void*>(start), end - start);   // the write tracker keeps out of the range while it changes
-    if (!VirtualAlloc(reinterpret_cast<void*>(start), static_cast<SIZE_T>(end - start), MEM_COMMIT, protect_of(p))) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "commit %llx (+%llx): VirtualAlloc failed, error %lu", static_cast<unsigned long long>(start),
-                static_cast<unsigned long long>(end - start), static_cast<unsigned long>(e));
+    const ww::OsWriteScope wws(reinterpret_cast<void*>(start), end - start);
+    if (!nxrt::platform::commit(reinterpret_cast<void*>(start), static_cast<std::size_t>(end - start))) {
+        NXLOG_E(kTag, "commit %llx (+%llx): platform::commit failed", static_cast<unsigned long long>(start),
+                static_cast<unsigned long long>(end - start));
+        return false;
+    }
+    uint32_t prot = 0;
+    switch (p) {
+        case Prot::None:  prot = 0; break;
+        case Prot::R:     prot = nxrt::platform::PROT_READ; break;
+        case Prot::RW:    prot = nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE; break;
+        case Prot::RX:    prot = nxrt::platform::PROT_READ | nxrt::platform::PROT_EXEC; break;
+        case Prot::RWX:   prot = nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE | nxrt::platform::PROT_EXEC; break;
+    }
+    if (!nxrt::platform::protect(reinterpret_cast<void*>(start), static_cast<std::size_t>(end - start), prot)) {
+        NXLOG_E(kTag, "commit %llx (+%llx): platform::protect failed", static_cast<unsigned long long>(start),
+                static_cast<unsigned long long>(end - start));
         return false;
     }
     return true;
@@ -326,10 +327,9 @@ bool decommit(uint64_t addr, uint64_t size) {
     if (!page_span(addr, size, &start, &end)) return false;
     if (start == end) return true;
     const ww::OsWriteScope wws(reinterpret_cast<void*>(start), end - start);
-    if (!VirtualFree(reinterpret_cast<void*>(start), static_cast<SIZE_T>(end - start), MEM_DECOMMIT)) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "decommit %llx (+%llx): VirtualFree failed, error %lu", static_cast<unsigned long long>(start),
-                static_cast<unsigned long long>(end - start), static_cast<unsigned long>(e));
+    if (!nxrt::platform::decommit(reinterpret_cast<void*>(start), static_cast<std::size_t>(end - start))) {
+        NXLOG_E(kTag, "decommit %llx (+%llx): platform::decommit failed", static_cast<unsigned long long>(start),
+                static_cast<unsigned long long>(end - start));
         return false;
     }
     return true;
@@ -339,50 +339,37 @@ bool protect(uint64_t addr, uint64_t size, Prot p) {
     uint64_t start = 0, end = 0;
     if (!page_span(addr, size, &start, &end)) return false;
     if (start == end) return true;
-    const DWORD np = protect_of(p);
-    const ww::OsWriteScope wws(reinterpret_cast<void*>(start), end - start);   // pages the write tracker armed get this protection, not its own
-    {   // heap: the page table says whether every page is committed, so one VirtualProtect does it (no VirtualQuery over the view)
+    uint32_t prot = 0;
+    switch (p) {
+        case Prot::None:  prot = 0; break;
+        case Prot::R:     prot = nxrt::platform::PROT_READ; break;
+        case Prot::RW:    prot = nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE; break;
+        case Prot::RX:    prot = nxrt::platform::PROT_READ | nxrt::platform::PROT_EXEC; break;
+        case Prot::RWX:   prot = nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE | nxrt::platform::PROT_EXEC; break;
+    }
+    const ww::OsWriteScope wws(reinterpret_cast<void*>(start), end - start);
+    {   // heap: the page table says whether every page is committed, so one protect does it
         std::lock_guard hk(g_heap_mu);
         if (in_heap_view(start, end)) {
             const uint64_t p0 = (start - kHeapBase) / kPage, p1 = (end - kHeapBase) / kPage;
             bool all = true;
             for (uint64_t q = p0; q < p1 && all; ++q) all = g_heap_cls[q] != 0;
-            DWORD old = 0;
-            if (all && VirtualProtect(reinterpret_cast<void*>(start), static_cast<SIZE_T>(end - start), np, &old)) {
-                std::fill(g_heap_cls.begin() + static_cast<std::ptrdiff_t>(p0), g_heap_cls.begin() + static_cast<std::ptrdiff_t>(p1),
-                          np == PAGE_NOACCESS ? uint8_t{1} : np == PAGE_READWRITE ? uint8_t{3} : uint8_t{2});
+            if (all && nxrt::platform::protect(reinterpret_cast<void*>(start), static_cast<std::size_t>(end - start), prot)) {
+                uint8_t cls = 0;
+                if (p == Prot::None) cls = 1;  // committed but no access
+                else if (p == Prot::R || p == Prot::RX) cls = 2;  // readable
+                else cls = 3;  // writable
+                std::fill(g_heap_cls.begin() + static_cast<std::ptrdiff_t>(p0), g_heap_cls.begin() + static_cast<std::ptrdiff_t>(p1), cls);
                 g_heap_epoch.fetch_add(1, std::memory_order_seq_cst);
                 return true;
             }
         }
     }
-    // Pass 1: every page must be committed, so a failure never leaves the range half changed.
-    for (uint64_t cur = start; cur < end;) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (VirtualQuery(reinterpret_cast<void*>(cur), &mbi, sizeof mbi) != sizeof mbi || mbi.RegionSize == 0) {
-            NXLOG_E(kTag, "protect %llx: VirtualQuery failed, error %lu", static_cast<unsigned long long>(cur),
-                    static_cast<unsigned long>(GetLastError()));
-            return false;
-        }
-        if (mbi.State != MEM_COMMIT) {
-            NXLOG_E(kTag, "protect %llx: page is not committed", static_cast<unsigned long long>(cur));
-            return false;
-        }
-        cur = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
-    }
-    // Pass 2: region by region (a range can span several allocations, each has its own region).
-    g_heap_epoch.fetch_add(1, std::memory_order_seq_cst);
-    for (uint64_t cur = start; cur < end;) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        VirtualQuery(reinterpret_cast<void*>(cur), &mbi, sizeof mbi);
-        const uint64_t chunk_end = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
-        DWORD old = 0;
-        if (!VirtualProtect(reinterpret_cast<void*>(cur), static_cast<SIZE_T>(chunk_end - cur), np, &old)) {
-            NXLOG_E(kTag, "protect %llx (+%llx): VirtualProtect failed, error %lu", static_cast<unsigned long long>(cur),
-                    static_cast<unsigned long long>(chunk_end - cur), static_cast<unsigned long>(GetLastError()));
-            return false;
-        }
-        cur = chunk_end;
+    // For non-heap memory, use platform::protect
+    if (!nxrt::platform::protect(reinterpret_cast<void*>(start), static_cast<std::size_t>(end - start), prot)) {
+        NXLOG_E(kTag, "protect %llx (+%llx): platform::protect failed", static_cast<unsigned long long>(start),
+                static_cast<unsigned long long>(end - start));
+        return false;
     }
     return true;
 }
@@ -424,12 +411,17 @@ bool is_mapped(uint64_t addr, uint64_t size) {
             return true;
         }
     }
-    for (uint64_t cur = start; cur < end;) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (VirtualQuery(reinterpret_cast<void*>(cur), &mbi, sizeof mbi) != sizeof mbi || mbi.RegionSize == 0) return false;
-        if (mbi.State != MEM_COMMIT) return false;
-        if ((mbi.Protect & 0xFF) == PAGE_NOACCESS || (mbi.Protect & PAGE_GUARD)) return false;
-        cur = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
+    // For non-heap memory, use platform page_query to check commit state
+    for (uint64_t cur = start; cur < end; ) {
+        nxrt::platform::PageState state;
+        nxrt::platform::PageProtect protect;
+        uint64_t region_base = 0, region_size = 0;
+        if (!nxrt::platform::page_query(cur, &state, &protect, &region_base, &region_size))
+            return false;
+        if (state != nxrt::platform::PageState::Commit) return false;
+        // Check if page has any access (not NOACCESS)
+        if (protect == nxrt::platform::PageProtect::NoAccess) return false;
+        cur = std::min(end, region_base + region_size);
     }
     return true;
 }
@@ -455,14 +447,20 @@ bool heap_create(uint64_t reserve_bytes) {
     }
     // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never
     const std::string mode = nxrt::config_get_str("memory", "heap_section", "auto");
+    // Check for Wine on Linux
+    bool wine = false;
+#if defined(__linux__)
+    // Wine detection would go here if needed
+#else
     const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    const bool wine = ntdll && GetProcAddress(ntdll, "wine_get_version");
+    wine = ntdll && GetProcAddress(ntdll, "wine_get_version");
+#endif
     if (mode == "0" || (mode != "1" && wine)) {
-        void* p = VirtualAlloc(reinterpret_cast<void*>(kHeapBase), static_cast<SIZE_T>(size), MEM_RESERVE, PAGE_NOACCESS);
-        if (reinterpret_cast<uint64_t>(p) != kHeapBase) {
-            NXLOG_E(kTag, "heap_create: VirtualAlloc(MEM_RESERVE %llu MiB) at %llx failed, error %lu", static_cast<unsigned long long>(size >> 20),
-                    static_cast<unsigned long long>(kHeapBase), static_cast<unsigned long>(GetLastError()));
-            if (p) VirtualFree(p, 0, MEM_RELEASE);
+        void* p = nxrt::platform::reserve_fixed(reinterpret_cast<void*>(kHeapBase), static_cast<std::size_t>(size));
+        if (!p || reinterpret_cast<uint64_t>(p) != kHeapBase) {
+            NXLOG_E(kTag, "heap_create: platform::reserve_fixed(%llu MiB) at %llx failed", static_cast<unsigned long long>(size >> 20),
+                    static_cast<unsigned long long>(kHeapBase));
+            if (p) nxrt::platform::release_fixed(p, size);
             return false;
         }
         g_heap_size = size;
@@ -473,27 +471,21 @@ bool heap_create(uint64_t reserve_bytes) {
                 static_cast<unsigned long long>(size >> 20), static_cast<unsigned long long>(kHeapBase), wine ? "Wine" : "[memory] heap_section = 0");
         return true;
     }
-    HANDLE sec = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_RESERVE,
-                                    static_cast<DWORD>(size >> 32), static_cast<DWORD>(size & 0xFFFFFFFFu), nullptr);
+    nxrt::platform::Section* sec = nxrt::platform::section_create(size);
     if (!sec) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "heap_create: CreateFileMapping(%llu MiB) failed, error %lu",
-                static_cast<unsigned long long>(size >> 20), static_cast<unsigned long>(e));
+        NXLOG_E(kTag, "heap_create: platform::section_create(%llu MiB) failed", static_cast<unsigned long long>(size >> 20));
         return false;
     }
-    void* v = MapViewOfFileEx(sec, FILE_MAP_ALL_ACCESS, 0, 0, static_cast<SIZE_T>(size),
-                              reinterpret_cast<void*>(kHeapBase));
+    uint64_t v = nxrt::platform::section_map_view(sec, kHeapBase, 0, size, true);
     if (!v) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "heap_create: MapViewOfFileEx at %llx failed, error %lu",
-                static_cast<unsigned long long>(kHeapBase), static_cast<unsigned long>(e));
-        CloseHandle(sec);
+        NXLOG_E(kTag, "heap_create: section_map_view at %llx failed", static_cast<unsigned long long>(kHeapBase));
+        nxrt::platform::section_destroy(sec);
         return false;
     }
-    if (reinterpret_cast<uint64_t>(v) != kHeapBase) {
-        NXLOG_E(kTag, "heap_create: primary view landed at %p, not %llx", v, static_cast<unsigned long long>(kHeapBase));
-        UnmapViewOfFile(v);
-        CloseHandle(sec);
+    if (v != kHeapBase) {
+        NXLOG_E(kTag, "heap_create: primary view landed at %llx, not %llx", v, static_cast<unsigned long long>(kHeapBase));
+        nxrt::platform::section_unmap_view(v, size);
+        nxrt::platform::section_destroy(sec);
         return false;
     }
     g_section = sec;
@@ -539,23 +531,21 @@ bool heap_commit(uint64_t offset, uint64_t size) {
     const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);   // MEM_COMMIT makes committed pages read-write again
     // The game sets a heap of about 11 GB at boot and all of it is committed here. When the system's commit charge is near its limit (just after
     // the launcher's setup, or with a small page file) this fails, the game turns the result into nn::os OutOfMemory (0x1003) and calls svcBreak.
-    // Windows grows a system-managed page file after such a failure and other processes give memory back, so wait a little and try again.
-    bool ok = VirtualAlloc(reinterpret_cast<void*>(kHeapBase + start), static_cast<SIZE_T>(end - start), MEM_COMMIT, PAGE_READWRITE) != nullptr;
+    // The system grows a page file after such a failure and other processes give memory back, so wait a little and try again.
+    bool ok = nxrt::platform::commit(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start));
+    if (ok) ok = nxrt::platform::protect(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
     for (int attempt = 1; !ok && attempt <= 40; ++attempt) {
-        const DWORD e = GetLastError();
-        if (e != ERROR_COMMITMENT_LIMIT && e != ERROR_NOT_ENOUGH_MEMORY && e != ERROR_COMMITMENT_MINIMUM) break;
         if (attempt == 1)
-            NXLOG_W(kTag, "heap_commit [%llx, +%llx): the system is out of commit (error %lu); waiting up to 10 s for the page file to grow",
-                    static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start), static_cast<unsigned long>(e));
-        Sleep(250);
-        ok = VirtualAlloc(reinterpret_cast<void*>(kHeapBase + start), static_cast<SIZE_T>(end - start), MEM_COMMIT, PAGE_READWRITE) != nullptr;
+            NXLOG_W(kTag, "heap_commit [%llx, +%llx): the system is out of commit; waiting up to 10 s for the page file to grow",
+                    static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start));
+        nxrt::platform::sleep_ns(250000000);  // 250 ms
+        ok = nxrt::platform::commit(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start));
+        if (ok) ok = nxrt::platform::protect(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
         if (ok) NXLOG_I(kTag, "heap_commit: committed after %d retries", attempt);
     }
     if (!ok) {
-        DWORD e = GetLastError();
-        NXLOG_E(kTag, "heap_commit [%llx, +%llx): VirtualAlloc failed, error %lu",
-                static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start),
-                static_cast<unsigned long>(e));
+        NXLOG_E(kTag, "heap_commit [%llx, +%llx): platform::commit failed",
+                static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start));
         return false;
     }
     for (uint64_t p = start / kPage; p < end / kPage; p++) {
@@ -563,7 +553,7 @@ bool heap_commit(uint64_t offset, uint64_t size) {
             bit_set(p);
             g_committed += kPage;
         }
-        g_heap_cls[p] = 3;       // MEM_COMMIT with PAGE_READWRITE applies to pages that were committed already too
+        g_heap_cls[p] = 3;       // committed read-write
     }
     g_heap_epoch.fetch_add(1, std::memory_order_seq_cst);
     return true;
@@ -578,7 +568,7 @@ bool heap_decommit(uint64_t offset, uint64_t size) {
                 static_cast<unsigned long long>(size));
         return false;
     }
-    // VirtualFree(MEM_DECOMMIT) is refused on pages of a section view (ERROR_INVALID_PARAMETER), so the pages are made
+    // For section views, decommit is not supported (ERROR_INVALID_PARAMETER), so the pages are made
     // PAGE_NOACCESS through the primary view instead: guest accesses fault, the host pages stay charged to the section
     // (as in smo-recomp's SetMemoryHeapSize), and the alias views still show the section's contents.
     const uint64_t start = offset & ~(kPage - 1);
@@ -590,14 +580,36 @@ bool heap_decommit(uint64_t offset, uint64_t size) {
             continue;
         }
         uint64_t run = p;
-        while (run < end / kPage && bit_test(run)) run++;
-        DWORD old = 0;
-        if (!VirtualProtect(reinterpret_cast<void*>(kHeapBase + p * kPage), static_cast<SIZE_T>((run - p) * kPage),
-                            PAGE_NOACCESS, &old)) {
-            DWORD e = GetLastError();
-            NXLOG_E(kTag, "heap_decommit [%llx, +%llx): VirtualProtect failed, error %lu",
-                    static_cast<unsigned long long>(p * kPage), static_cast<unsigned long long>((run - p) * kPage),
-                    static_cast<unsigned long>(e));
+        while (run < end / kPage && bit_test(run)) {
+            const uint64_t addr = kHeapBase + run * kPage;
+            if (nxrt::mem::ww::is_retired_page(addr)) {
+                // Retired page: the write-watch region was destroyed but guest may still write.
+                // Decommit it anyway (make NOACCESS) but clear the retired bit so future faults
+                // are not misclassified. This handles the race where guest writes occur between
+                // region_destroy and heap_decommit (Issue #77).
+                break;
+            }
+            run++;
+        }
+        if (run == p) {
+            // Single retired page: decommit it and clear the retired bit.
+            const uint64_t addr = kHeapBase + p * kPage;
+            if (!nxrt::platform::protect(reinterpret_cast<void*>(addr), kPage, nxrt::platform::PROT_NONE)) {
+                NXLOG_E(kTag, "heap_decommit [%llx, +%llx): platform::protect failed",
+                        static_cast<unsigned long long>(p * kPage), static_cast<unsigned long long>(kPage));
+                return false;
+            }
+            bit_clear(p);
+            g_committed -= kPage;
+            g_heap_cls[p] = 1;  // no-access
+            nxrt::mem::ww::clear_retired_page(addr);
+            g_heap_epoch.fetch_add(1, std::memory_order_seq_cst);
+            p++;
+            continue;
+        }
+        if (!nxrt::platform::protect(reinterpret_cast<void*>(kHeapBase + p * kPage), static_cast<std::size_t>((run - p) * kPage), nxrt::platform::PROT_NONE)) {
+            NXLOG_E(kTag, "heap_decommit [%llx, +%llx): platform::protect failed",
+                    static_cast<unsigned long long>(p * kPage), static_cast<unsigned long long>((run - p) * kPage));
             return false;
         }
         for (uint64_t q = p; q < run; q++) {
@@ -645,23 +657,20 @@ uint64_t heap_alias(uint64_t offset, uint64_t size, uint64_t at, Prot p) {
         NXLOG_W(kTag, "heap_alias: target %llx is not 64 KiB aligned", static_cast<unsigned long long>(at));
         return 0;
     }
-    const DWORD access = (p == Prot::R) ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
-    const DWORD off_hi = static_cast<DWORD>(offset >> 32);
-    const DWORD off_lo = static_cast<DWORD>(offset & 0xFFFFFFFFu);
+    const bool write = (p == Prot::RW || p == Prot::RWX);
 
     ww::ban_section(offset, size);   // before the view exists: writes through it would not fault in the primary view
     if (at != 0) {
-        void* v = MapViewOfFileEx(g_section, access, off_hi, off_lo, static_cast<SIZE_T>(size), reinterpret_cast<void*>(at));
+        uint64_t v = nxrt::platform::section_map_view(g_section, at, offset, size, write);
         if (!v) {
-            DWORD e = GetLastError();
-            NXLOG_E(kTag, "heap_alias at %llx (section %llx, +%llx): MapViewOfFileEx failed, error %lu",
+            NXLOG_E(kTag, "heap_alias at %llx (section %llx, +%llx): section_map_view failed",
                     static_cast<unsigned long long>(at), static_cast<unsigned long long>(offset),
-                    static_cast<unsigned long long>(size), static_cast<unsigned long>(e));
+                    static_cast<unsigned long long>(size));
             return 0;
         }
-        if (reinterpret_cast<uint64_t>(v) != at) {
-            UnmapViewOfFile(v);
-            NXLOG_E(kTag, "heap_alias: view landed at %p, not %llx", v, static_cast<unsigned long long>(at));
+        if (v != at) {
+            nxrt::platform::section_unmap_view(v, size);
+            NXLOG_E(kTag, "heap_alias: view landed at %llx, not %llx", v, static_cast<unsigned long long>(at));
             return 0;
         }
         g_aliases.emplace(at, Alias{size, offset});
@@ -675,17 +684,17 @@ uint64_t heap_alias(uint64_t offset, uint64_t size, uint64_t at, Prot p) {
     for (int tries = 0; tries < kAliasTries; tries++) {
         cand = find_free_alias(cand, size);
         if (!cand) break;
-        void* v = MapViewOfFileEx(g_section, access, off_hi, off_lo, static_cast<SIZE_T>(size), reinterpret_cast<void*>(cand));
-        if (v && reinterpret_cast<uint64_t>(v) == cand) {
+        uint64_t v = nxrt::platform::section_map_view(g_section, cand, offset, size, write);
+        if (v == cand) {
             g_aliases.emplace(cand, Alias{size, offset});
             g_alias_used[cand] = size;
             NXLOG_I(kTag, "heap alias: section %llx (+%llx) at %llx", static_cast<unsigned long long>(offset),
                     static_cast<unsigned long long>(size), static_cast<unsigned long long>(cand));
             return cand;
         }
-        if (v) UnmapViewOfFile(v);
-        NXLOG_W(kTag, "heap_alias: %llx is taken (error %lu): marking it unusable",
-                static_cast<unsigned long long>(cand), static_cast<unsigned long>(GetLastError()));
+        if (v) nxrt::platform::section_unmap_view(v, size);
+        NXLOG_W(kTag, "heap_alias: %llx is taken: marking it unusable",
+                static_cast<unsigned long long>(cand));
         g_alias_used[cand] = size;  // refused by the kernel: never offer it again
     }
     NXLOG_E(kTag, "heap_alias: no free range for %llx bytes in the alias region", static_cast<unsigned long long>(size));
@@ -695,10 +704,13 @@ uint64_t heap_alias(uint64_t offset, uint64_t size, uint64_t at, Prot p) {
 void* heap_private_view(uint64_t offset, uint64_t size) {
     std::lock_guard lk(g_heap_mu);
     if (!g_section || size == 0 || offset % kAllocGranularity || offset > g_heap_size || size > g_heap_size - offset) return nullptr;
-    return MapViewOfFile(g_section, FILE_MAP_ALL_ACCESS, static_cast<DWORD>(offset >> 32), static_cast<DWORD>(offset & 0xFFFFFFFFu), static_cast<SIZE_T>(size));
+    uint64_t v = nxrt::platform::section_map_view(g_section, 0, offset, size, true);
+    return v ? reinterpret_cast<void*>(v) : nullptr;
 }
 
-bool heap_private_view_unmap(void* view) { return view && UnmapViewOfFile(view) != 0; }
+bool heap_private_view_unmap(void* view) {
+    return view && nxrt::platform::section_unmap_view(reinterpret_cast<uint64_t>(view), 0);
+}
 
 bool heap_alias_unmap(uint64_t view_addr) {
     std::lock_guard lk(g_heap_mu);
@@ -707,9 +719,9 @@ bool heap_alias_unmap(uint64_t view_addr) {
         NXLOG_W(kTag, "heap_alias_unmap: %llx is not an alias view", static_cast<unsigned long long>(view_addr));
         return false;
     }
-    if (!UnmapViewOfFile(reinterpret_cast<void*>(view_addr))) {
-        NXLOG_E(kTag, "heap_alias_unmap %llx: UnmapViewOfFile failed, error %lu",
-                static_cast<unsigned long long>(view_addr), static_cast<unsigned long>(GetLastError()));
+    if (!nxrt::platform::section_unmap_view(view_addr, it->second.size)) {
+        NXLOG_E(kTag, "heap_alias_unmap %llx: section_unmap_view failed",
+                static_cast<unsigned long long>(view_addr));
         return false;
     }
     g_alias_used.erase(view_addr);
