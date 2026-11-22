@@ -804,7 +804,13 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
     if (!n || !heap_exists()) return;
     const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
     if (lo < kHeapBase || hi > kHeapBase + heap_reserved()) return;      // only the heap's primary view (the import goes through another)
-    // g_transitions is already initialized in region_create
+    // g_transitions is initialized in region_create, but ImportFreeze can run before any region exists (e.g., NVN pool import).
+    // Ensure it's created here if needed.
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (!g_transitions) g_transitions = nxrt::platform::rwlock_create();
+        if (!g_transitions) return;
+    }
     for (int i = 0; slot_ < 0; ++i) {   // after the file reads in progress there; then no new one starts until the end
         {
             std::lock_guard<std::mutex> lk(g_scope_mu);
