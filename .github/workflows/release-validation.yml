@@ -1,0 +1,50 @@
+name: Release validation
+
+# Fast, artifact-free checks for the release tooling. The full release workflow builds the launcher and engine; this one
+# can run on every pull request and only needs Python and PowerShell. It catches a broken verifier, a manifest schema
+# change, a stale version pointer and a malformed packaging script before a tag is cut.
+on:
+  pull_request:
+  push:
+    paths:
+      - 'tools/**'
+      - '.github/workflows/release*.yml'
+      - 'docs/release.json'
+      - 'Cargo.toml'
+      - 'README.md'
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile the release tools
+        run: python -m py_compile tools/*.py
+      - name: Release validation tests
+        run: python -m unittest discover -s tools/tests -v
+      - name: Check the checked-in release pointers
+        run: python tools/check_release.py
+
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse the release scripts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in 'tools/package_release.ps1', 'tools/release.ps1', 'tools/install_local.ps1') {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              $errors | ForEach-Object { Write-Error "${file}: $($_.Message)" }
+              exit 1
+            }
+          }
+          Write-Host 'release scripts parse'

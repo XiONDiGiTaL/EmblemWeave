@@ -58,10 +58,21 @@ try {
     & (Join-Path $PSScriptRoot 'package_release.ps1') @pkgArgs
     $pkgDir = Join-Path $repo 'target\pkg'
     $manifest = Get-Content (Join-Path $pkgDir 'manifest.json') -Raw | ConvertFrom-Json
+    $zipPath = Join-Path $pkgDir $manifest.zip
+    $releaseManifest = Join-Path $pkgDir 'release-manifest.json'
+    $shaFile = Join-Path $pkgDir 'SHA256SUMS'
+    if (-not (Test-Path -LiteralPath $releaseManifest -PathType Leaf)) {
+        throw "package_release.ps1 did not write $releaseManifest"
+    }
+    $manifestHash = (Get-FileHash -LiteralPath $releaseManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+    @(
+        "$($manifest.zipSha)  $($manifest.zip)",
+        "$manifestHash  release-manifest.json"
+    ) | Set-Content -Encoding ascii $shaFile
 
     # 3. The notes: install steps, the hash just measured, then the changelog body. The Linux translator is built and
     # attached by the tag workflow on an Ubuntu runner; this local script packages the Windows zip only.
-    $hashes = "``sha256`` of the zip: ``$($manifest.zipSha)``"
+    $hashes = "``sha256`` of the zip: ``$($manifest.zipSha)``. The release also ships ``release-manifest.json`` (a SHA-256 for every file) and ``SHA256SUMS``."
     $notes = @"
 # EmblemWeave $Version
 
@@ -96,6 +107,9 @@ $body
 
     # 5. Publish.
     if ($Local) {
+        Write-Host "local zip: $zipPath"
+        Write-Host "local manifest: $releaseManifest"
+        Write-Host "local checksums: $shaFile"
         Write-Host "local only: not touching GitHub"
         return
     }
@@ -132,15 +146,17 @@ $body
     Write-Host "tag target: $target"
 
     $tag = "v$Version"
-    $assets = @((Join-Path $pkgDir $manifest.zip))
+    $assets = @($zipPath, $releaseManifest, $shaFile)
     # Checked again here, immediately before upload: the same tool package_release.ps1 ran for the zip, so a stale or
     # hand-made asset cannot be published either, and the hashes in the notes are the files that go out.
     $py = Get-Command python -ErrorAction SilentlyContinue
     if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
     if (-not $py) { throw 'python is needed to verify the release assets (tools/verify_archive.py)' }
-    & $py.Source (@('tools/verify_archive.py') + $assets)
+    & $py.Source 'tools/verify_archive.py' $zipPath
     if ($LASTEXITCODE -ne 0) { throw 'a release asset failed archive verification; nothing was uploaded' }
-    $sha = (Get-FileHash $assets[0] -Algorithm SHA256).Hash.ToLower()
+    & $py.Source 'tools/release_manifest.py' 'verify' '--archive' $zipPath '--manifest' $releaseManifest
+    if ($LASTEXITCODE -ne 0) { throw 'the release manifest does not match the zip; nothing was uploaded' }
+    $sha = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLower()
     if ($sha -ne $manifest.zipSha) { throw "$($manifest.zip) hashes to $sha, the manifest says $($manifest.zipSha)" }
     # Windows PowerShell 5.1 turns a native command's stderr into a terminating
     # error while $ErrorActionPreference is Stop. A missing release is the

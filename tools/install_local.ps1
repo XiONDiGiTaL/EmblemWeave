@@ -42,14 +42,32 @@ if (Test-Path -LiteralPath $target -PathType Leaf) {
     Copy-Item -LiteralPath $target -Destination $saved -Force
 }
 
+$builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
+$stage = Join-Path $install (".$exeName.new-" + [guid]::NewGuid().ToString('N'))
 try {
-    Copy-Item -LiteralPath $built -Destination $target -Force
+    # Copy beside the target first, verify it, then replace. A failed copy leaves the installed launcher untouched; a
+    # failed replace restores the pre-install copy instead of leaving a truncated executable.
+    Copy-Item -LiteralPath $built -Destination $stage -Force
+    $stageHash = (Get-FileHash -LiteralPath $stage -Algorithm SHA256).Hash
+    if ($stageHash -ne $builtHash) { throw "the staged launcher does not match the build at $built" }
+    if (Test-Path -LiteralPath $target -PathType Leaf) {
+        # File.Replace's three-argument overload needs a real backup path, not $null. $saved is the verified
+        # pre-install copy; replacing through it atomically keeps the old launcher available for rollback.
+        if (-not $saved) { throw "no pre-install backup path for $target" }
+        [System.IO.File]::Replace($stage, $target, $saved)
+    } else {
+        Move-Item -LiteralPath $stage -Destination $target
+    }
 } catch {
+    Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue
+    if ($saved) { Copy-Item -LiteralPath $saved -Destination $target -Force -ErrorAction SilentlyContinue }
     throw "could not replace $target (is EmblemWeave still open?): $($_.Exception.Message)"
 }
-$builtHash = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
 $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
-if ($builtHash -ne $targetHash) { throw "the installed launcher does not match the build at $built" }
+if ($builtHash -ne $targetHash) {
+    if ($saved) { Copy-Item -LiteralPath $saved -Destination $target -Force }
+    throw "the installed launcher does not match the build at $built; restored $saved"
+}
 
 $mine = @(Get-ChildItem -LiteralPath $backups -File |
           Where-Object { $_.Name -match '^EmblemWeave\.exe\.pre-install-\d{8}-\d{6}$' } |

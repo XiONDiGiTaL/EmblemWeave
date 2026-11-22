@@ -5,22 +5,36 @@
 #   pwsh -File tools/package_release.ps1 -Version 0.1.12
 #   pwsh -File tools/package_release.ps1 -SkipBuild      # reuse target\release\EmblemWeave.exe
 #   pwsh -File tools/package_release.ps1 -SkipConfigureCheck  # do not configure the extracted zip
+#   pwsh -File tools/package_release.ps1 -RequireConfigureCheck # fail if that check cannot run
+#   pwsh -File tools/package_release.ps1 -Deterministic   # fixed zip entry timestamps
+#   pwsh -File tools/package_release.ps1 -AllowDirty      # explicitly package uncommitted changes
+#   pwsh -File tools/package_release.ps1 -AllowStaleBuild  # reuse an executable whose stamp does not match
 #
-# Writes target\pkg\EmblemWeave-v<version>-windows-x64.zip and prints its size and sha256.
+# Writes target\pkg\EmblemWeave-v<version>-windows-x64.zip, release-manifest.json and prints the zip's size and sha256.
 param(
     [string]$Version = '',
     [switch]$SkipBuild,
-    [switch]$SkipConfigureCheck
+    [switch]$SkipConfigureCheck,
+    [switch]$RequireConfigureCheck,
+    [switch]$AllowStaleBuild,
+    [switch]$AllowDirty,
+    [switch]$Deterministic
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
+    if ($SkipConfigureCheck -and $RequireConfigureCheck) {
+        throw '-SkipConfigureCheck and -RequireConfigureCheck cannot be used together'
+    }
     if (-not $Version) {
         $line = Select-String -Path 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
         if (-not $line) { throw 'no version in Cargo.toml' }
         $Version = $line.Matches[0].Groups[1].Value
     }
+    # A version becomes a path segment and a zip entry prefix. tools/check_release.py checks it too; keep this guard local
+    # so a caller cannot point the cleanup below outside target\pkg.
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "version '$Version' is not major.minor.patch" }
     # The site, README, changelog index and release.json are edited by hand. Check them before building anything, so a
     # release cannot be packed with a download button or an updater pointer that still names the previous version.
     $pyCheck = Get-Command python -ErrorAction SilentlyContinue
@@ -29,15 +43,58 @@ try {
     & $pyCheck.Source 'tools/check_release.py' --version $Version
     if ($LASTEXITCODE -ne 0) { throw "release metadata does not agree on $Version; fix it before packing" }
     $name = "EmblemWeave-v$Version"
-    $pkg = Join-Path $repo "target\pkg\$name"
-    $zip = Join-Path $repo "target\pkg\$name-windows-x64.zip"
+    $pkgRoot = [System.IO.Path]::GetFullPath((Join-Path $repo 'target\pkg'))
+    $pkg = Join-Path $pkgRoot $name
+    $zip = Join-Path $pkgRoot "$name-windows-x64.zip"
+    $pkgFull = [System.IO.Path]::GetFullPath($pkg)
+    if (-not $pkgFull.StartsWith($pkgRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "package path $pkgFull escapes $pkgRoot"
+    }
     Write-Host "packing $name"
+
+    # Provenance for the launcher. -SkipBuild must not silently package an executable from another version or tree.
+    $commit = 'unknown'
+    $dirty = $false
+    $stamp = Join-Path $repo 'target\release\emblemweave-build.json'
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git is needed to identify and copy the release tree' }
+    $head = @(& git rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $head.Count -eq 0) { throw 'git rev-parse HEAD failed; package from a Git checkout' }
+    $commit = $head[0].Trim()
+    $dirty = @(& git status --porcelain --untracked-files=normal 2>$null).Count -gt 0
+    if ($dirty -and -not $AllowDirty) {
+        throw 'the working tree has tracked or untracked changes; commit them, or pass -AllowDirty to build an explicitly dirty manifest'
+    }
+    $builtCommit = $commit
+    $builtDirty = $dirty
 
     # 1. The launcher.
     $exe = Join-Path $repo 'target\release\EmblemWeave.exe'
     if (-not $SkipBuild) {
         cargo build --release -p emblemweave
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+        [ordered]@{
+            version = $Version
+            commit = $commit
+            dirty = $dirty
+            configuration = 'Release'
+            target = 'windows-x64'
+            builtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        } | ConvertTo-Json | Set-Content -Encoding utf8 $stamp
+    } elseif (Test-Path -LiteralPath $stamp -PathType Leaf) {
+        $built = Get-Content -LiteralPath $stamp -Raw | ConvertFrom-Json
+        $why = @()
+        if ($built.version -ne $Version) { $why += "version $($built.version), packing $Version" }
+        if ($built.commit -ne $commit) { $why += "commit $($built.commit), tree $commit" }
+        if ([bool]$built.dirty -ne $dirty) { $why += "dirty $($built.dirty), tree $dirty" }
+        if ($why.Count -gt 0) {
+            $message = "the existing launcher was not built from this tree: $($why -join '; ')"
+            if ($AllowStaleBuild) { Write-Warning $message } else { throw "$message. Rebuild without -SkipBuild, or pass -AllowStaleBuild." }
+        }
+        $builtCommit = [string]$built.commit
+        $builtDirty = [bool]$built.dirty
+    } else {
+        $message = "no build stamp at $stamp; cannot prove the existing launcher belongs to $Version"
+        if ($AllowStaleBuild) { Write-Warning $message } else { throw "$message. Rebuild without -SkipBuild, or pass -AllowStaleBuild." }
     }
     if (-not (Test-Path $exe)) { throw "missing $exe (build it, or drop -SkipBuild)" }
 
@@ -65,13 +122,24 @@ try {
     # `docs\PACKAGE.md` into the package root used to leave it as `PACKAGE.md`, where nothing looks for it;
     # tools/verify_archive.py is what noticed.
     New-Item -ItemType Directory -Force (Join-Path $pkg 'docs') | Out-Null
-    # Every page the README links, not only PACKAGE: the new guide pages would
-    # otherwise work on GitHub and 404 inside the downloaded zip.
-    foreach ($doc in (Get-ChildItem (Join-Path $repo 'docs') -Filter '*.md' -File)) {
-        Copy-Item $doc.FullName (Join-Path (Join-Path $pkg 'docs') $doc.Name)
+    # Every page the README links, not only PACKAGE. Read the list from Git so a local experimental .md file that is not in
+    # the release commit cannot travel to players. The changelog and screenshots are tracked files too.
+    $trackedDocs = @(& git ls-files -- 'docs/*.md' 'docs/changelog' 'docs/screenshots' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $trackedDocs.Count -eq 0) { throw 'git ls-files found no tracked docs to package' }
+    foreach ($rel in $trackedDocs) {
+        $srcDoc = Join-Path $repo $rel
+        $dstDoc = Join-Path $pkg $rel
+        New-Item -ItemType Directory -Force (Split-Path $dstDoc) | Out-Null
+        Copy-Item -LiteralPath $srcDoc -Destination $dstDoc -Force
     }
-    Copy-Item (Join-Path $repo 'docs\changelog') (Join-Path $pkg 'docs\changelog') -Recurse
-    Copy-Item (Join-Path $repo 'docs\screenshots') (Join-Path $pkg 'docs\screenshots') -Recurse
+    # The same checks the release runner uses, shipped for an offline download or install check. They are standard-library
+    # Python and import each other; keep all three together.
+    New-Item -ItemType Directory -Force (Join-Path $pkg 'tools') | Out-Null
+    foreach ($f in 'verify_archive.py', 'release_manifest.py', 'verify_install.py') {
+        $srcTool = Join-Path $repo "tools\$f"
+        if (-not (Test-Path -LiteralPath $srcTool -PathType Leaf)) { throw "missing release verifier $srcTool" }
+        Copy-Item -LiteralPath $srcTool -Destination (Join-Path $pkg "tools\$f")
+    }
 
     # 3b. The optional movie decoder's shared runtime. These are deliberately not taken from the player's machine:
     # a release must contain the exact ABI the runtime was compiled against, and the GPL build is easy to lose when
@@ -96,7 +164,18 @@ try {
         Copy-Item -LiteralPath $src -Destination (Join-Path $ffmpegDst $f) -Force
     }
     foreach ($f in 'README.md', 'SHA256SUMS', 'LICENSE.txt', 'COPYING.GPLv3') {
-        Copy-Item -LiteralPath (Join-Path $ffmpegSrc $f) -Destination (Join-Path $ffmpegDst $f) -Force
+        $licenseFile = Join-Path $ffmpegSrc $f
+        if (-not (Test-Path -LiteralPath $licenseFile -PathType Leaf)) { throw "missing FFmpeg notice $licenseFile" }
+        Copy-Item -LiteralPath $licenseFile -Destination (Join-Path $ffmpegDst $f) -Force
+    }
+    # The folder's SHA256SUMS is what a player checks. It must pin the same three files the script just verified.
+    $sumsPath = Join-Path $ffmpegSrc 'SHA256SUMS'
+    $sums = @{}
+    foreach ($line in (Get-Content -LiteralPath $sumsPath)) {
+        if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+)$') { $sums[$matches[2].Trim()] = $matches[1].ToLowerInvariant() }
+    }
+    foreach ($f in $ffmpegHashes.Keys) {
+        if ($sums[$f] -ne $ffmpegHashes[$f]) { throw "upscalers\ffmpeg\SHA256SUMS does not pin $f to $($ffmpegHashes[$f])" }
     }
 
     # The dump, the build output and the fetched third-party sources stay out.
@@ -134,20 +213,23 @@ try {
     # 0.1.5. Dropping it would scatter the tree into whatever folder a player unpacks beside an older one.
     $prefix = "$name/"
     $nFiles = 0
+    # A stable timestamp makes two runs over the same tree produce the same entry metadata. The deflate stream itself is
+    # .NET's; pinning the timestamp removes the checkout-time variation that otherwise changes the zip bytes.
+    $fixedTime = [DateTimeOffset]::Parse('1980-01-01T00:00:00Z')
     $za = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
         # The wrapper itself gets an entry too, so an extractor creates it in order.
         $e = $za.CreateEntry($prefix, [System.IO.Compression.CompressionLevel]::NoCompression)
-        $e.LastWriteTime = Get-Item -LiteralPath $pkg | Select-Object -ExpandProperty LastWriteTime
+        $e.LastWriteTime = if ($Deterministic) { $fixedTime } else { [DateTimeOffset](Get-Item -LiteralPath $pkg).LastWriteTime }
         foreach ($d in (Get-ChildItem -LiteralPath $pkg -Recurse -Directory | Sort-Object FullName)) {
             $rel = $prefix + $d.FullName.Substring($rootLen).Replace('\', '/') + '/'
             $e = $za.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::NoCompression)
-            $e.LastWriteTime = $d.LastWriteTime
+            $e.LastWriteTime = if ($Deterministic) { $fixedTime } else { [DateTimeOffset]$d.LastWriteTime }
         }
         foreach ($f in (Get-ChildItem -LiteralPath $pkg -Recurse -File | Sort-Object FullName)) {
             $rel = $prefix + $f.FullName.Substring($rootLen).Replace('\', '/')
             $e = $za.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
-            $e.LastWriteTime = $f.LastWriteTime
+            $e.LastWriteTime = if ($Deterministic) { $fixedTime } else { [DateTimeOffset]$f.LastWriteTime }
             $out = $e.Open()
             try {
                 $in = [System.IO.File]::OpenRead($f.FullName)
@@ -166,8 +248,10 @@ try {
     $required = @(
         'EmblemWeave.exe', 'portable.txt', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/INSTALL.md',
         'docs/USAGE.md', 'docs/BUILDING.md', 'docs/SECURITY.md', 'docs/TERMS.md', 'docs/PRIVACY.md',
-        'docs/LEGAL.md', 'docs/DMCA.md',
+        'docs/LEGAL.md', 'docs/DMCA.md', 'docs/RELEASE_VALIDATION.md', 'docs/PORTABLE_INSTALLATION.md',
+        'docs/UPGRADE_AND_RECOVERY.md',
         'docs/screenshots/overview.png', 'docs/changelog/README.md',
+        'tools/verify_archive.py', 'tools/release_manifest.py', 'tools/verify_install.py',
         'engine/fefw-recomp/runtime/CMakeLists.txt', 'engine/fefw-recomp/game-build/fefw/CMakeLists.txt',
         'engine/fefw-recomp/recomp/requirements.txt', 'engine/fefw-recomp/tools/shaders/harness/Program.cs',
         # The CMake configure reads this before it builds anything; a zip without it failed every build (issues #16, #17).
@@ -214,7 +298,9 @@ try {
         $llvm = @($envDump | Where-Object { $_ -like 'NX_LLVM_BIN=*' })
         $llvm = if ($llvm.Count -gt 0) { $llvm[0].Substring('NX_LLVM_BIN='.Length) } else { '' }
         if (-not $envOk -or -not $llvm -or -not (Test-Path (Join-Path $llvm 'clang-cl.exe'))) {
-            Write-Warning 'configure check skipped: runtime\scripts\env.cmd found no Visual Studio C++ tools and LLVM on this machine (that says nothing about the zip)'
+            $why = 'runtime\scripts\env.cmd found no Visual Studio C++ tools and LLVM on this machine'
+            if ($RequireConfigureCheck) { throw "configure check required but $why" }
+            Write-Warning "configure check skipped: $why (that says nothing about the zip)"
         } else {
             # One child shell, so the configure sees the same INCLUDE, LIB and clang-cl the engine's own build script gives it.
             $clang = (Join-Path $llvm 'clang-cl.exe').Replace('\', '/')
@@ -242,6 +328,30 @@ try {
     Write-Host "$zip ($mb MB)"
     Write-Host "sha256: $hash"
 
+    # 7. The per-file manifest: the zip hash alone cannot say which source files were in it or whether one changed after
+    # download. tools/release_manifest.py hashes every entry and records the source commit and launcher build stamp. The
+    # manifest is a sidecar, not a zip entry, so its own hash is not circular.
+    $manifestPath = Join-Path (Split-Path $zip) 'release-manifest.json'
+    $manifestArgs = @(
+        'tools/release_manifest.py', 'create',
+        '--archive', $zip,
+        '--version', $Version,
+        '--output', $manifestPath,
+        '--prefix', "$name/",
+        '--source-commit', $commit,
+        '--build-configuration', 'Release',
+        '--build-target', 'windows-x64',
+        '--launcher-commit', $builtCommit
+    )
+    if ($dirty) { $manifestArgs += '--source-dirty' } else { $manifestArgs += '--source-clean' }
+    if ($builtDirty) { $manifestArgs += '--launcher-dirty' } else { $manifestArgs += '--launcher-clean' }
+    foreach ($r in $required) { $manifestArgs += @('--require', "$name/$r") }
+    & $py.Source @manifestArgs
+    if ($LASTEXITCODE -ne 0) { throw "the zip failed manifest generation: $manifestPath" }
+    & $py.Source 'tools/release_manifest.py' 'verify' '--archive' $zip '--manifest' $manifestPath
+    if ($LASTEXITCODE -ne 0) { throw "the zip failed manifest verification: $manifestPath" }
+    $manifestSha = (Get-FileHash $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
     # 5. What was built, for the release script: names and hashes, so the notes and the upload cannot disagree. The
     # Linux translator is a separate job on an Ubuntu runner (`.github/workflows/release.yml`): it is the only place
     # that can write the executable bit without lying about it, and a Windows package run must not pretend to.
@@ -250,9 +360,16 @@ try {
         zip     = [System.IO.Path]::GetFileName($zip)
         zipSha  = $hash
         zipSize = (Get-Item $zip).Length
+        sourceCommit = $commit
+        sourceDirty = $dirty
+        launcherCommit = $builtCommit
+        launcherDirty = $builtDirty
+        releaseManifest = [System.IO.Path]::GetFileName($manifestPath)
+        releaseManifestSha256 = $manifestSha
     }
     $manifest | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path (Split-Path $zip) 'manifest.json')
     Write-Host "manifest: $(Join-Path (Split-Path $zip) 'manifest.json')"
+    Write-Host "release manifest: $manifestPath"
 } finally {
     Pop-Location
 }

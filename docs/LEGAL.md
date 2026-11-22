@@ -53,6 +53,10 @@ adapted into it. That project's repository has since been removed; its final rel
 
 `zbic` is used out-of-process and is not a dependency of any shipped binary. Because it is GPL-2.0, an in-tree port must be written from the format description rather than copied, and the resulting licensing decision recorded before any port lands.
 
+The complete Rust/runtime inventory, the Intel XeSS and FFmpeg redistribution terms, and the remaining notice gaps are
+in [DEPENDENCY_LICENSE_AUDIT.md](DEPENDENCY_LICENSE_AUDIT.md). That page is a distribution audit, not a replacement for
+the licence texts in the package.
+
 ## Trademarks and presentation
 
 The launcher's visual language is inspired by the game's tactical-fantasy aesthetic and by [XiØN](https://github.com/XiONDiGiTaL)'s own identity. It uses no Nintendo artwork and no official Fire Emblem logo.
