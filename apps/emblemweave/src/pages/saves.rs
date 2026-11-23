@@ -473,7 +473,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.saves_ui.create_selected = true;
             }
             Action::KeepCurrent => {
-                let current = crate::saves::summary(&crate::saves::account_dir(&save_dir)).0 > 0;
+                let current = crate::saves::has_save(&crate::saves::account_dir(&save_dir));
                 if current {
                     app.saves_ui.dialog = Some(CreateDialog {
                         mode: CreateMode::Current,
@@ -592,7 +592,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    current_save(ui, &p, &save_dir, active.as_deref());
+    if let Some(m) = current_save(ui, &p, &save_dir, active.as_deref(), title, running) {
+        message = Some(m);
+    }
 
     current_slots(app, ui, &p, &save_dir, &mut message, running);
 
@@ -669,7 +671,7 @@ fn empty_profiles(
     save_dir: &Path,
     running: bool,
 ) -> Option<Action> {
-    let current_files = crate::saves::summary(&crate::saves::account_dir(save_dir)).0;
+    let current_files = crate::saves::has_save(&crate::saves::account_dir(save_dir));
     let mut action = None;
     widgets::section(ui, p, "Start here", |ui| {
         ui.horizontal_top(|ui| {
@@ -693,8 +695,8 @@ fn empty_profiles(
             if widgets::primary_button(ui, p, "Create a profile", !running).clicked() {
                 action = Some(Action::Create);
             }
-            if widgets::button(ui, p, "Keep current save", !running && current_files > 0)
-                .on_hover_text(if current_files > 0 {
+            if widgets::button(ui, p, "Keep current save", !running && current_files)
+                .on_hover_text(if current_files {
                     "Copies the save the game currently reads into a new, independent profile"
                 } else {
                     "There is no current save to keep yet. Play once, or import a save below."
@@ -765,9 +767,12 @@ fn current_save(
     p: &crate::theme::Palette,
     save_dir: &Path,
     active: Option<&str>,
-) {
+    title: u64,
+    running: bool,
+) -> Option<(String, Tone)> {
     let account = crate::saves::account_dir(save_dir);
     let current = crate::saves::slots_with_sizes(save_dir);
+    let mut message = None;
     widgets::section(ui, p, "Current save", |ui| {
         ui.label(
             crate::i18n::text("The game reads this folder")
@@ -829,6 +834,55 @@ fn current_save(
                     .color(p.warn),
             );
         }
+        // A save can sit in this folder in a shape the game does not open: an import from an older build left it
+        // one level too deep, or an account folder the game never reads holds it. Name it and make it usable here,
+        // instead of showing "no save" while the files are a folder away (issue #79).
+        // Profiles are left out: the carousel already lists them, and loading one is its own action.
+        let profile_root = save_dir.join("profiles");
+        let orphans: Vec<_> = crate::saves::find_orphan_saves(save_dir)
+            .into_iter()
+            .filter(|o| !o.path.starts_with(&profile_root))
+            .collect();
+        if !orphans.is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                crate::i18n::text("Saves in this folder that the game does not read")
+                    .font(theme::semibold(12.5))
+                    .color(p.warn),
+            );
+            for orphan in orphans.iter().take(4) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        crate::i18n::text(format!(
+                            "{}: {} files",
+                            orphan.description, orphan.files
+                        ))
+                        .size(11.5)
+                        .color(p.body),
+                    );
+                    if widgets::button(ui, p, "Use this save", !running)
+                        .on_hover_text(crate::i18n::tr(
+                            "Copies this save into the folder the game reads. The save there now is moved to Backups first.",
+                        ))
+                        .clicked()
+                    {
+                        message = Some(
+                            match crate::saves::adopt_orphan_save(orphan, save_dir, title, &stamp()) {
+                                Ok(imported) => (
+                                    format!(
+                                        "Using the save in {}: {} files copied",
+                                        orphan.path.display(),
+                                        imported.files
+                                    ),
+                                    Tone::Ok,
+                                ),
+                                Err(e) => (format!("Could not use that save: {e}"), Tone::Bad),
+                            },
+                        );
+                    }
+                });
+            }
+        }
         ui.add_space(5.0);
         if active.is_none() {
             ui.label(
@@ -838,6 +892,7 @@ fn current_save(
             );
         }
     });
+    message
 }
 
 fn carousel(
@@ -1704,7 +1759,7 @@ fn create_dialog(
                 CreateMode::Current => {
                     name.is_ok()
                         && !duplicate
-                        && crate::saves::summary(&crate::saves::account_dir(save_dir)).0 > 0
+                        && crate::saves::has_save(&crate::saves::account_dir(save_dir))
                 }
             };
             ready.set(can_create);
@@ -1759,7 +1814,7 @@ fn create_dialog(
                 None => Err("choose a backup folder to import".into()),
             },
             CreateMode::Current => {
-                if crate::saves::summary(&crate::saves::account_dir(save_dir)).0 == 0 {
+                if !crate::saves::has_save(&crate::saves::account_dir(save_dir)) {
                     Err("there is no current save to keep yet".into())
                 } else {
                     match crate::saves::store_profile(save_dir, &name, &stamp()) {

@@ -3844,7 +3844,13 @@ pub fn set_ini_key(text: &str, section: &str, key: &str, value: &str) -> String 
 /// folder the game was already reading.
 fn carry_save_across(current: &Path, intended: &Path) -> Result<(), String> {
     let target = crate::saves::account_dir(intended);
-    if crate::saves::summary(&target).0 > 0 {
+    // A save is `000` with files in it, not a folder that merely has the account's `.meta`: the game writes that
+    // metadata before it has saved anything, and treating it as a save made reconciliation skip the real one (#79).
+    if crate::saves::has_save(&target)
+        || same_folder(current, intended)
+        || current.starts_with(intended)
+        || intended.starts_with(current)
+    {
         return Ok(());
     }
     if !current.is_dir()
@@ -3911,10 +3917,42 @@ pub fn sync_save_dir(run_dir: &Path) -> Result<(), String> {
         }
     }
 
+    // The folder the game will read can still be empty: a new release extracted beside the old copy, a switch from the
+    // profile folder to a portable one, or a run folder recreated after an update. Carry the newest save another
+    // EmblemWeave data root holds before the ini is written, so the game cannot start on a fresh save while the
+    // playthrough sits one folder away (issue #79). With no save anywhere this finds nothing and costs one check.
+    let target = crate::saves::account_dir(&intended);
+    if !crate::saves::has_save(&target) {
+        if let Some(found) = crate::saves::launcher_sources(&intended).into_iter().next() {
+            carry_save_across(&found.path, &intended).map_err(|e| {
+                format!(
+                    "your save is in {} but it could not be copied to {}: {e}",
+                    found.path.display(),
+                    intended.display()
+                )
+            })?;
+        }
+    }
+
+    if current_norm.as_deref() == Some(intended_norm.as_str()) {
+        return Ok(()); // Already in sync, and the save is where the game reads it
+    }
+
     // Update the ini with the correct save_dir
     let updated = set_ini_key(&text, "fs", "save_dir", &intended_str);
     std::fs::write(&ini_path, updated)
         .map_err(|e| format!("writing fefw.ini for save_dir sync: {e}"))
+}
+
+/// Whether two folders are the same one, tolerating Windows' case and slash differences. Reconciliation must not copy a
+/// save onto itself, which `import` refuses as an overlap.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (a, b) = (canon(a), canon(b));
+    a == b
+        || a.to_string_lossy()
+            .replace('/', "\\")
+            .eq_ignore_ascii_case(&b.to_string_lossy().replace('/', "\\"))
 }
 
 /// The engine's `[fefw] output` for a resolution label: the size the game
@@ -5061,11 +5099,9 @@ pub fn play(
     }
     // Reconcile [fs] save_dir with launcher config before launch (issue #79).
     // A mismatch here causes the runtime to mount the wrong save folder, so
-    // saves appear empty or missing even though they exist on disk.
-    if let Err(e) = sync_save_dir(&dir) {
-        // Log but don't block launch; the game will use whatever the ini has.
-        eprintln!("[launcher] save_dir sync failed: {e}");
-    }
+    // saves appear empty or missing even though they exist on disk. Refuse to launch when a save exists but
+    // could not be put where the game reads it: starting anyway opens an empty game and looks like data loss.
+    sync_save_dir(&dir)?;
     // A build from an earlier release can point the game at a packed .nup, which the engine cannot read in place. The launcher writes those
     // files before play, so reaching this means that write has not happened yet; say so instead of letting the game die on `main.npdm is
     // compressed in the .nup` (issue #24).
@@ -5175,6 +5211,15 @@ mod tests {
         let user = old.join("account").join(crate::saves::DEFAULT_USER);
         std::fs::create_dir_all(user.join("000")).unwrap();
         std::fs::write(user.join("000").join("Auto"), "the save the game reads").unwrap();
+        // The game wrote its account metadata into the new folder on an earlier start; that must not count as a save
+        // and stop the real one from being carried.
+        let new_user = new.join("account").join(crate::saves::DEFAULT_USER);
+        std::fs::create_dir_all(new_user.join("000")).unwrap();
+        std::fs::write(
+            new.join("account").join(format!("{}.meta", crate::saves::DEFAULT_USER)),
+            "size=67108864\n",
+        )
+        .unwrap();
 
         carry_save_across(&old, &new).unwrap();
         assert_eq!(

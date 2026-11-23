@@ -140,22 +140,76 @@ pub fn survey_here(title_id: u64) -> Survey {
 /// Saves this launcher keeps under another of its data roots: `%APPDATA%\EmblemWeave\save`, and `data\save` beside the
 /// executable (a portable copy, or a source checkout). `save_dir` is the root in use, which is never offered to itself.
 ///
-/// Returns the account save folder (the one holding `000`) so `import` receives a folder it can resolve directly.
+/// A newer download extracted beside an older copy keeps its save in its own `data\save`, which the new copy cannot see.
+/// Those sibling folders are offered too: an upgrade that produced a second EmblemWeave folder must not look like a lost
+/// playthrough (issue #79).
+///
+/// Returns the account save folder (the one holding `000`) so `import` receives a folder it can resolve directly. Newest
+/// first, so the caller that carries one saves carries the most recently played.
 pub fn launcher_sources(save_dir: &Path) -> Vec<Found> {
-    let mut roots: Vec<(&str, PathBuf)> = Vec::new();
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
     if let Some(appdata) = std::env::var_os("APPDATA") {
         roots.push((
-            "EmblemWeave (AppData)",
+            "EmblemWeave (AppData)".into(),
             PathBuf::from(appdata).join("EmblemWeave").join("save"),
         ));
     }
     if let Some(exe) = crate::platform::exe_dir() {
-        roots.push(("EmblemWeave (this install)", exe.join("data").join("save")));
+        roots.push(("EmblemWeave (this install)".into(), exe.join("data").join("save")));
+        if let Some(parent) = exe.parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p != exe && p.is_dir() {
+                        let label = p
+                            .file_name()
+                            .map(|n| format!("EmblemWeave (nearby copy: {})", n.to_string_lossy()))
+                            .unwrap_or_else(|| "EmblemWeave (nearby copy)".into());
+                        roots.push((label, p.join("data").join("save")));
+                    }
+                }
+            }
+        }
+    }
+    // A remembered engine checkout names the folder of an older copy even when it is on another drive. A portable
+    // copy keeps its save under that folder's `data`, so the new download can still find the playthrough.
+    let mut engine_files: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = crate::config::Config::dir() {
+        engine_files.push(dir.join("engine.txt"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        engine_files.push(
+            PathBuf::from(appdata)
+                .join("EmblemWeave")
+                .join("engine.txt"),
+        );
+    }
+    for file in engine_files {
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            if let Some(root) = remembered_install_root(&text) {
+                let name = root
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "older copy".into());
+                roots.push((format!("EmblemWeave (older copy: {name})"), root));
+            }
+        }
     }
     launcher_sources_from(&roots, save_dir)
 }
 
-fn launcher_sources_from(roots: &[(&str, PathBuf)], save_dir: &Path) -> Vec<Found> {
+/// The `data\save` of the install a remembered `engine.txt` names, when that folder still exists. The file holds the
+/// checkout (`…\engine\fefw-recomp`); two levels up is the EmblemWeave folder it belongs to.
+fn remembered_install_root(text: &str) -> Option<PathBuf> {
+    let checkout = Path::new(text.trim());
+    let install = checkout.parent()?.parent()?;
+    let save = install.join("data").join("save");
+    save.is_dir().then_some(save)
+}
+
+fn launcher_sources_from(roots: &[(String, PathBuf)], save_dir: &Path) -> Vec<Found> {
     let current = account_dir(save_dir);
     let mut out = Vec::new();
     for (label, root) in roots {
@@ -165,7 +219,9 @@ fn launcher_sources_from(roots: &[(&str, PathBuf)], save_dir: &Path) -> Vec<Foun
         let Some(save) = account_save(&root.join("account")) else {
             continue;
         };
-        if save == current {
+        // The root in use, including another account folder inside it, is not a source for itself: those saves are
+        // listed by `find_orphan_saves` and adopted with a button, not carried automatically.
+        if save == current || save.starts_with(save_dir) {
             continue;
         }
         let (files, modified) = summary(&save);
@@ -173,12 +229,13 @@ fn launcher_sources_from(roots: &[(&str, PathBuf)], save_dir: &Path) -> Vec<Foun
             continue;
         }
         out.push(Found {
-            source: (*label).to_string(),
+            source: label.clone(),
             path: save,
             files,
             modified,
         });
     }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
     out
 }
 
@@ -326,6 +383,12 @@ fn save_below(dir: &Path) -> Option<PathBuf> {
         .filter(|p| p.is_dir() && is_account_save(p))
         .collect();
     (saves.len() == 1).then(|| saves[0].clone())
+}
+
+/// Whether `account` holds the save the game reads. A `.meta` alone does not count: the game writes that metadata
+/// before it has ever saved, so a folder with only metadata is still an empty save.
+pub fn has_save(account: &Path) -> bool {
+    is_account_save(account)
 }
 
 /// The account save in an `account` folder, preferring the engine's fixed user id.
@@ -520,7 +583,9 @@ pub fn import(
     {
         return Err("the source and the save folder overlap".into());
     }
-    let backup = if target.is_dir() && summary(&target).0 > 0 {
+    // Back up only a save that is really there. A folder holding just the account's `.meta` is the empty save the
+    // game writes on first start; moving it aside would hide that metadata from the import below.
+    let backup = if target.is_dir() && has_save(&target) {
         let to = save_dir.join("backups").join(stamp);
         std::fs::create_dir_all(save_dir.join("backups"))
             .map_err(|e| format!("creating the backups folder: {e}"))?;
@@ -648,11 +713,30 @@ pub struct OrphanSave {
     pub modified: Option<std::time::SystemTime>,
 }
 
-/// Find all orphan saves in the save directory.
-/// These are saves in profiles/ or in account/<other user>/ that the game doesn't read.
+/// Find all saves in the save directory that the game does not read.
+/// These are saves in `profiles/`, in `account/<other user>/`, or nested one level below the game's own account folder.
+///
+/// The last shape is the dangerous one: an import from an older build could end up as `account/<user>/<user>/000`, and
+/// the game opens the empty folder above it. Nothing on the page named that save, so the player saw "no save" while
+/// their files sat one folder deeper.
 pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
-    let mut out = Vec::new();
+    let mut out: Vec<OrphanSave> = Vec::new();
     let target = account_dir(save_dir);
+
+    // A save one level below the folder the game opens, left by an import that was nested too deep.
+    if let Some(save) = save_below(&target) {
+        if save != target {
+            let (files, modified) = summary(&save.join("000"));
+            if files > 0 {
+                out.push(OrphanSave {
+                    description: "Nested below the game's account folder".into(),
+                    path: save,
+                    files,
+                    modified,
+                });
+            }
+        }
+    }
 
     // Check profiles/ folder
     let profiles = save_dir.join("profiles");
@@ -662,18 +746,20 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
             if !path.is_dir() {
                 continue;
             }
-            // Check if this profile has a 000 folder with files
-            let slot = path.join("000");
-            if slot.is_dir() {
-                let (files, modified) = summary(&slot);
-                if files > 0 && path != target {
-                    out.push(OrphanSave {
-                        description: format!("Profile \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
-                        path: path.clone(),
-                        files,
-                        modified,
-                    });
-                }
+            let Some(save) = save_below(&path) else {
+                continue;
+            };
+            let (files, modified) = summary(&save.join("000"));
+            if files > 0 && save != target {
+                out.push(OrphanSave {
+                    description: format!(
+                        "Profile \"{}\"",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    path: save,
+                    files,
+                    modified,
+                });
             }
         }
     }
@@ -686,28 +772,31 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
             if !path.is_dir() {
                 continue;
             }
-            // Skip the DEFAULT_USER folder (the one the game reads)
+            // The game's own account folder is handled above, including a save nested below it.
             if path == target {
                 continue;
             }
-            // Check if this account folder has a 000 with files
-            let slot = path.join("000");
-            if slot.is_dir() {
-                let (files, modified) = summary(&slot);
-                if files > 0 {
-                    out.push(OrphanSave {
-                        description: format!("Account folder \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
-                        path: path.clone(),
-                        files,
-                        modified,
-                    });
-                }
+            let Some(save) = save_below(&path) else {
+                continue;
+            };
+            let (files, modified) = summary(&save.join("000"));
+            if files > 0 {
+                out.push(OrphanSave {
+                    description: format!(
+                        "Account folder \"{}\"",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    path: save,
+                    files,
+                    modified,
+                });
             }
         }
     }
 
     // Sort by modification time, newest first
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.dedup_by(|a, b| a.path == b.path);
     out
 }
 
@@ -791,6 +880,121 @@ pub struct ProfileMeta {
     pub units: usize,
     pub leader: Option<String>,
     pub valid_slots: usize,
+}
+
+/// The save facts a diagnostic report needs, without a byte of save content: where the launcher and the game point,
+/// whether those folders hold a real save, any save the game ignores, and every emulator save found for the title.
+///
+/// A report that arrives without its ZIP still answers the first question a save bug needs: was there a save, and where
+/// was it? The same text is written into the bundle.
+pub fn describe_save_state(title_id: u64) -> String {
+    let mut s = String::new();
+    let configured = crate::config::Config::save_dir();
+    match &configured {
+        Some(dir) => {
+            s.push_str(&format!("configured: {}\n", dir.display()));
+            s.push_str(&describe_account(dir, "  "));
+        }
+        None => s.push_str("configured: (not set)\n"),
+    }
+    match crate::engine::effective_save_dir() {
+        Some(effective) => {
+            s.push_str(&format!("effective (fefw.ini): {}\n", effective.display()));
+            if configured.as_ref().is_some_and(|c| c != &effective) {
+                s.push_str("status: MISMATCH (the game reads the effective path)\n");
+                s.push_str(&describe_account(&effective, "  "));
+            } else {
+                s.push_str("status: in sync\n");
+            }
+        }
+        None => s.push_str("effective (fefw.ini): (not found)\n"),
+    }
+    if let Some(dir) = &configured {
+        let orphans = find_orphan_saves(dir);
+        if orphans.is_empty() {
+            s.push_str("unread saves in this folder: none\n");
+        } else {
+            s.push_str("unread saves in this folder:\n");
+            for o in orphans {
+                s.push_str(&format!(
+                    "  {}: {} ({} files, {})\n",
+                    o.description,
+                    o.path.display(),
+                    o.files,
+                    when(o.modified)
+                ));
+            }
+        }
+        let others = launcher_sources(dir);
+        if !others.is_empty() {
+            s.push_str("saves under another EmblemWeave data root:\n");
+            for f in others {
+                s.push_str(&format!(
+                    "  {}: {} ({} files, {})\n",
+                    f.source,
+                    f.path.display(),
+                    f.files,
+                    when(f.modified)
+                ));
+            }
+        }
+    }
+    let survey = survey_here(title_id);
+    if survey.saves.is_empty() {
+        s.push_str("emulator saves found: none\n");
+    } else {
+        s.push_str("emulator saves found:\n");
+        for f in survey.saves {
+            s.push_str(&format!(
+                "  {}: {} ({} files, {})\n",
+                f.source,
+                f.path.display(),
+                f.files,
+                when(f.modified)
+            ));
+        }
+    }
+    for path in survey.empty {
+        s.push_str(&format!("emulator folder with no save: {}\n", path.display()));
+    }
+    s
+}
+
+fn describe_account(root: &Path, indent: &str) -> String {
+    let account = account_dir(root);
+    let mut s = format!("{indent}account: {}\n", account.display());
+    match save_below(&account) {
+        Some(save) if save == account => {
+            let (files, modified) = summary(&save.join("000"));
+            s.push_str(&format!(
+                "{indent}save: {} files in 000 ({})\n",
+                files,
+                when(modified)
+            ));
+        }
+        Some(save) => {
+            let (files, _) = summary(&save.join("000"));
+            s.push_str(&format!(
+                "{indent}save: {files} files in 000, but nested at {}; the game opens the level above\n",
+                save.display()
+            ));
+        }
+        None => s.push_str(&format!("{indent}save: none (000 is missing or empty)\n")),
+    }
+    let meta = account.with_extension("meta");
+    if meta.is_file() {
+        let size = std::fs::metadata(&meta).map(|m| m.len()).unwrap_or(0);
+        s.push_str(&format!("{indent}meta: {size} bytes\n"));
+    } else {
+        s.push_str(&format!("{indent}meta: missing\n"));
+    }
+    s
+}
+
+fn when(t: Option<SystemTime>) -> String {
+    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| format!("{}s since epoch", d.as_secs()))
+        .unwrap_or_else(|| "time unknown".into())
 }
 
 /// A user-facing profile name that is also a safe directory name. Unlike the
@@ -1155,7 +1359,9 @@ pub fn load_empty_profile(
         return Err("this profile is not empty".into());
     }
     let target = account_dir(save_dir);
-    let backup = if target.is_dir() && summary(&target).0 > 0 {
+    // Back up only a save that is really there. A folder holding just the account's `.meta` is the empty save the
+    // game writes on first start; moving it aside would hide that metadata from the import below.
+    let backup = if target.is_dir() && has_save(&target) {
         let to = save_dir.join("backups").join(stamp);
         std::fs::create_dir_all(save_dir.join("backups"))
             .map_err(|e| format!("creating the backups folder: {e}"))?;
@@ -1223,7 +1429,7 @@ pub fn profiles(save_dir: &Path) -> Vec<Profile> {
 pub fn store_profile(save_dir: &Path, name: &str, stamp: &str) -> Result<usize, String> {
     let name = crate::mods::clean_name(name);
     let from = account_dir(save_dir);
-    if summary(&from).0 == 0 {
+    if !has_save(&from) {
         return Err("there is no save to keep yet".into());
     }
     let to = save_dir.join("profiles").join(&name);
@@ -1667,7 +1873,7 @@ mod tests {
             "a run left behind",
         );
         let found = launcher_sources_from(
-            &[("EmblemWeave (AppData)", appdata.clone())],
+            &[("EmblemWeave (AppData)".to_string(), appdata.clone())],
             &current,
         );
         assert_eq!(found.len(), 1);
@@ -1678,10 +1884,75 @@ mod tests {
 
         // The root in use is not offered as a source of itself.
         let found = launcher_sources_from(
-            &[("EmblemWeave (AppData)", current.clone())],
+            &[("EmblemWeave (AppData)".to_string(), current.clone())],
             &current,
         );
         assert!(found.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_remembered_engine_names_an_older_portable_install() {
+        let root = temp("remembered-engine");
+        let install = root.join("EmblemWeave-0.1.41");
+        let checkout = install.join("engine").join("fefw-recomp");
+        let save = install.join("data").join("save");
+        std::fs::create_dir_all(&checkout).unwrap();
+        assert_eq!(remembered_install_root(&checkout.display().to_string()), None);
+        std::fs::create_dir_all(&save).unwrap();
+        assert_eq!(
+            remembered_install_root(&checkout.display().to_string()),
+            Some(save)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_save_inside_the_current_root_is_not_a_source_for_itself() {
+        let root = temp("same-root-source");
+        let save = root.join("save");
+        write(
+            &save.join("account").join("ANOTHERUSER").join("000/Auto"),
+            "a save the game does not read",
+        );
+        let found = launcher_sources_from(
+            &[("This root".to_string(), save.clone())],
+            &save,
+        );
+        assert!(found.is_empty(), "{found:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_meta_only_account_folder_is_not_a_save() {
+        let root = temp("meta-only");
+        let save = root.join("save");
+        let account = account_dir(&save);
+        std::fs::create_dir_all(account.join("000")).unwrap();
+        write(&account.with_extension("meta"), "size=67108864\n");
+
+        assert!(!has_save(&account), "metadata is not a playthrough");
+        assert!(find_orphan_saves(&save).is_empty());
+        assert!(
+            store_profile(&save, "Nothing", "1").is_err(),
+            "an empty save cannot be kept as a profile"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_save_nested_below_the_account_folder_is_reported() {
+        let root = temp("nested-account");
+        let save = root.join("save");
+        let target = account_dir(&save);
+        let deeper = target.join(DEFAULT_USER);
+        write(&deeper.join("000/Auto"), "a real save");
+
+        assert!(!has_save(&target), "the game opens the level above");
+        let found = find_orphan_saves(&save);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path, deeper);
+        assert_eq!(found[0].files, 1);
         let _ = std::fs::remove_dir_all(root);
     }
 
