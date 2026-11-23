@@ -203,6 +203,10 @@ void cond_wait(Cond* c, Mutex* m) {
     SleepConditionVariableSRW(&c->cv, &m->lock, INFINITE, 0);
 }
 
+bool cond_wait_ms(Cond* c, Mutex* m, uint32_t ms) {
+    return SleepConditionVariableSRW(&c->cv, &m->lock, ms, 0) != 0;
+}
+
 void cond_signal(Cond* c) {
     WakeConditionVariable(&c->cv);
 }

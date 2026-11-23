@@ -142,6 +142,7 @@ void mutex_unlock(Mutex* m);
 Cond* cond_create();
 void cond_destroy(Cond* c);
 void cond_wait(Cond* c, Mutex* m);   // releases `m` while waiting and takes it again before returning
+bool cond_wait_ms(Cond* c, Mutex* m, uint32_t ms);   // as cond_wait, but returns false when `ms` runs out
 void cond_signal(Cond* c);
 void cond_broadcast(Cond* c);
 

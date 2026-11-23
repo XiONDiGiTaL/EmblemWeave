@@ -216,6 +216,18 @@ void cond_wait(Cond* c, Mutex* m) {
     pthread_cond_wait(&c->c, &m->m);
 }
 
+bool cond_wait_ms(Cond* c, Mutex* m, uint32_t ms) {
+    timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += static_cast<time_t>(ms / 1000);
+    ts.tv_nsec += static_cast<long>(ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    return pthread_cond_timedwait(&c->c, &m->m, &ts) == 0;
+}
+
 void cond_signal(Cond* c) {
     pthread_cond_signal(&c->c);
 }

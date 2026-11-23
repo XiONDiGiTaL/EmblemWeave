@@ -438,28 +438,9 @@ retry:
                 NXLOG_E(kTag, "fallback: protect() failed for ImportFreeze page %llx", static_cast<unsigned long long>(addr));
                 // protect failed; fall through to next fallback
             }
-            // Broad fallback: if the page is committed memory (not a guard page) and was originally
-            // read-write (allocation_protect == PAGE_READWRITE), the Vulkan driver may have left it
-            // as PAGE_NOACCESS after a pool import. Restore it to readable.
-            // This catches cases where ImportFreeze has already completed but the driver didn't restore the page.
-            nxrt::platform::PageState state;
-            nxrt::platform::PageProtect protect_val;
-            uint64_t region_base, region_size;
-            if (nxrt::platform::page_query(addr, &state, &protect_val, &region_base, &region_size)) {
-                if (state == nxrt::platform::PageState::Commit) {
-                    // Check if the allocation protection was read-write (common for pool import pages)
-                    // On Windows, we'd need VirtualQuery for AllocationProtect; on POSIX, mprotect history.
-                    // For now, assume any committed PAGE_NOACCESS page in the guest address space
-                    // that isn't a guard page should be readable.
-                    NXLOG_W(kTag, "fallback: making committed PAGE_NOACCESS page %llx readable (was protection %x, read fault kind=%d, broad fallback)",
-                            static_cast<unsigned long long>(addr), pr, kind);
-                    if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                                nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
-                        return true;
-                    NXLOG_E(kTag, "fallback: protect() failed for committed PAGE_NOACCESS page %llx", static_cast<unsigned long long>(addr));
-                    // protect failed; fall through
-                }
-            }
+            // No broad fallback here: a committed PAGE_NOACCESS page can be a guard page, and
+            // unprotecting it would let the guest run past a stack guard or corrupt the write
+            // tracker's bookkeeping. The narrower cases above name the page that is restored.
         }
         return false;  // not handled
     }

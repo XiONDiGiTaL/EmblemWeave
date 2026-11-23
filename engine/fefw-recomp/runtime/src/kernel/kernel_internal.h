@@ -20,7 +20,7 @@ struct KernelLock {
 };
 extern KernelLock g_k;
 
-// Initialize the sharded kernel locks (called once at startup).
+// Initialize the kernel lock (called once at startup; g_k creates its own mutex).
 void init_kernel_locks();
 
 // Initialize the thread list lock (called once at startup).
