@@ -375,10 +375,29 @@ std::string romfs_dir() { return config_get_str("fs", "romfs", "game/romfs"); }
 
 std::string save_dir() {
     std::string d = config_get_str("fs", "save_dir", "");
-    if (!d.empty()) return d;
+    if (!d.empty()) {
+        // Ensure the configured save directory exists; log if we create it.
+        std::error_code ec;
+        if (!std::filesystem::exists(std::filesystem::u8path(d), ec)) {
+            std::filesystem::create_directories(std::filesystem::u8path(d), ec);
+            if (!ec) {
+                NXLOG_I("fs", "save directory created at '%s'", d.c_str());
+            }
+        }
+        return d;
+    }
     const char* appdata = std::getenv("APPDATA");
     const char* folder = game::info().save_folder;
-    return std::string(appdata && *appdata ? appdata : ".") + "\\" + (folder && *folder ? folder : "nxrt") + "\\save";
+    std::string fallback = std::string(appdata && *appdata ? appdata : ".") + "\\" + (folder && *folder ? folder : "nxrt") + "\\save";
+    // Ensure the fallback save directory exists; log if we create it.
+    std::error_code ec;
+    if (!std::filesystem::exists(std::filesystem::u8path(fallback), ec)) {
+        std::filesystem::create_directories(std::filesystem::u8path(fallback), ec);
+        if (!ec) {
+            NXLOG_I("fs", "save directory created at '%s' (fallback)", fallback.c_str());
+        }
+    }
+    return fallback;
 }
 
 std::string mods_dir() { return config_get_str("fs", "mods", "mods"); }

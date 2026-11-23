@@ -47,15 +47,27 @@ pub struct Found {
     pub modified: Option<std::time::SystemTime>,
 }
 
-/// Saves for `title_id` under every known emulator in `appdata`.
+/// What the emulator roots hold for the title: the saves that can be imported,
+/// and the game's own folders that exist but hold no files.
 ///
-/// The save tree changed slightly between yuzu forks: most use
-/// `save/0000000000000000/<profile>/<title>`, Eden can use another save id,
-/// and a portable or migrated install can omit the profile level. Scanning
-/// the save directory rather than assuming one profile id finds all of them.
-pub fn find(appdata: &Path, title_id: u64) -> Vec<Found> {
+/// An emulator creates the title folder before a save is written, and a profile
+/// the player never used stays empty. Reporting those folders separately is the
+/// difference between "no save was found anywhere" and "the folder is there, but
+/// there is nothing in it to import". Empty folders are never offered as a
+/// source: `import` refuses them, so the page can only explain them.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Survey {
+    pub saves: Vec<Found>,
+    pub empty: Vec<PathBuf>,
+}
+
+/// Every yuzu-family save root under `appdata`, split into importable saves and
+/// empty folders. The layout is `nand/user/save/<save id>/[<profile>/]<title>`:
+/// most forks use `save/0000000000000000/<profile>/<title>`, Eden can use another
+/// save id, and a portable or migrated install can omit the profile level.
+pub fn survey(appdata: &Path, title_id: u64) -> Survey {
     let name = format!("{title_id:016X}");
-    let mut out = Vec::new();
+    let mut out = Survey::default();
     for emu in EMULATOR_DIRS {
         let save_root = appdata.join(emu).join("nand").join("user").join("save");
         let Ok(ids) = std::fs::read_dir(&save_root) else {
@@ -65,48 +77,56 @@ pub fn find(appdata: &Path, title_id: u64) -> Vec<Found> {
             if !id.path().is_dir() {
                 continue;
             }
-            push_found(&mut out, emu, &id.path().join(&name));
+            push_candidate(&mut out, emu, &id.path().join(&name));
             let Ok(profiles) = std::fs::read_dir(id.path()) else {
                 continue;
             };
             for profile in profiles.flatten() {
                 if profile.path().is_dir() {
-                    push_found(&mut out, emu, &profile.path().join(&name));
+                    push_candidate(&mut out, emu, &profile.path().join(&name));
                 }
             }
         }
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
-    out.dedup_by(|a, b| a.path == b.path);
+    out.saves.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.saves.dedup_by(|a, b| a.path == b.path);
+    out.empty.sort();
+    out.empty.dedup();
     out
 }
 
-fn push_found(out: &mut Vec<Found>, source: &str, path: &Path) {
+fn push_candidate(out: &mut Survey, source: &str, path: &Path) {
     if !path.is_dir() {
         return;
     }
     let (files, modified) = summary(path);
     if files > 0 {
-        out.push(Found {
+        out.saves.push(Found {
             source: source.to_string(),
             path: path.to_path_buf(),
             files,
             modified,
         });
+    } else {
+        out.empty.push(path.to_path_buf());
     }
 }
 
-/// Saves under the current user's `%APPDATA%` and `%LOCALAPPDATA%`.
+/// The same survey under the current user's `%APPDATA%` and `%LOCALAPPDATA%`.
 /// The second root covers portable-style forks that keep their NAND there.
-pub fn find_here(title_id: u64) -> Vec<Found> {
-    let mut out = Vec::new();
+pub fn survey_here(title_id: u64) -> Survey {
+    let mut out = Survey::default();
     for key in ["APPDATA", "LOCALAPPDATA"] {
         if let Some(root) = std::env::var_os(key) {
-            out.extend(find(Path::new(&root), title_id));
+            let one = survey(Path::new(&root), title_id);
+            out.saves.extend(one.saves);
+            out.empty.extend(one.empty);
         }
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
-    out.dedup_by(|a, b| a.path == b.path);
+    out.saves.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.saves.dedup_by(|a, b| a.path == b.path);
+    out.empty.sort();
+    out.empty.dedup();
     out
 }
 
@@ -560,6 +580,96 @@ pub fn export(save_dir: &Path, dest: &Path, title_id: u64) -> Result<(PathBuf, u
         ));
     }
     copy_tree(&from, &to).map(|n| (to, n))
+}
+
+/// An orphan save found in the save directory that the game doesn't read.
+/// These can exist in profiles/ or in non-DEFAULT_USER account folders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanSave {
+    /// Human-readable description of where this save was found.
+    pub description: String,
+    /// The path to the save folder (the one containing the 000 subfolder).
+    pub path: PathBuf,
+    /// Number of save files found.
+    pub files: usize,
+    /// Newest modification time of any file in the save.
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Find all orphan saves in the save directory.
+/// These are saves in profiles/ or in account/<other user>/ that the game doesn't read.
+pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
+    let mut out = Vec::new();
+    let target = account_dir(save_dir);
+
+    // Check profiles/ folder
+    let profiles = save_dir.join("profiles");
+    if profiles.is_dir() {
+        for e in std::fs::read_dir(&profiles).into_iter().flatten().flatten() {
+            let path = e.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Check if this profile has a 000 folder with files
+            let slot = path.join("000");
+            if slot.is_dir() {
+                let (files, modified) = summary(&slot);
+                if files > 0 && path != target {
+                    out.push(OrphanSave {
+                        description: format!("Profile \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
+                        path: path.clone(),
+                        files,
+                        modified,
+                    });
+                }
+            }
+        }
+    }
+
+    // Check account/ folder for non-DEFAULT_USER saves
+    let account = save_dir.join("account");
+    if account.is_dir() {
+        for e in std::fs::read_dir(&account).into_iter().flatten().flatten() {
+            let path = e.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip the DEFAULT_USER folder (the one the game reads)
+            if path == target {
+                continue;
+            }
+            // Check if this account folder has a 000 with files
+            let slot = path.join("000");
+            if slot.is_dir() {
+                let (files, modified) = summary(&slot);
+                if files > 0 {
+                    out.push(OrphanSave {
+                        description: format!("Account folder \"{}\"", path.file_name().unwrap_or_default().to_string_lossy()),
+                        path: path.clone(),
+                        files,
+                        modified,
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort by modification time, newest first
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
+}
+
+/// Adopt an orphan save into the game's account save.
+/// This moves the current save to backups/ and copies the orphan save into place.
+/// Returns the import result with backup info.
+pub fn adopt_orphan_save(
+    orphan: &OrphanSave,
+    save_dir: &Path,
+    title_id: u64,
+    stamp: &str,
+) -> Result<Imported, String> {
+    // Use the existing import logic, which handles backup automatically
+    import(&orphan.path, save_dir, title_id, stamp)
 }
 
 /// A named copy of the account save, kept in `<save folder>/profiles/<name>`.
@@ -1468,6 +1578,18 @@ mod tests {
     }
 
     #[test]
+    fn reports_an_empty_emulator_folder_without_offering_it() {
+        let root = temp("find-empty");
+        let empty = root.join(
+            "yuzu/nand/user/save/0000000000000000/00000000000000000000000000000000/04007EF01F8AE000",
+        );
+        std::fs::create_dir_all(&empty).unwrap();
+        let survey = survey(&root, FALLBACK_TITLE_ID);
+        assert!(survey.saves.is_empty());
+        assert_eq!(survey.empty, vec![empty]);
+    }
+
+    #[test]
     fn finds_emulator_saves_by_title() {
         let root = temp("find");
         let title = root.join("yuzu/nand/user/save/0000000000000000/5A3C/04007EF01F8AE000");
@@ -1476,7 +1598,7 @@ mod tests {
             &root.join("yuzu/nand/user/save/0000000000000000/5A3C/0100000000000000/x"),
             "other game",
         );
-        let found = find(&root, FALLBACK_TITLE_ID);
+        let found = survey(&root, FALLBACK_TITLE_ID).saves;
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].source.as_str(), found[0].files), ("yuzu", 1));
         assert_eq!(found[0].path, title);
@@ -1492,7 +1614,7 @@ mod tests {
         write(&lichii.join("000/Auto"), "l");
         write(&fritchii.join("000/Auto"), "f");
         write(&eden.join("000/Auto"), "e");
-        let found = find(&root, FALLBACK_TITLE_ID);
+        let found = survey(&root, FALLBACK_TITLE_ID).saves;
         let sources: Vec<&str> = found.iter().map(|f| f.source.as_str()).collect();
         assert_eq!(found.len(), 3, "{sources:?}");
         assert!(sources.contains(&"lichii"));
