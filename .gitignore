@@ -35,3 +35,22 @@ shots/*.jpg
 shots/**/*.png
 shots/**/*.jpg
 shots/*.b64
+
+# Local diagnostics, captures and build scratch: none of this ships.
+*.log
+*.log.prev
+/fefw_fatal.txt
+/controls.ini
+/shader_order.txt
+/commit_message.txt
+/shot_*.png
+/build_test.cmd
+/tt_test_out/
+/.inspect/
+/extract_exefs.py
+/extract_romfs.py
+/parse_nup.py
+/engine/fefw-recomp/runtime/build_new/
+/engine/fefw-recomp/runtime/test_dav1d/
+/engine/fefw-recomp/runtime/src/nxrt_pch.h
+/engine/fefw-recomp/runtime/src/gfx/nxrt_gfx_pch.h
