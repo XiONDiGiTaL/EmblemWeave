@@ -71,10 +71,26 @@ was 1821 lines / 321,441 bytes, with the region lines down from 566 to 2. The
 line rate fell from 13.7/s to 9.1/s. Scenes differ, so this is a log-volume
 measurement, not a frame-time benchmark.
 
-The game-thread system-call wait median was 1.10-1.12 ms in both logs; the p99
-sample moved from 2.10 ms to 2.91 ms in one non-controlled run. No claim of a
-frame-time improvement is made; the change removes a polling sleep and makes the
-wakeup immediate, and no 60 fps regression was observed.
+Controlled A/B (same startup scene, mod enabled, 64 s each):
+
+| Metric | old (pre-logsync) | new (cond_wait) |
+| --- | --- | --- |
+| fps | 60 | 60 |
+| region announcement pairs | 179 | 1 |
+| log lines | 1,391 | 1,097 |
+| log bytes | 199,075 | 178,681 |
+| game wait p50 | 1.14 ms | 1.19 ms |
+| game wait p95 | 1.58 ms | 1.61 ms |
+| game wait p99 | 2.19 ms | 2.10 ms |
+| game wait max | 3.55 ms | 5.92 ms |
+| process CPU | 89.4 s | 84.5 s |
+| crash / watchdog | none | none |
+
+The log change is measured on the same scene: 21% fewer lines and 10% fewer
+bytes. The wait numbers are one 64 s sample each: p99 improved by 0.09 ms while
+max worsened by 2.37 ms and CPU was 4.9 s lower. No material frame-time
+improvement is claimed; both runs held 60 fps. A longer multi-scene A/B is still
+needed before publishing a wait-latency figure.
 
 ## Deployment
 
@@ -97,7 +113,7 @@ earlier 06:19 crash report is preserved as
 
 - POSIX write tracking and the 48 s / 200 s runs are Windows-only evidence; a
   Linux run is still needed for the POSIX fix.
-- The timed-wait change should be A/B tested on one fixed scene before any
-  performance claim is published.
+- The 64 s startup A/B is done (above) and shows no material frame-time
+  change; a longer multi-scene A/B is still needed before a performance claim.
 - FCC's controller-artwork and multi-backup changes remain uncommitted in the
   working tree.
