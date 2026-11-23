@@ -1,0 +1,30 @@
+name: Launcher Rust tests
+
+# The launcher crate is Windows-only (egui/windows-sys plus the winresource
+# build script), so its test suite runs on windows-latest. The workspace
+# crates it depends on are pure Rust and need no extra setup.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-rust-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test -p emblemweave
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run the launcher test suite
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test -p emblemweave --locked

@@ -1,0 +1,36 @@
+# Cargo configuration for EmblemWeave
+# Enables sccache for compilation caching (like the C++ build)
+# Set SCCACHE_DIR environment variable to control cache location
+
+[build]
+# Use sccache as compiler wrapper when available
+# On Windows with clang-cl, we use the same sccache instance as the C++ build
+# rustc-wrapper = "sccache"  # Disabled for compilation without sccache installed
+
+[target.x86_64-pc-windows-msvc]
+# Linker optimizations - use MSVC link.exe (lld-link not available)
+# linker = "lld-link"
+rustflags = [
+    "-C", "link-arg=-OPT:REF",
+    "-C", "link-arg=-OPT:ICF",
+    "-C", "link-arg=-DEBUG:FASTLINK",
+]
+
+# Incremental compilation settings
+[profile.dev]
+incremental = true
+
+[profile.release]
+incremental = false
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Strip symbols in release for smaller binaries
+strip = "debuginfo"
+
+# sccache configuration via environment variables:
+# SCCACHE_DIR - cache directory (default: ~/.cache/sccache)
+# SCCACHE_CACHE_SIZE - max cache size (e.g., "4G")
+# SCCACHE_IDLE_TIMEOUT - seconds before server shutdown (default: 600)
+# RUSTC_WRAPPER - alternative way to set wrapper (overridden by build.rustc-wrapper)
