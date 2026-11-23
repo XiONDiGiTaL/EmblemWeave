@@ -6,8 +6,6 @@
 // If main's waits mostly see every worker of a pool busy, the pool is saturated and more workers would shorten them; if they see one or
 // two, main waits on a chain of jobs and more workers cannot help.
 // The guest threads also take the game's names (Basic_Worker1, ...) in the log while this is on.
-#include <windows.h>
-
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -22,6 +20,7 @@
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/diag.h"
+#include "nxrt/platform.h"
 
 namespace nxrt::kernel {
 
@@ -34,15 +33,13 @@ const char* const kGroupName[kGroups] = {"-", "main", "Basic", "GFX", "MOCull"};
 std::atomic<int> g_members[kGroups];
 std::atomic<int> g_blocked[kGroups];
 std::atomic<int> g_main_kind{-1};          // kind main is blocked in, -1 = running
-int64_t g_main_t0 = 0;                     // g_k: when main blocked (QPC)
+int64_t g_main_t0 = 0;                     // when main blocked (platform clock ticks)
 std::atomic<uint64_t> g_k_contended{0}, g_k_wait_ticks{0};   // g_k acquisitions that found it held, and the time they waited
 struct Waker { uint64_t n[3] = {}, ticks[3] = {}; };
 std::unordered_map<std::string, Waker> g_wakers;   // g_k: who woke main, per kind, and how long main had been blocked
 
-int64_t qpc() {
-    LARGE_INTEGER c;
-    QueryPerformanceCounter(&c);
-    return c.QuadPart;
+int64_t now_ticks() {
+    return static_cast<int64_t>(platform::clock_ticks());
 }
 
 struct Hist {
@@ -53,22 +50,13 @@ struct Hist {
 int64_t g_period_s = 0;
 
 void sampler() {
-    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    platform::thread_set_priority(platform::thread_self(), platform::ThreadPriority::Highest);
     Hist h[4];   // main blocked on an address, on a mutex, on a condition variable; main running
     uint64_t total = 0;
-    LARGE_INTEGER f, t0, now;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&t0);
+    const uint64_t freq = platform::clock_hz();
+    int64_t t0 = now_ticks();
     for (;;) {
-        if (timer) {
-            LARGE_INTEGER due;
-            due.QuadPart = -2500;   // 250 us
-            SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
-            WaitForSingleObject(timer, INFINITE);
-        } else {
-            Sleep(1);
-        }
+        platform::sleep_ns(250000);  // 250 us
         if (g_members[1].load(std::memory_order_relaxed) == 0) continue;   // main not tagged yet
         const int k = g_main_kind.load(std::memory_order_relaxed);
         Hist& x = h[k < 0 ? 3 : (k > 2 ? 0 : k)];
@@ -79,8 +67,8 @@ void sampler() {
             r = r < 0 ? 0 : (r > 8 ? 8 : r);
             x.run[g][r]++;
         }
-        QueryPerformanceCounter(&now);
-        if (now.QuadPart - t0.QuadPart < g_period_s * f.QuadPart) continue;
+        int64_t now = now_ticks();
+        if (now - t0 < g_period_s * static_cast<int64_t>(freq)) continue;
         t0 = now;
         static const char* const kWhat[4] = {"main waits on an address", "main waits on a mutex", "main waits on a cv", "main runs"};
         std::string out;
@@ -111,9 +99,9 @@ void sampler() {
         NXLOG_I("kernel", "%s", out.c_str());
         {   // who main waited for
             std::unordered_map<std::string, Waker> w;
-            AcquireSRWLockExclusive(&detail::g_k);
+            detail::g_k.lock();
             w.swap(g_wakers);
-            ReleaseSRWLockExclusive(&detail::g_k);
+            detail::g_k.unlock();
             std::vector<std::pair<std::string, Waker>> v(w.begin(), w.end());
             auto tot = [](const Waker& x) { return x.ticks[0] + x.ticks[1] + x.ticks[2]; };
             std::sort(v.begin(), v.end(), [&](const auto& a, const auto& b) { return tot(a.second) > tot(b.second); });
@@ -121,14 +109,14 @@ void sampler() {
             for (size_t i = 0; i < v.size() && i < 10; i++) {
                 const Waker& x = v[i].second;
                 std::snprintf(b, sizeof b, "%s %s: address %llu %.1f ms, mutex %llu %.1f ms, cv %llu %.1f ms", i ? ";" : "", v[i].first.c_str(),
-                              (unsigned long long)x.n[0], x.ticks[0] * 1000.0 / f.QuadPart, (unsigned long long)x.n[1], x.ticks[1] * 1000.0 / f.QuadPart,
-                              (unsigned long long)x.n[2], x.ticks[2] * 1000.0 / f.QuadPart);
+                              (unsigned long long)x.n[0], x.ticks[0] * 1000.0 / freq, (unsigned long long)x.n[1], x.ticks[1] * 1000.0 / freq,
+                              (unsigned long long)x.n[2], x.ticks[2] * 1000.0 / freq);
                 line += b;
             }
             NXLOG_I("kernel", "main woken in %llds by (blocked time ended by each waker):%s", static_cast<long long>(g_period_s), line.c_str());
             const uint64_t nc = g_k_contended.exchange(0), wt = g_k_wait_ticks.exchange(0);
             NXLOG_I("kernel", "kernel lock (g_k) in %llds: %llu contended acquisitions, %.1f ms waiting in all (%.1f us each)", static_cast<long long>(g_period_s),
-                    (unsigned long long)nc, wt * 1000.0 / f.QuadPart, nc ? wt * 1e6 / f.QuadPart / nc : 0.0);
+                    (unsigned long long)nc, wt * 1000.0 / freq, nc ? wt * 1e6 / freq / nc : 0.0);
         }
         for (Hist& y : h) y = Hist{};
         total = 0;
@@ -147,7 +135,7 @@ bool occupancy_wanted() {
 
 void occ_block(const KThread& t, int kind) {
     if (t.occ_group <= 0) return;
-    if (t.occ_group == 1) g_main_kind.store(kind, std::memory_order_relaxed), g_main_t0 = qpc();
+    if (t.occ_group == 1) g_main_kind.store(kind, std::memory_order_relaxed), g_main_t0 = now_ticks();
     else g_blocked[t.occ_group].fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -170,10 +158,11 @@ void occ_name(KThread& t, const char* game_name) {
 }
 
 void occ_lock_contended() {
-    const int64_t t0 = qpc();
-    AcquireSRWLockExclusive(&detail::g_k);
+    const int64_t t0 = now_ticks();
+    detail::g_k.lock();
     g_k_contended.fetch_add(1, std::memory_order_relaxed);
-    g_k_wait_ticks.fetch_add(static_cast<uint64_t>(qpc() - t0), std::memory_order_relaxed);
+    g_k_wait_ticks.fetch_add(static_cast<uint64_t>(now_ticks() - t0), std::memory_order_relaxed);
+    detail::g_k.unlock();
 }
 
 void occ_main_woken() {
@@ -183,7 +172,7 @@ void occ_main_woken() {
     const char* name = w ? w->name.c_str() : log_thread_name();
     Waker& x = g_wakers[name && *name ? name : "host"];
     x.n[k]++;
-    x.ticks[k] += static_cast<uint64_t>(qpc() - g_main_t0);
+    x.ticks[k] += static_cast<uint64_t>(now_ticks() - g_main_t0);
 }
 
 void install_occupancy() {

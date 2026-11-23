@@ -19,7 +19,11 @@ thread_local size_t t_index = ~size_t(0);
 constexpr size_t kRing = 32;
 std::mutex g_files_lock;
 std::string g_files[kRing];
+uint32_t g_file_tids[kRing] = {};
 size_t g_files_next = 0, g_files_count = 0;
+
+std::mutex g_zstd_lock;
+std::string g_zstd_error;
 
 }  // namespace
 
@@ -103,9 +107,11 @@ void diag_threads_release(std::vector<ThreadRecord>& recs) {
 
 void diag_note_file(const char* what, const char* path) {
     char buf[600];
-    snprintf(buf, sizeof buf, "[%lu] %s %s", GetCurrentThreadId(), what ? what : "?", path ? path : "(null)");
+    const uint32_t tid = GetCurrentThreadId();
+    snprintf(buf, sizeof buf, "[%lu] %s %s", static_cast<unsigned long>(tid), what ? what : "?", path ? path : "(null)");
     std::lock_guard<std::mutex> lk(g_files_lock);
     g_files[g_files_next] = buf;
+    g_file_tids[g_files_next] = tid;
     g_files_next = (g_files_next + 1) % kRing;
     if (g_files_count < kRing) g_files_count++;
 }
@@ -118,9 +124,31 @@ std::vector<std::string> diag_recent_files() {
     return out;
 }
 
+std::string diag_last_file() {
+    std::lock_guard<std::mutex> lk(g_files_lock);
+    if (!g_files_count) return {};
+    const uint32_t me = GetCurrentThreadId();
+    for (size_t i = 0; i < g_files_count; i++) {
+        const size_t k = (g_files_next + kRing - 1 - i) % kRing;
+        if (g_file_tids[k] == me) return g_files[k];
+    }
+    return g_files[(g_files_next + kRing - 1) % kRing];
+}
+
 void diag_clear_recent_files() {
     std::lock_guard<std::mutex> lk(g_files_lock);
     g_files_next = g_files_count = 0;
+    for (uint32_t& tid : g_file_tids) tid = 0;
+}
+
+void diag_set_zstd_error(const char* text) {
+    std::lock_guard<std::mutex> lk(g_zstd_lock);
+    g_zstd_error = text ? text : "";
+}
+
+std::string diag_last_zstd_error() {
+    std::lock_guard<std::mutex> lk(g_zstd_lock);
+    return g_zstd_error;
 }
 
 }  // namespace nxrt

@@ -84,7 +84,7 @@ NXTEST(boosts_a_lowest_band_thread_that_other_programs_starve) {
     Sleep(200);
     REQUIRE(k::thread_start(h) == k::kOk);
     auto t = k::handle_as<k::KThread>(h);
-    HANDLE host = static_cast<HANDLE>(t->host_handle);
+    HANDLE host = static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread));
     Sleep(3000);
     const uint64_t without = cpu_ms(host);               // no guard yet: the hogs outrank the lowest band
     const uint64_t boosts0 = k::starvation_boosts();

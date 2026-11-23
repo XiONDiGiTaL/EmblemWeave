@@ -92,14 +92,14 @@ struct CpuSnap {
     std::unordered_map<uint64_t, std::wstring> names;         // pid -> image name
 };
 
-const char* band_name(int host_prio) {
+const char* band_name(nxrt::platform::ThreadPriority host_prio) {
     switch (host_prio) {
-        case THREAD_PRIORITY_TIME_CRITICAL: return "time critical";
-        case THREAD_PRIORITY_HIGHEST: return "highest";
-        case THREAD_PRIORITY_ABOVE_NORMAL: return "above normal";
-        case THREAD_PRIORITY_NORMAL: return "normal";
-        case THREAD_PRIORITY_BELOW_NORMAL: return "below normal";
-        case THREAD_PRIORITY_LOWEST: return "lowest";
+        case nxrt::platform::ThreadPriority::TimeCritical: return "time critical";
+        case nxrt::platform::ThreadPriority::Highest: return "highest";
+        case nxrt::platform::ThreadPriority::AboveNormal: return "above normal";
+        case nxrt::platform::ThreadPriority::Normal: return "normal";
+        case nxrt::platform::ThreadPriority::BelowNormal: return "below normal";
+        case nxrt::platform::ThreadPriority::Lowest: return "lowest";
         default: return "?";
     }
 }
@@ -110,7 +110,8 @@ const char* band_name(int host_prio) {
 std::string placement(const KThread& t) {
     PROCESSOR_NUMBER pn{};
     char ideal[24] = "?";
-    if (GetThreadIdealProcessorEx(static_cast<HANDLE>(t.host_handle), &pn)) std::snprintf(ideal, sizeof ideal, "%u:%u", pn.Group, pn.Number);
+    void* h = t.host_thread ? nxrt::platform::thread_native_handle(t.host_thread) : nullptr;
+    if (h && GetThreadIdealProcessorEx(static_cast<HANDLE>(h), &pn)) std::snprintf(ideal, sizeof ideal, "%u:%u", pn.Group, pn.Number);
     char buf[128];
     std::snprintf(buf, sizeof buf, "host affinity 0x%llx, ideal processor %s, last ran on processor %d (at its last SVC)",
                   static_cast<unsigned long long>(t.host_affinity.load(std::memory_order_relaxed)), ideal, t.last_proc.load(std::memory_order_relaxed));
@@ -232,7 +233,7 @@ void loop(Guard* g, int poll_ms, int need_polls, bool lean, int idle_poll_ms) {
         std::unordered_map<uint32_t, const ThreadRec*> by_tid;
         for (ULONG i = 0; i < nthreads; i++) by_tid[static_cast<uint32_t>(reinterpret_cast<uintptr_t>(mine[i].unique_thread))] = &mine[i];
         for (const std::shared_ptr<KThread>& t : threads()) {
-            if (!t->started || t->exited || !t->host_handle || !t->host_tid) continue;
+            if (!t->started || t->exited || !t->host_thread || !t->host_tid) continue;
             auto it = by_tid.find(t->host_tid);
             Seen& s = seen[t->host_tid];
             if (it == by_tid.end()) {
@@ -245,7 +246,7 @@ void loop(Guard* g, int poll_ms, int need_polls, bool lean, int idle_poll_ms) {
             else s.ready_polls = ready ? 1 : 0;
             if (s.ready_polls >= 1 || s.boosted) watching = true;   // ready now: poll again soon
             s.switches = r.context_switches;
-            HANDLE h = static_cast<HANDLE>(t->host_handle);
+            void* h = t->host_thread ? nxrt::platform::thread_native_handle(t->host_thread) : nullptr;
             if (s.boosted) {                                    // boosted: keep it for boost_polls polls, then back to its band
                 if (++s.boost_polls >= boost_polls) {
                     sched_apply(*t);                            // its band, and under strict its own processor again

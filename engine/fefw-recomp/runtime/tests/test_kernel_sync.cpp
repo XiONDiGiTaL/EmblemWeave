@@ -195,10 +195,12 @@ void restore_priority() {
 // Every test starts and ends here: no thread, waiter or handle survives from the previous test.
 void begin() {
     raise_priority();
+    nxrt::svc_init();
+    nxrt::kernel::init_kernel_locks();
+    nxrt::kernel::init_thread_list_lock();
     ks::kernel_reset();
     g_bodies.clear();
     nxrt::fn_clear();
-    nxrt::svc_init();
     nxrt::mem::shutdown();
     nxrt::mem::init();
     nxrt::fn_register(kEntryAddr, guest_entry);

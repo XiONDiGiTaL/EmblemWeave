@@ -274,6 +274,14 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
     if (files.empty()) out += "  (none)\n";
     for (const auto& f : files) appendf(out, "  %s\n", f.c_str());
 
+    // The last native zstd failure: its note carries the newest recent-file entry for the decoding thread (or the newest overall
+    // when that thread has none; normally the asset whose decode failed) and the error, before the game copied the code as a
+    // length (#77).
+    const std::string zstd = diag_last_zstd_error();
+    out += "last zstd error: ";
+    out += zstd.empty() ? "(none)" : zstd;
+    out += "\n";
+
     // The last 30 s of frame times: what the game was doing before it went wrong.
     out += frame_times_summary(30.0);
     return out;

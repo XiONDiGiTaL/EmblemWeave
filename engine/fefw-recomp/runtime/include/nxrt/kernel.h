@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// A small Horizon kernel: result codes, kernel objects and the handle table, guest threads (one Win32 thread per guest thread,
+// A small Horizon kernel: result codes, kernel objects and the handle table, guest threads (one host thread per guest thread,
 // console core model), and the 19.2 MHz system tick. The SVC dispatcher lives in svc.h, IPC sessions in ipc.h.
 // Pattern from SuperMarioWonderRecomp runtime/src/kernel.cpp + kernel_state.h (MIT) and smo-recomp runtime/os/os_threads.c (GPL-3.0).
 #pragma once
@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "nxrt/abi.h"
+#include "nxrt/platform.h"
 
 namespace nxrt::kernel {
 
@@ -97,7 +98,7 @@ struct KThread : KObject {
     int prio = 44;                      // HOS priority 0 (highest) .. 63; applications use 28..59 (nn::os 0..31 = prio - 28)
     int ideal_core = 0;                 // console core 0..2 the thread prefers (-1 none)
     uint64_t core_mask = 1;             // console cores the thread may run on (bit n = core n)
-    void* host_handle = nullptr;        // Win32 thread handle (owned by the thread object)
+    platform::Thread* host_thread = nullptr;  // platform thread handle (owned by the thread object)
     uint32_t host_tid = 0;
     bool started = false, cancel_sync = false;
     std::atomic<bool> exited{false};    // written under the kernel lock (thread_mark_exited), read under the thread-list lock and elsewhere
@@ -110,13 +111,13 @@ struct KThread : KObject {
     uint32_t wait_result = 0;
     uint64_t wait_mutex = 0, wait_key = 0, wait_addr = 0;
     uint32_t wait_tag = 0;
-    void* cv_storage[1] = {nullptr};    // CONDITION_VARIABLE is pointer sized: this thread's own wake-up (kernel_sync.cpp)
+    platform::Cond* cv = nullptr;       // this thread's own wake-up (kernel_sync.cpp)
     std::weak_ptr<KThread> self;
     // [kernel] spin_threads / lock_spin_threads (kernel_sync.cpp): this thread spins on its wake flag before it sleeps / polls a held mutex
     // word before it queues. Set when the game names the thread (main: when it is adopted). Read by the thread itself.
     bool spin_ok = false, lock_spin_ok = false;
     char game_name[32] = {};            // the name nn::os::SetThreadName gave it (thread_diag.cpp), written under the kernel lock; empty until then
-    ~KThread() override;                // closes host_handle
+    ~KThread() override;                // closes host_thread
     ObjType type() const override { return ObjType::Thread; }
     bool signaled() const override { return exited; }
 };
@@ -163,7 +164,7 @@ struct SchedInfo {
     uint64_t reserved = 0;               // processors left out of `pool` by render_place = reserve (render_core and main's SMT sibling)
 };
 SchedInfo sched_info();                  // initialises on first use
-int sched_host_priority(int hos_prio);   // THREAD_PRIORITY_* for a HOS priority under the model (nn::os prio = hos - 28)
+nxrt::platform::ThreadPriority sched_host_priority(int hos_prio);   // THREAD_PRIORITY_* for a HOS priority under the model (nn::os prio = hos - 28)
 // Which console core the calling thread is on right now: the core of its host processor (strict), or its ideal core (soft, or off-model processor).
 int sched_current_core();
 // Process priority class. [sched] priority_class = auto | high | above_normal | normal (default auto: high when `interactive`, i.e. a person
@@ -180,6 +181,10 @@ uint64_t starvation_boosts();            // boosts given so far
 void install_spin_hint();                // WFE / YIELD of the lifted code hand the host processor over (busy_mutex.cpp, [sched] spin_yield)
 void install_busy_mutex_hle();           // nn::os::LockBusyMutex as host code that yields while it waits (busy_mutex.cpp, [sched] busy_mutex_hle)
 void sched_reset_for_tests();            // forget the slot and re-read the config at the next sched_info()
+
+// Kernel initialization (called once at runtime startup from runtime.cpp)
+void init_kernel_locks();
+void init_thread_list_lock();
 
 // ---- time --------------------------------------------------------------------------------------------------------------------
 uint64_t system_tick();                  // the console tick (tick_hz()), from QueryPerformanceCounter

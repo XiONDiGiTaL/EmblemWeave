@@ -102,8 +102,14 @@ void* reserve(std::size_t bytes);
 bool commit(void* p, std::size_t bytes);
 bool decommit(void* p, std::size_t bytes);
 void release(void* p, std::size_t bytes);
-bool protect(void* p, std::size_t bytes, bool writable);
+// Protect with POSIX-style flags (PROT_NONE, PROT_READ, PROT_WRITE, PROT_EXEC, or combinations).
+// On Windows, maps to PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_*.
+bool protect(void* p, std::size_t bytes, uint32_t protect);
 std::size_t page_size();
+// Reserve address space at a specific fixed address (for stack, kernel region). Returns the address or nullptr on failure.
+void* reserve_fixed(void* addr, std::size_t bytes);
+// Release a fixed reservation.
+bool release_fixed(void* addr, std::size_t bytes);
 
 using ThreadFn = void (*)(void*);
 
@@ -112,8 +118,18 @@ struct Thread;
 Thread* thread_start(const char* name, ThreadFn fn, void* arg);
 void thread_join(Thread* t);
 void thread_detach(Thread* t);
+Thread* thread_self();    // returns the handle for the calling thread
 uint32_t thread_id();     // the host's id for the calling thread, for log tags
 void yield_cpu();         // offers the processor to another ready thread
+
+// Thread CPU time in 100ns units (kernel + user time). Returns 0 on failure or if not supported.
+uint64_t thread_cpu_time(Thread* t);
+// Returns a pseudo-handle for the current thread (like GetCurrentThread on Windows, pthread_self on POSIX).
+// This is only used for thread_cpu_time() when the calling thread wants its own CPU time.
+Thread* thread_current_handle();
+// Returns the native thread handle (HANDLE on Windows, pthread_t on POSIX) for use with host APIs.
+// Returns nullptr on failure or if not supported.
+void* thread_native_handle(Thread* t);
 
 // A lock the runtime holds for a few instructions at a time, never across a guest wait.
 struct Mutex;
@@ -121,6 +137,7 @@ struct Cond;
 Mutex* mutex_create();
 void mutex_destroy(Mutex* m);
 void mutex_lock(Mutex* m);
+bool mutex_trylock(Mutex* m);
 void mutex_unlock(Mutex* m);
 Cond* cond_create();
 void cond_destroy(Cond* c);
@@ -147,5 +164,104 @@ bool file_seek(File* f, int64_t offset);   // absolute, from the start
 int64_t file_size(File* f);                // -1 when it cannot be asked
 bool file_exists(const char* path_utf8);
 bool file_mkdirs(const char* path_utf8);   // every missing component, like mkdir -p
+
+// Number of physical CPU cores (SMT siblings counted once). Used for auto-tuning spin waits.
+int physical_core_count();
+
+// Thread scheduling and affinity (for the console core model)
+enum class ThreadPriority { Lowest, BelowNormal, Normal, AboveNormal, Highest, TimeCritical };
+// Set the affinity mask of a thread (bit n = processor n). Returns false on failure.
+bool thread_set_affinity(Thread* t, uint64_t mask);
+// Set the ideal processor for a thread (soft affinity hint). Returns false on failure.
+bool thread_set_ideal_processor(Thread* t, int processor);
+// Set the priority of a thread. Returns false on failure.
+bool thread_set_priority(Thread* t, ThreadPriority prio);
+// Disable Windows' dynamic priority boost for a thread (no-op on POSIX).
+void thread_disable_boost(Thread* t);
+// Get the current processor number for the calling thread. Returns -1 on failure.
+int thread_current_processor();
+// Get the process affinity mask. Returns false on failure.
+bool process_get_affinity_mask(uint64_t* proc_mask, uint64_t* sys_mask);
+// Set the process priority class. Returns false on failure.
+bool process_set_priority_class(int priority_class);
+// Named mutex for cross-process coordination (used for console core slot allocation).
+// Returns a handle (opaque pointer) or nullptr on failure/already exists.
+void* named_mutex_create(const char* name, bool* already_exists);
+void named_mutex_destroy(void* handle);
+
+// Shared memory section for the guest heap (like Windows SEC_RESERVE section with multiple view mappings).
+// Creates a section of the given size (bytes). Returns an opaque handle or nullptr on failure.
+struct Section;
+Section* section_create(uint64_t size);
+// Maps a view of the section at the specified address (or lets the OS choose if addr=0).
+// offset = section offset, size = view size. Returns the mapped address or 0 on failure.
+uint64_t section_map_view(Section* s, uint64_t addr, uint64_t offset, uint64_t size, bool write);
+// Unmaps a view at the given address. Returns true on success.
+bool section_unmap_view(uint64_t addr, uint64_t size);
+// Destroys the section.
+void section_destroy(Section* s);
+// Changes the protection of a mapped view range. Returns true on success.
+bool section_protect(uint64_t addr, uint64_t size, bool writable);
+
+// --- write-watch (page fault tracking) ------------------------------------------------------
+// Read-write lock for the write-watch transition lock (g_transitions equivalent).
+// Multiple readers (fault handlers, arm's shared path) or one writer (region_destroy, arm exclusive).
+struct RWLock;
+RWLock* rwlock_create();
+void rwlock_destroy(RWLock* lk);
+void rwlock_lock_shared(RWLock* lk);
+void rwlock_unlock_shared(RWLock* lk);
+void rwlock_lock_exclusive(RWLock* lk);
+void rwlock_unlock_exclusive(RWLock* lk);
+
+// Page protection query (equivalent to VirtualQuery for a single page).
+// Returns 0 on failure. On Windows: PAGE_READONLY, PAGE_READWRITE, PAGE_NOACCESS, etc.
+// On POSIX: PROT_READ, PROT_WRITE, PROT_NONE, or 0 if not committed.
+uint32_t page_protect(uint64_t addr);
+
+// Cross-platform page protection constants (match POSIX sys/mman.h values).
+// On Windows, these map to PAGE_* constants; on POSIX they are the native values.
+constexpr uint32_t PROT_NONE  = 0x0;
+constexpr uint32_t PROT_READ  = 0x1;
+constexpr uint32_t PROT_WRITE = 0x2;
+constexpr uint32_t PROT_EXEC  = 0x4;
+
+// Installs a handler for page faults (SIGSEGV on POSIX, VEH on Windows).
+// The handler receives the fault address and the access kind (0=read, 1=write, 8=execute).
+// Returns true if the fault was handled (page made accessible), false if it should continue
+// to the default handler (crash). Only one handler can be installed (the write-watch subsystem).
+using PageFaultHandler = bool (*)(uint64_t addr, int kind);
+bool page_fault_handler_install(PageFaultHandler fn);
+void page_fault_handler_remove();
+
+// Memory state constants (subset of Windows MEMORY_BASIC_INFORMATION.State / Protect)
+enum class PageState : uint32_t {
+    Free = 0,
+    Reserve = 0x2000,   // MEM_RESERVE
+    Commit = 0x1000,    // MEM_COMMIT
+};
+enum class PageProtect : uint32_t {
+    NoAccess = 0x01,
+    ReadOnly = 0x02,
+    ReadWrite = 0x04,
+    WriteCopy = 0x08,
+    Execute = 0x10,
+    ExecuteRead = 0x20,
+    ExecuteReadWrite = 0x40,
+    ExecuteWriteCopy = 0x80,
+    Guard = 0x100,
+    NoCache = 0x200,
+    WriteCombine = 0x400,
+};
+
+// Queries memory info for a page. Returns false on failure.
+// If successful, fills state, protect, region_base, region_size.
+bool page_query(uint64_t addr, PageState* state, PageProtect* protect, uint64_t* region_base, uint64_t* region_size);
+
+// High-resolution tick count (milliseconds since boot, like GetTickCount64)
+uint64_t tick_count_ms();
+
+// Exit the current process with the given exit code. Does not return.
+[[noreturn]] void process_exit(int code);
 
 }  // namespace nxrt::platform

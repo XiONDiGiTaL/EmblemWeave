@@ -10,6 +10,7 @@
 #include "nxrt/symbols.h"
 #include "nxrt/memory.h"
 #include "nxrt/write_watch.h"
+#include <nxrecomp/cxx.h>
 
 #include <windows.h>
 
@@ -31,8 +32,18 @@ volatile int g_fake_mode = 0;             // 0: the fake guest writes through nu
 uint64_t* volatile g_null_ptr = nullptr;  // a null pointer the compiler cannot see through
 int* volatile g_null_int = nullptr;
 std::string g_report;                     // filled by crash_test_capture
+volatile DWORD g_hle_exception = 0;       // hle_memmove_guarded: the code it raised
 
 bool has(const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; }
+
+// hle_memmove (cxx.h) is inline; a noinline caller keeps its fault/trap out of the __try body itself.
+__declspec(noinline) void call_hle_memmove(::Ctx* c) { nx::hle_memmove(c); }
+__declspec(noinline) void hle_memmove_guarded(::Ctx* c) {
+    __try {
+        call_hle_memmove(c);
+    } __except (g_hle_exception = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
 
 void ensure_symbols() {
     static const bool loaded = (nxrt::symbols_load_map() > 0);
@@ -161,6 +172,35 @@ NXTEST(guest_trap_names_the_code) {
     nxrt::diag_unregister_thread();
     CHECK_MSG(has(g_report, "HOST EXCEPTION 0xE0000001 (GUEST TRAP)"), "guest trap header missing");
     CHECK_MSG(!has(g_report, "reading address"), "a trap is not an access violation");
+}
+
+NXTEST(hle_memmove_traps_on_absurd_size) {
+    // The guest memcpy/memmove HLE takes x2 as the size. A failed zstd decode leaves -20 there (#77); a 32-bit -20 can arrive
+    // zero-extended. The destination is null, so without the guard the host memmove faults at once instead of corrupting test memory.
+    const uint64_t sizes[] = {~uint64_t(0) - 19, 0xffffffecull, (1ull << 30) + 1};
+    for (uint64_t n : sizes) {
+        ::Ctx c{};
+        c.x[0] = 0;
+        c.x[1] = 0;
+        c.x[2] = n;
+        g_hle_exception = 0;
+        hle_memmove_guarded(&c);
+        CHECK_EQ(g_hle_exception, 0xE0000001u);
+    }
+}
+
+NXTEST(hle_memmove_copies_a_normal_size) {
+    uint8_t src[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    uint8_t dst[16] = {};
+    ::Ctx c{};
+    c.x[0] = reinterpret_cast<uint64_t>(dst);
+    c.x[1] = reinterpret_cast<uint64_t>(src);
+    c.x[2] = sizeof src;
+    g_hle_exception = 0;
+    hle_memmove_guarded(&c);
+    CHECK_EQ(g_hle_exception, 0u);
+    CHECK(std::memcmp(dst, src, sizeof src) == 0);
+    CHECK_EQ(c.x[0], reinterpret_cast<uint64_t>(dst));
 }
 
 NXTEST(untranslated_instruction_names_the_code) {
