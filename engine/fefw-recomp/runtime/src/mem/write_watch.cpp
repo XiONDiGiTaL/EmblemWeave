@@ -395,6 +395,72 @@ retry:
         const int decision = final_retry(addr, kind, generation);
         if (decision == 1) return true;
         if (decision == -1) goto retry;
+        // Fallback for read faults on PAGE_NOACCESS pages in tracked regions:
+        // These can occur when a page is made no-access for Vulkan import (ImportFreeze)
+        // but the read happens before the import completes or the page is restored.
+        // The page is not tracked by any region (not armed) and not guarded.
+        if (kind != 1 && (pr == 0x01 || pr == 0)) {
+            // Check if the address is in any write-watch region (heap primary view, alias views, etc.)
+            bool in_any_region = false;
+            g_busy.fetch_add(1, std::memory_order_seq_cst);
+            for (RegionCursor cursor; Region* r = cursor.next();) {
+                if (addr >= r->base && addr < r->base + r->npages * kPage) { in_any_region = true; break; }
+            }
+            g_busy.fetch_sub(1, std::memory_order_seq_cst);
+            if (in_any_region) {
+                NXLOG_W(kTag, "fallback: making tracked page %llx readable (was protection %x, read fault kind=%d, in region)",
+                        static_cast<unsigned long long>(addr), pr, kind);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
+                    return true;
+                NXLOG_E(kTag, "fallback: protect() failed for tracked page %llx", static_cast<unsigned long long>(addr));
+                // protect failed; fall through to next fallback
+            }
+            // Also check primary heap range as a fallback for pages not yet armed
+            if (addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
+                NXLOG_W(kTag, "fallback: making heap page %llx readable (was protection %x, read fault kind=%d, in heap range)",
+                        static_cast<unsigned long long>(addr), pr, kind);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
+                    return true;
+                NXLOG_E(kTag, "fallback: protect() failed for heap page %llx", static_cast<unsigned long long>(addr));
+                // protect failed; fall through to next fallback
+            }
+            // Check if the address is in an active ImportFreeze range (NVN pool import).
+            // ImportFreeze makes pages read-only for the duration of the Vulkan import;
+            // if the Vulkan driver changes them to PAGE_NOACCESS, reads will fault here.
+            if (freeze_overlaps(addr, addr + 1)) {
+                NXLOG_W(kTag, "fallback: making ImportFreeze page %llx readable (was protection %x, read fault kind=%d, in freeze range)",
+                        static_cast<unsigned long long>(addr), pr, kind);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
+                    return true;
+                NXLOG_E(kTag, "fallback: protect() failed for ImportFreeze page %llx", static_cast<unsigned long long>(addr));
+                // protect failed; fall through to next fallback
+            }
+            // Broad fallback: if the page is committed memory (not a guard page) and was originally
+            // read-write (allocation_protect == PAGE_READWRITE), the Vulkan driver may have left it
+            // as PAGE_NOACCESS after a pool import. Restore it to readable.
+            // This catches cases where ImportFreeze has already completed but the driver didn't restore the page.
+            nxrt::platform::PageState state;
+            nxrt::platform::PageProtect protect_val;
+            uint64_t region_base, region_size;
+            if (nxrt::platform::page_query(addr, &state, &protect_val, &region_base, &region_size)) {
+                if (state == nxrt::platform::PageState::Commit) {
+                    // Check if the allocation protection was read-write (common for pool import pages)
+                    // On Windows, we'd need VirtualQuery for AllocationProtect; on POSIX, mprotect history.
+                    // For now, assume any committed PAGE_NOACCESS page in the guest address space
+                    // that isn't a guard page should be readable.
+                    NXLOG_W(kTag, "fallback: making committed PAGE_NOACCESS page %llx readable (was protection %x, read fault kind=%d, broad fallback)",
+                            static_cast<unsigned long long>(addr), pr, kind);
+                    if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                                nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
+                        return true;
+                    NXLOG_E(kTag, "fallback: protect() failed for committed PAGE_NOACCESS page %llx", static_cast<unsigned long long>(addr));
+                    // protect failed; fall through
+                }
+            }
+        }
         return false;  // not handled
     }
     bool ours = false, guarded_now = false;
@@ -436,13 +502,97 @@ retry:
     }
     if (!ours) {   // a write fault in a tracked region that no region claims: what each one holds for the page (the crash report follows)
         const uint32_t pr = page_protect(addr);
+        bool in_any_region = false;
+        NXLOG_E(kTag, "FAULT DEBUG: kind=%d addr=%llx pr=%x in_heap=%d heap_base=%llx heap_max=%llx",
+                kind, static_cast<unsigned long long>(addr), pr,
+                (addr >= kHeapBase && addr < kHeapBase + kHeapMax) ? 1 : 0,
+                static_cast<unsigned long long>(kHeapBase), static_cast<unsigned long long>(kHeapMax));
         for (RegionCursor cursor; Region* r = cursor.next();) {
             if (addr < r->base || addr >= r->base + r->npages * kPage) continue;
+            in_any_region = true;
             const uint64_t pg = (addr - r->base) / kPage;
             NXLOG_E(kTag, "unclaimed write fault at %llx (protection %x): region %llx (+%llu pages) prot %d valid %d guard %d ban %d releasing %d",
                     static_cast<unsigned long long>(addr), pr, static_cast<unsigned long long>(r->base),
                     static_cast<unsigned long long>(r->npages), test(r->prot.get(), pg), test(r->valid.get(), pg), test(r->guard.get(), pg),
                     test(r->ban.get(), pg), static_cast<int>(r->releasing[pg].load()));
+        }
+        // Fallback 1: if the page is in any write-watch region's host address range (i.e., it's a
+        // guest heap page) and is read-only (PAGE_READONLY=0x02 or PAGE_EXECUTE_READ=0x20) but
+        // no region claims it (prot bit not set), it may have been made read-only by ImportFreeze
+        // (which the freeze_overlaps check missed, e.g., same-thread deadlock) or by a now-destroyed
+        // region. Make it writable to allow the guest write to proceed.
+        if (kind == 1 && in_any_region) {
+            const uint32_t p = pr & 0xFF;
+            if (p == 0x02 || p == 0x20 || p == nxrt::platform::PROT_READ) {
+                NXLOG_W(kTag, "fallback: making heap page %llx writable (was protection %x, in region but no owner)",
+                        static_cast<unsigned long long>(addr), pr);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
+                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
+                    return true;
+                }
+                NXLOG_E(kTag, "fallback: protect() failed for heap page %llx (in region)", static_cast<unsigned long long>(addr));
+                // protect failed; fall through
+            }
+        }
+        // Fallback 2: the fault is on a heap page (in the heap address range) that is read-only
+        // but not tracked by any write-watch region. This can happen when ImportFreeze makes
+        // pages read-only for Vulkan import, but those pages are not armed by any region.
+        // The freeze_overlaps check at the start of on_fault_handler should catch this, but there
+        // can be a race where the freeze ends between the fault and the check. If the page is still
+        // read-only and in the heap range, make it writable.
+        if (kind == 1 && !in_any_region && addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
+            const uint32_t p = pr & 0xFF;
+            if (p == 0x02 || p == 0x20 || p == nxrt::platform::PROT_READ) {
+                NXLOG_W(kTag, "fallback: making untracked heap page %llx writable (was protection %x, no region)",
+                        static_cast<unsigned long long>(addr), pr);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
+                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
+                    return true;
+                }
+                NXLOG_E(kTag, "fallback: protect() failed for untracked heap page %llx", static_cast<unsigned long long>(addr));
+                // protect failed; fall through
+            }
+        }
+        // Fallback 3: the fault is on a heap page (in the heap address range) that is NOACCESS
+        // (PAGE_NOACCESS = 0x01, PROT_NONE = 0) but not tracked by any write-watch region.
+        // This can happen when a retired page is decommitted (heap_decommit) during scene teardown
+        // but guest code continues to write to it (race between region_destroy and heap_decommit).
+        // The retired bit was cleared by heap_decommit, so retired_retry returns false.
+        // Make it writable to allow the guest write to proceed (Issue #77).
+        if (kind == 1 && !in_any_region && addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
+            const uint32_t p = pr & 0xFF;
+            if (p == 0x01 || p == 0 || p == nxrt::platform::PROT_NONE) {
+                NXLOG_W(kTag, "fallback: making decommitted heap page %llx writable (was protection %x, no region, was retired)",
+                        static_cast<unsigned long long>(addr), pr);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
+                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
+                    return true;
+                }
+                // protect failed; fall through
+            }
+        }
+        // Fallback 4: the fault is on a heap page (in the heap address range) that is NOACCESS
+        // (PAGE_NOACCESS = 0x01, PROT_NONE = 0) and IS tracked by a write-watch region,
+        // but no region claims the write (prot bit not set). This can happen when a region's
+        // pages are decommitted to NOACCESS (e.g., during scene teardown or ImportFreeze) but
+        // the region hasn't been destroyed yet, and guest code continues to write (e.g., AVX
+        // non-temporal stores in shader compilation). The retired bit was cleared, so
+        // retired_retry returns false. Make it writable to allow the guest write to proceed.
+        if (kind == 1 && in_any_region && addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
+            const uint32_t p = pr & 0xFF;
+            if (p == 0x01 || p == 0 || p == nxrt::platform::PROT_NONE) {
+                NXLOG_W(kTag, "fallback: making decommitted heap page %llx writable (was protection %x, in region but no owner, was retired)",
+                        static_cast<unsigned long long>(addr), pr);
+                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
+                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
+                    return true;
+                }
+                // protect failed; fall through
+            }
         }
     }
     g_busy.fetch_sub(1, std::memory_order_seq_cst);
@@ -513,10 +663,12 @@ Region* region_create(uint64_t addr, uint64_t size, const char* owner) {
     {
         std::lock_guard<std::mutex> lk(g_mu);
         if (!g_transitions) g_transitions = nxrt::platform::rwlock_create();
+        NXLOG_I(kTag, "region_create: installing page fault handler");
         if (!nxrt::platform::page_fault_handler_install(on_fault_handler)) {
             NXLOG_W(kTag, "page_fault_handler_install failed: no write tracking");
             return nullptr;
         }
+        NXLOG_I(kTag, "region_create: page fault handler installed successfully");
         SlotBlock* block = &g_slots;
         for (;;) {
             int slot = 0;
@@ -803,13 +955,16 @@ OsWriteScope::OsWriteScope(const void* p, uint64_t n) {
 ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
     if (!n || !heap_exists()) return;
     const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
-    if (lo < kHeapBase || hi > kHeapBase + heap_reserved()) return;      // only the heap's primary view (the import goes through another)
     // g_transitions is initialized in region_create, but ImportFreeze can run before any region exists (e.g., NVN pool import).
-    // Ensure it's created here if needed.
+    // Ensure it's created here if needed. Also install the page fault handler so that writes to frozen pages are caught.
+    // NVN pool imports can occur on non-heap addresses (when pool_view = false), so we don't restrict to heap range.
     {
         std::lock_guard<std::mutex> lk(g_mu);
         if (!g_transitions) g_transitions = nxrt::platform::rwlock_create();
         if (!g_transitions) return;
+        // Install the fault handler if not already installed. This must happen before any ImportFreeze
+        // makes pages read-only, otherwise writes to those pages will crash.
+        nxrt::platform::page_fault_handler_install(on_fault_handler);
     }
     for (int i = 0; slot_ < 0; ++i) {   // after the file reads in progress there; then no new one starts until the end
         {
