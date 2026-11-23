@@ -13,7 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="site.css?v=0.1.41" id="site-css">
+<link rel="stylesheet" href="site.css?v=0.1.42" id="site-css">
 </head>
 <body>
 <div class="grid" aria-hidden="true"></div>
@@ -32,7 +32,7 @@
     <a class="docs" href="https://github.com/XiONDiGiTaL/EmblemWeave#readme">Docs</a>
   </nav>
   <div class="hud-right">
-    <span class="build" id="version">v0.1.41</span>
+    <span class="build" id="version">v0.1.42</span>
     <button id="sound" class="icon" title="Sound on or off" aria-pressed="true">♪</button>
   </div>
 </header>
@@ -47,11 +47,11 @@
       <h1>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>, with integrated mod management and in-game enhancements.</h1>
       <p class="lede">EmblemWeave builds the game ahead of time from your own dump and plays it natively, with no emulator. Mods, save profiles, cheats, an in-game menu and a recompilation pipeline you can watch run.</p>
       <div class="cta">
-        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/download/v0.1.41/EmblemWeave-v0.1.41-windows-x64.zip" data-sfx="coin">Download for Windows</a>
+        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/download/v0.1.42/EmblemWeave-v0.1.42-windows-x64.zip" data-sfx="coin">Download for Windows</a>
         <a class="btn ghost" href="https://github.com/XiONDiGiTaL/EmblemWeave" data-sfx="click">Source on GitHub</a>
       </div>
       <ul class="badges">
-        <li id="badge-release">release 0.1.41</li>
+        <li id="badge-release">release 0.1.42</li>
         <li>Windows x64</li>
         <li>GPL-3.0</li>
         <li>No game code included</li>
@@ -71,7 +71,7 @@
       <article data-sfx-hover="hover"><h3>An in-game menu</h3><p><kbd>F10</kbd> pauses the game, takes a screenshot, restarts or stops it, and reaches quick cheats, display settings and controls.</p></article>
       <article data-sfx-hover="hover"><h3>Diagnostics that explain</h3><p>Every stage reports, engine logs are read back, crashes are decoded, and the CPU, GPU and toolchain are recorded for bug reports.</p></article>
     </div>
-    <p class="note">The 0.1.41 download carries the existing build across an in-place update, so it opens ready to play without rebuilding. It adds the 200% master volume (#60) and the GPU picker that lists this PC's real Vulkan adapters (#66), and keeps the FSR 4.1.2 / 3.1 upscaler path included.</p>
+    <p class="note">The 0.1.42 download updates the launcher and engine in place, so an existing install opens ready to play without rebuilding. It focuses on stability: return-to-title crashes (#77), HDR restoration (#78) and save-folder reconciliation (#79), with the parallel Find Units scan (#76) and AV1/Opus cinematic decoding (#75) ready for field testing.</p>
   </section>
 
   <section id="engine" class="section">
@@ -138,6 +138,6 @@
   </div>
 </dialog>
 
-<script src="site.js?v=0.1.41"></script>
+<script src="site.js?v=0.1.42"></script>
 </body>
 </html>
