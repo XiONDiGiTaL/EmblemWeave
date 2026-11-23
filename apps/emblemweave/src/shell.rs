@@ -430,12 +430,14 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                 let active = app.jobs.iter().find(|j| !j.finished() && j.kind != crate::jobs::JobKind::Detect);
                 if let Some(job) = active {
                     let kind = job.kind;
-                    let (message, copied, total, stages_done, stages_total) = job.snapshot(|pr| {
+                    let (message, copied, total, stages_done, stages_total, stage_fraction, elapsed, eta) = job.snapshot(|pr| {
                         let done = pr.stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done | crate::jobs::StageStatus::Skipped | crate::jobs::StageStatus::Failed)).count();
-                        (pr.message.clone(), pr.copied, pr.total, done, pr.stages.len())
+                        (pr.message.clone(), pr.copied, pr.total, done, pr.stages.len(), pr.fraction, job.started.elapsed(), crate::jobs::eta(&pr.stages, pr.fraction))
                     });
+                    // A stage that reports its own counter (`[123/206]`) moves the bar between stage boundaries,
+                    // instead of leaving it still for the minutes the compiler takes.
                     let fraction = if stages_total > 0 {
-                        Some(stages_done as f32 / stages_total as f32)
+                        Some(((stages_done as f32 + stage_fraction) / stages_total as f32).min(1.0))
                     } else if total > 0 {
                         Some(copied as f32 / total as f32)
                     } else {
@@ -453,6 +455,13 @@ pub fn status_bar(app: &mut App, ctx: &egui::Context) {
                         ui.painter().rect_filled(bar, CornerRadius::same(2), p.panel_hi);
                         ui.painter().rect_filled(Rect::from_min_max(bar.min, Pos2::new(bar.left() + bar.width() * frac, bar.max.y)), CornerRadius::same(2), p.accent);
                         ui.label(crate::i18n::text(format!("{:.0}%", frac * 100.0)).font(theme::mono(9.5)).color(p.muted));
+                    }
+                    ui.label(crate::i18n::text(crate::jobs::clock(elapsed)).font(theme::mono(9.5)).color(p.muted));
+                    if ctx.screen_rect().width() > 1000.0 {
+                        let left = eta
+                            .map(|d| format!("· {} left", crate::jobs::short_eta(d)))
+                            .unwrap_or_else(|| "· estimating".to_string());
+                        ui.label(crate::i18n::text(left).size(9.5).color(p.muted));
                     }
                     if widgets::button(ui, &p, "Cancel", true).clicked() {
                         app.confirm = Some(crate::Confirm::CancelJob(kind));
@@ -626,22 +635,34 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
                     let list_h = (ctx.screen_rect().height() - 250.0).clamp(120.0, 350.0);
                     egui::ScrollArea::vertical().id_salt("activity-jobs").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                         for job in app.jobs.iter().filter(|j| !j.finished()) {
-                            let stages = job.snapshot(|pr| pr.stages.clone());
+                            let (stages, stage_fraction, elapsed, eta) = job.snapshot(|pr| {
+                                (pr.stages.clone(), pr.fraction, job.started.elapsed(), crate::jobs::eta(&pr.stages, pr.fraction))
+                            });
                             ui.add_space(5.0);
                             ui.horizontal(|ui| {
                                 ui.add(egui::Spinner::new().size(12.0).color(p.accent));
                                 ui.label(crate::i18n::text(job.kind.title()).font(theme::semibold(11.0)).color(p.ink));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(crate::i18n::text(format!("{:.1}s", job.started.elapsed().as_secs_f32())).font(theme::mono(9.5)).color(p.muted));
+                                    ui.label(crate::i18n::text(crate::jobs::clock(elapsed)).font(theme::mono(9.5)).color(p.muted));
                                     if widgets::button(ui, &p, "Stop", true).clicked() {
                                         cancel = Some(job.kind);
                                     }
                                 });
                             });
                             if !stages.is_empty() {
-                                widgets::progress_bar(ui, &p, Some(stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done | crate::jobs::StageStatus::Skipped)).count() as f32 / stages.len() as f32));
+                                let done = stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done | crate::jobs::StageStatus::Skipped)).count();
+                                widgets::progress_bar(ui, &p, Some(((done as f32 + stage_fraction) / stages.len() as f32).min(1.0)));
+                                let left = eta
+                                    .map(|d| format!("{} left", crate::jobs::short_eta(d)))
+                                    .unwrap_or_else(|| "estimating the time left".to_string());
+                                ui.label(
+                                    crate::i18n::text(format!("{} elapsed · {left}", crate::jobs::clock(elapsed)))
+                                        .size(10.0)
+                                        .color(p.muted),
+                                );
                                 for s in stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Active | crate::jobs::StageStatus::Failed)) {
-                                    ui.label(crate::i18n::text(format!("{} · {}", s.name, s.detail)).size(10.0).color(p.body));
+                                    let running = s.started.map(|t| crate::jobs::clock(t.elapsed())).unwrap_or_default();
+                                    ui.label(crate::i18n::text(format!("{} · {} · {}", s.name, running, s.detail)).size(10.0).color(p.body));
                                 }
                             }
                         }

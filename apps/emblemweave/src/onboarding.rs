@@ -187,9 +187,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 if ready {
                     widgets::status_line(ui, &p, Tone::Ok, "Build complete", "The native executable is ready.");
                 } else if let Some(job) = app.running(JobKind::Engine) {
-                    let stages = job.snapshot(|pr| pr.stages.clone());
+                    let (stages, stage_fraction) = job.snapshot(|pr| (pr.stages.clone(), pr.fraction));
                     let done = stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done | crate::jobs::StageStatus::Skipped | crate::jobs::StageStatus::Failed)).count();
-                    widgets::progress_bar(ui, &p, if stages.is_empty() { None } else { Some(done as f32 / stages.len() as f32) });
+                    widgets::progress_bar(ui, &p, if stages.is_empty() { None } else { Some(((done as f32 + stage_fraction) / stages.len() as f32).min(1.0)) });
                     ui.add_space(5.0);
                     if let Some(active) = stages.iter().find(|s| matches!(s.status, crate::jobs::StageStatus::Active)) {
                         ui.label(crate::i18n::text(active.name).font(theme::semibold(13.0)).color(p.ink));

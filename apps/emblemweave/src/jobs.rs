@@ -67,6 +67,10 @@ pub struct Progress {
     /// Bytes copied and bytes to copy, while a package is being unpacked.
     pub copied: u64,
     pub total: u64,
+    /// How far the running stage is, 0.0..=1.0, when the step prints a counter
+    /// (`[123/206]` from Ninja). A stage that says nothing leaves it at zero and
+    /// the estimate falls back to the finished stages' times.
+    pub fraction: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +106,67 @@ impl JobKind {
             JobKind::Repair => "repair",
         }
     }
+}
+
+/// A running time the way a person reads it: `42s`, `3m 07s`, `1h 02m`.
+pub fn clock(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// How long is left, in the coarse words a file copy uses: `about 4 min`.
+/// Seconds would claim a precision the stages cannot support.
+pub fn short_eta(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 45 {
+        "under a minute".to_string()
+    } else if s < 90 {
+        "about a minute".to_string()
+    } else if s < 3600 {
+        format!("about {} min", (s + 30) / 60)
+    } else {
+        format!("about {}h {:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// Time left in a job. The finished stages give a mean, a running stage that
+/// reports its own counter replaces that mean while it has one, and every stage
+/// still ahead gets the mean. `None` until two stages are done: the first stages
+/// are the quick ones, and their mean would promise a finish the compiler stage
+/// blows past.
+pub fn eta(stages: &[Stage], fraction: f32) -> Option<Duration> {
+    let done: Vec<Duration> = stages
+        .iter()
+        .filter(|s| matches!(s.status, StageStatus::Done | StageStatus::Failed))
+        .filter_map(|s| s.elapsed)
+        .collect();
+    if done.len() < 2 {
+        return None;
+    }
+    let pending = stages.iter().filter(|s| s.status == StageStatus::Pending).count();
+    let mean = done.iter().sum::<Duration>().div_f64(done.len() as f64);
+    let mut left = mean * pending as u32;
+    if let Some(running) = stages
+        .iter()
+        .find(|s| s.status == StageStatus::Active)
+        .and_then(|s| s.started)
+        .map(|t| t.elapsed())
+    {
+        left += if (0.02..1.0).contains(&fraction) {
+            // The step's own counter is better than any mean: project it forward.
+            let total = running.as_secs_f64() / fraction as f64;
+            Duration::from_secs_f64((total - running.as_secs_f64()).max(0.0))
+        } else {
+            mean.saturating_sub(running)
+        };
+    }
+    (!left.is_zero()).then_some(left)
 }
 
 /// `%APPDATA%\EmblemWeave\logs`, where every task writes what it did. When the
@@ -225,6 +290,11 @@ impl Ctx {
         self.write(&line);
         self.with(|p| {
             p.message = line.clone();
+            // The activity panel shows the running step's latest output, so a long compile reads as work rather
+            // than a label that has not changed since the stage started.
+            if let Some(s) = p.stages.iter_mut().find(|s| s.status == StageStatus::Active) {
+                s.detail = line.clone();
+            }
             p.log.push(line);
         });
     }
@@ -238,11 +308,18 @@ impl Ctx {
                 format!("Unpacking the package: {} of {} copied", crate::fmt_size(done), crate::fmt_size(total));
         });
     }
+    /// How far the running step is, when it prints a counter like Ninja's
+    /// `[123/206]`; the status strip and the time-left estimate read it.
+    pub fn fraction(&self, fraction: f32) {
+        self.with(|p| p.fraction = fraction.clamp(0.0, 1.0));
+    }
     pub fn start(&self, i: usize) {
         self.with(|p| {
             if let Some(s) = p.stages.get_mut(i) {
                 s.status = StageStatus::Active;
                 s.started = Some(Instant::now());
+                s.detail.clear();
+                p.fraction = 0.0;
                 p.message = format!("{}...", s.name);
             }
         });
@@ -256,6 +333,7 @@ impl Ctx {
                 s.elapsed = s.started.map(|t| t.elapsed());
                 s.detail = detail.clone();
             }
+            p.fraction = 0.0;
             p.log.push(format!("{:?}: {}", status, detail));
         });
     }
@@ -1039,5 +1117,36 @@ mod tests {
         // Written again only when the text differs, so a running copy stays put.
         assert_eq!(write_bridge(&dir).unwrap(), script);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn running_times_and_estimates_read_like_a_file_copy() {
+        assert_eq!(clock(Duration::from_secs(42)), "42s");
+        assert_eq!(clock(Duration::from_secs(187)), "3m 07s");
+        assert_eq!(clock(Duration::from_secs(3720)), "1h 02m");
+        assert_eq!(short_eta(Duration::from_secs(200)), "about 3 min");
+        assert_eq!(short_eta(Duration::from_secs(20)), "under a minute");
+    }
+
+    #[test]
+    fn the_estimate_reads_the_finished_stages_and_the_running_counter() {
+        let stage = |name, status, secs: f64, ago: Option<Duration>| Stage {
+            name,
+            status,
+            detail: String::new(),
+            started: ago.map(|d| Instant::now() - d),
+            elapsed: (status != StageStatus::Active).then(|| Duration::from_secs_f64(secs)),
+        };
+        let stages = vec![
+            stage("python", StageStatus::Done, 10.0, None),
+            stage("exefs", StageStatus::Done, 30.0, None),
+            stage("build", StageStatus::Active, 0.0, Some(Duration::from_secs(20))),
+            stage("shaders", StageStatus::Pending, 0.0, None),
+        ];
+        // A 20s mean: the half-run step has about 20s left, and the stage after it gets the mean.
+        let left = eta(&stages, 0.5).expect("two finished stages are enough for a rate");
+        assert!((left.as_secs_f64() - 40.0).abs() < 1.5, "{left:?}");
+        // One finished stage is not a rate yet.
+        assert_eq!(eta(&stages[..1], 0.0), None);
     }
 }

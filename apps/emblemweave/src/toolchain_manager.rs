@@ -1018,24 +1018,23 @@ impl ToolchainManager {
             // Run the program the command names. Visual Studio's command is `vswhere -path <folder> -property …`;
             // running `path` (the folder) instead is what returned `Access is denied (os error 5)` before any build
             // stage could log a line.
-            let mut command = Command::new(version_program(tool, path));
-            if cmd.len() > 1 {
-                command.args(&cmd[1..]);
-            }
-            let output = command.output()?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-
-            if let Some(regex_str) = &tool.version_regex {
-                let regex = regex::Regex::new(regex_str)?;
-                if let Some(caps) = regex.captures(&stdout) {
-                    return Ok(caps.get(1).map(|m| m.as_str().to_string()));
+            let program = version_program(tool, path);
+            // Two attempts: the first run of the 113 MB carried clang-cl can be held up by an antivirus scan and
+            // answer nothing, which used to stop a build before its own compile-and-link probe had run. Both streams
+            // are read because a tool may print its version to stderr (`clang -v` does).
+            for attempt in 0..2 {
+                let mut command = Command::new(&program);
+                if cmd.len() > 1 {
+                    command.args(&cmd[1..]);
                 }
-            }
-
-            // Fallback: first line with version-like pattern
-            for line in stdout.lines() {
-                if line.chars().any(|c| c.is_ascii_digit()) && line.contains('.') {
-                    return Ok(Some(line.trim().to_string()));
+                let output = command.output()?;
+                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                text.push_str(&String::from_utf8_lossy(&output.stderr));
+                if let Some(version) = version_in(tool, &text) {
+                    return Ok(Some(version));
+                }
+                if attempt == 0 {
+                    std::thread::sleep(Duration::from_millis(250));
                 }
             }
         }
@@ -1113,6 +1112,23 @@ fn version_program(tool: &ToolSpec, path: &Path) -> PathBuf {
     } else {
         named.to_path_buf()
     }
+}
+
+/// The version a tool's output names: the lock's regex first, then the first line that looks like a version.
+fn version_in(tool: &ToolSpec, text: &str) -> Option<String> {
+    if let Some(regex_str) = &tool.version_regex {
+        if let Ok(regex) = regex::Regex::new(regex_str) {
+            if let Some(caps) = regex.captures(text) {
+                return caps.get(1).map(|m| m.as_str().to_string());
+            }
+        }
+    }
+    for line in text.lines() {
+        if line.chars().any(|c| c.is_ascii_digit()) && line.contains('.') {
+            return Some(line.trim().to_string());
+        }
+    }
+    None
 }
 
 /// Compute SHA-256 of a file
@@ -1387,6 +1403,21 @@ mod tests {
         let parent = ToolchainManager::new(root.clone());
         assert_eq!(parent.find_tool(&ninja).unwrap(), Some(bin.join("ninja.exe")));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `clang -v` writes to stderr; a version there is still the tool's version.
+    #[cfg(windows)]
+    #[test]
+    fn a_version_on_stderr_is_read() {
+        let spec = tool_spec(
+            "cmake",
+            "3.31.2",
+            None,
+            Some(vec!["cmd.exe".into(), "/C".into(), "echo 3.31.2 1>&2".into()]),
+        );
+        let mgr = ToolchainManager::new(std::env::temp_dir());
+        let version = mgr.get_tool_version(&spec, Path::new("cmd.exe")).unwrap();
+        assert_eq!(version.as_deref(), Some("3.31.2"));
     }
 
     /// End to end on Windows: the command runs, even though the tool's expected path is a folder.

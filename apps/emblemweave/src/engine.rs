@@ -1163,6 +1163,17 @@ pub fn verify_log_text(text: &str) -> String {
     out
 }
 
+/// `[123/206] Building CXX object …`: how far a Ninja-driven step is. Ninja puts
+/// the counter at the start of the line; anything else is not a counter.
+fn bracket_progress(line: &str) -> Option<f32> {
+    let rest = line.trim_start().strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let (done, total) = rest[..end].split_once('/')?;
+    let done: f32 = done.trim().parse().ok()?;
+    let total: f32 = total.trim().parse().ok()?;
+    (total > 0.0 && done <= total).then(|| done / total)
+}
+
 /// Lines from a child's pipe, tolerating bytes that are not UTF-8. `BufRead::lines`
 /// stops at the first bad byte and every line after it is lost — which is how a
 /// CMake error block disappears from a log whose summary line still arrives.
@@ -1411,10 +1422,16 @@ fn run_env(
         let first = first_error.clone();
         readers.push(std::thread::spawn(move || match pipe {
             Either::Out(out) => stream_lines(out, |line| {
+                if let Some(f) = bracket_progress(&line) {
+                    ctx.fraction(f);
+                }
                 ctx.log(line.clone());
                 remember(&tail, &first, &line);
             }),
             Either::Err(err) => stream_lines(err, |line| {
+                if let Some(f) = bracket_progress(&line) {
+                    ctx.fraction(f);
+                }
                 ctx.log(line.clone());
                 remember(&tail, &first, &line);
             }),
@@ -2550,13 +2567,23 @@ pub fn build(
             }
             crate::toolchain_manager::VerificationStatus::Missing => {
                 if v.tool_name != "sccache" && v.tool_name != "uv" && v.tool_name != "nasm" {
-                    // Name the path when one was found but its version could not be read: "not found" alone sends the
-                    // player looking for an install that is already there.
-                    let saw = match &v.found_path {
-                        Some(p) => format!(" It ran {} but read no version there.", p.display()),
-                        None => String::new(),
-                    };
-                    return Err(format!("Required tool '{}' not found. {}{saw}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
+                    // A tool found at a path but whose `--version` printed nothing is not missing. The first run of the
+                    // carried clang-cl can be swallowed by an antivirus scan, and that used to stop the build before
+                    // its own compile-and-link probe had run, leaving the player to run Requirements first. The probe
+                    // a few lines below is the real test, so this is a warning.
+                    if let Some(p) = &v.found_path {
+                        ctx.log(format!(
+                            "Tool '{}' is at {} but did not report a version; the compile-and-link probe decides whether it works",
+                            v.tool_name,
+                            p.display()
+                        ));
+                        continue;
+                    }
+                    return Err(format!(
+                        "Required tool '{}' not found. {}",
+                        v.tool_name,
+                        v.error.as_ref().unwrap_or(&String::new())
+                    ));
                 }
                 ctx.log(format!("Optional tool '{}' not found: {}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
             }
@@ -2570,7 +2597,9 @@ pub fn build(
     let event_emitter = Arc::new(event_emitter);
     let toolchain_mgr = toolchain_mgr.with_event_emitter(event_emitter.clone());
 
-    // Spawn consumer thread to output JSON Lines to stdout
+    // Spawn consumer thread to output JSON Lines to stdout, with a done signal so a stdout nobody reads cannot
+    // hold up a finished build.
+    let (events_done_tx, events_done_rx) = std::sync::mpsc::channel();
     let consumer_handle = std::thread::spawn(move || {
         use std::io::{self, Write};
         let stdout = io::stdout();
@@ -2581,6 +2610,7 @@ pub fn build(
                 handle.flush().ok();
             }
         }
+        let _ = events_done_tx.send(());
     });
 
     // Get build configuration
@@ -3269,6 +3299,7 @@ pub fn build(
             .map_err(|e| format!("writing {}: {e}", corpus_stamp.display()))?;
     }
     let mut report = shader_report(&corpus, &spirv)?;
+    ctx.fraction(report.translated as f32 / report.expected.max(1) as f32);
     if report.expected == 0 {
         return Err(format!("{} lists no shader blocks, so the dump could not be read for shaders. Send a diagnostics report; the game cannot draw without them.", corpus.join("unique.tsv").display()));
     }
@@ -3305,6 +3336,7 @@ pub fn build(
                 ctx.log(format!("translator attempt {attempt} ended early: {e}"));
             }
             report = shader_report(&corpus, &spirv)?;
+            ctx.fraction(report.translated as f32 / report.expected.max(1) as f32);
             if report.missing.is_empty() {
                 break;
             }
@@ -3393,9 +3425,17 @@ pub fn build(
     };
     event_emitter.build_completed(true, summary).ok();
 
-    // Wait for consumer thread to flush all events
-    drop(event_emitter); // Close the channel
-    consumer_handle.join().ok();
+    // The manager holds its own handle to the emitter. Dropping only the local one leaves the channel open, so
+    // the consumer waits for an event that never comes and `join()` never returns: the build printed its last
+    // line and then looked hung for ever. Release both senders first.
+    drop(toolchain_mgr);
+    drop(event_emitter);
+    // A stdout nobody drains must not turn a finished build into a hang either: wait for the writer, but stop
+    // waiting if it is stuck and let it finish on its own.
+    if events_done_rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
+        ctx.log("the structured build output is not being read; finishing without waiting for it");
+    }
+    drop(consumer_handle);
 
     Ok(JobResult::Engine(dir))
 }
@@ -5222,6 +5262,49 @@ pub fn play(config: &crate::config::Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The consumer thread sees the channel close only after every sender is gone. The manager keeps its own
+    /// handle to the emitter, so a build that drops only its local one prints its last line and then waits on
+    /// `join()` for ever — which is exactly how a finished RomFS overlay looked like a hang.
+    #[test]
+    fn the_event_channel_closes_after_the_manager_is_dropped() {
+        let (emitter, events) = BuildEventEmitter::with_channel("test".to_string());
+        let emitter = Arc::new(emitter);
+        let manager = ToolchainManager::new(std::env::temp_dir()).with_event_emitter(emitter.clone());
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let consumer = std::thread::spawn(move || {
+            for _event in events {}
+            let _ = done_tx.send(());
+        });
+        emitter
+            .build_started(
+                "test",
+                BuildConfig {
+                    jobs: 1,
+                    memory_limit_mb: None,
+                    sccache_enabled: false,
+                    incremental: false,
+                    target: "Release".to_string(),
+                    features: vec![],
+                },
+            )
+            .unwrap();
+        drop(manager);
+        drop(emitter);
+        assert!(
+            done.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            "the consumer is still waiting: a sender outlived the build"
+        );
+        consumer.join().unwrap();
+    }
+
+    #[test]
+    fn ninja_counters_are_read_as_progress() {
+        assert_eq!(bracket_progress("[103/206] Building CXX object runtime\\x.cpp.obj"), Some(0.5));
+        assert_eq!(bracket_progress("  [1/4] Linking CXX executable fefw.exe"), Some(0.25));
+        assert_eq!(bracket_progress("[home] the path"), None);
+        assert_eq!(bracket_progress("Building CXX object"), None);
+    }
 
     #[test]
     fn reconciliation_copies_the_ini_folders_save_before_repointing() {
