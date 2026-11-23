@@ -607,26 +607,44 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let backups = crate::saves::backups(&save_dir);
     widgets::section(ui, &p, "Backups", |ui| {
         if backups.is_empty() {
-            ui.label(crate::i18n::text("No whole-save backups yet. Importing a save or loading a profile keeps the save it replaces here.").size(12.5).color(p.muted));
+            ui.label(crate::i18n::text("No backups yet. Importing a save, loading a profile, or deleting a profile keeps the replaced data here.").size(12.5).color(p.muted));
         }
         for b in &backups {
+            let is_profile_backup = b.name.contains("-profile-");
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::text(&b.name).font(theme::mono(12.5)).color(p.ink));
                 ui.label(crate::i18n::text(format!("{} files, {}", b.files, ago(b.modified))).size(12.0).color(p.muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::button(ui, &p, "Restore", !running)
-                        .on_hover_text(crate::i18n::tr("Makes this backup the current save; the save it replaces is kept in the backups folder"))
-                        .clicked()
-                    {
-                        message = Some(match crate::saves::restore_backup_verified(&save_dir, b, title, &stamp()) {
-                            Ok(i) => {
-                                app.saves_ui.editor = None;
-                                app.saves_ui.active_profile = None;
-                                app.saves_ui.profile_cache = None;
-                                (format!("Restored {} ({} files){}", b.name, i.files, i.backup.map(|p| format!("; the save it replaced is in {}", p.display())).unwrap_or_default()), Tone::Ok)
-                            }
-                            Err(e) => (format!("Could not restore {}: {e}", b.name), Tone::Bad),
-                        });
+                    if is_profile_backup {
+                        // Profile backup: restore as a profile (not the current save)
+                        if widgets::button(ui, &p, "Restore Profile", !running)
+                            .on_hover_text(crate::i18n::tr("Restores this profile to the profiles list; it does not replace the current save"))
+                            .clicked()
+                        {
+                            message = Some(match crate::saves::restore_profile(&save_dir, &b.name) {
+                                Ok(profile) => {
+                                    app.saves_ui.profile_cache = None;
+                                    (format!("Restored profile {}", profile.name), Tone::Ok)
+                                }
+                                Err(e) => (format!("Could not restore profile {}: {e}", b.name), Tone::Bad),
+                            });
+                        }
+                    } else {
+                        // Whole-save backup: restore as current save
+                        if widgets::button(ui, &p, "Restore", !running)
+                            .on_hover_text(crate::i18n::tr("Makes this backup the current save; the save it replaces is kept in the backups folder"))
+                            .clicked()
+                        {
+                            message = Some(match crate::saves::restore_backup_verified(&save_dir, b, title, &stamp()) {
+                                Ok(i) => {
+                                    app.saves_ui.editor = None;
+                                    app.saves_ui.active_profile = None;
+                                    app.saves_ui.profile_cache = None;
+                                    (format!("Restored {} ({} files){}", b.name, i.files, i.backup.map(|p| format!("; the save it replaced is in {}", p.display())).unwrap_or_default()), Tone::Ok)
+                                }
+                                Err(e) => (format!("Could not restore {}: {e}", b.name), Tone::Bad),
+                            });
+                        }
                     }
                 });
             });

@@ -1710,6 +1710,41 @@ pub fn remove_profile(save_dir: &Path, p: &Profile, stamp: &str) -> Result<PathB
     Ok(b)
 }
 
+/// Restore a profile from the backups folder.
+/// The backup folder name must match the pattern `<stamp>-profile-<name>`.
+pub fn restore_profile(save_dir: &Path, backup_name: &str) -> Result<Profile, String> {
+    let backup_path = save_dir.join("backups").join(backup_name);
+    if !backup_path.is_dir() {
+        return Err(format!("backup {} does not exist", backup_name));
+    }
+    // Validate it's a profile backup
+    if !backup_name.contains("-profile-") {
+        return Err(format!("{} is not a profile backup", backup_name));
+    }
+    // Extract profile name from backup folder name
+    let profile_name = backup_name
+        .split_once("-profile-")
+        .map(|(_, name)| name)
+        .ok_or_else(|| format!("could not parse profile name from {}", backup_name))?;
+    let profile_name = crate::mods::clean_name(profile_name);
+    if profile_name.is_empty() {
+        return Err("invalid profile name".into());
+    }
+    let target = save_dir.join("profiles").join(&profile_name);
+    if target.exists() {
+        return Err(format!("a profile named {} already exists", profile_name));
+    }
+    std::fs::create_dir_all(save_dir.join("profiles")).map_err(|e| e.to_string())?;
+    std::fs::rename(&backup_path, &target).map_err(|e| e.to_string())?;
+    let (files, modified) = summary(&target);
+    Ok(Profile {
+        name: profile_name,
+        path: target,
+        files,
+        modified,
+    })
+}
+
 /// A slot in the current save, with the size the page shows beside it.
 pub fn slots_with_sizes(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64)> {
     slots(save_dir)
@@ -2179,6 +2214,38 @@ mod tests {
         assert_eq!(slots(&save).len(), 1);
         remove_profile(&save, &ps[0], "3").unwrap();
         assert!(profiles(&save).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_backup_and_restore_cycle() {
+        let root = temp("profile-restore");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "original");
+        // Create a profile
+        store_profile(&save, "Test Profile", "1").unwrap();
+        let ps = profiles(&save);
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].name, "Test Profile");
+        // Move profile to backups (simulates user deleting profile)
+        let backup_path = remove_profile(&save, &ps[0], "2").unwrap();
+        assert!(profiles(&save).is_empty());
+        // Verify backup exists with expected name pattern
+        let backup_name = backup_path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(backup_name.contains("-profile-Test Profile"));
+        // Restore profile from backup
+        let restored = restore_profile(&save, &backup_name).unwrap();
+        assert_eq!(restored.name, "Test Profile");
+        assert!(restored.path.is_dir());
+        // Verify profile is back in profiles list
+        let ps = profiles(&save);
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].name, "Test Profile");
+        // Verify backup is gone
+        let backups = crate::saves::backups(&save);
+        let profile_backups: Vec<_> = backups.iter().filter(|b| b.name.contains("-profile-")).collect();
+        assert!(profile_backups.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

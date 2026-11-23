@@ -205,23 +205,44 @@ pub fn current_exe() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
-/// Where the build replaced by the last update is kept: `backups\EmblemWeave.exe.old` beside the launcher, so an
-/// update never leaves an `.old` file in the install root.
+/// Where builds replaced by updates are kept: `Old versions\EmblemWeave.exe.old*`
+/// beside the launcher, so an update never leaves an `.old` file in the install root.
 ///
-/// Only one previous build is kept, however many times this copy updates.
-pub fn backup_exe() -> Option<PathBuf> {
-    current_exe().map(|exe| backups_dir(&exe).join(BACKUP_FILE))
+/// Multiple previous builds are kept, with incrementing extensions: .old, .old.1, .old.2, etc.
+pub fn backup_exes() -> Vec<PathBuf> {
+    current_exe()
+        .map(|exe| {
+            let dir = old_versions_dir(&exe);
+            let mut exes: Vec<_> = std::fs::read_dir(&dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    let p = e.ok()?.path();
+                    let is_old = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("EmblemWeave.exe.old"));
+                    is_old.then_some(p)
+                })
+                .collect();
+            exes.sort_by(|a, b| {
+                // Sort by extension: .old < .old.1 < .old.2 ...
+                let a_ext = a.extension().and_then(|s| s.to_str()).unwrap_or("");
+                let b_ext = b.extension().and_then(|s| s.to_str()).unwrap_or("");
+                a_ext.cmp(b_ext)
+            });
+            exes
+        })
+        .unwrap_or_default()
 }
 
-/// The folder beside the launcher that keeps the previous build.
-fn backups_dir(exe: &Path) -> PathBuf {
-    exe.with_file_name("backups")
+/// The folder beside the launcher that keeps previous builds.
+fn old_versions_dir(exe: &Path) -> PathBuf {
+    exe.with_file_name("Old versions")
 }
 
-/// The one previous build the updater keeps, in `backups\`.
-const BACKUP_FILE: &str = "EmblemWeave.exe.old";
-
-/// Move the `EmblemWeave.exe.old` an earlier version wrote beside the launcher into `backups\`, so the install root is
+/// Move the `EmblemWeave.exe.old` an earlier version wrote beside the launcher into `Old versions\`, so the install root is
 /// clear again after the first start of this build.
 pub fn migrate_legacy_backup() {
     if let Some(exe) = current_exe() {
@@ -235,8 +256,10 @@ fn migrate_backup(exe: &Path) {
     if !legacy.is_file() {
         return;
     }
-    let dir = backups_dir(exe);
-    let kept = dir.join(BACKUP_FILE);
+    let dir = old_versions_dir(exe);
+    // Use the new naming scheme: find the next available version number
+    let backup_name = next_old_version_name(&dir);
+    let kept = dir.join(&backup_name);
     if kept.is_file() {
         // Restore offers the newest previous build, which `kept` already holds; this older one is only clutter.
         let _ = std::fs::remove_file(&legacy);
@@ -250,7 +273,7 @@ fn migrate_backup(exe: &Path) {
 }
 
 pub fn has_backup() -> bool {
-    backup_exe().is_some_and(|p| p.is_file())
+    !backup_exes().is_empty()
 }
 
 /// Download a release's zip and unpack its executable into `dir`, returning
@@ -393,7 +416,7 @@ pub fn install(
     let staged = install_into(
         new_exe,
         &target,
-        &backups_dir(&target),
+        &old_versions_dir(&target),
         crate::engine::run_dir().as_deref(),
         engine_root,
         keep_previous,
@@ -409,7 +432,7 @@ pub fn install(
 fn install_into(
     new_exe: &Path,
     target: &Path,
-    backups: &Path,
+    old_versions: &Path,
     play: Option<&Path>,
     engine_root: Option<&Path>,
     keep_previous: bool,
@@ -437,14 +460,16 @@ fn install_into(
         crate::engine::mark_build_carried_in(&engine, play, &version_text(release_tag));
     }
     if keep_previous {
-        // The backup lives in `backups\`; the folder does not exist yet on an install that has never updated.
-        if let Err(e) = std::fs::create_dir_all(backups) {
+        // The backup lives in `Old versions\`; the folder does not exist yet on an install that has never updated.
+        if let Err(e) = std::fs::create_dir_all(old_versions) {
             let _ = std::fs::remove_file(&staged);
-            return Err(format!("creating the backups folder: {e}"));
+            return Err(format!("creating the Old versions folder: {e}"));
         }
         // Copying a running executable is allowed; replacing it is not. Do it only once the release is known to be
         // complete, so a failed update does not overwrite the version Restore would go back to.
-        if let Err(e) = std::fs::copy(&target, backups.join(BACKUP_FILE)) {
+        // Save with incrementing extension: .old, .old.1, .old.2, etc.
+        let backup_name = next_old_version_name(old_versions);
+        if let Err(e) = std::fs::copy(&target, old_versions.join(&backup_name)) {
             let _ = std::fs::remove_file(&staged);
             return Err(format!("keeping the current version: {e}"));
         }
@@ -452,14 +477,41 @@ fn install_into(
     Ok(staged)
 }
 
-/// Put the build kept from the last update back.
+/// Determine the next old version filename: EmblemWeave.exe.old, EmblemWeave.exe.old.1, EmblemWeave.exe.old.2, etc.
+fn next_old_version_name(old_versions: &Path) -> String {
+    let existing = backup_exes();
+    if existing.is_empty() {
+        "EmblemWeave.exe.old".to_string()
+    } else {
+        // Find the highest numbered extension
+        let mut max_num = 0;
+        for p in &existing {
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext == "old" {
+                max_num = max_num.max(1);
+            } else if let Some(num_str) = ext.strip_prefix("old.") {
+                if let Ok(num) = num_str.parse::<u32>() {
+                    max_num = max_num.max(num + 1);
+                }
+            }
+        }
+        if max_num == 0 {
+            "EmblemWeave.exe.old".to_string()
+        } else if max_num == 1 {
+            "EmblemWeave.exe.old.1".to_string()
+        } else {
+            format!("EmblemWeave.exe.old.{max_num}")
+        }
+    }
+}
+
+/// Put the most recent kept build back (the one with the highest version number).
 pub fn restore_previous() -> Result<(), String> {
-    let backup = backup_exe()
-        .filter(|p| p.is_file())
-        .ok_or("there is no previous version to go back to")?;
+    let exes = backup_exes();
+    let backup = exes.last().ok_or("there is no previous version to go back to")?;
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
     let tmp = std::env::temp_dir().join(format!("emblemweave-rollback-{}.exe", std::process::id()));
-    std::fs::copy(&backup, &tmp).map_err(|e| format!("reading the previous version: {e}"))?;
+    std::fs::copy(backup, &tmp).map_err(|e| format!("reading the previous version: {e}"))?;
     swap_script(&tmp, &target, &update_log(), failure_marker().as_deref())
 }
 
@@ -756,7 +808,7 @@ mod tests {
         let staged = install_into(
             &release.join("EmblemWeave.exe"),
             &install.join("EmblemWeave.exe"),
-            &install.join("backups"),
+            &install.join("Old versions"),
             Some(&play),
             Some(&engine),
             true,
@@ -780,9 +832,9 @@ mod tests {
         assert_eq!(read(&install.join("docs/PACKAGE.md")), "release manifest");
         assert_eq!(read(&staged), "new launcher");
         assert_eq!(read(&install.join("EmblemWeave.exe")), "old launcher");
-        // The backup goes in `backups\`, which the update creates; nothing is written beside the launcher.
+        // The backup goes in `Old versions\`, which the update creates; nothing is written beside the launcher.
         assert_eq!(
-            read(&install.join("backups/EmblemWeave.exe.old")),
+            read(&install.join("Old versions/EmblemWeave.exe.old")),
             "old launcher"
         );
         assert!(!install.join("EmblemWeave.exe.old").exists());
@@ -795,7 +847,7 @@ mod tests {
     /// The build an older version kept beside the launcher is moved into `backups\`, so upgrading does not leave the
     /// install root with an `.old` file after the update that starts using the folder.
     #[test]
-    fn a_backup_beside_the_launcher_moves_into_the_backups_folder() {
+    fn a_backup_beside_the_launcher_moves_into_the_old_versions_folder() {
         let root = std::env::temp_dir().join(format!("ew-migrate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let exe = root.join("EmblemWeave.exe");
@@ -806,7 +858,7 @@ mod tests {
 
         assert!(!root.join("EmblemWeave.exe.old").exists());
         assert_eq!(
-            read(&root.join("backups/EmblemWeave.exe.old")),
+            read(&root.join("Old versions/EmblemWeave.exe.old")),
             "previous launcher"
         );
         let _ = std::fs::remove_dir_all(root);
@@ -821,12 +873,12 @@ mod tests {
         let exe = root.join("EmblemWeave.exe");
         write(&exe, "current launcher");
         write(&root.join("EmblemWeave.exe.old"), "older");
-        write(&root.join("backups/EmblemWeave.exe.old"), "kept");
+        write(&root.join("Old versions/EmblemWeave.exe.old"), "kept");
 
         migrate_backup(&exe);
 
         assert!(!root.join("EmblemWeave.exe.old").exists());
-        assert_eq!(read(&root.join("backups/EmblemWeave.exe.old")), "kept");
+        assert_eq!(read(&root.join("Old versions/EmblemWeave.exe.old")), "kept");
         let _ = std::fs::remove_dir_all(root);
     }
 
