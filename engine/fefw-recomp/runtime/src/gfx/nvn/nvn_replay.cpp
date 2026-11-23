@@ -1422,19 +1422,21 @@ Texture* feedback_clone(Texture* t) {
 }
 
 // [nvn] lean_barriers (default auto): the measured GPU sync set (PERF_NOTES, GPU track: GPU time per frame 15.1 -> 10.9 ms at 4K on an
-// RTX 3080, no visual difference) as the default of its five keys: dispatch_barriers = tracked, game_barriers = tracked, batch_ubo_updates,
-// feedback_levels, depth_ro_sticky. Each of those keys set in the ini or the environment still wins. auto: on for an NVIDIA GPU while
-// pass_barriers is tracked (the F1 page's "Fewer GPU pipeline waits", which turns this off with it); other drivers forgive a missing
-// dependency less readily and the set is not tested there yet. true / false force it.
+// RTX 3080, and -14% to -25% GPU time / +20-23% 1% low FPS on AMD RADV PHOENIX, no visual difference) as the default of its five keys:
+// dispatch_barriers = tracked, game_barriers = tracked, batch_ubo_updates, feedback_levels, depth_ro_sticky. Each of those keys set in
+// the ini or the environment still wins. auto: on for NVIDIA (0x10de) and AMD (0x1002) GPUs while pass_barriers is tracked (the F1 page's
+// "Fewer GPU pipeline waits", which turns this off with it); other vendors stay off until tested there. true / false force it.
 bool lean_barriers_on() {
     static const bool on = [] {
         std::string v = nxrt::config_get_str("nvn", "lean_barriers", "auto");
         for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (v.empty() || v == "auto") {
-            const bool nvidia = device().properties().vendorID == 0x10de;
+            const uint32_t vid = device().properties().vendorID;
+            const bool supported = (vid == 0x10de || vid == 0x1002);
+            const char* who = vid == 0x10de ? "NVIDIA GPU" : (vid == 0x1002 ? "AMD GPU" : "untested GPU vendor");
             const bool pass_tracked = nxrt::config_get_str("nvn", "pass_barriers", "tracked") != "full";
-            const bool r = nvidia && pass_tracked;
-            NXLOG_I(kTag, "[nvn] lean_barriers = auto: %s (%s%s)", r ? "on" : "off", nvidia ? "NVIDIA GPU" : "not an NVIDIA GPU",
+            const bool r = supported && pass_tracked;
+            NXLOG_I(kTag, "[nvn] lean_barriers = auto: %s (%s%s)", r ? "on" : "off", who,
                     pass_tracked ? "" : ", pass_barriers = full");
             return r;
         }
@@ -1899,8 +1901,23 @@ uint64_t g_sh_uses = 0, g_sh_from_mirror = 0, g_sh_bytes_mirror = 0, g_sh_bytes_
 uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_bytes_dout = 0, g_sh_merged = 0, g_sh_flushes = 0;
 constexpr VkDeviceSize kShadowMax = 16ull << 20;
 
+// [nvn] compute_shadows (default auto): copy compute storage buffers to/from device-local shadow buffers (or direct pool mirror)
+// so discrete GPUs do not cross PCIe per shader access. auto: off on integrated GPUs (unified memory: host-imported buffers are already
+// in the same RAM, so shadow copies waste bandwidth and extra barriers), on elsewhere. true / false force it.
 bool compute_shadows_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "compute_shadows", true);
+    static const bool on = [] {
+        std::string v = nxrt::config_get_str("nvn", "compute_shadows", "auto");
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (v.empty() || v == "auto") {
+            const bool igpu = device().properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+            const bool r = !igpu;
+            NXLOG_I(kTag, "[nvn] compute_shadows = auto: %s (%s)", r ? "on" : "off", igpu ? "integrated GPU" : "discrete GPU");
+            return r;
+        }
+        const bool r = !(v == "false" || v == "0" || v == "off" || v == "no");
+        NXLOG_I(kTag, "[nvn] compute_shadows = %s", r ? "on" : "off");
+        return r;
+    }();
     return on;
 }
 bool compute_direct_on() {
