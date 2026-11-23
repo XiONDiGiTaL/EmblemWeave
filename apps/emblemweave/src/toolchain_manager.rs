@@ -555,6 +555,57 @@ impl ToolchainManager {
         Ok(())
     }
 
+    /// Load the on-disk lock when it still describes the current probe, otherwise generate a fresh one.
+    ///
+    /// A lock written by an older probe can name a required tool with no expected path, no version command and no
+    /// PATH lookup (the Nov 21 Windows SDK entry did exactly that), or still require a tool this release made optional
+    /// (.NET). Verification can only report those as missing, which would fail a build over a stale cache. Returns
+    /// true when a loaded lock was discarded.
+    pub fn load_tools_lock_or_generate(&mut self) -> Result<bool> {
+        if self.load_tools_lock().is_err() {
+            self.generate_tools_lock()?;
+            return Ok(false);
+        }
+        let loaded = self.tools_lock.take().expect("load_tools_lock stored the lock");
+        let fresh = self.generate_tools_lock()?;
+        if self.lock_is_usable(&loaded, &fresh) {
+            self.tools_lock = Some(loaded);
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// A lock is usable when it agrees with the fresh probe about which tools exist and which are required, and
+    /// every required tool in it can still be located. Version strings may differ: verification checks the minimum.
+    fn lock_is_usable(&self, loaded: &ToolsLock, fresh: &ToolsLock) -> bool {
+        if loaded.version != fresh.version || loaded.platform != fresh.platform {
+            return false;
+        }
+        for fresh_tool in &fresh.tools {
+            let Some(loaded_tool) = loaded.tools.iter().find(|tool| tool.name == fresh_tool.name) else {
+                return false;
+            };
+            if loaded_tool.category != fresh_tool.category {
+                return false;
+            }
+            if loaded_tool.category == ToolCategory::Required
+                && !matches!(self.find_tool(loaded_tool), Ok(Some(_)))
+            {
+                return false;
+            }
+        }
+        // A required tool the probe no longer lists would still gate verification.
+        for loaded_tool in &loaded.tools {
+            if loaded_tool.category == ToolCategory::Required
+                && !fresh.tools.iter().any(|tool| tool.name == loaded_tool.name)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Generate a tools.lock from current system state
     pub fn generate_tools_lock(&mut self) -> Result<ToolsLock> {
         let probe_result = toolchain::probe();
@@ -1253,7 +1304,64 @@ mod tests {
             .map(|v| v.tool_name.as_str())
             .collect();
         assert!(missing.is_empty(), "required tools missing: {missing:?}");
+
+        // The Nov 21 lock in the engine checkout names a Windows SDK with no path and still requires .NET. It must be
+        // discarded if the manager is ever rooted at the checkout, not reused until verification fails.
+        let stale_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../engine/fefw-recomp/tools.lock");
+        if let Ok(text) = std::fs::read_to_string(stale_path) {
+            let stale: ToolsLock = serde_json::from_str(&text).unwrap();
+            assert!(
+                !mgr.lock_is_usable(&stale, mgr.tools_lock().unwrap()),
+                "the Nov 21 tools.lock must not be reused"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn lock_with(tools: Vec<ToolSpec>) -> ToolsLock {
+        ToolsLock {
+            version: TOOLS_LOCK_VERSION,
+            generated_at: String::new(),
+            git_commit: None,
+            platform: Platform::Windows,
+            tools,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// A lock that cannot locate a required tool, or that disagrees with the probe about what is required, was written
+    /// by an older probe. Verification can only report those tools as missing, so the lock must be discarded.
+    #[test]
+    fn a_lock_that_cannot_locate_a_required_tool_is_not_usable() {
+        let dir = std::env::temp_dir().join(format!("ew-tool-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let present = tool_spec("windows_sdk", "10.0.28000.0", Some(&dir), None);
+        let fresh = lock_with(vec![present.clone()]);
+        let mgr = ToolchainManager::new(dir.clone());
+
+        assert!(mgr.lock_is_usable(&lock_with(vec![present.clone()]), &fresh));
+
+        // The Nov 21 shape: a required Windows SDK with no path, no command and no PATH lookup.
+        let blind = tool_spec("windows_sdk", "10.0.22621.0", None, None);
+        assert!(!mgr.lock_is_usable(&lock_with(vec![blind]), &fresh));
+
+        // A tool the current probe found is absent from the lock.
+        assert!(!mgr.lock_is_usable(&lock_with(vec![]), &fresh));
+
+        // A required tool the probe no longer lists would still gate the build.
+        let extra = tool_spec("nasm", "2.16.01", None, None);
+        assert!(!mgr.lock_is_usable(&lock_with(vec![present.clone(), extra]), &fresh));
+
+        // The probe made a tool optional that the lock still requires.
+        let mut now_optional = present.clone();
+        now_optional.category = ToolCategory::Optional;
+        let fresh_optional = lock_with(vec![now_optional]);
+        assert!(!mgr.lock_is_usable(&lock_with(vec![present.clone()]), &fresh_optional));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The release carries Ninja and CMake in `<checkout>/tools/bin`. A manager rooted at the checkout finds them

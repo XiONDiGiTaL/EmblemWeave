@@ -2518,9 +2518,13 @@ pub fn build(
     // tools.lock lives; find_tool also checks the checkout beside it, which is where the carried tools\bin is.
     let toolchain_root = root.join("..");
     let mut toolchain_mgr = ToolchainManager::new(toolchain_root);
-    toolchain_mgr.load_tools_lock().ok(); // Load if exists, otherwise generate
-    if toolchain_mgr.tools_lock().is_none() {
-        toolchain_mgr.generate_tools_lock().map_err(|e| e.to_string())?;
+    // Load a lock only while it still matches this probe; a stale one (a required tool with no path, or a tool that
+    // became optional) would fail verification before the build starts.
+    if toolchain_mgr
+        .load_tools_lock_or_generate()
+        .map_err(|e| e.to_string())?
+    {
+        ctx.log("tools.lock predates this toolchain probe or cannot locate a required tool; generated a fresh one");
     }
 
     // Verify all tools against tools.lock
