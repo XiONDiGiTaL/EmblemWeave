@@ -14,6 +14,100 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_LOG_COPY: u64 = 8 * 1024 * 1024;
 
+/// The expected diagnostic files that should be present in a valid report.
+const EXPECTED_REPORT_FILES: &[&str] = &[
+    "report.txt",
+    "environment.txt",
+    "config.json",
+];
+
+/// Validates a generated report archive.
+/// Returns (is_valid, validation_message, sha256_checksum).
+pub fn validate_report(path: &Path) -> (bool, String, Option<String>) {
+    // Check file exists
+    if !path.exists() {
+        return (false, "Report file does not exist".into(), None);
+    }
+
+    // Check file size > 0
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return (false, format!("Cannot read file metadata: {e}"), None),
+    };
+    let size = meta.len();
+    if size == 0 {
+        return (false, "Report file is empty (0 bytes)".into(), None);
+    }
+
+    // Calculate SHA-256
+    let sha256 = match calculate_sha256(path) {
+        Ok(hash) => Some(hash),
+        Err(e) => return (false, format!("Cannot calculate SHA-256: {e}"), None),
+    };
+
+    // Verify it's a readable ZIP archive with expected contents
+    let is_zip = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if is_zip {
+        match validate_zip_contents(path) {
+            Ok(files) => {
+                let missing: Vec<&str> = EXPECTED_REPORT_FILES
+                    .iter()
+                    .filter(|expected| !files.iter().any(|f| f.ends_with(*expected)))
+                    .copied()
+                    .collect();
+                if missing.is_empty() {
+                    (true, format!("Valid ZIP archive ({})", fmt_size(size)), sha256)
+                } else {
+                    (false, format!("ZIP missing expected files: {}", missing.join(", ")), sha256)
+                }
+            }
+            Err(e) => (false, format!("Invalid ZIP archive: {e}"), sha256),
+        }
+    } else {
+        // It's a folder (fallback when ZIP creation failed)
+        let missing: Vec<&str> = EXPECTED_REPORT_FILES
+            .iter()
+            .filter(|expected| !path.join(expected).exists())
+            .copied()
+            .collect();
+        if missing.is_empty() {
+            (true, format!("Valid report folder ({})", fmt_size(size)), sha256)
+        } else {
+            (false, format!("Report folder missing expected files: {}", missing.join(", ")), sha256)
+        }
+    }
+}
+
+/// Calculate SHA-256 checksum of a file.
+fn calculate_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, BufReader};
+    let file = std::fs::File::open(path).map_err(|e| format!("opening file: {e}"))?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buffer).map_err(|e| format!("reading file: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Validate ZIP archive contents and return list of files.
+fn validate_zip_contents(path: &Path) -> Result<Vec<String>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("opening ZIP: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("reading ZIP: {e}"))?;
+    let mut files = Vec::new();
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).map_err(|e| format!("reading ZIP entry {i}: {e}"))?;
+        files.push(file.name().to_string());
+    }
+    Ok(files)
+}
+
 fn stamp() -> String {
     // Milliseconds, not seconds: two reports made in the same second must not
     // share a folder and mix their files.
