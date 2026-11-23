@@ -51,6 +51,11 @@ class Config(GameConfig):
         # main's zstd 1.5.x ZSTD_decompressMultiFrame (loading / area changes): native zstd, the lifted original as the fallback
         # (runtime/games/fefw/fefw_hle.cpp; FEFW_HLE_ZSTD=0 turns it off)
         0x71000c6a60: ('nx_hle_zstd_multiframe(c, NX_ORIG);', (0xd503237f, 0xd10483ff, 0xa90c7bfd, 0xa90d6ffc)),
+        # main's two hottest culling tests (box against a view volume, box against a cylinder; leaf functions that return 0 / 1):
+        # native versions behind FEFW_HLE_CULL (unset / 0: the lifted originals, 1: native, 2: both, compared into
+        # cull_verify.log; game-build/fefw/src/fefw_hle.cpp)
+        0x71019786c0: ('nx_hle_cull_view_box(c, NX_ORIG);', (0xad400420, 0xb940f408, 0x34000288, 0x3dc00402)),
+        0x7101980580: ('nx_hle_cull_cylinder_box(c, NX_ORIG);', (0x3942c008, 0x36000608, 0x3dc01c07, 0xad400021)),
     }
     # hot code packed together (guest entries from the perf push's profiles, hottest first; see hot.txt's header)
     hot_order = 'hot.txt'

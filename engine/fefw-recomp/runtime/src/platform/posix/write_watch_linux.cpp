@@ -870,6 +870,13 @@ bool any_valid(const Region* r, uint64_t first, uint64_t count) {
     return false;
 }
 
+uint64_t count_valid(const Region* r) {
+    if (!r) return 0;
+    uint64_t n = 0;
+    for (uint64_t w = 0; w < r->nwords; ++w) n += static_cast<uint64_t>(__builtin_popcountll(r->valid[w].load(std::memory_order_relaxed)));
+    return n;
+}
+
 bool page_banned(const Region* r, uint64_t page) { return !r || page >= r->npages || test(r->ban.get(), page); }
 
 void invalidate(Region* r, uint64_t first, uint64_t count) {

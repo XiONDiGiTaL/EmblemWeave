@@ -41,6 +41,8 @@ int main(int argc, char** argv) {
     // The runtime opens its shader cache only from [nvn] shader_cache / NXRT_NVN_SHADER_CACHE (no work-folder fallback),
     // so the test process points it at the game's cache unless the environment already sets it.
     if (!std::getenv("NXRT_NVN_SHADER_CACHE") && !project_root().empty()) _putenv_s("NXRT_NVN_SHADER_CACHE", project_path("work/shader_cache/spirv").c_str());
+    // Tests count log lines: no [log] repeat_limit in the test process unless the environment asks for one.
+    if (!std::getenv("NXRT_LOG_REPEAT_LIMIT")) _putenv_s("NXRT_LOG_REPEAT_LIMIT", "0");
     if (argc >= 2 && !std::strcmp(argv[1], "--list")) {
         std::set<std::string> groups;
         for (auto& c : cases()) groups.insert(c.group);

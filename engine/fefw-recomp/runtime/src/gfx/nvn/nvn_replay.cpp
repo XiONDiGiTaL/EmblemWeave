@@ -154,8 +154,17 @@ Pass P;
 // does not end with a barrier: its written attachments are remembered here, and the next command that could depend on them gets one. A
 // layout change of such an image is that barrier for the image (narrow masks, set_narrow_barriers); a later pass that renders to it again in
 // the same layout, and every command other than a pass or a layout change, get a full barrier first (end_pass).
-struct PendingWrite { Ref<Texture> tex; VkImageLayout layout; };
+// att_done: an attachment-only barrier (narrow_pass_conflicts) has made the write visible to later attachment use; every other use still
+// gets its full barrier or layout change.
+struct PendingWrite { Ref<Texture> tex; VkImageLayout layout; bool att_done = false; };
 std::vector<PendingWrite> g_pending;
+
+// [nvn] narrow_pass_conflicts (default true): a pass that renders again into an attachment an earlier pass wrote with no barrier after it
+// (pending_conflict) gets an attachment-to-attachment barrier instead of a full one, so compute and copies are not drained for it.
+bool narrow_pass_conflicts_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "narrow_pass_conflicts", true);
+    return on;
+}
 bool g_tracked = false;         // this submission uses tracked barriers
 bool g_pass_unsafe = false;     // a draw of the open pass may write memory other than its attachments
 bool g_prog_writes = false;     // the bound program has storage buffer or storage image bindings
@@ -790,8 +799,9 @@ void end_pass(bool to_pass = false) {
     if (to_pass && g_tracked && !g_pass_unsafe) {
         auto remember = [](Texture* t, VkImageLayout l) {
             if (!t || !tex_gpu(t)) return;
-            for (const PendingWrite& w : g_pending) if (w.tex.get() == t) return;
-            g_pending.push_back({Ref<Texture>::share(t), l});
+            for (PendingWrite& w : g_pending)
+                if (w.tex.get() == t) { w.att_done = false; return; }   // written again: no barrier covers this write yet
+            g_pending.push_back({Ref<Texture>::share(t), l, false});
         };
         for (uint32_t i = 0; i < P.ncolor; ++i) remember(P.color[i].tex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (!P.depth_ro) remember(P.depth.tex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -809,7 +819,7 @@ void end_pass(bool to_pass = false) {
 bool pending_conflict(Texture* t, VkImageLayout layout) {
     if (!t || g_pending.empty()) return false;
     for (const PendingWrite& w : g_pending)
-        if (same_image(w.tex.get(), t) && tex_layout(t) == w.layout && layout == w.layout) return true;
+        if (!w.att_done && same_image(w.tex.get(), t) && tex_layout(t) == w.layout && layout == w.layout) return true;
     return false;
 }
 
@@ -942,7 +952,18 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
         for (uint32_t i = 0; i < S.ncolor && !conflict; ++i) conflict = pending_conflict(S.color_tex[i].get(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (!conflict && S.depth_tex)
             conflict = pending_conflict(S.depth_tex.get(), depth_ro ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        if (conflict) {
+        if (conflict && narrow_pass_conflicts_on()) {
+            // attachment writes before, attachment reads and writes after (colour, depth and stencil, load and store ops included)
+            constexpr VkPipelineStageFlags2 kAtt = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                                   VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            scoped_barrier(F->cb, kAtt, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, kAtt,
+                           VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+            // mark only attachment writes as attachment-visible; transfer writes (do_copy_texture_texture / do_downsample) are not covered
+            for (PendingWrite& w : g_pending)
+                if (w.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL || w.layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    w.att_done = true;
+        } else if (conflict) {
             memory_barrier(F->cb);
             g_pending.clear();
         }

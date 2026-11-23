@@ -123,6 +123,10 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
 void memory_barrier(VkCommandBuffer cb);
+// A memory barrier with the scopes given ([nvn] narrow_pass_conflicts / narrow_copy_barriers). It is not a full barrier:
+// memory_barrier_count does not change, so trackers that wait for one (open dispatches, batched updates) still record their own.
+void scoped_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+                    VkAccessFlags2 dst_access);
 // Full memory barriers this thread recorded into `cb` so far: a change since a point in its recording means one lies between.
 uint64_t memory_barrier_count(VkCommandBuffer cb);
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and

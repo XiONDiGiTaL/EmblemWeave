@@ -12,11 +12,15 @@
 #include "nxrt/platform.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 namespace nxrt {
 namespace {
@@ -44,12 +48,82 @@ int64_t g_t0 = 0;           // platform::now_ns() at log_init
 
 thread_local char t_name[64] = {};
 
+// [log] async (default true; env NXRT_LOG_ASYNC): Info and lower lines go to a writer thread, which writes and flushes them, so the
+// thread that logs (the render thread's hitch and census lines, the replay's stats) no longer pays for the file write and the flush. Errors,
+// log_flush and log_shutdown write everything queued and the line itself on the calling thread, in order, so a crash report is complete.
+// Warnings are queued too but the writer flushes at once. g_fmu orders the file: the writer and the synchronous paths take it, then take
+// the queue (g_qmu), so lines stay in the order they were logged. Read once at log start.
+std::recursive_mutex g_fmu;                // the file writes (recursive: a crash inside fwrite may log again on the same thread)
+std::mutex g_qmu;
+std::condition_variable g_qcv;
+std::vector<std::string> g_queue;          // formatted lines, newline included
+bool g_queue_flush = false;                // a queued warning: the writer flushes after this batch
+bool g_writer_started = false;
+int g_async = -1;                          // -1: not read yet
+
+// [log] repeat_limit (default 30; env NXRT_LOG_REPEAT_LIMIT; 0 = off): at most this many Info / Debug / Trace lines from one call site
+// (one format string) in 10 s; the rest are counted and named in one line when the site logs again after the window. Errors, warnings
+// and the start-up settings dump (tag "config") are never held back.
+int g_repeat_limit = -1;
+struct Site {
+    long long window_start = 0;     // QPC
+    unsigned lines = 0, dropped = 0;
+    const char* tag = nullptr;
+};
+std::unordered_map<const char*, Site> g_sites;   // g_mu held
+
+// The file part of one batch. g_fmu held.
+void write_lines_locked(const std::vector<std::string>& lines, bool flush) {
+    if (!g_file) return;
+    for (const std::string& l : lines) std::fwrite(l.data(), 1, l.size(), g_file);
+    if (flush) std::fflush(g_file);
+}
+
+// Writes what the queue holds (and, when given, one more line after it) on the calling thread.
+void drain_sync(const std::string* extra, bool flush) {
+    std::lock_guard<std::recursive_mutex> f(g_fmu);
+    std::vector<std::string> batch;
+    {
+        std::lock_guard<std::mutex> q(g_qmu);
+        batch.swap(g_queue);
+        g_queue_flush = false;
+    }
+    if (extra) batch.push_back(*extra);
+    write_lines_locked(batch, flush);
+}
+
+void writer_loop() {
+    std::vector<std::string> batch;
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> q(g_qmu);
+            g_qcv.wait(q, [] { return !g_queue.empty(); });
+        }
+        std::lock_guard<std::recursive_mutex> f(g_fmu);
+        bool flush;
+        {
+            std::lock_guard<std::mutex> q(g_qmu);
+            batch.swap(g_queue);
+            flush = g_queue_flush;
+            g_queue_flush = false;
+        }
+        // a batch is written and flushed whole: the file stays at most one batch behind, and a warning reaches the disk at once
+        write_lines_locked(batch, true);
+        (void)flush;
+        batch.clear();
+    }
+}
+
+bool async_on() { return g_async > 0; }   // g_mu held
+
 struct Resolved {
     std::string path;
     LogLevel level;
     bool to_stderr;
     bool stderr_all;
     bool keep_previous;
+    int async;
+    int repeat_limit;
 };
 
 // Final settings: env > [log] config keys > options. Reads config, so it must be called without g_mu held.
@@ -65,6 +139,11 @@ Resolved resolve(const LogOptions& opt) {
     } else if (config_has("log", "path")) {
         r.path = config_get_str("log", "path");
     }
+    // [log] async / repeat_limit: read here, without g_mu (a config read can itself log)
+    if (const char* e = std::getenv("NXRT_LOG_ASYNC")) r.async = (e[0] != '0' && e[0] != 'f' && e[0] != 'F') ? 1 : 0;
+    else r.async = config_get_bool("log", "async", true) ? 1 : 0;
+    if (const char* e = std::getenv("NXRT_LOG_REPEAT_LIMIT")) r.repeat_limit = std::atoi(e);
+    else r.repeat_limit = static_cast<int>(config_get_int("log", "repeat_limit", 30));
     if (const char* e = std::getenv("NXRT_LOG_LEVEL")) {
         r.level = log_parse_level(e, r.level);
     } else if (config_has("log", "level")) {
@@ -88,6 +167,9 @@ void rotate_previous(const std::string& path) {
 void apply(const Resolved& r, bool only_if_uninit) {
     std::lock_guard<std::recursive_mutex> g(g_mu);
     if (only_if_uninit && g_inited.load(std::memory_order_acquire)) return;
+    drain_sync(nullptr, true);
+    std::lock_guard<std::recursive_mutex> f(g_fmu);
+    g_sites.clear();
     if (g_file) {
         std::fclose(g_file);
         g_file = nullptr;
@@ -95,6 +177,8 @@ void apply(const Resolved& r, bool only_if_uninit) {
     g_path.clear();
     g_level.store(static_cast<int>(r.level), std::memory_order_relaxed);
     g_to_stderr = r.to_stderr;
+    g_async = r.async;
+    g_repeat_limit = r.repeat_limit;
     g_stderr_all = r.stderr_all;
     std::memset(g_counts, 0, sizeof g_counts);
     g_since_flush = 0;
@@ -126,6 +210,8 @@ void log_init(const LogOptions& opt) {
 
 void log_shutdown() {
     std::lock_guard<std::recursive_mutex> g(g_mu);
+    drain_sync(nullptr, true);
+    std::lock_guard<std::recursive_mutex> f(g_fmu);
     if (g_file) {
         std::fflush(g_file);
         std::fclose(g_file);
@@ -137,7 +223,7 @@ void log_shutdown() {
 
 void log_flush() {
     std::lock_guard<std::recursive_mutex> g(g_mu);
-    if (g_file) std::fflush(g_file);
+    drain_sync(nullptr, true);
 }
 
 void log_set_level(LogLevel l) { g_level.store(static_cast<int>(l), std::memory_order_relaxed); }
@@ -242,27 +328,78 @@ void logv(LogLevel l, const char* tag, const char* fmt, va_list ap) {
     }
 
     std::lock_guard<std::recursive_mutex> g(g_mu);
+    const bool async = async_on();
+    std::string note;   // a repeat-limit summary that goes before this line
+    // the start-up settings dump ("config" lines, all from one format) is always kept whole
+    if (g_repeat_limit > 0 && li > static_cast<int>(LogLevel::Warn) && fmt && !(tag && std::strcmp(tag, "config") == 0)) {
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        Site& st = g_sites[fmt];
+        if (!st.lines || now.QuadPart - st.window_start >= 10 * g_freq) {
+            if (st.dropped) {
+                char b[200];
+                std::snprintf(b, sizeof b, "log: %u more lines from %s's \"%.60s\" in 10 s were left out ([log] repeat_limit = %d)", st.dropped,
+                              st.tag ? st.tag : "?", fmt, g_repeat_limit);
+                note = b;
+            }
+            st.window_start = now.QuadPart;
+            st.lines = 0;
+            st.dropped = 0;
+            st.tag = tag;
+        }
+        if (++st.lines > static_cast<unsigned>(g_repeat_limit)) {
+            st.dropped++;
+            return;   // not counted, not written
+        }
+    }
     char prefix[256];
     std::snprintf(prefix, sizeof prefix, "[%10.6f %c t%lu %s] ", seconds_since_init_locked(), kLevelLetters[li],
                   static_cast<unsigned long>(platform::thread_id()), t_name[0] ? t_name : "-");
     std::string line = prefix;
-    line += tag ? tag : "";
-    line += ": ";
-    line += msg;
+    if (!note.empty()) {
+        std::string nl = line + note;
+        line += tag ? tag : "";
+        line += ": ";
+        line += msg;
+        note = nl;
+    } else {
+        line += tag ? tag : "";
+        line += ": ";
+        line += msg;
+    }
 
     g_counts[li]++;
     if (g_file) {
-        std::fwrite(line.data(), 1, line.size(), g_file);
-        std::fputc('\n', g_file);
-        if (li <= static_cast<int>(LogLevel::Warn) || ++g_since_flush >= kFlushEvery) {
-            std::fflush(g_file);
-            g_since_flush = 0;
+        std::string out;
+        if (!note.empty()) out = note + "\n";
+        out += line;
+        out += '\n';
+        if (async && li > static_cast<int>(LogLevel::Error)) {
+            {
+                std::lock_guard<std::mutex> q(g_qmu);
+                g_queue.push_back(std::move(out));
+                if (li <= static_cast<int>(LogLevel::Warn)) g_queue_flush = true;
+            }
+            if (!g_writer_started) {
+                g_writer_started = true;
+                std::thread(writer_loop).detach();
+            }
+            g_qcv.notify_one();
+        } else {
+            // synchronous: errors (a crash report must be on disk), or [log] async = false (the old path: flush on warnings and every 100 lines)
+            const bool flush = li <= static_cast<int>(LogLevel::Warn) || ++g_since_flush >= kFlushEvery;
+            if (flush) g_since_flush = 0;
+            drain_sync(&out, flush || async);
         }
     }
     if (g_to_stderr && (g_stderr_all || li <= static_cast<int>(LogLevel::Warn))) {
+        if (!note.empty()) std::fprintf(stderr, "%s\n", note.c_str());
         std::fprintf(stderr, "%s\n", line.c_str());
     }
-    if (g_sink) g_sink(l, line.c_str(), g_sink_user);
+    if (g_sink) {
+        if (!note.empty()) g_sink(LogLevel::Info, note.c_str(), g_sink_user);
+        g_sink(l, line.c_str(), g_sink_user);
+    }
 }
 
 void logf(LogLevel l, const char* tag, const char* fmt, ...) {

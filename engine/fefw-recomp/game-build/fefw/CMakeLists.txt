@@ -147,6 +147,11 @@ if(FEFW_CPU_VARIANT STREQUAL "compat")
     target_compile_definitions(fefw PRIVATE FEFW_CPU_NEEDS=FEFW_CPU_NEEDS_COMPAT_BUILD)
 else()
     target_compile_definitions(fefw PRIVATE FEFW_CPU_NEEDS=FEFW_CPU_NEEDS_FMA_BUILD)
+    # fefw_hle.cpp's culling tests follow the lifted code's fused multiply-adds: the fma lifted libraries are compiled with -mfma
+    # (recomp/games/fefw/CMakeLists.txt), so this file is too; without it each of them would be a call into the CRT's fmaf.
+    # In EmblemWeave the file is part of the runtime's game module (runtime/games/fefw), compiled in that directory's scope.
+    set_source_files_properties("${FEFW_RUNTIME_DIR}/games/fefw/fefw_hle.cpp" DIRECTORY "${FEFW_RUNTIME_DIR}/games/fefw"
+                                PROPERTIES COMPILE_OPTIONS "-mfma")
 endif()
 # The site list the libraries were lifted with (recomp/games/fefw/CMakeLists.txt), as fefw.sites for the runtime's checks of code mods.
 if(EXISTS "${FEFW_LIB_DIR}/main.sites")

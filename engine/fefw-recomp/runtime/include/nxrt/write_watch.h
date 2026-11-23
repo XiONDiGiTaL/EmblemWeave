@@ -49,6 +49,8 @@ bool page_banned(const Region* r, uint64_t page);
 void invalidate(Region* r, uint64_t first, uint64_t count);
 // Owner: appends the pages written by the CPU since the last call (page indices) and clears that record.
 void take_written(Region* r, std::vector<uint64_t>& out);
+// Valid pages of the region (a popcount of the valid bitmap).
+uint64_t count_valid(const Region* r);
 // Monotonic sequence bumped whenever any region marks a page written (lets callers with many regions skip scanning when idle).
 uint64_t write_seq();
 

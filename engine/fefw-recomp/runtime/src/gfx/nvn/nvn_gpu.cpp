@@ -915,6 +915,19 @@ void memory_barrier(VkCommandBuffer cb) {
     vkCmdPipelineBarrier2(cb, &di);
 }
 
+void scoped_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+                    VkAccessFlags2 dst_access) {
+    VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = src_stage;
+    b.srcAccessMask = src_access;
+    b.dstStageMask = dst_stage;
+    b.dstAccessMask = dst_access;
+    VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
 // ---- submission --------------------------------------------------------------------------------------------------------
 namespace {
 

@@ -119,6 +119,8 @@ raw:
 // ---- native routines outside the lifted code (runtime/games/fefw/fefw_hle.cpp; in fefw_rt.dll for the package), for GameConfig.inline_replace bodies --
 // `orig` is the lifted original (NX_ORIG in the body): the routine hands the call to it when it cannot give the same result.
 extern "C" void nx_hle_zstd_multiframe(Ctx *NX_NOESC c, void (*orig)(Ctx *));
+extern "C" void nx_hle_cull_view_box(Ctx *NX_NOESC c, void (*orig)(Ctx *));          // FEFW_HLE_CULL: 0 lifted, 1 native, 2 both compared
+extern "C" void nx_hle_cull_cylinder_box(Ctx *NX_NOESC c, void (*orig)(Ctx *));
 
 namespace nx {
 

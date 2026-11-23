@@ -857,6 +857,13 @@ uint64_t guard_faults() { return g_guard_faults.load(std::memory_order_relaxed);
 
 uint64_t write_seq() { return g_write_seq.load(std::memory_order_seq_cst); }
 
+uint64_t count_valid(const Region* r) {
+    if (!r) return 0;
+    uint64_t n = 0;
+    for (uint64_t w = 0; w < r->nwords; ++w) n += static_cast<uint64_t>(__builtin_popcountll(r->valid[w].load(std::memory_order_relaxed)));
+    return n;
+}
+
 void take_written(Region* r, std::vector<uint64_t>& out) {
     if (!r) return;
     for (uint64_t w = 0; w < r->nwords; ++w) {

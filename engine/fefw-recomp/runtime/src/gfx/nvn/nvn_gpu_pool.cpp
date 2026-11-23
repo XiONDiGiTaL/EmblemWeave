@@ -5,6 +5,7 @@
 // the same pages. Measured on the RTX 3080 and the UHD 770 with MapViewOfFile views: imports work with 4096-byte alignment,
 // and GPU writes are visible through every view of the section.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -91,6 +92,7 @@ constexpr uint64_t kMirrorChunkBytes = 64ull << 20;   // the mirror's chunk (kCh
 VkBuffer g_dummy = VK_NULL_HANDLE;
 gfx::Buffer g_dummy_buf;
 std::once_flag g_dummy_once;
+std::atomic<VkBuffer> g_dummy_ready{VK_NULL_HANDLE};   // g_dummy once made (dummy_buffer's fast path)
 std::mutex g_log_mu;
 std::unordered_set<uint64_t> g_logged;
 std::mutex g_live_mu;
@@ -607,7 +609,11 @@ void prefetch_pool(MemoryPool* p) {
 }
 
 VkBuffer dummy_buffer() {
+    // Every draw without vertex buffers asks for it. MSVC's call_once calls into ntdll (InitOnceBeginInitialize) each time.
+    // The atomic is the fast path; call_once still makes the buffer exactly once.
+    if (const VkBuffer b = g_dummy_ready.load(std::memory_order_acquire)) return b;
     std::call_once(g_dummy_once, make_dummy);
+    g_dummy_ready.store(g_dummy, std::memory_order_release);
     return g_dummy;
 }
 
@@ -855,6 +861,7 @@ void pool_shutdown() {
     if (g_dummy_buf.buffer) buffer_views_forget(g_dummy_buf.buffer);
     if (g_dummy_buf.buffer) device().destroy_buffer(g_dummy_buf);
     g_dummy = VK_NULL_HANDLE;
+    g_dummy_ready.store(VK_NULL_HANDLE, std::memory_order_release);
     g_dummy_buf = gfx::Buffer();
     new (&g_dummy_once) std::once_flag();
 }
@@ -1190,11 +1197,10 @@ void log_summary(uint32_t now) {
     if (now - last < 1200) return;
     last = now;
     uint64_t valid = 0, hot = 0;
-    for (const Mirror* m : g_mirrors)
-        for (uint64_t p = 0; p < m->npages; ++p) {
-            valid += page_valid(*m, p) ? 1 : 0;
-            hot += m->hot_until[static_cast<size_t>(p)] > now ? 1 : 0;
-        }
+    for (const Mirror* m : g_mirrors) {
+        valid += mem::ww::count_valid(m->ww);
+        for (uint32_t p : m->sig_pages) hot += m->hot_until[p] > now ? 1 : 0;
+    }
     NXLOG_I(kTag, "pool mirrors: %zu, %llu MiB, valid %llu MiB, hot %llu KiB; binds to mirrors %lld, to pools %lld; copied %lld MiB; write faults %llu",
             g_mirrors.size(), static_cast<unsigned long long>(g_mirror_bytes >> 20), static_cast<unsigned long long>(valid * kPageBytes >> 20),
             static_cast<unsigned long long>(hot * kPageBytes >> 10), static_cast<long long>(g_st_dev_binds.load()), static_cast<long long>(g_st_host_binds.load()),
@@ -1597,10 +1603,10 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     // word by word (page by page this was ~3.5 % of the render thread: draws note their storage buffers, MiBs each; notes/rt.md)
     const bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
-    for (uint64_t p = first; p <= last; ++p) bit_put(m.gpu_inv, p, true);
     for (uint64_t p = first; p <= last;) {
         const uint64_t lo = p & 63, hi = std::min<uint64_t>(64, lo + (last + 1 - p));
         const uint64_t mask = (hi - lo == 64) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo)) - 1) << lo);
+        m.gpu_inv[static_cast<size_t>(p >> 6)] |= mask;
         m.want[static_cast<size_t>(p >> 6)] &= ~mask;
         m.tv[static_cast<size_t>(p >> 6)] &= ~mask;
         p += hi - lo;
@@ -1635,9 +1641,11 @@ void mirror_begin_submit(Frame& f, bool on) {
             const uint8_t sb = static_cast<uint8_t>(1u << std::min<uint32_t>(g_sub_idx, 7));
             static std::vector<uint64_t> cand;
             cand.clear();
+            constexpr uint32_t kSigAge = 600;   // presents not hot before a page leaves the hot-copy list
             size_t keep = 0;
             for (uint32_t p : m.sig_pages) {
                 if (!m.sig[p]) continue;
+                if (m.hot_until[p] <= now && now - m.hot_until[p] > kSigAge) { m.sig[p] = 0; continue; }
                 m.sig_pages[keep++] = p;
                 if (!(m.sig[p] & sb) || page_valid(m, p) || new_get(m, p) || m.hot_until[p] <= now || mem::ww::page_banned(m.ww, p)) continue;
                 cand.push_back(p);

@@ -164,7 +164,11 @@ std::string frame_name(uint64_t addr, std::unordered_map<uint64_t, std::string>&
     std::string n;
     if (si.from_map && !si.symbol.empty()) {
         n = si.symbol;
-        if (std::find(offsets.begin(), offsets.end(), n) != offsets.end()) {
+        // an entry is the whole symbol as the map writes it, or a plain function name ("resolve_read" matches "...::resolve_read(...)")
+        const bool want = std::any_of(offsets.begin(), offsets.end(), [&](const std::string& o) {
+            return n == o || n.find("::" + o + "(") != std::string::npos || n.find(" " + o + "(") != std::string::npos;
+        });
+        if (want) {
             char b[24];
             std::snprintf(b, sizeof b, "+0x%llx", static_cast<unsigned long long>(si.sym_offset));
             n += b;

@@ -259,6 +259,32 @@ NXTEST(log_file_output_is_written) {
     remove_log_files(p);
 }
 
+// [log] repeat_limit: lines from one call site beyond the limit in 10 s are left out (and not counted); warnings never are.
+NXTEST(log_repeat_limit_per_call_site) {
+    std::string p = temp_path("repeat");
+    REQUIRE(!p.empty());
+    remove_log_files(p);
+    clear_env();
+    config_clear();
+    _putenv_s("NXRT_LOG_REPEAT_LIMIT", "3");
+    LogOptions o;
+    o.path = p.c_str();
+    o.level = LogLevel::Info;
+    o.to_stderr = false;
+    log_init(o);
+    for (int i = 0; i < 10; i++) logf(LogLevel::Info, "rep", "same site %d", i);
+    for (int i = 0; i < 5; i++) logf(LogLevel::Warn, "rep", "warning %d", i);
+    log_flush();
+    std::string text = read_file(p);
+    CHECK(contains(text, "rep: same site 2"));
+    CHECK(!contains(text, "rep: same site 3"));
+    CHECK(contains(text, "rep: warning 4"));
+    CHECK_EQ(log_count(LogLevel::Info), 3u);
+    log_shutdown();
+    _putenv_s("NXRT_LOG_REPEAT_LIMIT", "0");   // the test process runs without the limit (test_main.cpp)
+    remove_log_files(p);
+}
+
 NXTEST(log_prev_rotation_on_second_init) {
     std::string p = temp_path("rotate");
     REQUIRE(!p.empty());
