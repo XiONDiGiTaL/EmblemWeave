@@ -1315,6 +1315,8 @@ void storage_probe(uint64_t gpu_address, uint64_t size, bool vertex) {
     g_sto_bytes[s][row] += size;
 }
 
+uint64_t mirror_evict_gen() { return static_cast<uint64_t>(g_st_evictions.load(std::memory_order_relaxed)); }
+
 BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use, bool* from_mirror) {
     if (from_mirror) *from_mirror = false;
     MemoryPool* mp = nullptr;

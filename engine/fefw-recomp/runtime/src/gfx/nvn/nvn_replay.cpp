@@ -1988,9 +1988,11 @@ bool g_out_all = true;                 // the next draw checks every slot
 uint64_t g_out_last_gen = ~0ull;       // out_gen() at the last check
 bool g_out_unmemo = false;             // a slot ended unmemoised (it held a result): the next draw checks every slot
 uint16_t g_out_servable_list[kOutSlots];
+uint8_t g_out_servable_in[kOutSlots] = {};
 int g_out_servable_n = 0;              // slots currently memoised as overlapping-but-servable
 uint64_t g_out_last_ww = ~0ull;
 uint64_t g_out_last_inv = ~0ull;
+uint64_t g_out_last_evict = ~0ull;
 uint8_t g_out_dirty[kOutSlots] = {};
 uint16_t g_out_dirty_list[kOutSlots];
 int g_out_dirty_n = 0;
@@ -2041,18 +2043,19 @@ void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why
         return;
     }
     if (copy_ok && out_servable(b.addr, sz)) {
-        const bool was_servable = m.servable;
         m.addr = b.addr;
         m.size = b.size;
         m.gen = gen;
         m.servable = true;
-        if (!was_servable) {
-            const int idx = static_cast<int>(&m - g_out_slot);
+        const int idx = static_cast<int>(&m - g_out_slot);
+        if (!g_out_servable_in[idx]) {
             if (g_out_servable_n == 0) {
                 g_out_last_ww = mem::ww::write_seq();
                 g_out_last_inv = g_mirror_inv_seq;
+                g_out_last_evict = mirror_evict_gen();
             }
-            if (g_out_servable_n < kOutSlots) g_out_servable_list[g_out_servable_n++] = static_cast<uint16_t>(idx);
+            g_out_servable_in[idx] = 1;
+            g_out_servable_list[g_out_servable_n++] = static_cast<uint16_t>(idx);
         }
         return;
     }
@@ -2106,11 +2109,14 @@ const OutOverlapSnap* out_draw_bindings() {
         const uint64_t gen = snap->gen;
         if (g_out_servable_n > 0) {
             const uint64_t ww = mem::ww::write_seq();
-            if (ww != g_out_last_ww || g_mirror_inv_seq != g_out_last_inv) {
+            const uint64_t ev = mirror_evict_gen();
+            if (ww != g_out_last_ww || g_mirror_inv_seq != g_out_last_inv || ev != g_out_last_evict) {
                 g_out_last_ww = ww;
                 g_out_last_inv = g_mirror_inv_seq;
+                g_out_last_evict = ev;
                 for (int i = 0; i < g_out_servable_n; ++i) {
                     const uint16_t idx = g_out_servable_list[i];
+                    g_out_servable_in[idx] = 0;
                     if (g_out_slot[idx].servable) {
                         g_out_slot[idx].gen = ~0ull;
                         g_out_slot[idx].servable = false;
@@ -2818,7 +2824,8 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                         ii.imageView = g_su_view;
                         ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                     }
-                } else if (tex_gpu(r.tex) && first_time_id(1, d.shader, static_cast<uint64_t>(d.index), r.tex->id)) {
+                } else if (tex_gpu(r.tex) && !(tex_layout(r.tex) == VK_IMAGE_LAYOUT_UNDEFINED && tex_first_upload_deferrable(r.tex)) &&
+                           first_time_id(1, d.shader, static_cast<uint64_t>(d.index), r.tex->id)) {
                     NXLOG_W(kTag, "sampled texture %u (%s, target %d, %dx%dx%d) has no view of the shader's view type %d, sampled type %d: shader %s binding %s (NVN slot %d, set %u binding %u) gets the dummy view",
                             r.tex->id, r.tex->fmt ? r.tex->fmt->name : "?", r.tex->b.target, r.tex->b.width, r.tex->b.height, r.tex->b.depth,
                             static_cast<int>(view_type_for(b)), static_cast<int>(q.component), d.shader->hash.c_str(), b.name.c_str(), b.nvn.index, d.set, d.binding);
@@ -5300,9 +5307,7 @@ void apply_bind_program(const P_BindProgram& p) {
             if (rs_on()) g_rs.out_prog_marked += std::popcount(S.ubo_mask[st]) + std::popcount(S.ssbo_mask[st]);
         }
     } else {
-        g_out_all = true;
-    g_out_servable_n = 0;
-    for (OutSlot& s : g_out_slot) s = OutSlot();     // out_draw_bindings: the active stages may change
+        g_out_all = true;     // out_draw_bindings: the active stages may change
     }
     for (int st = 0; st < 6; ++st)
         if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
@@ -6398,6 +6403,7 @@ void replay_shutdown() {
     S = GState();
     g_out_all = true;
     g_out_servable_n = 0;
+    std::memset(g_out_servable_in, 0, sizeof g_out_servable_in);
     for (OutSlot& s : g_out_slot) s = OutSlot();
     raw_binds_reset();
     P = Pass();
