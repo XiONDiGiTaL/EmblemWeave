@@ -3,6 +3,7 @@
 LIBRARY fefw_rt
 EXPORTS
     fefw_rt_main
+    nx_hle_zstd_multiframe
     call_indirect
     host_import
     guest_trap

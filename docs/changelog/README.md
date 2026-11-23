@@ -5,6 +5,7 @@ description of the current state instead of a wall of history.
 
 | Version | Date | In one line |
 | --- | --- | --- |
+| [0.1.42](0.1.42.md) | 2026-11-22 | Cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash fixed, HDR state restored, save directory reconciliation implemented. |
 | [0.1.41](0.1.41.md) | 2026-11-20 | A measured performance controller, a Performance page, a themed nine-tab F1 menu, 200% master volume, real Vulkan GPU selection, save portraits and party cheats, and no drag glide. |
 | [0.1.40](0.1.40.md) | 2026-11-18 | Update and Play without a rebuild, cleaner add-on failures, and a bounded packed-audio cache. |
 | [0.1.39](0.1.39.md) | 2026-11-18 | Standard mode, DLC discovery, special-character build paths, and an updater that keeps the built game. |

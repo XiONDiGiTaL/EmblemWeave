@@ -516,6 +516,19 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
     widgets::section(ui, p, "Save data", |ui| {
         let (files, _) = crate::saves::summary(&crate::saves::account_dir(&save_dir));
         widgets::kv(ui, p, "Save folder", &save_dir.display().to_string());
+        // Show effective save_dir from fefw.ini (what the game actually uses).
+        if let Some(effective) = crate::engine::effective_save_dir() {
+            if effective != save_dir {
+                widgets::kv(
+                    ui,
+                    p,
+                    "Effective (fefw.ini)",
+                    &format!("{} (differs from above)", effective.display()),
+                );
+            } else {
+                widgets::kv(ui, p, "Effective (fefw.ini)", &effective.display().to_string());
+            }
+        }
         widgets::kv(
             ui,
             p,
@@ -534,7 +547,9 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
         // player force a rescan after copying a save into an emulator.
         let now = ui.input(|i| i.time);
         if app.saves_ui.sources_title != Some(title) || now - app.saves_ui.sources_at > 5.0 {
-            app.saves_ui.sources = crate::saves::find_here(title);
+            let survey = crate::saves::survey_here(title);
+            app.saves_ui.sources = survey.saves;
+            app.saves_ui.empty_sources = survey.empty;
             app.saves_ui.sources_title = Some(title);
             app.saves_ui.sources_at = now;
         }
@@ -543,7 +558,9 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
         ui.horizontal(|ui| {
             ui.label(crate::i18n::text("Emulator saves").font(theme::semibold(13.0)).color(p.ink));
             if widgets::button(ui, p, "Scan again", true).on_hover_text(crate::i18n::tr("Looks in Switch emulator save folders")).clicked() {
-                app.saves_ui.sources = crate::saves::find_here(title);
+                let survey = crate::saves::survey_here(title);
+                app.saves_ui.sources = survey.saves;
+                app.saves_ui.empty_sources = survey.empty;
                 app.saves_ui.sources_title = Some(title);
                 app.saves_ui.sources_at = now;
             }
@@ -553,6 +570,23 @@ pub(crate) fn saves_section(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::
         });
         if found.is_empty() {
             ui.label(crate::i18n::text("No emulator saves for this game were found. Lichii, Fritchii and Eden use the yuzu NAND layout; a portable install can be picked with Import from folder.").size(12.5).color(p.muted));
+        }
+        // A title folder the emulator created and never wrote to is common (an
+        // unused profile, or a save that was moved out). Say that it exists and
+        // is empty, instead of leaving the player to guess why the scan found
+        // nothing on a folder they can see in Explorer.
+        for path in &app.saves_ui.empty_sources {
+            ui.label(
+                crate::i18n::text(format!(
+                    "Empty save folder (nothing to import): {}",
+                    path.display()
+                ))
+                .size(11.5)
+                .color(p.muted),
+            )
+            .on_hover_text(crate::i18n::tr(
+                "The emulator created this title folder but no save was written to it",
+            ));
         }
         for f in &found {
             ui.horizontal(|ui| {

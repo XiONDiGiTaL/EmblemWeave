@@ -395,7 +395,10 @@ fn unpack_packed_romfs(
         if !file.compressed {
             continue; // the engine serves stored files from the package itself
         }
-        let out = dest.join(rel);
+        // A path from the container is data, not a path: it must stay inside `dest`.
+        let Some(out) = safe_relative(dest, rel) else {
+            return Err(format!("the .nup has an unsafe packed path {rel:?}"));
+        };
         if std::fs::metadata(&out).map(|m| m.len()).ok() == Some(file.size) {
             continue;
         }
@@ -861,8 +864,10 @@ fn unpack_package_addons(
 /// entry hash from the package.
 fn exefs_copy_matches(dir: &Path, files: &[(String, u64, [u8; 32])]) -> bool {
     files.iter().all(|(name, size, sha)| {
-        std::fs::read(dir.join(name))
-            .is_ok_and(|data| data.len() as u64 == *size && Sha256::digest(&data)[..] == sha[..])
+        safe_relative(dir, name).is_some_and(|path| {
+            std::fs::read(path)
+                .is_ok_and(|data| data.len() as u64 == *size && Sha256::digest(&data)[..] == sha[..])
+        })
     })
 }
 
@@ -934,10 +939,18 @@ fn use_nup(
             return None;
         }
         for (name, i) in &exefs {
+            let Some(out) = safe_relative(&dir, name) else {
+                g.checks.push(Check::new(
+                    Severity::Error,
+                    "ExeFS",
+                    format!("the .nup has an unsafe ExeFS path {name:?}"),
+                ));
+                return None;
+            };
             match nup
                 .read(*i)
                 .map_err(|e| format!("{e:#}"))
-                .and_then(|b| std::fs::write(dir.join(name), b).map_err(|e| e.to_string()))
+                .and_then(|b| std::fs::write(&out, b).map_err(|e| e.to_string()))
             {
                 Ok(()) => {}
                 Err(e) => {
@@ -3110,5 +3123,23 @@ mod tests {
         assert!(dest.join("alpha/beta/gamma/delta/epsilon").is_dir());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path that comes from a container must stay inside the folder it is written into.
+    #[test]
+    fn container_paths_cannot_escape_the_destination() {
+        let root = std::env::temp_dir().join("ew-safe-relative");
+        assert_eq!(safe_relative(&root, "a/b/c.bin"), Some(root.join("a/b/c.bin")));
+        let absolute = std::env::temp_dir().join("abs.bin");
+        for bad in [
+            "../evil.bin",
+            "a/../../evil.bin",
+            "a/b/../c.bin",
+            ".",
+            "",
+            &absolute.to_string_lossy(),
+        ] {
+            assert_eq!(safe_relative(&root, bad), None, "{bad:?} must be rejected");
+        }
     }
 }

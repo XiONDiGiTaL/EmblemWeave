@@ -57,6 +57,16 @@ if(NOT NXRT_UPSCALER_FSR)
     list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "framegen_ffx[.]cpp$")
     list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "ffx_files[.]cpp$")
     list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "ffx_device_proc[.][ch]$")
+else()
+    # FSR 3 Frame Generation (framegen_ffx.cpp) requires the FFX Frame Generation library
+    # which is separate from the standard FFX library. The headers are in runtime/third_party/amd_ffx_api_fg/
+    # but the library (ffx_api.lib) must be built or provided separately. Check for the library and disable
+    # framegen_ffx.cpp if not found.
+    set(_nxrt_ffx_fg_lib "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd_ffx_api_fg/ffx_api.lib")
+    if(NOT EXISTS "${_nxrt_ffx_fg_lib}")
+        message(STATUS "nxrt: FFX Frame Generation library not found at ${_nxrt_ffx_fg_lib}: disabling framegen_ffx.cpp (FSR 3 FG)")
+        list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "framegen_ffx[.]cpp$")
+    endif()
 endif()
 if(NOT NXRT_UPSCALER_DLSS)
     list(FILTER NXRT_GFX_SOURCES EXCLUDE REGEX "temporal_dlss[.]cpp$")
@@ -132,7 +142,17 @@ endif()
 # The core calls into the graphics shell (src/core/switch2.cpp: the HDR layer luminance; src/testtools: the screenshot wait), so whatever
 # links nxrt (nxrt_tests, the liftrun_* tests) links nxrt_gfx too, as the game exe does. Static libraries may depend on each other.
 target_link_libraries(nxrt INTERFACE nxrt_gfx)
-target_compile_definitions(nxrt_gfx PUBLIC VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
+# Propagate upscaler feature gates from nxrt (main CMakeLists.txt converts ON/OFF to 1/0)
+# These must be on nxrt_gfx because temporal.cpp and output_pass.h are compiled here
+target_compile_definitions(nxrt_gfx PUBLIC
+    VMA_STATIC_VULKAN_FUNCTIONS=0
+    VMA_DYNAMIC_VULKAN_FUNCTIONS=1
+    NXRT_UPSCALER_FSR=${_nxrt_upscaler_fsr}
+    NXRT_UPSCALER_DLSS=${_nxrt_upscaler_dlss}
+    NXRT_UPSCALER_XESS=${_nxrt_upscaler_xess}
+    NXRT_UPSCALER_NIS=${_nxrt_upscaler_nis}
+    NXRT_UPSCALER_MAKO=${_nxrt_upscaler_mako}
+)
 
 add_executable(nxrt_gfx_demo apps/gfx_demo.cpp)
 target_link_libraries(nxrt_gfx_demo PRIVATE nxrt_gfx)

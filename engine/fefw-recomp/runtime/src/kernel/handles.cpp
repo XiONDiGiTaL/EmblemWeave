@@ -1,22 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Kernel handle table (include/nxrt/kernel.h). Pattern from SuperMarioWonderRecomp runtime/src/kernel.cpp handle_add/get/close (MIT).
-#include <windows.h>
-
 #include <functional>
 #include <unordered_map>
 
 #include "nxrt/gauge.h"
 #include "nxrt/kernel.h"
+#include "nxrt/platform.h"
 
 namespace nxrt::kernel {
 namespace {
-SRWLOCK g_lock = SRWLOCK_INIT;
+
+struct HandleLock {
+    platform::RWLock* rwlock = nullptr;
+    HandleLock() { rwlock = platform::rwlock_create(); }
+    ~HandleLock() { platform::rwlock_destroy(rwlock); }
+};
+
+HandleLock& g_lock() {
+    static HandleLock* lock = new HandleLock;
+    return *lock;
+}
+
 std::unordered_map<uint32_t, std::shared_ptr<KObject>> g_handles;
 uint32_t g_next = 0x10000;
+
 }  // namespace
 
 uint32_t handle_add(std::shared_ptr<KObject> o) {
-    AcquireSRWLockExclusive(&g_lock);
+    platform::rwlock_lock_exclusive(g_lock().rwlock);
     uint32_t h = 0;
     if (g_handles.size() < 0x3000) {          // Horizon's per-process handle table holds 0x400..0x3000 entries
         h = g_next;
@@ -24,7 +35,7 @@ uint32_t handle_add(std::shared_ptr<KObject> o) {
         if (g_next >= 0x40000000) g_next = 0x10000;
         g_handles[h] = std::move(o);
     }
-    ReleaseSRWLockExclusive(&g_lock);
+    platform::rwlock_unlock_exclusive(g_lock().rwlock);
     return h;
 }
 
@@ -33,37 +44,37 @@ std::shared_ptr<KObject> handle_get(uint32_t h) {
         KThread* t = current_thread();
         return t ? t->self.lock() : nullptr;
     }
-    AcquireSRWLockShared(&g_lock);
+    platform::rwlock_lock_shared(g_lock().rwlock);
     auto it = g_handles.find(h);
     std::shared_ptr<KObject> r = it == g_handles.end() ? nullptr : it->second;
-    ReleaseSRWLockShared(&g_lock);
+    platform::rwlock_unlock_shared(g_lock().rwlock);
     return r;
 }
 
 void handle_close(uint32_t h) {
     std::shared_ptr<KObject> dying;   // destroyed outside the lock
-    AcquireSRWLockExclusive(&g_lock);
+    platform::rwlock_lock_exclusive(g_lock().rwlock);
     auto it = g_handles.find(h);
     if (it != g_handles.end()) {
         dying = std::move(it->second);
         g_handles.erase(it);
     }
-    ReleaseSRWLockExclusive(&g_lock);
+    platform::rwlock_unlock_exclusive(g_lock().rwlock);
 }
 
 size_t handle_count() {
-    AcquireSRWLockShared(&g_lock);
+    platform::rwlock_lock_shared(g_lock().rwlock);
     size_t n = g_handles.size();
-    ReleaseSRWLockShared(&g_lock);
+    platform::rwlock_unlock_shared(g_lock().rwlock);
     return n;
 }
 
 void handles_reset() {
     std::unordered_map<uint32_t, std::shared_ptr<KObject>> old;
-    AcquireSRWLockExclusive(&g_lock);
+    platform::rwlock_lock_exclusive(g_lock().rwlock);
     old.swap(g_handles);
     g_next = 0x10000;
-    ReleaseSRWLockExclusive(&g_lock);
+    platform::rwlock_unlock_exclusive(g_lock().rwlock);
 }
 
 // ---- gauges (include/nxrt/gauge.h): live handles per object type ----
@@ -77,11 +88,11 @@ struct GaugeHook {
 
 // Handle-table entries of one object type: a walk of at most 0x3000 entries under the table lock (shared).
 size_t count_type(ObjType t) {
-    AcquireSRWLockShared(&g_lock);
+    platform::rwlock_lock_shared(g_lock().rwlock);
     size_t n = 0;
     for (const auto& kv : g_handles)
         if (kv.second->type() == t) n++;
-    ReleaseSRWLockShared(&g_lock);
+    platform::rwlock_unlock_shared(g_lock().rwlock);
     return n;
 }
 

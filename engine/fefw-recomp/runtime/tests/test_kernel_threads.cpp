@@ -54,9 +54,11 @@ bool in_kernel_region(uint64_t a, uint64_t n) {
 }
 
 void begin() {
+    nxrt::svc_init();
+    nxrt::kernel::init_kernel_locks();
+    nxrt::kernel::init_thread_list_lock();
     k::kernel_reset();
     nxrt::fn_clear();
-    nxrt::svc_init();
     nxrt::modules_unload_all();
     nxrt::mem::shutdown();
     nxrt::mem::init();
@@ -669,7 +671,7 @@ NXTEST(console_core_placement) {
         auto t = thread_of(hs[core]);
         REQUIRE(t);
         GROUP_AFFINITY ga{};
-        CHECK(GetThreadGroupAffinity(static_cast<HANDLE>(t->host_handle), &ga) != 0);
+        CHECK(GetThreadGroupAffinity(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread)), &ga) != 0);
         CHECK_EQ(ga.Group, 0);
         CHECK_EQ(static_cast<uint64_t>(ga.Mask), si.host_masks[core]);
     }
@@ -708,7 +710,7 @@ NXTEST(core_mask_0x3_stays_on_cores_0_and_1) {
     auto t = thread_of(h);
     REQUIRE(t);
     GROUP_AFFINITY ga{};
-    GetThreadGroupAffinity(static_cast<HANDLE>(t->host_handle), &ga);
+    GetThreadGroupAffinity(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread)), &ga);
     CHECK_EQ(static_cast<uint64_t>(ga.Mask), si.host_masks[0] | si.host_masks[1]);
     CHECK(join_guest(h, "mask3"));
     const int ok0 = bit_of(si.host_masks[0]), ok1 = bit_of(si.host_masks[1]);
@@ -746,7 +748,7 @@ NXTEST(set_core_mask_moves_running_thread) {
     auto t = thread_of(h);
     REQUIRE(t);
     GROUP_AFFINITY ga{};
-    GetThreadGroupAffinity(static_cast<HANDLE>(t->host_handle), &ga);
+    GetThreadGroupAffinity(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread)), &ga);
     CHECK_EQ(static_cast<uint64_t>(ga.Mask), si.host_masks[2]);
     CHECK(join_guest(h, "mover"));
 
@@ -771,14 +773,14 @@ NXTEST(priority_bands_active_and_inactive) {
     begin();
     const k::SchedInfo si = k::sched_info();
     if (si.active) {
-        for (int nn = 0; nn <= 31; nn++) CHECK_EQ(k::sched_host_priority(28 + nn), band_active(nn));
+        for (int nn = 0; nn <= 31; nn++) CHECK_EQ(static_cast<int>(k::sched_host_priority(28 + nn)), band_active(nn));
     } else {
         std::printf("    note: console core model not active here, the active table is not checked\n");
     }
     nxrt::config_set("sched", "console_cores", "0");
     k::sched_reset_for_tests();
     CHECK(!k::sched_info().active);
-    for (int nn = 0; nn <= 31; nn++) CHECK_EQ(k::sched_host_priority(28 + nn), band_inactive(nn));
+    for (int nn = 0; nn <= 31; nn++) CHECK_EQ(static_cast<int>(k::sched_host_priority(28 + nn)), band_inactive(nn));
     nxrt::config_clear();
     k::sched_reset_for_tests();
     end_case();
@@ -799,16 +801,16 @@ NXTEST(started_thread_win32_priority_follows_bands) {
     }
     for (int i = 0; i < 6; i++) {
         auto t = thread_of(hs[i]);
-        if (!t || !t->host_handle) continue;
-        const int got = GetThreadPriority(static_cast<HANDLE>(t->host_handle));
-        CHECK_EQ(got, k::sched_host_priority(prios[i]));
+        if (!t || !nxrt::platform::thread_native_handle(t->host_thread)) continue;
+        const int got = GetThreadPriority(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread)));
+        CHECK_EQ(got, static_cast<int>(k::sched_host_priority(prios[i])));
         if (k::sched_info().active) CHECK_EQ(got, band_active(prios[i] - 28));
     }
     // A running thread changes band with thread_set_priority.
     auto t0 = thread_of(hs[0]);
     if (t0) {
         CHECK(k::thread_set_priority(*t0, 28 + 17));
-        CHECK_EQ(GetThreadPriority(static_cast<HANDLE>(t0->host_handle)), k::sched_host_priority(28 + 17));
+        CHECK_EQ(GetThreadPriority(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t0->host_thread))), static_cast<int>(k::sched_host_priority(28 + 17)));
     }
     g_release = true;
     for (int i = 0; i < 6; i++)
@@ -835,7 +837,7 @@ NXTEST(config_switch_console_cores) {
     auto t = thread_of(h);
     REQUIRE(t);
     GROUP_AFFINITY ga{};
-    GetThreadGroupAffinity(static_cast<HANDLE>(t->host_handle), &ga);
+    GetThreadGroupAffinity(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread)), &ga);
     CHECK_EQ(static_cast<uint64_t>(ga.Mask), static_cast<uint64_t>(proc));
     g_release = true;
     CHECK(join_guest(h, "unpinned"));

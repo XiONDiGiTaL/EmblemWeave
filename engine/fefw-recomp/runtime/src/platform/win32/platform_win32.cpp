@@ -43,9 +43,20 @@ void release(void* p, std::size_t) {
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
 
-bool protect(void* p, std::size_t bytes, bool writable) {
+bool protect(void* p, std::size_t bytes, uint32_t protect) {
+    DWORD win_protect = PAGE_NOACCESS;
+    if (protect & PROT_READ) {
+        win_protect = (protect & PROT_WRITE) ? PAGE_READWRITE : PAGE_READONLY;
+    } else if (protect & PROT_WRITE) {
+        win_protect = PAGE_READWRITE;
+    }
+    if (protect & PROT_EXEC) {
+        if (win_protect == PAGE_NOACCESS) win_protect = PAGE_EXECUTE;
+        else if (win_protect == PAGE_READONLY) win_protect = PAGE_EXECUTE_READ;
+        else if (win_protect == PAGE_READWRITE) win_protect = PAGE_EXECUTE_READWRITE;
+    }
     DWORD old = 0;
-    return p && VirtualProtect(p, bytes, writable ? PAGE_READWRITE : PAGE_READONLY, &old) != 0;
+    return p && VirtualProtect(p, bytes, win_protect, &old) != 0;
 }
 
 std::size_t page_size() {
@@ -107,6 +118,40 @@ uint32_t thread_id() {
     return static_cast<uint32_t>(GetCurrentThreadId());
 }
 
+Thread* thread_self() {
+    // Create a temporary thread handle for the current thread
+    static thread_local Thread self;
+    self.handle = GetCurrentThread();
+    self.id = GetCurrentThreadId();
+    self.name = nullptr;
+    self.fn = nullptr;
+    self.arg = nullptr;
+    return &self;
+}
+
+uint64_t thread_cpu_time(Thread* t) {
+    if (!t || !t->handle) return 0;
+    FILETIME created{}, exited{}, kernel_time{}, user_time{};
+    if (!GetThreadTimes(t->handle, &created, &exited, &kernel_time, &user_time)) return 0;
+    auto to_u64 = [](const FILETIME& f) { return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+    return to_u64(kernel_time) + to_u64(user_time);
+}
+
+Thread* thread_current_handle() {
+    // GetCurrentThread returns a pseudo-handle that can be used with GetThreadTimes
+    static thread_local Thread self;
+    self.handle = GetCurrentThread();
+    self.id = GetCurrentThreadId();
+    self.name = nullptr;
+    self.fn = nullptr;
+    self.arg = nullptr;
+    return &self;
+}
+
+void* thread_native_handle(Thread* t) {
+    return t ? t->handle : nullptr;
+}
+
 void yield_cpu() {
     SwitchToThread();
 }
@@ -137,6 +182,10 @@ void mutex_lock(Mutex* m) {
 
 void mutex_unlock(Mutex* m) {
     ReleaseSRWLockExclusive(&m->lock);
+}
+
+bool mutex_trylock(Mutex* m) {
+    return TryAcquireSRWLockExclusive(&m->lock) != 0;
 }
 
 Cond* cond_create() {
@@ -291,6 +340,223 @@ bool file_mkdirs(const char* path_utf8) {
     }
     const DWORD a = GetFileAttributesW(w.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+int physical_core_count() {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (!len) return 0;
+    std::vector<uint8_t> buf(len);
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()), &len)) return 0;
+    int n = 0;
+    for (DWORD off = 0; off < len;) {
+        auto* e = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
+        if (e->Size == 0) break;
+        if (e->Relationship == RelationProcessorCore && e->Processor.GroupCount >= 1 && e->Processor.GroupMask[0].Group == 0) ++n;
+        off += e->Size;
+    }
+    return n;
+}
+
+bool thread_set_affinity(Thread* t, uint64_t mask) {
+    return SetThreadAffinityMask(t->handle, static_cast<DWORD_PTR>(mask)) != 0;
+}
+
+bool thread_set_ideal_processor(Thread* t, int processor) {
+    PROCESSOR_NUMBER pn{};
+    pn.Group = 0;
+    pn.Number = static_cast<BYTE>(processor);
+    return SetThreadIdealProcessorEx(t->handle, &pn, nullptr) != 0;
+}
+
+bool thread_set_priority(Thread* t, ThreadPriority prio) {
+    int win_prio = THREAD_PRIORITY_NORMAL;
+    switch (prio) {
+        case ThreadPriority::Lowest: win_prio = THREAD_PRIORITY_LOWEST; break;
+        case ThreadPriority::BelowNormal: win_prio = THREAD_PRIORITY_BELOW_NORMAL; break;
+        case ThreadPriority::Normal: win_prio = THREAD_PRIORITY_NORMAL; break;
+        case ThreadPriority::AboveNormal: win_prio = THREAD_PRIORITY_ABOVE_NORMAL; break;
+        case ThreadPriority::Highest: win_prio = THREAD_PRIORITY_HIGHEST; break;
+        case ThreadPriority::TimeCritical: win_prio = THREAD_PRIORITY_TIME_CRITICAL; break;
+    }
+    return SetThreadPriority(t->handle, win_prio) != 0;
+}
+
+void thread_disable_boost(Thread* t) {
+    SetThreadPriorityBoost(t->handle, TRUE);
+}
+
+int thread_current_processor() {
+    PROCESSOR_NUMBER pn{};
+    GetCurrentProcessorNumberEx(&pn);
+    if (pn.Group == 0) return static_cast<int>(pn.Number);
+    return -1;
+}
+
+bool process_get_affinity_mask(uint64_t* proc_mask, uint64_t* sys_mask) {
+    DWORD_PTR proc = 0, sys = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys)) return false;
+    *proc_mask = static_cast<uint64_t>(proc);
+    *sys_mask = static_cast<uint64_t>(sys);
+    return true;
+}
+
+bool process_set_priority_class(int priority_class) {
+    return SetPriorityClass(GetCurrentProcess(), static_cast<DWORD>(priority_class)) != 0;
+}
+
+void* named_mutex_create(const char* name, bool* already_exists) {
+    HANDLE m = CreateMutexA(nullptr, FALSE, name);
+    if (!m) return nullptr;
+    if (already_exists) *already_exists = (GetLastError() == ERROR_ALREADY_EXISTS);
+    return m;
+}
+
+void named_mutex_destroy(void* handle) {
+    if (handle) CloseHandle(static_cast<HANDLE>(handle));
+}
+
+struct Section {
+    HANDLE handle = nullptr;
+    uint64_t size = 0;
+};
+
+Section* section_create(uint64_t size) {
+    // Create a pagefile-backed section (like SEC_RESERVE)
+    HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_RESERVE,
+                                  static_cast<DWORD>(size >> 32), static_cast<DWORD>(size & 0xFFFFFFFF), nullptr);
+    if (!h) return nullptr;
+    auto* s = new Section;
+    s->handle = h;
+    s->size = size;
+    return s;
+}
+
+uint64_t section_map_view(Section* s, uint64_t addr, uint64_t offset, uint64_t size, bool write) {
+    DWORD protect = write ? FILE_MAP_WRITE : FILE_MAP_READ;
+    void* p = MapViewOfFileEx(s->handle, protect, static_cast<DWORD>(offset >> 32), static_cast<DWORD>(offset & 0xFFFFFFFF),
+                              static_cast<SIZE_T>(size), reinterpret_cast<void*>(addr));
+    return reinterpret_cast<uint64_t>(p);
+}
+
+bool section_unmap_view(uint64_t addr, uint64_t size) {
+    return UnmapViewOfFile(reinterpret_cast<void*>(addr)) != 0;
+}
+
+void section_destroy(Section* s) {
+    if (!s) return;
+    if (s->handle) CloseHandle(s->handle);
+    delete s;
+}
+
+bool section_protect(uint64_t addr, uint64_t size, bool writable) {
+    DWORD old = 0;
+    return VirtualProtect(reinterpret_cast<void*>(addr), static_cast<SIZE_T>(size), writable ? PAGE_READWRITE : PAGE_READONLY, &old) != 0;
+}
+
+void* reserve_fixed(void* addr, std::size_t bytes) {
+    void* p = VirtualAlloc(addr, bytes, MEM_RESERVE, PAGE_NOACCESS);
+    return p == addr ? p : nullptr;
+}
+
+bool release_fixed(void* addr, std::size_t bytes) {
+    (void)bytes;
+    return VirtualFree(addr, 0, MEM_RELEASE) != 0;
+}
+
+// --- write-watch (page fault tracking) ------------------------------------------------------
+
+struct RWLock {
+    SRWLOCK lock{};
+};
+
+RWLock* rwlock_create() {
+    auto* lk = new RWLock;
+    InitializeSRWLock(&lk->lock);
+    return lk;
+}
+
+void rwlock_destroy(RWLock* lk) {
+    delete lk;
+}
+
+void rwlock_lock_shared(RWLock* lk) {
+    AcquireSRWLockShared(&lk->lock);
+}
+
+void rwlock_unlock_shared(RWLock* lk) {
+    ReleaseSRWLockShared(&lk->lock);
+}
+
+void rwlock_lock_exclusive(RWLock* lk) {
+    AcquireSRWLockExclusive(&lk->lock);
+}
+
+void rwlock_unlock_exclusive(RWLock* lk) {
+    ReleaseSRWLockExclusive(&lk->lock);
+}
+
+uint32_t page_protect(uint64_t addr) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi) != sizeof mbi) return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    return mbi.Protect;
+}
+
+namespace {
+PageFaultHandler g_page_fault_handler = nullptr;
+PVOID g_veh_handle = nullptr;
+
+LONG CALLBACK veh_handler(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
+    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+    const ULONG_PTR kind = rec->ExceptionInformation[0];  // 0=read, 1=write, 8=execute
+    if (kind != 0 && kind != 1 && kind != 8) return EXCEPTION_CONTINUE_SEARCH;
+    const uint64_t addr = static_cast<uint64_t>(rec->ExceptionInformation[1]);
+    if (g_page_fault_handler) {
+        bool handled = g_page_fault_handler(addr, static_cast<int>(kind));
+        if (handled) return EXCEPTION_CONTINUE_EXECUTION;  // retry the faulting instruction
+    }
+    // Not handled - let the system handle it (crash or next handler)
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+}  // namespace
+
+bool page_fault_handler_install(PageFaultHandler fn) {
+    if (g_veh_handle) {
+        // Already installed - just update the handler function
+        g_page_fault_handler = fn;
+        return true;
+    }
+    g_page_fault_handler = fn;
+    g_veh_handle = AddVectoredExceptionHandler(1, veh_handler);
+    return g_veh_handle != nullptr;
+}
+
+void page_fault_handler_remove() {
+    // Keep the VEH handler installed permanently to avoid add/remove races.
+    // Just clear the handler function so faults pass through.
+    g_page_fault_handler = nullptr;
+}
+
+bool page_query(uint64_t addr, PageState* state, PageProtect* protect, uint64_t* region_base, uint64_t* region_size) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi) != sizeof mbi) return false;
+    if (state) *state = static_cast<PageState>(mbi.State);
+    if (protect) *protect = static_cast<PageProtect>(mbi.Protect);
+    if (region_base) *region_base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
+    if (region_size) *region_size = mbi.RegionSize;
+    return true;
+}
+
+uint64_t tick_count_ms() {
+    return GetTickCount64();
+}
+
+[[noreturn]] void process_exit(int code) {
+    ExitProcess(static_cast<UINT>(code));
 }
 
 }  // namespace nxrt::platform

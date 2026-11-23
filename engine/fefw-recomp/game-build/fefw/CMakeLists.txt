@@ -108,10 +108,10 @@ foreach(m main sdk subsdk0 subsdk1 subsdk2 rtld)
     list(APPEND FEFW_LIBS fefw_${m})
 endforeach()
 
-# src/fefw_hle.cpp: the native routines the lifted code calls (GameConfig.inline_replace in recomp/games/fefw/config.py, such as
-# nx_hle_zstd_multiframe); the release links the same file on the player's PC (game-build/release/fefw_build.py). Its zstd comes
-# from nxrt_zstd through nxrt_gfx.
-add_executable(fefw src/fefw_main.cpp src/fefw_hle.cpp res/fefw.rc)
+# The native routines the lifted code calls (GameConfig.inline_replace in recomp/games/fefw/config.py, such as
+# nx_hle_zstd_multiframe) live in runtime/games/fefw/fefw_hle.cpp: nxrt_game_fefw below carries them into this exe, and
+# fefw_rt.dll carries and exports them for the package (game-build/release/fefw_build.py links only fefw_stub.cpp and fefw_rt.lib).
+add_executable(fefw src/fefw_main.cpp res/fefw.rc)
 set_source_files_properties(res/fefw.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.manifest;${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.ico")
 target_include_directories(fefw PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_fefw nxrt_gfx nxrt nxrt_zstd)

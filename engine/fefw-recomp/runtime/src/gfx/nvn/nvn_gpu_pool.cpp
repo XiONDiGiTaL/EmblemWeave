@@ -210,8 +210,10 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     // The driver reads and writes back every page it imports (vkAllocateMemory pins them); a write of the game's landing in between was
     // lost (issue 97: one byte of a file the game was loading next to the pool, and its zstd frame never decompressed). Through a private
     // view the game's own view can be made read-only meanwhile: its writes to these pages wait for the import (mem::ww::ImportFreeze).
+    // For non-viewed pools (pool_view = false), the import uses the pool's own address directly, and the Vulkan driver may change
+    // page protections during import. ImportFreeze protects against this for all pool types.
     std::optional<mem::ww::ImportFreeze> freeze;
-    if (c.view) freeze.emplace(reinterpret_cast<const void*>(start), size);
+    freeze.emplace(reinterpret_cast<const void*>(start), size);
     VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     VkResult r;
     const auto tm0 = std::chrono::steady_clock::now();
@@ -570,7 +572,14 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
                 NXFT("pool.wait");
                 nxrt::HitchTimer ht(nxrt::kHpRenderLockWait);
                 std::unique_lock<std::mutex> lk(g_pf_mu);
-                g_pf_cv.wait(lk, [mp] { return mp->prefetch.load() == 2 || g_pf_stop; });
+                // Wait with timeout: if prefetch thread is disabled or stuck, fall back to importing ourselves
+                if (!g_pf_cv.wait_for(lk, std::chrono::seconds(5), [mp] { return mp->prefetch.load() == 2 || g_pf_stop; })) {
+                    // Timeout: prefetch didn't complete. Try to import ourselves by transitioning to state 4.
+                    int expect = 3;
+                    if (mp->prefetch.compare_exchange_strong(expect, 4)) {
+                        NXLOG_W(kTag, "prefetch timeout for pool %p, importing on render thread", static_cast<void*>(mp));
+                    }
+                }
             }
             if (mp->prefetch.load() == 2) mp->gpu = mp->prefetched.exchange(nullptr);
             if (!mp->gpu) mp->gpu = import_pool(mp);
@@ -874,7 +883,25 @@ uint64_t mirror_budget() {
             if (mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max<uint64_t>(vram, mp.memoryHeaps[h].size);
     }
     const int64_t set_mb = config_has("nvn", "pool_mirror_mb") ? std::max<int64_t>(0, config_get_int("nvn", "pool_mirror_mb", 0)) : -1;
-    const MirrorCap c = mirror_cap(vram, set_mb, shared);
+    MirrorCap c = mirror_cap(vram, set_mb, shared);
+    // For integrated GPUs: check config and system RAM to enable mirrors (ROG Ally X, Steam Deck, etc.)
+    if (shared && c.bytes == 0 && set_mb < 0) {
+        // [nvn] pool_mirror_integrated: on (default) = enable mirrors on integrated GPUs with >= 8 GiB RAM,
+        // off = disable mirrors on integrated GPUs, auto = enable if >= 8 GiB RAM.
+        const std::string v = config_get_str("nvn", "pool_mirror_integrated", "on");
+        if (v != "off") {
+            // Check system RAM (Windows)
+            MEMORYSTATUSEX msx{};
+            msx.dwLength = sizeof(msx);
+            if (GlobalMemoryStatusEx(&msx) && msx.ullTotalPhys >= nxrt::nvn::kMirrorIntegratedMinSystemRam) {
+                c = {nxrt::nvn::kMirrorIntegratedCap, "integrated GPU with sufficient system RAM"};
+            } else {
+                c = {0, "integrated GPU (insufficient system RAM)"};
+            }
+        } else {
+            c = {0, "integrated GPU (pool_mirror_integrated=off)"};
+        }
+    }
     NXLOG_I(kTag, "pool copies: cap %llu MiB (%s; largest device-local heap %llu MiB)%s", static_cast<unsigned long long>(c.bytes >> 20), c.why,
             static_cast<unsigned long long>(vram >> 20), c.bytes ? "" : ": no device-local copies");
     return c.bytes;

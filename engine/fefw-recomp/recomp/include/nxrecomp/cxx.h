@@ -116,7 +116,7 @@ raw:
     return (cc & 1) ? !r : r;
 }
 
-// ---- native routines outside the lifted code (fefw.exe: game-build/fefw/src/fefw_hle.cpp), for GameConfig.inline_replace bodies --------
+// ---- native routines outside the lifted code (runtime/games/fefw/fefw_hle.cpp; in fefw_rt.dll for the package), for GameConfig.inline_replace bodies --
 // `orig` is the lifted original (NX_ORIG in the body): the routine hands the call to it when it cannot give the same result.
 extern "C" void nx_hle_zstd_multiframe(Ctx *NX_NOESC c, void (*orig)(Ctx *));
 
@@ -680,7 +680,14 @@ NX_INLINE V128 v_dd(uint64_t lo, uint64_t hi) { V128 v; v.d[0] = lo; v.d[1] = hi
 // x0 unchanged = the destination; memcmp / strcmp: the difference of the first differing bytes as unsigned chars, written as a W
 // register, 0 when equal; strlen: the length). Registers the guest routine clobbers (x1..x18, v0..v7, NZCV) are left as they
 // are: no caller reads them after the call (AAPCS64). The guest memcpy (__memcpy_aarch64) is overlap-safe like memmove.
-NX_INLINE void hle_memmove(Ctx *c) { std::memmove(reinterpret_cast<void *>(c->x[0]), reinterpret_cast<const void *>(c->x[1]), c->x[2]); }
+// A guest copy larger than this cannot be a real buffer: 1 GiB is far above any single copy the game makes, and it catches both
+// a sign-extended negative (0xffffffffffffffec) and a 32-bit -20 zero-extended (0xffffffec). The host routine would otherwise run
+// off the guest buffer and fault in an unrelated page (issue #77: a failed zstd decode left -20 in x2); trap instead, naming the size.
+constexpr uint64_t kMaxGuestCopyBytes = 1ull << 30;
+NX_INLINE void hle_memmove(Ctx *c) {
+    if (c->x[2] > kMaxGuestCopyBytes) guest_trap("memcpy/memmove size is absurd or negative", c->x[2]);
+    std::memmove(reinterpret_cast<void *>(c->x[0]), reinterpret_cast<const void *>(c->x[1]), c->x[2]);
+}
 NX_INLINE void hle_memset(Ctx *c) { std::memset(reinterpret_cast<void *>(c->x[0]), static_cast<int>(static_cast<uint8_t>(c->x[1])), c->x[2]); }
 NX_INLINE void hle_strlen(Ctx *c) { c->x[0] = std::strlen(reinterpret_cast<const char *>(c->x[0])); }
 NX_INLINE uint32_t hle_bytediff(uint64_t x, uint64_t y) {   // first differing byte (lowest address = lowest byte) of two unequal words

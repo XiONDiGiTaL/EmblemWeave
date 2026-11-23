@@ -69,8 +69,8 @@ lifter reads it. **Your game dump is only read; it is never modified.** The
 audit and state are written into the run folder (`data/play` in a portable
 install, `%APPDATA%\EmblemWeave\play` otherwise):
 
-- `patch-audit.json` — the last build's files, hashes, ranges and status;
-- `patch-state.json` — the active set the built executable corresponds to.
+- `patch-audit.json`: the last build's files, hashes, ranges and status;
+- `patch-state.json`: the active set the built executable corresponds to.
 
 ## IPS and IPS32
 

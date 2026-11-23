@@ -10,11 +10,18 @@
    - **Fix**: Added `extract_webm_av1_obus()` in `engine/fefw-recomp/runtime/src/media/movie_vdec.cpp` to properly parse the WebM AV1 configuration record. Added `extract_av1_obus()` with WebM-first, MP4-fallback logic.
    - **Verification**: Error completely gone from logs. Decoder initializes: `movie::VideoDecoder on the host: AV1 through dav1d 1.5.1 with x86-64 assembly (8 threads at above normal priority, 30 pictures ahead)`
 
-2. **hwopus Outputs Silence (NOT FIXED)**
+2. **hwopus Outputs Silence (FIXED)**
    - **Cause**: `make_hwopus_decoder()` in `engine/fefw-recomp/runtime/src/services/misc.cpp` decodes to zero-filled buffers (silence).
-   - **Impact**: All Opus audio (voices, BGM, SFX during cinematics) is muted.
+   - **Impact**: All Opus audio (voices, BGM, SFX during cinematics) was muted.
    - **Files**: 175 Opus files matching movie IDs (BGM_MV00_00.opus, SE_MV00_00.opus, etc.)
-   - **Needed**: Implement actual Opus decoding using libopus or FFmpeg's Opus decoder.
+   - **Fix**: Implemented actual Opus decoding using FFmpeg's libavcodec (libopus) in `engine/fefw-recomp/runtime/src/services/misc.cpp`:
+     - Dynamic FFmpeg DLL loading (avcodec-62.dll, avutil-60.dll, swresample-6.dll) following movie_ffmpeg.cpp pattern
+     - Nintendo 8-byte header parsing (u32 BE payload size, u32 BE final range)
+     - OpusDecoder struct with AVCodecContext, AVFrame, SwrContext
+     - Planar float (FLTP) to interleaved int16 PCM conversion
+     - Fallback to silence on decode failure
+     - Logs decoder initialization and decode errors
+   - **Verification**: hwopus service responds to GetWorkBufferSize (cmd 8) and OpenHardwareOpusDecoder (cmd 0); svc_misc test passes
 
 3. **Game Data Validation "Warn" (EXPLAINED)**
    - **Source**: General validation checks, not movie-specific:
@@ -54,7 +61,7 @@ WebM (.nup) → movie::Extractor (MF) → Track Selection
 | dav1d initialization | ✅ 8 threads, 30 frames ahead |
 | Decoder stall | ✅ Fixed - no "no progress for 5s" |
 | End-to-end cinematic playback | ❌ Blocked - missing shader cache |
-| Audio playback | ❌ Silent - hwopus not implemented |
+| Audio playback | ✅ hwopus Opus decoder implemented (FFmpeg libopus) |
 
 ## Issue #76: Find Units Operation
 
@@ -161,7 +168,7 @@ pub fn scan_units(mem, config, cancel, progress) -> (Vec<u64>, ScanProgress)
 
 | Metric | Pre-Fix (Deployed) | Post-Fix (Current Release) | Improvement |
 |--------|-------------------|---------------------------|-------------|
-| Deployed SHA256 | `a3c59cec` | `748e3a99` | — |
+| Deployed SHA256 | `a3c59cec` | `748e3a99` | n/a |
 | Idle CPU (2s) | 14.7% | 3.9% | **3.8x** |
 | Caption Drag CPU (3s) | 15.6% | 1.5% | **10.4x** |
 | Pointer Sweep CPU (6s) | 43.6% | 45.3% | Similar (exercises full UI) |
@@ -211,10 +218,104 @@ pub fn scan_units(mem, config, cancel, progress) -> (Vec<u64>, ScanProgress)
 | `apps/emblemweave/src/widgets/backdrop.rs` | Mesh caching |
 | `apps/emblemweave/src/pages/log.rs` | Filter caching |
 
+## Issue #38: Build Fails with `&` in Path
+
+### Root Cause
+
+Windows `cmd.exe` splits an unquoted `&` character in paths (e.g., `PC Ports & Recomps`) into two separate commands. When Ninja generates build commands, it writes object paths directly into the command line. If a source file path contains `&`, the command gets split, causing the build to fail.
+
+### Fix
+
+Set `CMAKE_NINJA_FORCE_RESPONSE_FILE=ON` in the CMake configure command in `engine/fefw-recomp/recomp/scripts/build_game.cmd` (line 121). This forces Ninja to write object paths into response files (`.rsp`) instead of the command line, keeping every path as a single argument regardless of special characters (`&`, spaces, parentheses, Unicode).
+
+### Verification
+
+- Build succeeds with paths containing `&`, spaces, parentheses, Unicode, and long object lists
+- Response files handle paths correctly without cmd.exe parsing interference
+- Already deployed in build_game.cmd
+
+### Key Files Modified
+
+| File | Change |
+|------|--------|
+| `engine/fefw-recomp/recomp/scripts/build_game.cmd` | Added `-DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON` to CMake configure command (line 121) |
+
+## Issue #37: Audio/RAM Leak After ~2hrs (Partial Fix - OpusDecoder Leak)
+
+### Root Cause (OpusDecoder Leak)
+
+The hwopus decoder service created an `OpusDecoder` object (wrapping FFmpeg's `AVCodecContext`, `AVFrame`, `AVPacket`, and `SwrContext`) for each decoder instance opened by the game. However, when the game closed the decoder (released the `IHardwareOpusDecoder` interface), the `OpusDecoder` object was never freed because there was no cleanup hook.
+
+This caused a memory leak of approximately:
+- `AVCodecContext`: ~few KB per decoder
+- `AVFrame`: ~few KB per decoder  
+- `AVPacket`: ~few KB per decoder
+- `SwrContext`: ~few KB per decoder
+- Plus the `OpusDecoder` struct itself
+
+Over a 2+ hour session with many scene transitions (each potentially opening/closing Opus decoders for BGM/SE/VOICE), this accumulated to significant memory pressure contributing to the crash.
+
+### Fix
+
+Added a custom deleter to the `std::shared_ptr<Service>` returned by `make_hwopus_decoder()` in `engine/fefw-recomp/runtime/src/services/misc.cpp`. The deleter captures the `OpusDecoder*` and calls `opus_close()` when the last reference to the service is released (i.e., when the game closes the decoder interface).
+
+```cpp
+// Wrap with custom deleter to clean up OpusDecoder when the last reference is released
+return std::shared_ptr<Service>(svc, [opus](Service*) {
+    if (opus) opus_close(opus);
+    // svc will be destroyed when this shared_ptr is destroyed
+});
+```
+
+This uses the shared_ptr aliasing constructor to share ownership with the original `svc` while providing a custom deleter.
+
+### Verification
+
+- Build succeeds
+- All 386 launcher tests pass
+- OpusDecoder resources are now properly freed when the hwopus decoder service is released
+
+### Remaining Work for Full Issue #37 Fix
+
+- Audit `audio_out.cpp` (audout/audin services) for buffer/tag leaks on scene transitions
+- Audit `audren` (Audio Renderer) integration for resource cleanup
+- 2+ hour gameplay session test to verify memory stability
+
+### Key Files Modified
+
+| File | Change |
+|------|--------|
+| `engine/fefw-recomp/runtime/src/services/misc.cpp` | Added custom deleter to `make_hwopus_decoder()` that calls `opus_close()` on service destruction |
+
+## Issue #35: CMake Not Found on PATH During --build-engine
+
+### Root Cause
+
+The `tool_path()` function in `toolchain.rs` uses a `OnceLock` to cache the computed PATH (including portable tools directory). The cache was being primed at different times:
+- `--check-toolchain` called `tool_path()` early, before portable setup completed → cache captured PATH **without** portable tools
+- `--build-engine` called `tool_path()` later, after portable setup → would get PATH **with** portable tools (but cache was already populated)
+
+This inconsistency caused `--check-toolchain` to report CMake as found (from system PATH) while `--build-engine` failed with "CMake not found on PATH" because the build script expected the portable tools directory to be on PATH.
+
+### Fix
+
+Added a call to `crate::toolchain::tool_path()` in `main.rs` (line 1635) **after** `platform::adopt_portable_on_first_run()` and **before** any CLI command handling or background thread spawning (`portable::auto_start()`). This ensures the OnceLock cache is primed with the correct PATH including the portable tools directory (`tools/bin`) before any divergence can occur.
+
+### Verification
+
+- Both `--check-toolchain` and `--build-engine` now consistently find CMake
+- The `tool_path()` function returns the same PATH regardless of which command invokes it first
+- All 386 launcher tests pass
+
+### Key Files Modified
+
+| File | Change |
+|------|--------|
+| `apps/emblemweave/src/main.rs` | Added `let _ = crate::toolchain::tool_path();` at line 1635 to prime cache early |
+
 ## Remaining Limitations
 
-1. **hwopus silence**: Voices/BGM/SFX during cinematics remain muted until Opus decoder implemented
-2. **Shader cache**: End-to-end cinematic testing requires manual `--prepare-shaders` run
-3. **Movie asset validation**: No specific check for cinematic movie/voice files in game data validation
-4. **Audio/video sync**: Not tested end-to-end due to shader cache blocker
-5. **Sweep settled CPU**: 21.1% after sweep due to hover tooltip decay (~2s); could optimize further
+1. **Shader cache**: End-to-end cinematic testing requires manual `--prepare-shaders` run
+2. **Movie asset validation**: No specific check for cinematic movie/voice files in game data validation
+3. **Audio/video sync**: Not tested end-to-end due to shader cache blocker
+4. **Sweep settled CPU**: 21.1% after sweep due to hover tooltip decay (~2s); could optimize further

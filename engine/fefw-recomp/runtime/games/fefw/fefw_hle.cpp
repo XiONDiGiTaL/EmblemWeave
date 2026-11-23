@@ -1,23 +1,44 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Native routines that the lifted game code calls in place of a lifted guest function (GameConfig.inline_replace bodies; see
-// recomp/games/fefw/config.py). Linked into fefw.exe with the lifted libraries (tools/build/fefw_build.py), so no runtime change is
-// needed. Each one keeps the guest function's results exactly or hands the call back to the lifted original (`orig`).
-#include <stdint.h>
-#include <stdlib.h>
-#include <nxrecomp/ctx.h>
-#include "zstd.h"
+// recomp/games/fefw/config.py). They live in the game module (nxrt_game_fefw), which both fefw.exe and the release fefw_rt.dll
+// link: the packaged exe imports them from the DLL and needs no zstd headers or objects on the player's PC. Each one keeps the
+// guest function's results exactly or hands the call back to the lifted original (`orig`).
+#include <zstd.h>
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#include "nxrecomp/ctx.h"
+#include "nxrt/diag.h"
+#include "nxrt/log.h"
 
 namespace {
 
 // FEFW_HLE_ZSTD=0 turns the native zstd decoder off (every call goes to the lifted original).
 int zstd_enabled() {
-    static int on = -1;
-    int v = __atomic_load_n(&on, __ATOMIC_RELAXED);
+    static std::atomic<int> on{-1};
+    int v = on.load(std::memory_order_relaxed);
     if (v < 0) {
-        const char* e = getenv("FEFW_HLE_ZSTD");
+        const char* e = std::getenv("FEFW_HLE_ZSTD");
         v = !(e && e[0] == '0');
-        __atomic_store_n(&on, v, __ATOMIC_RELAXED);
+        on.store(v, std::memory_order_relaxed);
     }
+    return v;
+}
+
+uint32_t load32(uint64_t a) {
+    uint32_t v;
+    std::memcpy(&v, reinterpret_cast<const void*>(static_cast<uintptr_t>(a)), sizeof v);
+    return v;
+}
+
+uint64_t load64(uint64_t a) {
+    uint64_t v;
+    std::memcpy(&v, reinterpret_cast<const void*>(static_cast<uintptr_t>(a)), sizeof v);
     return v;
 }
 
@@ -35,7 +56,7 @@ int zstd_enabled() {
 // set, the call stays with the original, so a window limit or format the native decoder does not share cannot change a result.
 extern "C" void nx_hle_zstd_multiframe(Ctx* c, void (*orig)(Ctx*)) {
     const uint64_t dctx = c->x[0];
-    if (!zstd_enabled() || c->x[5] || c->x[6] || c->x[7] || rd32(dctx + 0x7598) != 0 || rd64(dctx + 0x7638) != (1ull << 27) + 1) {
+    if (!zstd_enabled() || c->x[5] || c->x[6] || c->x[7] || load32(dctx + 0x7598) != 0 || load64(dctx + 0x7638) != (1ull << 27) + 1) {
         orig(c);
         return;
     }
@@ -47,6 +68,20 @@ extern "C" void nx_hle_zstd_multiframe(Ctx* c, void (*orig)(Ctx*)) {
     const size_t r = ZSTD_decompressDCtx(d, reinterpret_cast<void*>(c->x[1]), static_cast<size_t>(c->x[2]),
                                          reinterpret_cast<const void*>(c->x[3]), static_cast<size_t>(c->x[4]));
     if (ZSTD_isError(r)) {
+        // ZSTD_getErrorName names the error, not the asset. Prefer this thread's newest recent-file entry (the file the load was
+        // reading), falling back to the newest entry overall; that is the title asset in the usual case. The note is kept for the
+        // crash report's "last zstd error" section.
+        char err[256];
+        std::snprintf(err, sizeof err, "%s (code %lld, source %llu bytes, destination capacity %llu bytes)",
+                      ZSTD_getErrorName(r), static_cast<long long>(r), static_cast<unsigned long long>(c->x[4]),
+                      static_cast<unsigned long long>(c->x[2]));
+        const std::string file = nxrt::diag_last_file();
+        std::string note = "last file ";
+        note += file.empty() ? "(none)" : file;
+        note += "; ";
+        note += err;
+        NXLOG_W("zstd", "native decode failed: %s (falling back to the lifted decoder)", note.c_str());
+        nxrt::diag_set_zstd_error(note.c_str());
         orig(c);
         return;
     }

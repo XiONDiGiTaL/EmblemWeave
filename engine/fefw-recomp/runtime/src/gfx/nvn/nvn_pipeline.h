@@ -5,6 +5,7 @@
 // offers (viewports, scissors, cull mode, front face, topology, depth/stencil tests and ops, depth bias, stencil references
 // and masks, blend constants, line width, vertex strides); everything else is part of the key.
 #pragma once
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -54,6 +55,21 @@ struct ProgLayout {
     // A per-program invariant of the replay: a storage buffer the program's shaders write (one that [nvn] gfx_ssbo_readonly proves read-only
     // does not count) or a storage image. A draw of this program then writes memory; worked out once here instead of over every binding a draw.
     bool writes_storage = false;
+
+    // --- Invariant caches for fast descriptor set building (Phase 2.2) ---
+    // Pre-computed VkWriteDescriptorSet templates for each set (0..3), static parts only.
+    // The dynamic parts (pBufferInfo, pImageInfo, pTexelBufferView) are filled in at build time.
+    struct WriteTemplate {
+        VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        uint32_t binding = 0;
+        VkDescriptorType type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        // Source classification for dynamic data lookup
+        uint8_t source_class = 0;  // 0=uniform, 1=storage, 2=image, 3=sampler, 4=texel, 5=push_const, 6=driver_const, 7=support, 8=constant_data, 9=uniform_block
+        int32_t source_index = -1; // index into the source array (ubo, ssbo, tex, img, etc.)
+        int32_t nvn_stage = -1;    // NVN shader stage this binding comes from
+    };
+    std::array<std::vector<WriteTemplate>, 4> set_templates;  // templates for sets 0..3
+    bool templates_built = false;
 };
 
 // [nvn] push_uniforms (default true): programs whose set 0 fits the device's push descriptor limit push it (ProgLayout::push_set0). False when the

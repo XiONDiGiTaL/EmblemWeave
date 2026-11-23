@@ -2,8 +2,6 @@
 // Semantics adapted from SuperMarioWonderRecomp runtime/src/kernel.cpp and svc_process.cpp (MIT, Copyright (c) 2026 BelmanteGu); see THIRD_PARTY_NOTICES.md.
 // Memory SVC group (include/nxrt/svc.h): heap, MapMemory/UnmapMemory, QueryMemory, permission and attribute calls, shared,
 // transfer and physical memory views in the alias region. The address space and the Horizon vm map are in include/nxrt/memory.h.
-#include <windows.h>
-
 #include <bit>
 
 #include <cstddef>
@@ -22,6 +20,7 @@
 #include "nxrt/memory.h"
 #include "nxrt/module.h"
 #include "nxrt/svc.h"
+#include "nxrt/platform.h"
 
 namespace nxrt {
 namespace {
@@ -142,11 +141,11 @@ GaugeHook gauge_alias_reservations("mem.alias_reservations", [] {   // host rese
 bool alias_alloc(uint64_t addr, uint64_t size) {
     const uint64_t base = addr & ~(mem::kAllocGranularity - 1);
     const uint64_t end = (addr + size + mem::kAllocGranularity - 1) & ~(mem::kAllocGranularity - 1);
-    void* p = VirtualAlloc(reinterpret_cast<void*>(base), static_cast<SIZE_T>(end - base), MEM_RESERVE, PAGE_READWRITE);
+    void* p = platform::reserve_fixed(reinterpret_cast<void*>(base), static_cast<size_t>(end - base));
     if (!p) return false;
     if (reinterpret_cast<uint64_t>(p) != base ||
-        !VirtualAlloc(reinterpret_cast<void*>(addr), static_cast<SIZE_T>(size), MEM_COMMIT, PAGE_READWRITE)) {
-        VirtualFree(p, 0, MEM_RELEASE);
+        !platform::commit(reinterpret_cast<void*>(addr), static_cast<size_t>(size))) {
+        platform::release_fixed(p, static_cast<size_t>(end - base));
         return false;
     }
     g_reserve_base[addr] = base;
@@ -161,8 +160,8 @@ void alias_free(uint64_t addr) {
         base = it->second;
         g_reserve_base.erase(it);
     }
-    if (!VirtualFree(reinterpret_cast<void*>(base), 0, MEM_RELEASE)) {
-        NXLOG_E(kTag, "VirtualFree(%llx) failed, error %lu", U(base), static_cast<unsigned long>(GetLastError()));
+    if (!platform::release_fixed(reinterpret_cast<void*>(base), 0)) {
+        NXLOG_E(kTag, "release_fixed(%llx) failed", U(base));
     }
 }
 
@@ -624,9 +623,11 @@ uint16_t page_bits(uint64_t g, uint64_t lo, uint64_t hi) {   // the pages of gra
     return static_cast<uint16_t>(((1u << n) - 1u) << first);
 }
 bool granule_free(uint64_t g) {   // nothing of the host's (or another window's) in the granule
-    MEMORY_BASIC_INFORMATION mi{};
-    if (!VirtualQuery(reinterpret_cast<void*>(g), &mi, sizeof mi)) return false;
-    return mi.State == MEM_FREE && reinterpret_cast<uint64_t>(mi.BaseAddress) + mi.RegionSize >= g + kGranule;
+    platform::PageState state;
+    platform::PageProtect protect;
+    uint64_t region_base, region_size;
+    if (!platform::page_query(g, &state, &protect, &region_base, &region_size)) return false;
+    return state == platform::PageState::Free && region_base + region_size >= g + kGranule;
 }
 GaugeHook gauge_physical_bytes("mem.physical_bytes", [] {   // MapPhysicalMemory pages mapped now
     std::lock_guard lk(g_mu);
@@ -669,8 +670,10 @@ void map_physical_memory(::Ctx* c) {
         const uint16_t want = page_bits(g, addr, end);
         auto it = g_phys.find(g);
         if (it == g_phys.end()) {
-            if (VirtualAlloc(reinterpret_cast<void*>(g), static_cast<SIZE_T>(kGranule), MEM_RESERVE, PAGE_READWRITE) != reinterpret_cast<void*>(g)) {
-                NXLOG_E(kTag, "MapPhysicalMemory: reserving %llx failed, error %lu", U(g), static_cast<unsigned long>(GetLastError()));
+            // Reserve the granule
+            void* p = platform::reserve_fixed(reinterpret_cast<void*>(g), static_cast<size_t>(kGranule));
+            if (p != reinterpret_cast<void*>(g)) {
+                NXLOG_E(kTag, "MapPhysicalMemory: reserving %llx failed", U(g));
                 svc_ret(c, kernel::kOutOfMemory);
                 return;
             }
@@ -682,8 +685,8 @@ void map_physical_memory(::Ctx* c) {
             uint64_t n = 1;   // a run of pages committed at once
             while (i + n < kGranulePages && (add & (1u << (i + n)))) ++n;
             const uint64_t a = g + i * mem::kPage;
-            if (!VirtualAlloc(reinterpret_cast<void*>(a), static_cast<SIZE_T>(n * mem::kPage), MEM_COMMIT, PAGE_READWRITE)) {
-                NXLOG_E(kTag, "MapPhysicalMemory: committing %llx failed, error %lu", U(a), static_cast<unsigned long>(GetLastError()));
+            if (!platform::commit(reinterpret_cast<void*>(a), static_cast<size_t>(n * mem::kPage))) {
+                NXLOG_E(kTag, "MapPhysicalMemory: committing %llx failed", U(a));
                 svc_ret(c, kernel::kOutOfMemory);
                 return;
             }
@@ -729,14 +732,14 @@ void unmap_physical_memory(::Ctx* c) {
         if (!drop) continue;
         it->second = static_cast<uint16_t>(it->second & ~drop);
         if (it->second == 0) {
-            VirtualFree(reinterpret_cast<void*>(g), 0, MEM_RELEASE);
+            platform::release(reinterpret_cast<void*>(g), static_cast<size_t>(kGranule));
             mem::vm_set(g, kGranule, mem::kMemFree, 0);   // the granule's other pages were free already
             g_phys.erase(it);
             continue;
         }
         for (uint64_t i = 0; i < kGranulePages; ++i)
             if (drop & (1u << i)) {
-                VirtualFree(reinterpret_cast<void*>(g + i * mem::kPage), static_cast<SIZE_T>(mem::kPage), MEM_DECOMMIT);
+                platform::decommit(reinterpret_cast<void*>(g + i * mem::kPage), static_cast<size_t>(mem::kPage));
                 mem::vm_set(g + i * mem::kPage, mem::kPage, mem::kMemFree, 0);
             }
     }
@@ -788,7 +791,7 @@ void svc_memory_reset_for_tests() {
     std::lock_guard lk(g_mu);
     for (auto& kv : g_windows) alias_free(kv.first);
     g_windows.clear();
-    for (auto& kv : g_phys) VirtualFree(reinterpret_cast<void*>(kv.first), 0, MEM_RELEASE);
+    for (auto& kv : g_phys) platform::release(reinterpret_cast<void*>(kv.first), static_cast<size_t>(kGranule));
     g_phys.clear();
     g_maps.clear();
     g_perm_locked.clear();

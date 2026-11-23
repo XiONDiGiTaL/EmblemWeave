@@ -32,11 +32,11 @@ Phase D completes the EmblemWeave optimization initiative by hardening the stora
 **Phase D Tests Added (7 tests):**
 - `test_corrupted_content_index_recovery` - Recovers from corrupted hardlink_index.json
 - `test_content_verification` - Verifies SHA-256 content integrity
-- `test_partial_corruption_recovery` - Handles partially corrupted indices
-- `test_concurrent_access` - Tests thread-safe access patterns
-- `test_large_content_handling` - Validates large file handling
-- `test_index_persistence_across_restarts` - Ensures index survives restarts
-- `test_hardlink_deduplication` - Verifies deduplication efficiency
+- `test_ref_counting_accuracy` - Tracks reference counts when the same content is added under multiple paths
+- `test_hardlink_fallback_on_windows` - Falls back to a copy when a hard link cannot be created
+- `test_readonly_handling_on_windows` - Clears the read-only attribute on linked files
+- `test_cleanup_removes_unreferenced_content` - Removes content whose reference count reaches zero
+- `test_materialize_romfs_integrity` - Verifies materialized RomFS output against the index
 
 **Key Hardening Features:**
 - Corrupted index recovery with automatic fallback to empty index
@@ -105,14 +105,16 @@ pub struct HardLinkStoreConfig {
 
 ## Performance Benchmarks
 
-| Metric | Target | Achieved |
+> **Unverified:** none of the figures below was measured in a reproducible Phase D run. They are targets/expectations only; see `PHASE_D_PERFORMANCE_BENCHMARKS.md`.
+
+| Metric | Target | Measured |
 |--------|--------|----------|
-| Clean build time | < 60s | ~58s |
-| Incremental build | < 20s | ~19s |
-| Storage deduplication (20 builds) | 4x | 5x (40GB → 8GB) |
-| Pipeline cache deduplication | 3x | 4x |
-| Lift reuse rate | 70% | 73% |
-| Test suite runtime | < 30s | ~12s |
+| Clean build time | < 60s | Not measured |
+| Incremental build | < 20s | Not measured |
+| Storage deduplication (20 builds) | 4x | Not measured |
+| Pipeline cache deduplication | 3x | Not measured |
+| Lift reuse rate | 70% | Not measured |
+| Test suite runtime | < 30s | Not measured |
 
 ## Deployment Verification
 
@@ -120,6 +122,7 @@ pub struct HardLinkStoreConfig {
 - Release binary: `target/release/EmblemWeave.exe` (18.5 MB)
 - GUI application (windows_subsystem = "windows")
 - CLI commands: `--compare-data`, `--fetch-tools`, `--apply-preset`
+- Storage CLI: `target/release/ew-storage.exe` (1.4 MB, console)
 
 ### User Data Preservation
 - `data/` directory: Preserved (config, saves, logs, engine.txt)
@@ -162,7 +165,7 @@ Events emitted during build:
 
 ## Known Limitations
 
-1. **Windows GUI Application**: Release binary is a GUI app; CLI requires debug build or specific flags
+1. **Two Binaries**: The launcher is a GUI app; storage operations use the separate console binary `ew-storage.exe`
 2. **Hard-link Minimum Size**: Files < 4KB are not hard-linked (stored as copies)
 3. **Disk Space Check**: May fail on some temp paths; handled gracefully
 4. **Concurrent Access**: RefCell-based; true multi-threading requires mutex wrapper

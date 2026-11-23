@@ -7,17 +7,51 @@
 # NASM: on PATH, in NXRT_NASM_DIR (cache variable) or in $ENV{NX_TOOLCHAIN}/bin, or name the exe with -DNXRT_NASM=<path>.
 set(NXRT_NASM_DIR "$ENV{NX_TOOLCHAIN}/bin" CACHE PATH "extra folder searched for nasm.exe")
 # also the folders of NASM's own installer and of `winget install NASM.NASM`
-find_program(NXRT_NASM nasm HINTS "${NXRT_NASM_DIR}" "$ENV{ProgramFiles}/NASM" "$ENV{LOCALAPPDATA}/bin/NASM")
-if(NXRT_NASM)
-    set(_d1d_asm_default ON)
+
+# Auto-detection mode: when ON (default), NASM detection and NXRT_DAV1D_ASM are automatically updated
+# on every configure. When OFF, the user controls NXRT_DAV1D_ASM manually via the cached option.
+option(NXRT_DAV1D_ASM_AUTO "Automatically enable/disable dav1d assembly based on NASM detection" ON)
+
+if(NXRT_DAV1D_ASM_AUTO)
+    # Auto mode: force re-detection of NASM on every configure by clearing the cached find_program result.
+    # This ensures that installing/removing NASM takes effect on the next configure.
+    unset(NXRT_NASM CACHE)
+    find_program(NXRT_NASM nasm HINTS "${NXRT_NASM_DIR}" "$ENV{ProgramFiles}/NASM" "$ENV{LOCALAPPDATA}/bin/NASM")
+    if(NXRT_NASM)
+        set(_d1d_asm_auto ON)
+        set(_d1d_asm_auto_msg "FOUND - optimized x86-64 assembly ENABLED")
+    else()
+        set(_d1d_asm_auto OFF)
+        set(_d1d_asm_auto_msg "NOT FOUND - C-only fallback (several times slower)")
+    endif()
+    # Force-update the cache to match current NASM detection.
+    set(NXRT_DAV1D_ASM ${_d1d_asm_auto} CACHE BOOL "Build dav1d's x86-64 assembly (needs NASM 2.14+)" FORCE)
+    message(STATUS "dav1d: NASM ${_d1d_asm_auto_msg} (auto-detection ON)")
 else()
-    set(_d1d_asm_default OFF)
-    # Loud on purpose: without the assembly a 1440p AV1 picture takes ~3x as long (30-50 ms on 4 threads of a Ryzen 7 3700X vs 10-15),
-    # so the movies play below their 30 fps and drift from their sound. Release packages must be built with NASM.
-    message(WARNING "dav1d: nasm not found (PATH, NXRT_NASM_DIR=${NXRT_NASM_DIR}): AV1 movies decode C only, several times slower. "
-                    "Install NASM 2.14+ or pass -DNXRT_NASM=<path to nasm.exe> -DNXRT_DAV1D_ASM=ON (an existing build folder keeps ASM OFF in its cache).")
+    # Manual mode: respect the user's cached choice. Use option() so the cache is not overwritten.
+    # Only run find_program if not explicitly set by user (cache variable exists).
+    if(NOT DEFINED NXRT_NASM)
+        find_program(NXRT_NASM nasm HINTS "${NXRT_NASM_DIR}" "$ENV{ProgramFiles}/NASM" "$ENV{LOCALAPPDATA}/bin/NASM")
+    endif()
+    # Set the status message based on current NASM detection
+    if(NXRT_NASM)
+        set(_d1d_asm_auto_msg "FOUND - optimized x86-64 assembly ENABLED")
+    else()
+        set(_d1d_asm_auto_msg "NOT FOUND - C-only fallback (several times slower)")
+    endif()
+    option(NXRT_DAV1D_ASM "Build dav1d's x86-64 assembly (needs NASM 2.14+)" ${_d1d_asm_auto})
+    if(NXRT_DAV1D_ASM AND NOT NXRT_NASM)
+        message(WARNING "dav1d: NXRT_DAV1D_ASM=ON but NASM not found. Assembly will not be built. "
+                        "Install NASM 2.14+ or set NXRT_DAV1D_ASM=OFF.")
+    endif()
+    message(STATUS "dav1d: NASM ${_d1d_asm_auto_msg} (auto-detection OFF, using cached NXRT_DAV1D_ASM=${NXRT_DAV1D_ASM})")
 endif()
-option(NXRT_DAV1D_ASM "Build dav1d's x86-64 assembly (needs NASM 2.14+)" ${_d1d_asm_default})
+
+# Final validation: if assembly is requested but NASM is missing, error out.
+if(NXRT_DAV1D_ASM AND NOT NXRT_NASM)
+    message(FATAL_ERROR "NXRT_DAV1D_ASM is ON but nasm was not found. "
+                        "Install NASM 2.14+ or set NXRT_DAV1D_ASM=OFF (or NXRT_DAV1D_ASM_AUTO=ON to auto-detect).")
+endif()
 file(GLOB _d1d_src CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 set(_d1d_tmpl ${_d1d_src})
 list(FILTER _d1d_tmpl INCLUDE REGEX "_tmpl\\.c$")

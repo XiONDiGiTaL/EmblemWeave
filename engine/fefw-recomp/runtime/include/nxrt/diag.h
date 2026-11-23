@@ -38,7 +38,16 @@ void diag_threads_release(std::vector<ThreadRecord>& recs);   // closes the dupl
 // A ring of the last 32 file/dir opens of any thread, printed by the crash handler: what the game was loading.
 void diag_note_file(const char* what, const char* path);       // what: "open", "dir", "read", ...
 std::vector<std::string> diag_recent_files();                  // oldest first, "[tid] what path"
+std::string diag_last_file();                                  // newest entry for this thread, else newest overall; "" when empty
 void diag_clear_recent_files();
+
+// ---- last zstd error ----------------------------------------------------------------------------------------------------
+// The last native zstd failure (runtime/games/fefw/fefw_hle.cpp): the newest recent-file entry for the failing thread (or the
+// newest overall when that thread has none; normally the file being decoded), then ZSTD_getErrorName with the code, source size
+// and destination capacity, or "".
+// The crash report prints it: the game may then copy the error code (-20) as a length and fault in an unrelated memcpy (#77).
+void diag_set_zstd_error(const char* text);
+std::string diag_last_zstd_error();
 
 // ---- crash handler -------------------------------------------------------------------------------------------------------
 struct CrashOptions {
@@ -64,6 +73,7 @@ void crash_uninstall();
 //   guest call stack (innermost first): f_<hex> ...        (lifted functions found on the host stack)
 //   threads: one line per registered thread (name, guest tid, lr)
 //   last files opened (oldest first): ...
+//   last zstd error: ...                             (fefw_hle.cpp's last native zstd failure: newest recent-file entry, error, sizes)
 std::string crash_build_report(void* exception_pointers /* EXCEPTION_POINTERS* */);
 // The file the crash report goes to: the path given to crash_install, else "<exe name>_crash.txt" next to the exe ("" = no file). The memory guard
 // writes its report there too.

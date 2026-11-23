@@ -2,8 +2,6 @@
 // Thread, event, synchronisation, time and diagnostic SVCs. Semantics from the Switchbrew SVC page; structure of the handlers
 // adapted from SuperMarioWonderRecomp runtime/src/kernel.cpp svc_impl (MIT, Copyright (c) 2026 BelmanteGu; see THIRD_PARTY_NOTICES.md).
 // Argument registers (AArch64): see include/nxrt/svc.h.
-#include <windows.h>
-
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -17,6 +15,7 @@
 #include "nxrt/memory.h"
 #include "nxrt/module.h"
 #include "nxrt/svc.h"
+#include "nxrt/platform.h"
 #include "kernel_internal.h"
 
 namespace nxrt {
@@ -34,7 +33,7 @@ void svc_exit_process(::Ctx* c) {
         std::snprintf(buf, sizeof buf, "lr=0x%llx", static_cast<unsigned long long>(c->x[30]));
         chain += buf;
         uint64_t f = c->x[29];
-        for (int i = 0; i < 24 && f && !IsBadReadPtr(reinterpret_cast<const void*>(f), 16); ++i) {
+        for (int i = 0; i < 24 && f; ++i) {
             const uint64_t next = *reinterpret_cast<const uint64_t*>(f), ret = *reinterpret_cast<const uint64_t*>(f + 8);
             std::snprintf(buf, sizeof buf, " <- 0x%llx", static_cast<unsigned long long>(ret));
             if (ret) chain += buf;
@@ -45,7 +44,7 @@ void svc_exit_process(::Ctx* c) {
     }
     NXLOG_I("runtime", "state at svcExitProcess:\n%s", summary().c_str());
     log_flush();
-    ExitProcess(0);
+    platform::process_exit(0);
 }
 
 void svc_create_thread(::Ctx* c) {            // x1 entry, x2 arg, x3 stack top, w4 priority, w5 core -> x1 handle
@@ -216,8 +215,7 @@ void svc_break(::Ctx* c) {
     if (notify_only) return;
     NXLOG_I("runtime", "state at svcBreak:\n%s", summary().c_str());
     log_flush();
-    RaiseException(0xE0000003, EXCEPTION_NONCONTINUABLE, 0, nullptr);
-    TerminateProcess(GetCurrentProcess(), 2);
+    platform::process_exit(2);
 }
 
 void svc_output_debug_string(::Ctx* c) {       // x0 pointer, x1 length
@@ -233,7 +231,7 @@ void svc_output_debug_string(::Ctx* c) {       // x0 pointer, x1 length
 void svc_return_from_exception(::Ctx* c) {
     NXLOG_E("svc", "svcReturnFromException(0x%llx): guest exception handlers are not supported", (unsigned long long)X(c, 0));
     log_flush();
-    RaiseException(0xE0000003, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    platform::process_exit(3);
 }
 
 }  // namespace

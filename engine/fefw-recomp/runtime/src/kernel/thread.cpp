@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Guest threads: one Win32 thread per guest thread, a TLS region per thread (TPIDRRO_EL0) and a static TLS block (TPIDR_EL0).
+// Guest threads: one host thread per guest thread, a TLS region per thread (TPIDRRO_EL0) and a static TLS block (TPIDR_EL0).
 // Pattern from SuperMarioWonderRecomp runtime/src/kernel.cpp new_thread / thread_main (MIT, Copyright (c) 2026 BelmanteGu) and
 // smo-recomp runtime/os/os_threads.c (thread start with console core model).
-#include <windows.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <functional>
+#include <mutex>
 
 #include "kernel_internal.h"
 #include "nxrt/game.h"
@@ -21,13 +20,16 @@
 #include "nxrt/module.h"
 
 namespace nxrt::kernel {
-namespace {
+namespace thread_detail {
 
-SRWLOCK g_list_lock = SRWLOCK_INIT;
+// Exception used to terminate the host thread when svcExitThread is called.
+struct ThreadExitException {};
+
+static platform::Mutex* g_list_lock = nullptr;
 std::vector<std::shared_ptr<KThread>> g_all;
 std::atomic<uint64_t> g_next_id{0x50};
 thread_local KThread* t_self = nullptr;
-thread_local std::shared_ptr<KThread> t_keepalive;   // released explicitly before ExitThread (which skips destructors)
+thread_local std::shared_ptr<KThread> t_keepalive;
 
 // Removes its gauge when the file's statics are torn down (declared after g_all, so it goes first).
 struct GaugeHook {
@@ -37,55 +39,73 @@ struct GaugeHook {
 };
 // Thread objects in the list: live threads plus exited ones that something still refers to (a game handle, a waiter). thread_create drops the
 // exited, unreferenced ones, and kernel_reset() drops all of them.
-GaugeHook gauge_threads("kernel.threads", [] {
-    AcquireSRWLockShared(&g_list_lock);
+GaugeHook gauge_threads("kernel.threads", [] () -> int64_t {
+    if (!nxrt::platform::mutex_trylock(g_list_lock)) return static_cast<int64_t>(-1);
     const int64_t n = static_cast<int64_t>(g_all.size());
-    ReleaseSRWLockShared(&g_list_lock);
+    nxrt::platform::mutex_unlock(g_list_lock);
     return n;
 });
+
+void init_thread_list_lock() {
+    g_list_lock = nxrt::platform::mutex_create();
+}
+
+uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
+
+}  // namespace thread_detail
+
+// Public API
+void init_thread_list_lock() {
+    thread_detail::g_list_lock = nxrt::platform::mutex_create();
+}
 
 uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 
 void finish_current(KThread& t) {
     diag_unregister_thread();
     detail::thread_mark_exited(t);
-    t_self = nullptr;
+    thread_detail::t_self = nullptr;
 }
 
-DWORD WINAPI host_thread_main(LPVOID param) {
+void host_thread_main(void* param) {
     auto* box = static_cast<std::shared_ptr<KThread>*>(param);
-    t_keepalive = std::move(*box);
+    thread_detail::t_keepalive = std::move(*box);
     delete box;
-    KThread* t = t_keepalive.get();
-    t_self = t;
-    t->host_tid = GetCurrentThreadId();
+    KThread* t = thread_detail::t_keepalive.get();
+    thread_detail::t_self = t;
+    t->host_tid = nxrt::platform::thread_id();
+    // Create the per-thread condition variable for kernel waits
+    t->cv = nxrt::platform::cond_create();
     log_set_thread_name(t->name.c_str());
     diag_register_thread(t->name.c_str(), &t->ctx, t->id);
     NXLOG_D("thread", "%s (id 0x%llx) starts at 0x%llx, core mask %llx prio %d", t->name.c_str(), (unsigned long long)t->id,
             (unsigned long long)t->entry, (unsigned long long)t->core_mask, t->prio);
-    dispatch_call(&t->ctx, t->entry);
-    NXLOG_D("thread", "%s returned from its entry function", t->name.c_str());
-    finish_current(*t);
-    t_keepalive.reset();
-    return 0;
+    try {
+        dispatch_call(&t->ctx, t->entry);
+        NXLOG_D("thread", "%s returned from its entry function", t->name.c_str());
+        finish_current(*t);
+    } catch (const thread_detail::ThreadExitException&) {
+        // Thread exited via svcExitThread: finish_current was already called in thread_exit()
+        NXLOG_D("thread", "%s exited via svcExitThread", t->name.c_str());
+    }
+    thread_detail::t_keepalive.reset();
 }
-
-}  // namespace
 
 // The TLS region (tls) and the static TLS block (tp_block) are not freed here: they come from mem::alloc_kernel, a bump allocator with no free,
 // so there is nothing to give back. They cost 0x1000 bytes plus the block (at least 0x1000) per thread ever created, a
 // few hundred KiB an hour at the S34 soak rate, against the 4 GiB kernel region.
 KThread::~KThread() {
-    if (host_handle) CloseHandle(static_cast<HANDLE>(host_handle));
+    if (host_thread) nxrt::platform::thread_join(host_thread);
+    if (cv) nxrt::platform::cond_destroy(cv);
 }
 
-KThread* current_thread() { return t_self; }
-::Ctx* current_ctx() { return t_self ? &t_self->ctx : nullptr; }
+KThread* current_thread() { return thread_detail::t_self; }
+::Ctx* current_ctx() { return thread_detail::t_self ? &thread_detail::t_self->ctx : nullptr; }
 
 uint32_t thread_create(const ThreadParams& p) {
     auto t = std::make_shared<KThread>();
     t->self = t;
-    t->id = g_next_id++;
+    t->id = thread_detail::g_next_id++;
     t->name = p.name.empty() ? "guest-" + std::to_string(t->id) : p.name;
     t->entry = p.entry;
     t->arg = p.arg;
@@ -99,7 +119,7 @@ uint32_t thread_create(const ThreadParams& p) {
     // TLS region (read through TPIDRRO_EL0) and the static TLS block (TPIDR_EL0). The nn::os convention keeps the thread pointer at
     // TLS +0x1F0. The block holds the 16-byte TCB, then the initial TLS image of the first module that has a PT_TLS segment.
     const TlsInfo& tpl = module_tls_template();
-    const uint64_t block_size = align_up(0x1000 > tpl.tp_offset + tpl.mem_size + 0x100 ? 0x1000 : tpl.tp_offset + tpl.mem_size + 0x100, 0x1000);
+    const uint64_t block_size = thread_detail::align_up(0x1000 > tpl.tp_offset + tpl.mem_size + 0x100 ? 0x1000 : tpl.tp_offset + tpl.mem_size + 0x100, 0x1000);
     t->tls = mem::alloc_kernel(0x1000);
     t->tp_block = mem::alloc_kernel(block_size);
     if (!t->tls || !t->tp_block) {
@@ -123,12 +143,12 @@ uint32_t thread_create(const ThreadParams& p) {
     // The kernel's ThreadLocalRegion current_thread_handle (TLS +0x110): SDK 22's InternalCriticalSection compares a lock's owner with it, so
     // a zero there makes every free mutex look held by its caller (Eden-NS2 k_process.cpp Run, svc_thread.cpp CreateThread write it too).
     *reinterpret_cast<uint32_t*>(t->tls + 0x110) = t->handle;
-    AcquireSRWLockExclusive(&g_list_lock);
+    nxrt::platform::mutex_lock(thread_detail::g_list_lock);
     // Thread objects of threads that have exited and that nothing else refers to (the game closed the handle, the host thread dropped its
     // own reference) leave the list. Without this the list grew by every thread the game ever made (S34 soak: 60 an hour).
-    g_all.erase(std::remove_if(g_all.begin(), g_all.end(), [](const std::shared_ptr<KThread>& o) { return o->exited && o.use_count() == 1; }), g_all.end());
-    g_all.push_back(t);
-    ReleaseSRWLockExclusive(&g_list_lock);
+    thread_detail::g_all.erase(std::remove_if(thread_detail::g_all.begin(), thread_detail::g_all.end(), [](const std::shared_ptr<KThread>& o) { return o->exited && o.use_count() == 1; }), thread_detail::g_all.end());
+    thread_detail::g_all.push_back(t);
+    nxrt::platform::mutex_unlock(thread_detail::g_list_lock);
     return t->handle;
 }
 
@@ -136,40 +156,34 @@ uint32_t thread_start(uint32_t handle) {
     auto t = handle_as<KThread>(handle);
     if (!t) return kInvalidHandle;
     {
-        AcquireSRWLockExclusive(&detail::g_k);
+        nxrt::platform::mutex_lock(detail::g_k.m);
         const bool already = t->started;
         t->started = true;
-        ReleaseSRWLockExclusive(&detail::g_k);
+        nxrt::platform::mutex_unlock(detail::g_k.m);
         if (already) return kInvalidState;
     }
-    SIZE_T stack = 0;
-    int64_t mb = config_get_int("threads", "host_stack_mb", 64);
-    stack = static_cast<SIZE_T>((mb < 1 ? 64 : mb) << 20);
     auto* box = new std::shared_ptr<KThread>(t);
-    DWORD tid = 0;
-    HANDLE h = CreateThread(nullptr, stack, host_thread_main, box, CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION, &tid);
-    if (!h) {
-        NXLOG_E("thread", "CreateThread failed for %s (error %lu)", t->name.c_str(), GetLastError());
+    t->host_thread = nxrt::platform::thread_start(t->name.c_str(), host_thread_main, box);
+    if (!t->host_thread) {
+        NXLOG_E("thread", "thread_start failed for %s", t->name.c_str());
         delete box;
         t->started = false;
         return kOutOfResource;
     }
-    t->host_handle = h;
-    t->host_tid = tid;
     sched_apply(*t);
-    ResumeThread(h);
     return kOk;
 }
 
 void thread_exit() {
-    KThread* t = t_self;
+    KThread* t = thread_detail::t_self;
     if (t) {
         NXLOG_D("thread", "%s exits (svcExitThread)", t->name.c_str());
         finish_current(*t);
-        t_keepalive.reset();     // the object may die here: t must not be touched again
+        thread_detail::t_keepalive.reset();     // the object may die here: t must not be touched again
     }
-    ExitThread(0);
-    for (;;) {}
+    // Throw an exception to unwind the stack and terminate the host thread cleanly.
+    // This is caught in host_thread_main.
+    throw thread_detail::ThreadExitException();
 }
 
 uint32_t main_thread_adopt(uint64_t stack_size, const char* name) {
@@ -184,38 +198,42 @@ uint32_t main_thread_adopt(uint64_t stack_size, const char* name) {
     uint32_t h = thread_create(p);
     if (!h) return 0;
     auto t = handle_as<KThread>(h);
-    HANDLE real = nullptr;
-    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &real, THREAD_ALL_ACCESS, FALSE, 0);
-    t->host_handle = real;
-    t->host_tid = GetCurrentThreadId();
+    // For the main thread, we don't create a new host thread - we adopt the current one.
+    // The platform layer doesn't need a thread handle for the main thread since it's not created via thread_start.
+    t->host_thread = nullptr;
+    t->host_tid = nxrt::platform::thread_id();
+    // Create the per-thread condition variable for kernel waits
+    t->cv = nxrt::platform::cond_create();
     t->started = true;
-    t_self = t.get();
+    thread_detail::t_self = t.get();
     log_set_thread_name(t->name.c_str());
     diag_register_thread(t->name.c_str(), &t->ctx, t->id);
     sched_apply(*t);
     occ_tag_main(*t);
     kernel_thread_named(*t, "main");
-    NXLOG_I("thread", "host thread %lu is now the guest main thread (stack 0x%llx..0x%llx)", GetCurrentThreadId(), (unsigned long long)stack, (unsigned long long)p.stack_top);
+    NXLOG_I("thread", "host thread %u is now the guest main thread (stack 0x%llx..0x%llx)", t->host_tid, (unsigned long long)stack, (unsigned long long)p.stack_top);
     return h;
 }
 
 void main_thread_release() {
-    if (KThread* t = t_self) finish_current(*t);
+    if (KThread* t = thread_detail::t_self) finish_current(*t);
 }
 
 std::vector<std::shared_ptr<KThread>> threads() {
-    AcquireSRWLockShared(&g_list_lock);
-    auto v = g_all;
-    ReleaseSRWLockShared(&g_list_lock);
+    nxrt::platform::mutex_lock(thread_detail::g_list_lock);
+    auto v = thread_detail::g_all;
+    nxrt::platform::mutex_unlock(thread_detail::g_list_lock);
     return v;
 }
 
 bool thread_join(uint32_t handle, uint32_t timeout_ms) {
     auto t = handle_as<KThread>(handle);
-    if (!t || !t->started) return true;
-    HANDLE h = static_cast<HANDLE>(t->host_handle);
-    if (!h) return true;
-    return WaitForSingleObject(h, timeout_ms) == WAIT_OBJECT_0;
+    if (!t || !t->started || !t->host_thread) return true;
+    // platform::thread_join doesn't support timeout, so we just join (blocking)
+    // For timeout support, we'd need to add it to the platform layer
+    nxrt::platform::thread_join(t->host_thread);
+    t->host_thread = nullptr;
+    return true;
 }
 
 uint64_t thread_count_running() {
@@ -272,15 +290,22 @@ bool thread_set_core_mask(KThread& t, int ideal, uint64_t mask) {
 }
 
 void kernel_reset() {
+    // Lazy-initialize kernel locks if not already done
+    static std::once_flag locks_init;
+    std::call_once(locks_init, [] {
+        init_kernel_locks();
+        init_thread_list_lock();
+    });
+
     std::vector<std::shared_ptr<KThread>> all = threads();
     for (auto& t : all) {
-        if (t.get() == t_self || !t->started || t->exited || !t->host_handle) continue;
-        if (WaitForSingleObject(static_cast<HANDLE>(t->host_handle), 5000) != WAIT_OBJECT_0)
-            NXLOG_E("thread", "kernel_reset: %s is still running after 5 s", t->name.c_str());
+        if (t.get() == thread_detail::t_self || !t->started || t->exited || !t->host_thread) continue;
+        nxrt::platform::thread_join(t->host_thread);
+        t->host_thread = nullptr;
     }
-    AcquireSRWLockExclusive(&g_list_lock);
-    g_all.clear();
-    ReleaseSRWLockExclusive(&g_list_lock);
+    nxrt::platform::mutex_lock(thread_detail::g_list_lock);
+    thread_detail::g_all.clear();
+    nxrt::platform::mutex_unlock(thread_detail::g_list_lock);
     handles_reset();
     detail::sync_reset();
 }

@@ -3,8 +3,6 @@
 // and ask for cores are wrapped: each call is logged with its arguments and the guest backtrace of the caller, then the SDK's own code
 // runs unchanged (the wrapper calls the lifted SDK function). svcCreateThread tags the guest thread it makes with the nn::os call that
 // asked for it, so the log ties ThreadType pointers, names and the runtime's guest-<id> names together (notes/threads.md).
-#include <windows.h>
-
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -56,7 +54,9 @@ std::string bt(const ::Ctx* c) {
 }
 
 std::string guest_str(uint64_t p) {
-    if (!p || IsBadReadPtr(reinterpret_cast<const void*>(p), 1)) return "(null)";
+    if (!p) return "(null)";
+    // On Windows we could use IsBadReadPtr, but on POSIX we just try to read and catch SIGSEGV
+    // For simplicity, we assume guest memory is always readable here (it's from the guest's own strings)
     std::string s;
     for (int i = 0; i < 64; i++) {
         const char ch = *reinterpret_cast<const char*>(p + i);

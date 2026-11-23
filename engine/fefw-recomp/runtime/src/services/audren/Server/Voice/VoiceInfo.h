@@ -438,13 +438,13 @@ class VoiceInfo {
             case server::PlayState::Stopped:
             case server::PlayState::Paused: {
                 for (server::WaveBuffer& wavebuffer : WaveBuffers) {
-                    wavebuffer.BufferAddressInfo.GetReference(true);
-                    wavebuffer.ContextAddressInfo.GetReference(true);
+                    wavebuffer.BufferAddressInfo.GetReference(false);
+                    wavebuffer.ContextAddressInfo.GetReference(false);
                 }
 
                 if (SampleFormat == ::nxrt::audren::SampleFormat::Adpcm) {
                     if (DataSourceStateAddressInfo.CpuAddress != 0) {
-                        DataSourceStateAddressInfo.GetReference(true);
+                        DataSourceStateAddressInfo.GetReference(false);
                     }
                 }
 

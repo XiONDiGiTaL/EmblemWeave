@@ -3836,6 +3836,40 @@ pub fn set_ini_key(text: &str, section: &str, key: &str, value: &str) -> String 
     out
 }
 
+/// Reconcile the `[fs] save_dir` in fefw.ini with the launcher's configured save directory.
+/// This fixes issue #79 where a mismatch between the ini and the launcher's config causes
+/// saves to not be read. Called before every Play to ensure the runtime mounts the correct folder.
+pub fn sync_save_dir(run_dir: &Path) -> Result<(), String> {
+    use crate::config::Config;
+    let ini_path = run_dir.join("fefw.ini");
+    let text = std::fs::read_to_string(&ini_path)
+        .map_err(|e| format!("reading fefw.ini for save_dir sync: {e}"))?;
+
+    // Get the launcher's intended save directory
+    let Some(intended) = Config::save_dir() else {
+        return Ok(()); // No data root configured; nothing to sync
+    };
+    let intended_str = intended.to_string_lossy().to_string();
+
+    // Parse current ini to find existing save_dir
+    let map = ini_parse(&text);
+    let current = map.get("fs.save_dir").cloned();
+
+    // Normalize paths for comparison (handle forward/backward slashes)
+    let normalize = |p: &str| p.replace('\\', "/");
+    let current_norm = current.as_ref().map(|c| normalize(c));
+    let intended_norm = normalize(&intended_str);
+
+    if current_norm.as_deref() == Some(intended_norm.as_str()) {
+        return Ok(()); // Already in sync
+    }
+
+    // Update the ini with the correct save_dir
+    let updated = set_ini_key(&text, "fs", "save_dir", &intended_str);
+    std::fs::write(&ini_path, updated)
+        .map_err(|e| format!("writing fefw.ini for save_dir sync: {e}"))
+}
+
 /// The engine's `[fefw] output` for a resolution label: the size the game
 /// renders its picture, UI and post effects at. "Native display" leaves that to
 /// the game, whose own config is `console` (docked 2560×1440, handheld 1080p).
@@ -3931,6 +3965,16 @@ pub struct Live {
     /// Every key the two files carry, by `section.key` (fefw.ini wins where
     /// both have one, as play mode's merge does).
     pub values: std::collections::BTreeMap<String, String>,
+}
+
+/// Read the effective `[fs] save_dir` from fefw.ini at the run directory.
+/// Returns `None` if fefw.ini doesn't exist, the key is missing, or parsing fails.
+pub fn effective_save_dir() -> Option<PathBuf> {
+    let dir = run_dir()?;
+    let ini_path = dir.join("fefw.ini");
+    let text = std::fs::read_to_string(&ini_path).ok()?;
+    let map = ini_parse(&text);
+    map.get("fs.save_dir").cloned().map(PathBuf::from)
 }
 
 fn ini_parse(text: &str) -> std::collections::HashMap<String, String> {
@@ -4968,6 +5012,13 @@ pub fn play(
     if !exe.is_file() || !dir.join("fefw.ini").is_file() {
         return Err("the game is not built yet: run Build the game on Game Setup".into());
     }
+    // Reconcile [fs] save_dir with launcher config before launch (issue #79).
+    // A mismatch here causes the runtime to mount the wrong save folder, so
+    // saves appear empty or missing even though they exist on disk.
+    if let Err(e) = sync_save_dir(&dir) {
+        // Log but don't block launch; the game will use whatever the ini has.
+        eprintln!("[launcher] save_dir sync failed: {e}");
+    }
     // A build from an earlier release can point the game at a packed .nup, which the engine cannot read in place. The launcher writes those
     // files before play, so reaching this means that write has not happened yet; say so instead of letting the game die on `main.npdm is
     // compressed in the .nup` (issue #24).
@@ -5034,8 +5085,11 @@ pub fn play(
     }
     let log = dir.join("fefw.log");
     let from = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let ini_path = dir.join("fefw.ini");
     let mut cmd = Command::new(&exe);
     cmd.current_dir(&dir)
+        .arg("--ini")
+        .arg(&ini_path)
         // The runtime searches its executable, the working folder, and this folder for `upscalers/<vendor>` (#26).
         // The engine checkout is where the issue's FSR files were copied, and its ancestors cover a release layout.
         .env("NXRT_LAUNCHER_DIR", &root)

@@ -202,6 +202,24 @@ pub fn bundle(app: &App, note: &str) -> Result<PathBuf, String> {
     for a in &app.activity {
         text.push_str(&format!("{} {}\n", a.at, a.text));
     }
+    text.push_str("\n== save directory reconciliation (issue #79) ==\n");
+    if let Some(configured) = Config::save_dir() {
+        text.push_str(&format!("configured: {}\n", configured.display()));
+    } else {
+        text.push_str("configured: (not set)\n");
+    }
+    if let Some(effective) = crate::engine::effective_save_dir() {
+        text.push_str(&format!("effective (fefw.ini): {}\n", effective.display()));
+        if let Some(configured) = Config::save_dir() {
+            if effective == configured {
+                text.push_str("status: in sync\n");
+            } else {
+                text.push_str("status: MISMATCH (game will use effective path)\n");
+            }
+        }
+    } else {
+        text.push_str("effective (fefw.ini): (not found)\n");
+    }
     text.push_str("\n== recent settings ==\n");
     text.push_str(&format!("{:#?}\n", app.config));
 

@@ -4,15 +4,13 @@
 // The SDK's busy mutex is a pure spin lock: ldaxr / cbnz / wfe, and the lifter turns wfe into a no-op. On the console the waiter spins on
 // its own core and the holder cannot be preempted (the SDK raises the thread's disable count in its TLS while it holds the lock). Under
 // the console core model (kernel/sched.cpp) several guest threads share three pinned host processors and the guest priority bands map to
-// Windows priorities, so a spinner that outranks the holder on the same processor starves it: the allocator lock of the game's heap stayed
+// host priorities, so a spinner that outranks the holder on the same processor starves it: the allocator lock of the game's heap stayed
 // held for minutes and the main thread waited on the graphics frame behind it (freeze reports in the sweep). This replacement takes the lock
 // the same way (a compare-and-swap on the lock word at +0x10, the disable count in TLS+0x100 raised on success), but gives the processor
 // away while it waits, to any ready thread, including a lower-priority holder. Unlock stays the guest's own code (a release store of zero and
 // the disable count), so the lock word and the TLS field look exactly as they do on the console.
 //
 // Config: [sched] busy_mutex_hle (env NXRT_SCHED_BUSY_MUTEX_HLE), default on; off leaves the SDK code in charge.
-#include <windows.h>
-
 #include <atomic>
 #include <cstdint>
 
@@ -22,6 +20,7 @@
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/module.h"
+#include "nxrt/platform.h"
 #include "kernel_internal.h"
 
 namespace nxrt::kernel {
@@ -38,9 +37,9 @@ void lock_busy_mutex(::Ctx* c) {
     for (uint32_t spins = 0;; spins++) {
         uint32_t expected = 0;
         if (word->load(std::memory_order_relaxed) == 0 && word->compare_exchange_weak(expected, 1, std::memory_order_acquire)) break;
-        if (spins < 64) YieldProcessor();
+        if (spins < 64) nxrt::platform::yield_cpu();
         else if (spins < 20000) yield_host();
-        else Sleep(1);
+        else nxrt::platform::sleep_ns(1000000);  // 1 ms
     }
     *disable = static_cast<uint16_t>(held + 1);
 }
@@ -50,7 +49,7 @@ void lock_busy_mutex(::Ctx* c) {
 void spin_hint(int kind) {
     thread_local uint32_t n = 0;
     if (kind == 1 || (++n & 63) == 0) yield_host();
-    else YieldProcessor();
+    else nxrt::platform::yield_cpu();
 }
 
 }  // namespace

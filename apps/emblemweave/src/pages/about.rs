@@ -27,6 +27,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 "https://github.com/XiONDiGiTaL",
             );
         });
+        // A plain text link, beside the attribution. Nothing is asked for on
+        // start-up, and there is no dialog or badge: it opens the creator's
+        // general support page only when the player chooses it.
+        ui.add_space(4.0);
+        ui.hyperlink_to(
+            crate::i18n::text("Support independent development")
+                .size(12.5)
+                .color(p.muted),
+            "https://buymeacoffee.com/xiondigital",
+        )
+        .on_hover_text(crate::i18n::tr(
+            "Voluntary support for XiØN Digital's independent software and creative work. \
+             Not a purchase of EmblemWeave, the game, or any Nintendo content.",
+        ));
     });
     ui.add_space(theme::SPACE_L);
 

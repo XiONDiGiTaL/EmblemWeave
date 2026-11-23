@@ -64,7 +64,7 @@ pub struct Cli {
     min_free_space: u64,
 
     /// Dry run mode
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value = "false", global = true)]
     dry_run: bool,
 }
 
@@ -83,8 +83,8 @@ enum Commands {
 
     /// Run cleanup across all storage systems
     Cleanup {
-        /// Force cleanup even if not auto-enabled
-        #[arg(long, default_value = "false")]
+        /// Accepted for compatibility; an explicit cleanup always runs
+        #[arg(long, default_value = "false", hide = true)]
         force: bool,
     },
 
@@ -158,12 +158,9 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Cleanup { force } => {
-            if !force && !manager.config.auto_cleanup {
-                println!("Cleanup not forced and auto_cleanup is disabled. Use --force to run anyway.");
-                return Ok(());
-            }
-
+        Commands::Cleanup { force: _ } => {
+            // An explicit `cleanup` is a user request, not automatic cleanup:
+            // `auto_cleanup` stays false in the config above and is never set here.
             println!("Running cleanup...");
             let result = manager.cleanup()?;
             print_cleanup_result(&result);

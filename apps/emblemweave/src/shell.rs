@@ -115,15 +115,29 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
             let strip = ui.available_rect_before_wrap();
             if ui.is_rect_visible(strip) {
                 ui.painter().hline(strip.x_range(), strip.bottom(), Stroke::new(1.0_f32, p.line));
-                let focus = Pos2::new(strip.left() + strip.width() * 0.18, strip.top());
+                // A soft crown across the header: the accent is strongest at
+                // the horizontal centre, fades to both ends, and dissolves
+                // downward. Drawing it as columns keeps that falloff smooth
+                // and symmetric; a triangle fan leaves a diagonal edge from
+                // the centre point to each corner.
+                let screen = ctx.screen_rect();
+                let peak = alpha(p.accent, 12);
+                let [r, g, b, a] = peak.to_array();
                 let mut mesh = egui::Mesh::default();
-                mesh.colored_vertex(focus, alpha(p.accent, 10));
-                for x in [strip.left(), strip.right()] {
-                    mesh.colored_vertex(Pos2::new(x, strip.top()), Color32::TRANSPARENT);
+                let steps = 48u32;
+                for i in 0..=steps {
+                    let t = i as f32 / steps as f32;
+                    let x = screen.left() + screen.width() * t;
+                    let falloff = 1.0 - (2.0 * t - 1.0).powi(2);
+                    let top = Color32::from_rgba_unmultiplied(r, g, b, (a as f32 * falloff) as u8);
+                    mesh.colored_vertex(Pos2::new(x, screen.top()), top);
                     mesh.colored_vertex(Pos2::new(x, strip.top() + 16.0), Color32::TRANSPARENT);
                 }
-                mesh.add_triangle(0, 1, 2);
-                mesh.add_triangle(0, 3, 4);
+                for i in 0..steps {
+                    let v = i * 2;
+                    mesh.add_triangle(v, v + 1, v + 2);
+                    mesh.add_triangle(v + 2, v + 1, v + 3);
+                }
                 ui.painter().add(egui::Shape::mesh(mesh));
             }
             // The title strip is the window's native caption. Windows starts
@@ -143,10 +157,8 @@ pub fn top_bar(app: &mut App, ctx: &egui::Context) {
                     app.config.nav.rail = !app.config.nav.rail;
                 }
                 let brand_left = ui.min_rect().right() + 3.0;
-                let (mark, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
-                let c = mark.center();
-                let diamond = vec![c + Vec2::new(0.0, -5.5), c + Vec2::new(5.5, 0.0), c + Vec2::new(0.0, 5.5), c + Vec2::new(-5.5, 0.0)];
-                ui.painter().add(egui::Shape::convex_polygon(diamond, p.accent, Stroke::new(1.0_f32, alpha(Color32::WHITE, 170))));
+                let (mark, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                logo::icon(ui.painter(), mark, Color32::WHITE);
                 // The wordmark is the display face, not spaced capitals: it is
                 // the one place the launcher signs its own name.
                 ui.label(

@@ -27,6 +27,18 @@
 #include "../../../third_party/nvidia_streamline/include/sl_pcl.h"
 #include "../../../third_party/nvidia_streamline/include/sl_reflex.h"
 
+// Stub implementations for FFX Frame Generation functions (used when framegen_ffx.cpp is not compiled
+// because the FFX Frame Generation library is not available).
+namespace nxrt::extras {
+bool ffx_fg_wanted() { return false; }
+bool ffx_fg_files() { return false; }
+uint32_t ffx_fg_extra_queues(uint32_t) { return 0; }
+void ffx_fg_install(gfx::Device&, uint32_t) {}
+bool ffx_fg_frame(VkCommandBuffer, const FfxFgFrame&) { return false; }
+uint64_t ffx_fg_present_count() { return 0; }
+bool ffx_fg_owns_swapchain() { return false; }
+}  // namespace nxrt::extras
+
 namespace nxrt::extras {
 namespace {
 

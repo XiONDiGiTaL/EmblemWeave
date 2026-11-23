@@ -48,6 +48,10 @@ pub struct Ui {
     /// from the Saves page. Scanning every frame watched every yuzu fork's
     /// NAND and made opening the page slower than it needed to be.
     pub sources: Vec<crate::saves::Found>,
+    /// Emulator folders for the title that exist but hold no files. Kept apart
+    /// from `sources` so nothing offers them for import; the page names them so
+    /// an empty profile is not mistaken for "no emulator was found".
+    pub empty_sources: Vec<PathBuf>,
     pub sources_title: Option<u64>,
     pub sources_at: f64,
     ids: Option<Arc<Ids>>,
@@ -403,6 +407,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     widgets::eyebrow(ui, &p, "Save profiles");
     ui.add_space(2.0);
+    // Show effective save_dir from fefw.ini (what the game actually uses).
+    if let Some(effective) = crate::engine::effective_save_dir() {
+        if effective != save_dir {
+            ui.label(
+                crate::i18n::text(format!(
+                    "Effective save folder (fefw.ini): {} (differs from configured)",
+                    effective.display()
+                ))
+                .size(11.0)
+                .color(p.warn),
+            )
+            .on_hover_text(crate::i18n::tr(
+                "The game reads saves from this folder. If it differs from the configured folder, saves may appear missing.",
+            ));
+            ui.add_space(4.0);
+        }
+    }
     ui.label(
         crate::i18n::text("Independent playthroughs")
             .font(theme::display(20.0))

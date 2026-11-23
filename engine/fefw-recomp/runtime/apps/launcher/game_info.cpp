@@ -132,6 +132,16 @@ bool has_entries(const fs::path& dir) {
     return !ec && it != fs::directory_iterator();
 }
 
+// True when the folder exists and has at least one file matching the extension (e.g., ".opus").
+bool has_entries_with_ext(const fs::path& dir, const std::wstring& ext) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return false;
+    for (fs::directory_iterator it(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (it->is_regular_file(ec) && it->path().extension() == ext) return true;
+    }
+    return false;
+}
+
 // setup_state.tsv as the setup tool writes it (pipeline.cpp, State): first line "mprs_setup_state\t1", then
 // "meta\tkey\tvalue" lines; the last "meta\tfinished" line wins. Anything else in the file is ignored.
 bool setup_finished_in(const fs::path& state_file) {
@@ -164,7 +174,16 @@ bool GameStatus::ready() const { return exefs && romfs; }
 
 std::wstring GameStatus::summary() const {
     if (ready()) {
-        if (setup_finished) return L"Ready to play.";
+        if (setup_finished) {
+            std::wstring base = L"Ready to play.";
+            if (!movies || !voices) {
+                base += L" ";
+                if (!movies && !voices) base += L"Warning: cinematic movie and voice assets not found.";
+                else if (!movies) base += L"Warning: cinematic movie assets not found.";
+                else base += L"Warning: cinematic voice assets not found.";
+            }
+            return base;
+        }
         return L"Game files found, but setup did not finish. Run setup again to finish it.";
     }
     if (!exefs && !romfs && !textures && !shaders) {
@@ -182,6 +201,9 @@ GameStatus check_game_dir(const std::wstring& dir) {
     s.textures = has_entries(root / L"bc7_cache");
     s.shaders = has_entries(root / L"shader_cache");
     s.setup_finished = setup_finished_in(root / L"setup_state.tsv");
+    // Cinematic assets: movie and voice .opus files in RomFS
+    s.movies = has_entries_with_ext(root / L"romfs" / L"movie", L".opus");
+    s.voices = has_entries_with_ext(root / L"romfs" / L"voice", L".opus");
     return s;
 }
 

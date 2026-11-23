@@ -1,8 +1,10 @@
 # Phase D: Performance Benchmarks
 
+> **Status: unverified.** None of the numbers in this document has been confirmed by a reproducible benchmark run. They are retained as targets/expectations only. Measure them on the reference hardware, and record the command, commit, and raw output before citing any figure as a result.
+
 ## Overview
 
-This document records the performance benchmarks achieved during Phase D hardening. All benchmarks run on the reference hardware configuration.
+This document records the benchmark targets and provisional figures associated with Phase D hardening. The reference hardware table describes the intended test machine; it is not evidence that these numbers were measured on it.
 
 ## Reference Hardware
 

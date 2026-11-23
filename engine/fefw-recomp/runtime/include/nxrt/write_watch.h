@@ -125,5 +125,9 @@ uint64_t guard_faults();   // accesses that hit a guarded page (statistics)
 
 uint64_t faults();     // write faults handled so far (statistics)
 uint64_t fault_waits(); // rounds a fault spent waiting for another thread's release of the same page (statistics; stays 0 for foreign faults)
+// memory.cpp: true when a heap page is in the retired set (its region was destroyed but the page may still be written by guest code).
+bool is_retired_page(uint64_t addr);
+// memory.cpp: clears the retired bit for a page (called when the page is decommitted).
+void clear_retired_page(uint64_t addr);
 
 }  // namespace nxrt::mem::ww
