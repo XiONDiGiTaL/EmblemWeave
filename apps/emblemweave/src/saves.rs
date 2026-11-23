@@ -114,6 +114,10 @@ fn push_candidate(out: &mut Survey, source: &str, path: &Path) {
 
 /// The same survey under the current user's `%APPDATA%` and `%LOCALAPPDATA%`.
 /// The second root covers portable-style forks that keep their NAND there.
+///
+/// The launcher's own other data root is included too. A copy that switches between `%APPDATA%` and a portable folder can
+/// leave a whole playthrough behind in the root it is not using (issue #79); the Saves page has to offer it instead of
+/// looking as if no save exists anywhere.
 pub fn survey_here(title_id: u64) -> Survey {
     let mut out = Survey::default();
     for key in ["APPDATA", "LOCALAPPDATA"] {
@@ -123,10 +127,58 @@ pub fn survey_here(title_id: u64) -> Survey {
             out.empty.extend(one.empty);
         }
     }
+    if let Some(save_dir) = crate::config::Config::save_dir() {
+        out.saves.extend(launcher_sources(&save_dir));
+    }
     out.saves.sort_by(|a, b| b.modified.cmp(&a.modified));
     out.saves.dedup_by(|a, b| a.path == b.path);
     out.empty.sort();
     out.empty.dedup();
+    out
+}
+
+/// Saves this launcher keeps under another of its data roots: `%APPDATA%\EmblemWeave\save`, and `data\save` beside the
+/// executable (a portable copy, or a source checkout). `save_dir` is the root in use, which is never offered to itself.
+///
+/// Returns the account save folder (the one holding `000`) so `import` receives a folder it can resolve directly.
+pub fn launcher_sources(save_dir: &Path) -> Vec<Found> {
+    let mut roots: Vec<(&str, PathBuf)> = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push((
+            "EmblemWeave (AppData)",
+            PathBuf::from(appdata).join("EmblemWeave").join("save"),
+        ));
+    }
+    if let Some(exe) = crate::platform::exe_dir() {
+        roots.push(("EmblemWeave (this install)", exe.join("data").join("save")));
+    }
+    launcher_sources_from(&roots, save_dir)
+}
+
+fn launcher_sources_from(roots: &[(&str, PathBuf)], save_dir: &Path) -> Vec<Found> {
+    let current = account_dir(save_dir);
+    let mut out = Vec::new();
+    for (label, root) in roots {
+        if *root == save_dir {
+            continue;
+        }
+        let Some(save) = account_save(&root.join("account")) else {
+            continue;
+        };
+        if save == current {
+            continue;
+        }
+        let (files, modified) = summary(&save);
+        if files == 0 || out.iter().any(|f: &Found| f.path == save) {
+            continue;
+        }
+        out.push(Found {
+            source: (*label).to_string(),
+            path: save,
+            files,
+            modified,
+        });
+    }
     out
 }
 
@@ -1606,6 +1658,34 @@ mod tests {
     }
 
     #[test]
+    fn offers_a_save_from_the_other_launcher_data_root() {
+        let root = temp("launcher-roots");
+        let current = root.join("install/save");
+        let appdata = root.join("appdata/EmblemWeave/save");
+        write(
+            &appdata.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "a run left behind",
+        );
+        let found = launcher_sources_from(
+            &[("EmblemWeave (AppData)", appdata.clone())],
+            &current,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].path,
+            appdata.join("account").join(DEFAULT_USER)
+        );
+
+        // The root in use is not offered as a source of itself.
+        let found = launcher_sources_from(
+            &[("EmblemWeave (AppData)", current.clone())],
+            &current,
+        );
+        assert!(found.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn finds_lichii_fritchii_eden_and_alternate_save_ids() {
         let root = temp("find-forks");
         let lichii = root.join("lichii/nand/user/save/0000000000000000/5A3C/04007EF01F8AE000");
@@ -1621,6 +1701,43 @@ mod tests {
         assert!(sources.contains(&"fritchii"));
         assert!(sources.contains(&"eden"));
         assert!(found.iter().any(|f| f.path == eden));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_emulator_title_folder_becomes_a_new_profile_without_touching_the_others() {
+        let root = temp("profile-yuzu");
+        let save = root.join("save");
+        // A yuzu-family save: `<nand>/user/save/<save id>/<profile>/<title>/000/...`.
+        let src = root
+            .join("yuzu/nand/user/save/0000000000000000/5A3C/04007EF01F8AE000");
+        let slot = valid_slot(b"a run from yuzu");
+        write_bytes(&src.join("000/Auto"), &slot);
+        write(&src.join("000/Global"), "global");
+        write(&save.join("profiles/Existing/000/Auto"), "keep me");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "the current save",
+        );
+
+        let p = import_profile(&save, "Yuzu run", &src, FALLBACK_TITLE_ID).unwrap();
+        assert_eq!(p.name, "Yuzu run");
+        assert_eq!(std::fs::read(p.path.join("000/Auto")).unwrap(), slot);
+        assert_eq!(
+            std::fs::read_to_string(save.join("profiles/Existing/000/Auto")).unwrap(),
+            "keep me",
+            "an existing profile is not replaced"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                save.join("account").join(DEFAULT_USER).join("000/Auto")
+            )
+            .unwrap(),
+            "the current save",
+            "importing a profile does not load it"
+        );
+        assert_eq!(profiles(&save).len(), 2);
+        assert!(src.join("000/Auto").is_file(), "the source is left alone");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -3836,6 +3836,38 @@ pub fn set_ini_key(text: &str, section: &str, key: &str, value: &str) -> String 
     out
 }
 
+/// Copy the save the game is using into `intended` when reconciliation would otherwise point it at an empty folder.
+///
+/// Issue #79: `sync_save_dir` used to rewrite the INI to the launcher's folder even when the INI's folder was the one with
+/// the save. The game then opened an empty save and started at the prologue while the player's save sat untouched beside
+/// it. Copying first makes reconciliation safe: the source is never changed, and a failure leaves the INI pointing at the
+/// folder the game was already reading.
+fn carry_save_across(current: &Path, intended: &Path) -> Result<(), String> {
+    let target = crate::saves::account_dir(intended);
+    if crate::saves::summary(&target).0 > 0 {
+        return Ok(());
+    }
+    if !current.is_dir()
+        || crate::saves::resolve_source(current, crate::saves::FALLBACK_TITLE_ID).is_none()
+    {
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string();
+    crate::saves::import(current, intended, crate::saves::FALLBACK_TITLE_ID, &stamp)
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+                "the game's save is in {}, but copying it to {} failed: {e}; fefw.ini was left pointing at the save",
+                current.display(),
+                intended.display()
+            )
+        })
+}
+
 /// Reconcile the `[fs] save_dir` in fefw.ini with the launcher's configured save directory.
 /// This fixes issue #79 where a mismatch between the ini and the launcher's config causes
 /// saves to not be read. Called before every Play to ensure the runtime mounts the correct folder.
@@ -3862,6 +3894,21 @@ pub fn sync_save_dir(run_dir: &Path) -> Result<(), String> {
 
     if current_norm.as_deref() == Some(intended_norm.as_str()) {
         return Ok(()); // Already in sync
+    }
+
+    // Never repoint the game at an empty folder while the folder it uses holds the save. A relative INI path is relative
+    // to the run folder, which is the game's working directory.
+    if let Some(raw) = current.as_deref() {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            let path = Path::new(raw);
+            let current_path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                run_dir.join(path)
+            };
+            carry_save_across(&current_path, &intended)?;
+        }
     }
 
     // Update the ini with the correct save_dir
@@ -5118,6 +5165,52 @@ pub fn play(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconciliation_copies_the_ini_folders_save_before_repointing() {
+        let dir = std::env::temp_dir().join(format!("ew-save-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old = dir.join("old").join("save");
+        let new = dir.join("new").join("save");
+        let user = old.join("account").join(crate::saves::DEFAULT_USER);
+        std::fs::create_dir_all(user.join("000")).unwrap();
+        std::fs::write(user.join("000").join("Auto"), "the save the game reads").unwrap();
+
+        carry_save_across(&old, &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("account").join(crate::saves::DEFAULT_USER).join("000").join("Auto")).unwrap(),
+            "the save the game reads"
+        );
+        assert!(new
+            .join("account")
+            .join(format!("{}.meta", crate::saves::DEFAULT_USER))
+            .is_file());
+        assert!(user.join("000").join("Auto").is_file(), "the source is left alone");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconciliation_keeps_a_save_the_launcher_folder_already_holds() {
+        let dir = std::env::temp_dir().join(format!("ew-save-sync-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old = dir.join("old").join("save");
+        let new = dir.join("new").join("save");
+        for (root, text) in [(&old, "old"), (&new, "new")] {
+            let user = root.join("account").join(crate::saves::DEFAULT_USER);
+            std::fs::create_dir_all(user.join("000")).unwrap();
+            std::fs::write(user.join("000").join("Auto"), text).unwrap();
+        }
+
+        carry_save_across(&old, &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("account").join(crate::saves::DEFAULT_USER).join("000").join("Auto")).unwrap(),
+            "new",
+            "the launcher's own save is not replaced"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn choosing_an_engine_folder_is_remembered_where_lookups_read_it() {
