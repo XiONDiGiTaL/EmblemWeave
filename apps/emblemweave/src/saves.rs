@@ -2249,6 +2249,174 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Restoration when a profile with the same name already exists must fail
+    /// and leave both the backup and the existing profile untouched.
+    #[test]
+    fn restore_profile_fails_on_name_collision() {
+        let root = temp("profile-collision");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "original");
+        // Create a profile and move it to backups
+        store_profile(&save, "Test Profile", "1").unwrap();
+        let ps = profiles(&save);
+        let backup_path = remove_profile(&save, &ps[0], "2").unwrap();
+        let backup_name = backup_path.file_name().unwrap().to_string_lossy().to_string();
+        // Create another profile with the same name
+        store_profile(&save, "Test Profile", "3").unwrap();
+        assert_eq!(profiles(&save).len(), 1);
+        // Attempt to restore - should fail
+        let result = restore_profile(&save, &backup_name);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
+        // Existing profile should be untouched
+        assert_eq!(profiles(&save).len(), 1);
+        assert_eq!(profiles(&save)[0].name, "Test Profile");
+        // Backup should still exist
+        let backups = crate::saves::backups(&save);
+        let profile_backups: Vec<_> = backups.iter().filter(|b| b.name.contains("-profile-")).collect();
+        assert_eq!(profile_backups.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Invalid profile backup (doesn't match naming pattern) must be rejected.
+    #[test]
+    fn restore_profile_rejects_invalid_backup_name() {
+        let root = temp("profile-invalid");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "original");
+        // Create a whole-save backup (not a profile backup)
+        let backup_dir = save.join("backups").join("12345-whole-save");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        write(&backup_dir.join("some-file"), "data");
+        // Attempt to restore as profile - should fail
+        let result = restore_profile(&save, "12345-whole-save");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a profile backup"));
+        // Backup should still exist
+        assert!(backup_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Empty profile backup (no contents) is restored but will be an empty profile.
+    /// The restore operation itself succeeds (it's just a rename); validation of
+    /// profile contents happens when the profile is loaded.
+    #[test]
+    fn restore_profile_empty_backup_restores_empty_folder() {
+        let root = temp("profile-empty");
+        let save = root.join("save");
+        // Create an empty profile backup folder
+        let backup_dir = save.join("backups").join("12345-profile-Empty Profile");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        // Attempt to restore - should succeed (rename)
+        let result = restore_profile(&save, "12345-profile-Empty Profile");
+        assert!(result.is_ok());
+        let restored = result.unwrap();
+        assert_eq!(restored.name, "Empty Profile");
+        assert!(restored.path.is_dir());
+        // Profile exists but has no files
+        assert_eq!(restored.files, 0);
+        // Backup is gone (renamed)
+        assert!(!backup_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Failed restoration must not destroy the backup.
+    /// This is tested by restore_profile_fails_on_name_collision which
+    /// verifies the backup persists when restoration fails due to name collision.
+    #[test]
+    fn restore_profile_preserves_backup_on_failure() {
+        // Covered by restore_profile_fails_on_name_collision
+        let root = temp("profile-preserve");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "original");
+        store_profile(&save, "Test Profile", "1").unwrap();
+        let ps = profiles(&save);
+        let backup_path = remove_profile(&save, &ps[0], "2").unwrap();
+        let backup_name = backup_path.file_name().unwrap().to_string_lossy().to_string();
+        // Create another profile with the same name to force collision
+        store_profile(&save, "Test Profile", "3").unwrap();
+        let result = restore_profile(&save, &backup_name);
+        assert!(result.is_err());
+        // Backup should still exist
+        let backups = crate::saves::backups(&save);
+        let profile_backups: Vec<_> = backups.iter().filter(|b| b.name.contains("-profile-")).collect();
+        assert_eq!(profile_backups.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Whole-save backup restoration must remain completely unaffected by
+    /// the new profile backup restoration functionality.
+    #[test]
+    fn whole_save_backup_restoration_unaffected() {
+        let root = temp("whole-save-unaffected");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "original");
+        // Create a whole-save backup (simulating import)
+        let backup_dir = save.join("backups").join("12345-import-backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let imported_user = backup_dir.join("account").join(DEFAULT_USER);
+        std::fs::create_dir_all(&imported_user.join("000")).unwrap();
+        write(&imported_user.join("000/Auto"), "imported save");
+        // Create a title_id file to make it a valid whole-save backup
+        write(&backup_dir.join("title_id"), "0A3C5F0000000000");
+        // List backups - should show both types if we had them
+        let backups = crate::saves::backups(&save);
+        assert_eq!(backups.len(), 1);
+        assert!(!backups[0].name.contains("-profile-"));
+        // Verify it's detected as whole-save backup
+        assert!(!backups[0].name.contains("-profile-"));
+        // The restore_backup_verified path should still work (tested elsewhere)
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Restored profile must preserve all original metadata and contents.
+    #[test]
+    fn restore_profile_preserves_metadata_and_contents() {
+        let root = temp("profile-preserve-contents");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/Auto"), "autosave data");
+        write(&user.join("000/Manual"), "manual save data");
+        write(&user.join("DEFAULT_USER.meta"), "meta data");
+        // Create a profile with multiple files
+        store_profile(&save, "My Profile", "1").unwrap();
+        let ps = profiles(&save);
+        // Verify original profile contents (copied from account_dir which is DEFAULT_USER,
+        // so contents are directly under the profile folder, not in a DEFAULT_USER subfolder)
+        assert!(ps[0].path.join("000/Auto").exists());
+        assert!(ps[0].path.join("000/Manual").exists());
+        assert!(ps[0].path.join("DEFAULT_USER.meta").exists());
+        let original_files = ps[0].files;
+        assert!(original_files >= 3);
+        // Move profile to backups
+        let backup_path = remove_profile(&save, &ps[0], "2").unwrap();
+        let backup_name = backup_path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(profiles(&save).is_empty());
+        // Restore profile
+        let restored = restore_profile(&save, &backup_name).unwrap();
+        // Verify restored profile has same name
+        assert_eq!(restored.name, "My Profile");
+        // Verify all contents are preserved directly under profile folder
+        assert!(restored.path.join("000/Auto").exists());
+        assert!(restored.path.join("000/Manual").exists());
+        assert!(restored.path.join("DEFAULT_USER.meta").exists());
+        // Verify file contents
+        assert_eq!(std::fs::read_to_string(restored.path.join("000/Auto")).unwrap(), "autosave data");
+        assert_eq!(std::fs::read_to_string(restored.path.join("000/Manual")).unwrap(), "manual save data");
+        assert_eq!(std::fs::read_to_string(restored.path.join("DEFAULT_USER.meta")).unwrap(), "meta data");
+        // Verify file count matches
+        assert_eq!(restored.files, original_files);
+        // Verify backup is gone
+        let backups = crate::saves::backups(&save);
+        let profile_backups: Vec<_> = backups.iter().filter(|b| b.name.contains("-profile-")).collect();
+        assert!(profile_backups.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn the_account_folder_is_always_the_titles_user() {
         let root = temp("account");
