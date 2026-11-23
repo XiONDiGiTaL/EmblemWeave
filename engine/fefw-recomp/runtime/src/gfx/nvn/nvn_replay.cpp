@@ -1242,7 +1242,7 @@ ViewRequest make_request(const DescriptorBinding& b, const TexResolved& r) {
     q.type = view_type_for(b);
     q.depth_compare = b.image.depth;
     const Texture& t = *r.tex;
-    int sw[4] = {t.b.swizzle[0], t.b.swizzle[1], t.b.swizzle[2], t.b.swizzle[3]};
+    const int* sw = t.b.swizzle;
     int dsmode = t.b.depth_stencil_mode;
     if (r.has_view) {
         const TextureViewInfo& v = r.view;
@@ -1252,13 +1252,17 @@ ViewRequest make_request(const DescriptorBinding& b, const TexResolved& r) {
             const FormatInfo* fi = format_info(v.format);
             if (fi) q.format = fi->vk;
         }
-        if (v.has_swizzle) for (int i = 0; i < 4; ++i) sw[i] = v.swizzle[i];
+        if (v.has_swizzle) sw = v.swizzle;
         if (v.has_depth_stencil_mode) dsmode = v.depth_stencil_mode;
     }
-    q.swizzle.r = vk_swizzle(sw[0]);
-    q.swizzle.g = vk_swizzle(sw[1]);
-    q.swizzle.b = vk_swizzle(sw[2]);
-    q.swizzle.a = vk_swizzle(sw[3]);
+    if (sw[0] == NVN_TEXTURE_SWIZZLE_R && sw[1] == NVN_TEXTURE_SWIZZLE_G && sw[2] == NVN_TEXTURE_SWIZZLE_B && sw[3] == NVN_TEXTURE_SWIZZLE_A) {
+        q.swizzle = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+    } else {
+        q.swizzle.r = vk_swizzle(sw[0]);
+        q.swizzle.g = vk_swizzle(sw[1]);
+        q.swizzle.b = vk_swizzle(sw[2]);
+        q.swizzle.a = vk_swizzle(sw[3]);
+    }
     q.depth_aspect = dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH;
     switch (b.image.component) {
         case ScalarType::Float: q.component = 1; break;
@@ -5321,12 +5325,12 @@ bool is_bind_op(Op op) {
     }
 }
 
-void mark_dirty(const RecordReader& r) {
+bool mark_dirty(const RecordReader& r) {
     if ((same_binds_on() || rs_on()) && is_bind_op(r.op())) {
         ++g_rs.binds;
         if (bind_is_same(r)) {
             ++g_rs.binds_same;
-            if (same_binds_on()) return;
+            if (same_binds_on()) return !g_trace;   // no state changed: run_list can skip the op body when not tracing
         }
     }
     switch (r.op()) {
@@ -5350,6 +5354,7 @@ void mark_dirty(const RecordReader& r) {
         case Op::SetRenderTargets: g_dirty = kAllDirty; break;
         default: break;
     }
+    return false;
 }
 
 // ---- windowed GPU counters (see g_cw) ----------------------------------------------------------------------------------------
@@ -5388,7 +5393,7 @@ void run_list(const CmdList& list, int depth) {
     if (depth > kMaxDepth) { NVN_LOG_ONCE("depth", "CallCommands nesting too deep"); return; }
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
     for (RecordReader r(list); r.next();) {
-        mark_dirty(r);
+        if (mark_dirty(r)) continue;
         const Op op = r.op();
         if (g_cs_open && !cs_keeps_open(op)) cs_close();
         if (g_wm_open && !wm_keeps_open(op)) wm_close();

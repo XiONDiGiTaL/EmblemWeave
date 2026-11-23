@@ -1285,7 +1285,16 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
         out.buffer = cb;
         out.offset = poff - (first / chunk_pages) * kChunkBytes;
         out.avail = std::min<uint64_t>(kChunkBytes, m->pool_bytes - (first / chunk_pages) * kChunkBytes) - out.offset;
-        for (uint64_t p = first; p <= last; ++p) bit_put(m->used, p, true);
+        if (first == last) {
+            bit_put(m->used, first, true);
+        } else {
+            for (uint64_t p = first; p <= last;) {
+                const uint64_t lo = p & 63, hi = std::min<uint64_t>(64, lo + (last + 1 - p));
+                const uint64_t mask = (hi - lo == 64) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo)) - 1) << lo);
+                m->used[static_cast<size_t>(p >> 6)] |= mask;
+                p += hi - lo;
+            }
+        }
         if (hot_copy_on()) {
             const uint8_t sb = static_cast<uint8_t>(1u << std::min<uint32_t>(g_sub_idx, 7));
             if (rv) {
