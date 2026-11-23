@@ -745,7 +745,13 @@ void sigsegv_handler(int sig, siginfo_t* info, void* uc) {
 }  // namespace
 
 bool page_fault_handler_install(PageFaultHandler fn) {
-    if (g_sigsegv_installed) return false;
+    if (g_sigsegv_installed) {
+        // Already installed: update the handler and report success. Returning
+        // false here made every region after the first one disable write
+        // tracking on POSIX, while Windows already returned true.
+        g_page_fault_handler = fn;
+        return true;
+    }
     g_page_fault_handler = fn;
     struct sigaction sa{};
     sa.sa_sigaction = sigsegv_handler;

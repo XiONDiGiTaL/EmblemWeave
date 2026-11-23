@@ -5050,15 +5050,24 @@ fn gpu_name(text: &str) -> Option<String> {
     })
 }
 
-/// The last lines that look like a failure, for a message that says why.
-fn last_error(log: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(log).ok()?;
+/// The last line that looks like a failure, for a message that says why.
+fn last_error_text(text: &str) -> Option<String> {
     text.lines()
         .filter(|l| {
             l.contains("error") || l.contains("ERR") || l.contains("failed") || l.contains("vulkan")
         })
         .next_back()
         .map(|l| l.trim().to_string())
+}
+
+/// The last error in the part of the log written since `from` bytes. Reading
+/// the whole file would report a crash from an earlier run, which is exactly
+/// what a player sees when a quick exit is followed by "last line: crash...".
+/// A log that got shorter was started over, so it is read whole.
+fn last_error_since(log: &Path, from: u64) -> Option<String> {
+    let bytes = std::fs::read(log).ok()?;
+    let start = if (bytes.len() as u64) < from { 0 } else { (from as usize).min(bytes.len()) };
+    last_error_text(&String::from_utf8_lossy(&bytes[start..]))
 }
 
 /// Delete the `RCX*.tmp` scratch files lld leaves in a release folder after an
@@ -5099,7 +5108,7 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
             std::thread::sleep(std::time::Duration::from_millis(500));
             if let Ok(Some(status)) = child.try_wait() {
                 if !status.success() {
-                    let why = last_error(&log)
+                    let why = last_error_since(&log, from)
                         .map(|e| format!(" Last line: {e}"))
                         .unwrap_or_default();
                     alert(
@@ -5262,6 +5271,27 @@ pub fn play(config: &crate::config::Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_error_is_the_newest_failure_line() {
+        let text = "[1] E crash: old\n[2] I still running\n[3] E crash: last zstd error: (none)\n";
+        assert_eq!(last_error_text(text).as_deref(), Some("[3] E crash: last zstd error: (none)"));
+    }
+
+    #[test]
+    fn a_previous_runs_crash_is_not_reported_for_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("fefw.log");
+        std::fs::write(&log, "[1] E crash: old\n").unwrap();
+        let from = std::fs::metadata(&log).unwrap().len();
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(file, "[6.1 E t14484 guest-85] crash: last zstd error: (none)").unwrap();
+        assert_eq!(
+            last_error_since(&log, from).as_deref(),
+            Some("[6.1 E t14484 guest-85] crash: last zstd error: (none)")
+        );
+    }
 
     /// The consumer thread sees the channel close only after every sender is gone. The manager keeps its own
     /// handle to the emitter, so a build that drops only its local one prints its last line and then waits on

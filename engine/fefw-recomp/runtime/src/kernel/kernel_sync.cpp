@@ -365,14 +365,13 @@ bool block_on_wake(KThread& t, int64_t timeout_ns, int kind, platform::Mutex* lo
             if (rem <= 0) return done(false);
             timeout = rem;
         }
-        // Use platform::cond_wait with timeout - for now use a simple approach
-        // TODO: Add timed cond_wait to platform layer
         if (timeout >= 0) {
-            // Convert to milliseconds for a simple sleep-based approach
-            int64_t ms = (timeout + 999999) / 1000000;
-            nxrt::platform::mutex_unlock(lock);
-            nxrt::platform::sleep_ns(std::min<int64_t>(timeout, ms * 1000000));
-            nxrt::platform::mutex_lock(lock);
+            // A real timed wait, so a wake during the timeout returns at once
+            // instead of after the whole sleep. Rounded up: the loop re-checks
+            // the deadline and waits again if the signal was spurious.
+            const int64_t ms = (timeout + 999999) / 1000000;
+            nxrt::platform::cond_wait_ms(thread_cv(t), lock,
+                                         static_cast<uint32_t>(std::min<int64_t>(ms, UINT32_MAX)));
         } else {
             nxrt::platform::cond_wait(thread_cv(t), lock);
         }

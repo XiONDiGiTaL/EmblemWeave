@@ -644,12 +644,19 @@ Region* region_create(uint64_t addr, uint64_t size, const char* owner) {
     {
         std::lock_guard<std::mutex> lk(g_mu);
         if (!g_transitions) g_transitions = nxrt::platform::rwlock_create();
-        NXLOG_I(kTag, "region_create: installing page fault handler");
+        // Every NVN pool region installs the same process-wide handler. Log the
+        // first installation only: at one pair per pool import this was 27% of
+        // a session's log and two log calls in a startup-critical path.
+        static bool handler_announced = false;
+        if (!handler_announced) NXLOG_I(kTag, "region_create: installing page fault handler");
         if (!nxrt::platform::page_fault_handler_install(on_fault_handler)) {
             NXLOG_W(kTag, "page_fault_handler_install failed: no write tracking");
             return nullptr;
         }
-        NXLOG_I(kTag, "region_create: page fault handler installed successfully");
+        if (!handler_announced) {
+            NXLOG_I(kTag, "region_create: page fault handler installed successfully");
+            handler_announced = true;
+        }
         SlotBlock* block = &g_slots;
         for (;;) {
             int slot = 0;
