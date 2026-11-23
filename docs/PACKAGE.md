@@ -5,10 +5,11 @@ Every release zip is built from this repository by `tools/package_release.ps1` o
 itself runs (`cargo build`, and `dotnet publish` for the shader translator). The same script still works locally for a
 dry run.
 
-Before it builds anything, the package script and the release workflow run `tools/check_release.py`. It fails unless
-`Cargo.toml`, `docs/release.json`, the download button, the README's current-release line and the changelog index all
-name the same version. The version bump and the site stamp are therefore checked together instead of being discovered
-after the zip is published.
+Before it builds anything, the package script and the release workflow run `tools/check_release.py`. When packaging, it
+fails unless `Cargo.toml`, `docs/release.json`, the download button, the README's current-release line and the changelog
+index all name the same version. Run without `--version`, it checks that the published pointers agree and allows
+`Cargo.toml` to name one newer development version, provided that version has a draft changelog and an index row. The
+version bump and the site stamp are therefore checked together instead of being discovered after the zip is published.
 
 ```
 EmblemWeave-vX.Y.Z-windows-x64.zip

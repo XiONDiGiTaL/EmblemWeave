@@ -1130,7 +1130,7 @@ void audio_page(Page& p) {
             mark(p);
         }
     }
-    tip("The volume of everything the game plays, applied as a gain in the audio output. Above 100% it is a boost (up to 200%) with a limiter, so loud parts are held back instead of clipping. A move above 100% asks for confirmation. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
+    tip("The volume of everything the game plays, applied as a gain in the audio output. Above 100% it is a boost (up to 200%) with a limiter, so loud parts are held back instead of clipping. It is independent of the EQ preamp and applies immediately. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
     if (ImGui::Checkbox("Mute when the window is not in focus", &a.mute_unfocused)) mark(p);
 
     ImGui::SeparatorText("Audio enhancements");

@@ -3,9 +3,12 @@
 One file per release, newest first. Each file is what the release notes said, word for word, so the README can stay a
 description of the current state instead of a wall of history.
 
+The current public release is **0.1.41**. The 0.1.42 file below is draft notes for a version that is still in
+development; its row says `unreleased` until the release is cut and the file becomes the shipped notes.
+
 | Version | Date | In one line |
 | --- | --- | --- |
-| [0.1.42](0.1.42.md) | 2026-11-22 | Cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash fixed, HDR state restored, save directory reconciliation implemented. |
+| [0.1.42](0.1.42.md) | unreleased | Draft notes: cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash fixed, HDR state restored, save directory reconciliation implemented. |
 | [0.1.41](0.1.41.md) | 2026-11-20 | A measured performance controller, a Performance page, a themed nine-tab F1 menu, 200% master volume, real Vulkan GPU selection, save portraits and party cheats, and no drag glide. |
 | [0.1.40](0.1.40.md) | 2026-11-18 | Update and Play without a rebuild, cleaner add-on failures, and a bounded packed-audio cache. |
 | [0.1.39](0.1.39.md) | 2026-11-18 | Standard mode, DLC discovery, special-character build paths, and an updater that keeps the built game. |
@@ -53,7 +56,10 @@ One file is the source of everything:
    plus the install steps and the hashes it measured, updates the table above, commits that file and the table, pushes,
    and publishes the GitHub release with both assets, its tag on the commit it just pushed. Files you had not committed
    are named in a warning, because the tag cannot carry them.
-3. Bump the version in `Cargo.toml` and the status line in the README.
+3. Bump the version in `Cargo.toml` and the status line in the README. While a release is in development,
+   `Cargo.toml` may name the next version and its row stays marked `unreleased`; `tools/check_release.py` accepts
+   that only while `docs/release.json` and the site still name the published release, and it refuses to package
+   until every pointer names the new version.
 
 `-Local` stops after the notes and the index, without touching GitHub. `-SkipBuild` reuses the launcher already in
 `target\release`. The generated notes are left in `target\pkg\release-notes-<version>.md`, and nothing has to be typed

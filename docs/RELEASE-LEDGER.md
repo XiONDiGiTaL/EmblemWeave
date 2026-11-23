@@ -1,8 +1,8 @@
 # 0.1.39 implementation ledger
 
-> **Current release: 0.1.40.** This page is the historical verification ledger
-> for 0.1.39, not the current release note. See the [changelog](changelog/README.md)
-> for 0.1.40 and later.
+> **Current release: 0.1.41.** This page is the historical verification ledger
+> for 0.1.39, not the current release note. 0.1.42 is in development and has not
+> been published. See the [changelog](changelog/README.md) for 0.1.41 and later.
 
 This ledger records what was actually changed and checked for 0.1.39, the
 release cut from this tree at that time.

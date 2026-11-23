@@ -183,16 +183,12 @@ NXTEST(audio_volume_can_return_above_100_after_lowering_from_a_boost) {
     CHECK(a.volume == 2.0);
 }
 
-NXTEST(audio_volume_gate_requires_the_boost_confirmation) {
+NXTEST(audio_volume_above_100_applies_without_a_confirmation) {
     play::AudioSettings a;
     play::audio_ui::State state;
-    CHECK(!play::audio_ui::apply_volume(a, state, 150.0));
-    CHECK(state.boost_warning);
-    CHECK(a.volume == 1.0);
-    // What the modal's "I know the risks" button does before the next drag.
-    a.volume = state.boost_pending / 100.0;
+    CHECK(play::audio_ui::apply_volume(a, state, 150.0));
     CHECK(a.volume == 1.5);
-    state.boost_warning = false;
+    CHECK(!state.boost_warning);
     CHECK(play::audio_ui::apply_volume(a, state, 175.0));
     CHECK(a.volume == 1.75);
     CHECK(play::audio_ui::apply_volume(a, state, 200.0));

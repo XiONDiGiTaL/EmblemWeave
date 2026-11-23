@@ -7,7 +7,7 @@ work on Windows, Linux and macOS (the PowerShell packaging step is Windows-only)
 
 | Tool | What it proves |
 | --- | --- |
-| `tools/check_release.py` | `Cargo.toml`, `docs/release.json`, the site download button, README current-release line and changelog index all name the same version. |
+| `tools/check_release.py` | `docs/release.json`, the site download button, the README current-release line and that release's changelog row all name the published version. `Cargo.toml` may name a newer development version only when its draft changelog and index row exist; with `--version` (packaging), every pointer must name that version. |
 | `tools/verify_archive.py` | Archive paths are relative and `/`-separated, no traversal, no exact duplicate, no case or Unicode-normalization collision, no Windows-reserved name, no symlink/encrypted entry, required files exist, and extraction stays inside the chosen folder. |
 | `tools/release_manifest.py` | Every file in the zip is listed with its size and SHA-256; the archive hash, source commit, dirty flag and launcher build stamp are recorded. `verify` recomputes all of it. |
 | `tools/verify_install.py` | An unpacked install matches a release manifest. Missing or changed release files fail; unknown extras are reported, while documented user data and generated build output are ignored. |

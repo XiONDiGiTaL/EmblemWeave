@@ -246,18 +246,15 @@ void apply_preset(AudioSettings& a, int preset) {
 bool apply_volume(AudioSettings& a, State& s, double percent) {
     if (!std::isfinite(percent)) return false;
     const double pct = std::clamp(percent, 0.0, 200.0);
-    // Once this session has run above 100%, lowering the level and raising it
-    // again must not re-arm the safety modal: that read as a hard cap at 100%.
-    // The modal is still shown the first time a 100% session is boosted.
-    if (a.volume > 1.0001) s.boost_approved = true;
-    if (pct > 100.0001 && a.volume <= 1.0001 && !s.boost_approved) {
-        s.boost_warning = true;
-        s.boost_pending = pct;
-        return false;
-    }
+    // Master gain is independent of the equalizer's preamp. Above 100% is the
+    // limited boost the panel describes; it applies immediately. The old modal
+    // read as a hard 100% cap and pushed players to the preamp for loudness.
     const double volume = pct / 100.0;
     if (std::fabs(volume - a.volume) < 1e-9) return false;
     a.volume = volume;
+    s.boost_warning = false;
+    s.boost_pending = 0.0;
+    s.boost_approved = volume > 1.0001;
     return true;
 }
 
@@ -386,7 +383,7 @@ Edit enhancements_window(AudioSettings& a, State& s) {
             if (glow_slider("master", &pct, 0.0f, 200.0f, "%.0f%%", ImGui::GetContentRegionAvail().x - px(8))) {
                 if (apply_volume(a, s, pct)) live = true;
             }
-            ImGui::TextDisabled("Above 100%% is a limited boost. The warning is shown once per session.");
+            ImGui::TextDisabled("Above 100%% is a limited boost, independent of the EQ preamp.");
 
             section_label("EQUALIZER");
             ImGui::TextUnformatted("Enable equalizer");

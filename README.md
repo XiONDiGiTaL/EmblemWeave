@@ -40,8 +40,11 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current release: 0.1.42.** Cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash fixed, HDR state restored, save directory reconciliation. Field tests pending for #75, #76, #77 (cycles), #78. See the
-> [0.1.42 changelog](docs/changelog/0.1.42.md).
+> **Current release: 0.1.41.** **0.1.42 is in development and has not been published.** Its
+> draft [changelog](docs/changelog/0.1.42.md) covers cinematic AV1+Opus infrastructure, the Find
+> Units optimization, the title-return crash fix, HDR state restoration and save-directory
+> reconciliation; field tests for #75, #76, #77 (cycles) and #78 are still pending. The site and
+> the updater keep pointing at [0.1.41](docs/changelog/0.1.41.md) until the release is cut.
 
 ## Documentation
 

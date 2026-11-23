@@ -41,6 +41,7 @@ mod savefile;
 mod saves;
 mod shell;
 mod sites;
+mod startup_overlay;
 mod snapshots;
 mod theme;
 mod build_versioning;
@@ -216,6 +217,8 @@ pub struct App {
     nav_last: Option<Page>,
     /// A Play succeeded and the launcher should minimize once this frame is done.
     minimize_after_play: bool,
+    /// The always-on-top card shown while the game is booting.
+    pub startup: startup_overlay::StartupOverlay,
     /// When the last redraw started, for the frame cap in `update`.
     last_frame: Instant,
 }
@@ -347,6 +350,7 @@ impl App {
             activity_hover_until: None,
             nav_last: None,
             minimize_after_play: false,
+            startup: Default::default(),
             last_frame: Instant::now(),
         };
         match repaired {
@@ -540,6 +544,7 @@ impl App {
         match engine::play(&self.config) {
             Ok(()) => {
                 self.minimize_after_play = self.config.minimize_on_play;
+                self.startup.begin();
                 self.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok);
             }
             Err(e) => self.notify(e, Tone::Bad),
@@ -1248,6 +1253,7 @@ impl eframe::App for App {
         self.overlays(ctx);
         self.tour_frame(ctx);
         ingame::frame(self, ctx);
+        startup_overlay::frame(self, ctx);
         pages::log::window(self, ctx);
         self.take_screenshot(ctx);
         if std::mem::take(&mut self.minimize_after_play) {

@@ -5691,6 +5691,27 @@ void load_census(CensusEvent ev, uint64_t present) {
             nxrt::vk_gauge_buffer_bytes().get() / 1048576.0, static_cast<long long>(nxrt::vk_gauge_memory_allocs().get()), nxrt::vk_gauge_memory_bytes().get() / 1048576.0);
 }
 
+// The launcher's loading card watches for this line. It is separate from the
+// pacing config so the card still closes when `unpaced_loading` is off. Loading
+// frames draw 3 times and the early fade draws about 35; the title is the first
+// frame in the hundreds. 64 skips the fade without waiting for a menu.
+void note_startup_ready() {
+    static bool ready = false;
+    if (ready) return;
+    static uint64_t last_p = 0, last_d = 0;
+    const uint64_t p = counters().presents.load(std::memory_order_relaxed);
+    if (p == last_p) return;
+    const uint64_t d = counters().draws.load(std::memory_order_relaxed) + counters().draws_skipped.load(std::memory_order_relaxed);
+    const uint64_t per = (d - last_d) / (p - last_p);
+    last_p = p;
+    last_d = d;
+    if (per >= 64) {
+        ready = true;
+        NXLOG_I(kTag, "startup ready: first frame with 64+ draws (present %llu, %llu draws)", static_cast<unsigned long long>(p),
+                static_cast<unsigned long long>(per));
+    }
+}
+
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
@@ -5731,6 +5752,7 @@ void note_frame_for_pacing() {
 
 void replay_begin_submit(Frame& f) {
     gpl_note_presents(counters().presents.load(std::memory_order_relaxed));   // [nvn] gpl_async defers draws only while frames are flowing
+    note_startup_ready();
     note_frame_for_pacing();
     rs_report();
     F = &f;

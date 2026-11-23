@@ -1,7 +1,7 @@
 # EmblemWeave v0.1.42 - Release Report
 
 **Date**: 2026-11-23
-**Status**: Release Candidate - Deployed to E:\EmblemWeave
+**Status**: Unreleased release candidate - deployed only to the development install at `E:\EmblemWeave`; 0.1.41 remains the public release
 
 ---
 

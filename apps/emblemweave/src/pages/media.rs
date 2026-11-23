@@ -1176,19 +1176,15 @@ pub fn audio(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &p,
             "Master",
-            "The volume everything the game plays is mixed at. Above 100% it is a limited boost, up to 200%; the first move above 100% asks for confirmation.",
+            "The volume everything the game plays is mixed at. Above 100% it is a limited boost, up to 200%, and it applies immediately; the limiter holds peaks below clipping. Start low.",
             |ui| {
                 let mut pct = (app.config.audio.master * 100.0).round();
                 if widgets::Slider::new(&mut pct, 0.0..=200.0).suffix(" %").show(ui, &p).changed() {
-                    if pct > 100.0 && app.config.audio.master <= 1.0 {
-                        // Do not store the boost until the player has accepted the warning. Remember the
-                        // previous value so Cancel or closing the dialog restores it instead of leaving 100%.
-                        let previous = app.config.audio.master;
-                        app.config.audio.master = 1.0;
-                        app.confirm = Some(crate::Confirm::AudioBoost { pct: pct.round() as u32, previous });
-                    } else {
-                        app.config.audio.master = (pct / 100.0).clamp(0.0, 2.0);
-                    }
+                    // Master gain is independent of the EQ preamp. Above 100% is the
+                    // engine's limited boost; the row's help carries the warning, and
+                    // the value applies at once instead of waiting on a modal that read
+                    // as a hard 100% cap.
+                    app.config.audio.master = (pct / 100.0).clamp(0.0, 2.0);
                 }
             },
         );
