@@ -31,12 +31,14 @@ cargo test --release
 # Verify all 378+ tests pass
 # Expected: 378 passed, 0 failed, 11 ignored
 
-# Build production binary
+# Build production binaries
 cargo build --release
 
-# Verify binary exists and has correct size
+# Verify both binaries exist and have the expected size
 ls -la target/release/EmblemWeave.exe
 # Expected: ~18.5 MB
+ls -la target/release/ew-storage.exe
+# Expected: ~1.4 MB
 ```
 
 ### 2. Test Results Verification
@@ -72,12 +74,13 @@ Ensure these directories exist and are writable:
 
 ### Step 1: Deploy Binary
 ```powershell
-# Copy new release binary
-Copy-Item "C:\Users\xiond\.config\freebuff-desktop\local-projects\413b2383-4be0-4b3c-b36e-5f485402a327\EmblemWeave\target\release\EmblemWeave.exe" "E:\EmblemWeave\EmblemWeave.exe" -Force
+# Copy new release binaries (run from the repository root)
+Copy-Item ".\target\release\EmblemWeave.exe" "E:\EmblemWeave\EmblemWeave.exe" -Force
+Copy-Item ".\target\release\ew-storage.exe" "E:\EmblemWeave\ew-storage.exe" -Force
 
 # Verify deployment
-Get-Item "E:\EmblemWeave\EmblemWeave.exe"
-# Expected: 18,508,800 bytes (18.5 MB), current timestamp
+Get-Item "E:\EmblemWeave\EmblemWeave.exe", "E:\EmblemWeave\ew-storage.exe"
+# Expected: 18,509,312 bytes (18.5 MB) and 1,377,280 bytes (1.4 MB), current timestamps
 ```
 
 ### Step 2: Verify Storage Systems Initialize
@@ -96,10 +99,9 @@ Get-ChildItem "E:\EmblemWeave\data\build" -Directory
 
 ### Step 3: Run Storage Health Check
 ```powershell
-# Verify storage manager can collect stats
-# (Requires CLI integration - use debug build for now)
-cd "C:\Users\xiond\.config\freebuff-desktop\local-projects\413b2383-4be0-4b3c-b36e-5f485402a327\EmblemWeave\apps\emblemweave"
-cargo run --bin EmblemWeave -- --help 2>&1 | head -20
+# Run from the data folder so the default build/... roots resolve there.
+cd "E:\EmblemWeave\data"
+& "E:\EmblemWeave\ew-storage.exe" stats
 ```
 
 ### Step 4: Verify User Data Preservation
@@ -136,7 +138,7 @@ time cargo test
 ```
 
 ### Storage Efficiency Verification
-After several builds, verify:
+After several builds, verify the following targets (unverified; not measured):
 - Hard-link deduplication: 5x reduction (40GB → 8GB for 20 builds)
 - Pipeline cache deduplication: 4x reduction
 - Lift reuse rate: > 70%
@@ -174,6 +176,7 @@ Start-Process "E:\EmblemWeave\EmblemWeave.exe"
 | File | Source | Destination | Size |
 |------|--------|-------------|------|
 | EmblemWeave.exe | target/release/ | E:\EmblemWeave\ | 18.5 MB |
+| ew-storage.exe | target/release/ | E:\EmblemWeave\ | 1.4 MB |
 
 ### Directories Preserved (NOT deployed)
 | Directory | Purpose |
@@ -186,7 +189,8 @@ Start-Process "E:\EmblemWeave\EmblemWeave.exe"
 
 ## Verification Checklist
 
-- [ ] Binary deployed and verified (18.5 MB)
+- [ ] Binaries deployed and verified (18.5 MB launcher, 1.4 MB storage CLI)
+- [ ] Storage CLI runs: `& "E:\EmblemWeave\ew-storage.exe" stats`
 - [ ] Backup created in backups/pre-deploy-<timestamp>/
 - [ ] User data directory (data/) intact
 - [ ] Launcher starts successfully
@@ -206,7 +210,7 @@ Start-Process "E:\EmblemWeave\EmblemWeave.exe"
 ### Storage Errors
 1. Check disk space: `Get-PSDrive E | Select Used,Free`
 2. Verify write permissions on `E:\EmblemWeave\data\`
-3. Run storage cleanup: (requires CLI integration)
+3. Run storage cleanup: `& "E:\EmblemWeave\ew-storage.exe" cleanup`
 
 ### Build Failures
 1. Verify toolchain: `--fetch-tools` flag

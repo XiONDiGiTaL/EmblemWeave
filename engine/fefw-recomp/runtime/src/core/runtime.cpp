@@ -56,6 +56,8 @@ bool init(const InitOptions& opt) {
         ok = false;
     }
     svc_init();
+    kernel::init_kernel_locks();
+    kernel::init_thread_list_lock();
     kernel::install_spin_hint();
     kernel::starvation_guard_start();
     if (opt.services) {

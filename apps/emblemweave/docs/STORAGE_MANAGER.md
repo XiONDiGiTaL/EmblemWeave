@@ -12,6 +12,8 @@ The Unified Storage Manager (`StorageManager`) provides a single interface for m
 
 It provides unified statistics, coordinated cleanup, and cross-store operations.
 
+> The CLI is built as the separate `ew-storage` console binary: `cargo build --release --bin ew-storage` for a binary, or `cargo run --bin ew-storage -- <command>` from `apps/emblemweave`.
+
 ## Architecture
 
 ### Manager Composition
@@ -139,11 +141,8 @@ pub struct StorageCleanupConfig {
 ### Cleanup Process
 
 ```bash
-# Run cleanup (respects auto_cleanup flag)
+# Run cleanup explicitly (auto_cleanup stays disabled)
 ew-storage cleanup
-
-# Force cleanup regardless of auto_cleanup
-ew-storage cleanup --force
 
 # Dry-run preview
 ew-storage cleanup --dry-run
@@ -311,7 +310,7 @@ fn promote_current(&mut self) -> Result<BuildIdentity> {
 # Example GitHub Actions step
 - name: EmblemWeave Storage Cleanup
   run: |
-    ew-storage cleanup --force
+    ew-storage cleanup
     ew-storage stats --format json > storage_report.json
   # Runs after successful build promotion
 ```
@@ -328,31 +327,21 @@ fn promote_current(&mut self) -> Result<BuildIdentity> {
 | Lift reuse rate | <50% | <30% |
 | Unreferenced objects | >1000 | >5000 |
 
-### Automated Cleanup
+### Automatic Cleanup
 
-Enable `auto_cleanup: true` in config for automatic cleanup on:
-- Build promotion (if storage exceeds thresholds)
-- Scheduled cron (daily/weekly)
-- Pre-build check (if free space low)
-
-```rust
-let config = StorageCleanupConfig {
-    auto_cleanup: true,
-    min_free_space: 20 * 1024 * 1024 * 1024, // 20 GB
-    ..Default::default()
-};
-```
+`auto_cleanup` defaults to `false` and is not read by the storage manager, so there
+is no background cleanup. `ew-storage cleanup` is an explicit operation; the CLI
+always constructs its config with `auto_cleanup: false`.
 
 ## Troubleshooting
 
 ### Cleanup Not Running
 
 ```bash
-# Check auto_cleanup flag
-ew-storage stats --format json | jq .config.auto_cleanup
-
-# Force cleanup
-ew-storage cleanup --force
+# The CLI never enables automatic cleanup; an explicit `cleanup` always runs.
+# Verify the roots point at the expected build/... folders, then run it.
+ew-storage disk-space
+ew-storage cleanup
 ```
 
 ### Statistics Missing
@@ -368,11 +357,9 @@ ew-storage stats  # Triggers lazy initialization
 ### Cross-Store Operation Failures
 
 ```bash
-# Check individual store health
-ew-version stats
-ew-pipeline-cache stats
-ew-object-store stats
-ew-romfs-store stats
+# Check unified store health
+ew-storage stats
+ew-storage disk-space
 
 # Run store-build with verbose error
 ew-storage store-build build/output 1700000000 --config Release --git-commit abc123 2>&1
@@ -385,22 +372,19 @@ ew-storage store-build build/output 1700000000 --config Release --git-commit abc
 ew-storage disk-space
 
 # Emergency cleanup
-ew-storage cleanup --force
-ew-object-store cleanup-objects
-ew-object-store cleanup-lifts
-ew-romfs-store cleanup
+ew-storage cleanup
 ```
 
 ## Best Practices
 
 1. **Run `ew-storage stats`** in CI after each build
-2. **Enable auto_cleanup** for production environments
+2. **Keep automatic cleanup disabled**; run `ew-storage cleanup` explicitly or from a scheduler
 3. **Set min_free_space** to 2x largest build size
 4. **Export reports** weekly for trend analysis
 5. **Monitor deduplication ratios** across all stores
 6. **Coordinate cleanup schedules** with build windows
 7. **Keep configs in version control** (`.emblemweave/storage.toml`)
-8. **Test dry-runs** before enabling auto_cleanup
+8. **Test dry-runs** before scheduling cleanup
 
 ## Advanced Usage
 

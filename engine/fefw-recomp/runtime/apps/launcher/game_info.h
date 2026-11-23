@@ -27,6 +27,9 @@ struct GameStatus {
     bool textures = false;        // bc7_cache\ exists and holds at least one entry
     bool shaders = false;         // shader_cache\ exists and holds at least one entry
     bool setup_finished = false;  // setup_state.tsv records a finished setup run
+    // Cinematic assets (movie/voice): RomFS/movie/*.opus and RomFS/voice/*.opus (or similar)
+    bool movies = false;          // RomFS/movie/ has at least one .opus file
+    bool voices = false;          // RomFS/voice/ has at least one .opus file
     bool ready() const;           // exefs and romfs are there, enough to start the game
     std::wstring summary() const; // one plain sentence for the player
 };

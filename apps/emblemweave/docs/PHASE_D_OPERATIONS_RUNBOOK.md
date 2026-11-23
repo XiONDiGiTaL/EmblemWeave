@@ -85,16 +85,14 @@ Get-ChildItem $logPath -File -Filter "*.log" | Where-Object { $_.LastWriteTime -
 
 #### 1. Storage Cleanup (Manual or Scheduled)
 ```powershell
-# Run storage cleanup (dry-run first)
-# Note: Requires CLI integration - use debug build for now
+# Run from the data folder so the default build/... roots resolve there.
+cd "E:\EmblemWeave\data"
 
-cd "C:\Users\xiond\.config\freebuff-desktop\local-projects\413b2383-4be0-4b3c-b36e-5f485402a327\EmblemWeave\apps\emblemweave"
+# Dry run first
+& "E:\EmblemWeave\ew-storage.exe" cleanup --dry-run
 
-# Dry run
-cargo run --release --bin ew-storage -- cleanup --dry-run
-
-# Actual cleanup (if dry-run looks good)
-cargo run --release --bin ew-storage -- cleanup
+# Actual cleanup (auto_cleanup stays disabled; this is an explicit run)
+& "E:\EmblemWeave\ew-storage.exe" cleanup
 ```
 
 #### 2. Backup Verification
@@ -122,11 +120,11 @@ $backups | Select-Object -Skip 20 | Remove-Item -Recurse -Force
 
 #### 1. Full Storage Audit
 ```powershell
-# Generate storage report
-cd "C:\Users\xiond\.config\freebuff-desktop\local-projects\413b2383-4be0-4b3c-b36e-5f485402a327\EmblemWeave\apps\emblemweave"
-cargo run --release --bin ew-storage -- stats --format json --output "storage-report-$(Get-Date -Format 'yyyyMMdd').json"
+# Run from the data folder so the default build/... roots resolve there.
+cd "E:\EmblemWeave\data"
+& "E:\EmblemWeave\ew-storage.exe" stats --format json --output "storage-report-$(Get-Date -Format 'yyyyMMdd').json"
 
-# Analyze report for anomalies
+# Analyze the report for anomalies
 # - Sudden size increases
 # - Low deduplication ratios
 # - Orphaned content growth
@@ -151,7 +149,7 @@ Start-Process "E:\EmblemWeave\EmblemWeave.exe" -ArgumentList "--fetch-tools" -Wa
 Get-ChildItem "E:\EmblemWeave\data\crash" -File
 
 # 2. Run from command prompt (debug build)
-cd "C:\Users\xiond\.config\freebuff-desktop\local-projects\413b2383-4be0-4b3c-b36e-5f485402a327\EmblemWeave\apps\emblemweave"
+cd apps/emblemweave
 cargo run --bin EmblemWeave
 
 # 3. Check Windows Event Viewer
@@ -226,7 +224,8 @@ Rename-Item "E:\EmblemWeave\data\build\object_store\object_index.json" "object_i
 Start-Process "E:\EmblemWeave\EmblemWeave.exe"
 
 # 4. Run cleanup to remove orphaned content
-# (requires CLI integration)
+cd "E:\EmblemWeave\data"
+& "E:\EmblemWeave\ew-storage.exe" cleanup
 ```
 
 ### Incident: Disk Full
@@ -373,13 +372,12 @@ Start-Process "E:\EmblemWeave\EmblemWeave.exe" -ArgumentList "--compare-data", "
 # Apply preset
 Start-Process "E:\EmblemWeave\EmblemWeave.exe" -ArgumentList "--apply-preset", "Quality" -Wait
 
-# View storage stats (debug build)
-cd apps/emblemweave && cargo run --bin ew-storage -- stats
-
-# Run cleanup (debug build)
-cd apps/emblemweave && cargo run --bin ew-storage -- cleanup --dry-run
-cd apps/emblemweave && cargo run --bin ew-storage -- cleanup
+# Storage stats and cleanup
+cd "E:\EmblemWeave\data"
+& "E:\EmblemWeave\ew-storage.exe" stats
+& "E:\EmblemWeave\ew-storage.exe" cleanup --dry-run
+& "E:\EmblemWeave\ew-storage.exe" cleanup
 
 # Export report
-cd apps/emblemweave && cargo run --bin ew-storage -- stats --format json --output report.json
+& "E:\EmblemWeave\ew-storage.exe" stats --format json --output report.json
 ```
