@@ -616,6 +616,10 @@ pub struct Config {
     /// player comes back. Off by default, so a new install keeps the launcher
     /// visible unless the player asks for this.
     pub minimize_on_play: bool,
+    /// Show the runtime's debug console window (fefw.exe). Off by default to
+    /// avoid an unwanted console window; on displays the console for troubleshooting.
+    /// Logging to fefw.log continues regardless of this setting.
+    pub show_debug_console: bool,
     /// Built engine checkouts (as `engine.txt` records them) whose reuse offer was declined. The offer for one folder does not
     /// hide an offer for another, and a declined one stays declined across restarts.
     pub reuse_dismissed: Vec<String>,
@@ -808,5 +812,26 @@ mod tests {
         let mut current = Config::default();
         apply_saved_mode(r#"{"interface_mode":"standard"}"#, &mut current);
         assert_eq!(current.interface_mode, InterfaceMode::Standard);
+    }
+
+    #[test]
+    fn show_debug_console_defaults_to_false() {
+        let cfg = Config::default();
+        assert!(!cfg.show_debug_console, "show_debug_console should default to false");
+    }
+
+    #[test]
+    fn show_debug_console_round_trips() {
+        let mut cfg = Config::default();
+        cfg.show_debug_console = true;
+        let back: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(back.show_debug_console);
+    }
+
+    #[test]
+    fn an_old_config_without_show_debug_console_defaults_to_false() {
+        // Config from before this field existed should default to false
+        let cfg: Config = serde_json::from_str(r#"{"theme":"emblem"}"#).unwrap();
+        assert!(!cfg.show_debug_console);
     }
 }

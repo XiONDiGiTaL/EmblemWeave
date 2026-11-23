@@ -27,6 +27,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
 /// Pinned revision the engine's shader translator is built against.
 const SHADER_TRANSLATOR_URL: &str = "https://git.ryujinx.app/ryubing/ryujinx.git";
 const SHADER_TRANSLATOR_REV: &str = "a82350bb774f70fcbd41c9987bf67a3775409963";
@@ -5091,11 +5096,10 @@ It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card
 
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
-pub fn play(
-    graphics: &crate::config::Graphics,
-    audio: &crate::config::Audio,
-    performance: &crate::config::Performance,
-) -> Result<(), String> {
+pub fn play(config: &crate::config::Config) -> Result<(), String> {
+    let graphics = &config.graphics;
+    let audio = &config.audio;
+    let performance = &config.performance;
     let root = root().ok_or("the engine was not found")?;
     let dir = run_dir().ok_or(crate::platform::NO_DATA_DIR)?;
     let exe = game_exe(&root);
@@ -5195,6 +5199,12 @@ pub fn play(
         // A ReShade.ini from before 6.8, or one the setup wrote before the launcher
         // could catch it, still blocks the bare Home key. Every launch checks once.
         let _ = allow_plain_shortcuts(&dir.join("ReShade.ini"));
+    }
+    // Hide the console window unless the user explicitly enabled it.
+    // Logging to fefw.log continues regardless.
+    #[cfg(windows)]
+    if !config.show_debug_console {
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let child = cmd
         .spawn()

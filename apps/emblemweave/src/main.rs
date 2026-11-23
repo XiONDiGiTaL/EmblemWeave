@@ -537,7 +537,7 @@ impl App {
             self.start(JobKind::Repair);
             return;
         }
-        match engine::play(&self.config.graphics, &self.config.audio, &self.config.performance) {
+        match engine::play(&self.config) {
             Ok(()) => {
                 self.minimize_after_play = self.config.minimize_on_play;
                 self.notify("Starting Fire Emblem: Fortune's Weave", Tone::Ok);

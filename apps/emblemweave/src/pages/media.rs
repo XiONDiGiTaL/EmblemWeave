@@ -597,6 +597,19 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
+    // Debug section: console visibility for troubleshooting.
+    widgets::section(ui, &p, "Debug", |ui| {
+        widgets::setting_row(
+            ui,
+            &p,
+            "Show debug console",
+            "Displays the runtime's console window (fefw.exe) for troubleshooting. Off by default to avoid an unwanted console window; logging to fefw.log continues regardless.",
+            |ui| {
+                widgets::toggle(ui, &p, &mut app.config.show_debug_console);
+            },
+        );
+    });
+
     let desired = crate::engine::desired_values(g, &app.config.audio);
     // The files the game actually reads, so a change the launcher has written
     // for the next start is visibly waiting rather than silently absent.
