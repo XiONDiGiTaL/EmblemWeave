@@ -1887,6 +1887,7 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     for (auto& kv : g->views) views.push_back(kv.second);
     g->views.clear();
     g->last_view = VK_NULL_HANDLE;
+    g->last_req_view = VK_NULL_HANDLE;
     defer_destroy([old, views]() mutable {
         for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(old);
@@ -1964,6 +1965,7 @@ bool tex_f16_promote(Texture* t, Frame& f) {
     g->views.clear();
     g->last_view = VK_NULL_HANDLE;
     g->last_key = {};
+    g->last_req_view = VK_NULL_HANDLE;
     g->sampled_formats.clear();
     g->last_sampled_fmt = VK_FORMAT_MAX_ENUM;
     defer_destroy([old, views]() mutable {
@@ -2143,6 +2145,7 @@ uint64_t tex_demote(Texture* t, TexGpu* g, Frame& f) {
     g->views.clear();
     g->last_view = VK_NULL_HANDLE;
     g->last_key = {};
+    g->last_req_view = VK_NULL_HANDLE;
     defer_destroy([old, views]() mutable {
         for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(old);
