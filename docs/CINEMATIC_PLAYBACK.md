@@ -87,11 +87,11 @@ Fire Emblem: Fortune's Weave uses **WebM container with AV1 video** for cinemati
 - Seek handling with loop restart optimization
 - Per-track queues with timestamps
 
-### hwopus (Audio Decoder) - NEEDS IMPLEMENTATION
+### hwopus (Audio Decoder) - IMPLEMENTED
 
-**Location**: `engine/fefw-recomp/runtime/src/services/misc.cpp` (lines 245-340)
+**Location**: `engine/fefw-recomp/runtime/src/services/misc.cpp` (lines 36-400, 590-680)
 
-**Current Behavior**: Outputs zero-filled buffers (silence)
+**Implementation**: FFmpeg libavcodec (libopus) via dynamic DLL loading
 
 **Opus Packet Format**:
 ```
@@ -99,9 +99,13 @@ Nintendo 8-byte header: [u32_be payload_size][u32_be final_range]
 Opus packet: [TOC][frame(s)...]
 ```
 
-**Needed**: Actual Opus decoding using:
-- Option A: libopus (add to third_party)
-- Option B: FFmpeg libavcodec (already linked for video)
+**Features**:
+- Dynamic FFmpeg DLL loading (avcodec-62.dll, avutil-60.dll, swresample-6.dll) following movie_ffmpeg.cpp pattern
+- OpusDecoder struct with AVCodecContext, AVFrame, SwrContext
+- Nintendo 8-byte header parsing (u32 BE payload size, u32 BE final range)
+- Planar float (FLTP) output converted to interleaved int16 PCM
+- Fallback to silence on decode failure
+- Logs decoder initialization and decode errors
 
 **Opus Files** (175 total, matching movie IDs):
 - `BGM_MV00_00.opus` - Background music
@@ -200,8 +204,7 @@ movie: frame 123 at 41000000 us, clock 40998000 us, late=false
 
 ## Future Improvements
 
-1. **Implement hwopus Opus decoding** - Critical for voices
-2. **Add A/V clock synchronization** - Master clock with audio as reference
-3. **Movie asset validation** - Check for cinematic files in game data validation
-4. **Hardware decode** - Enable FFmpeg D3D11VA path for AV1
-5. **Shader cache distribution** - Ship pre-compiled cache
+1. **Add A/V clock synchronization** - Master clock with audio as reference
+2. **Movie asset validation** - Check for cinematic files in game data validation
+3. **Hardware decode** - Enable FFmpeg D3D11VA path for AV1
+4. **Shader cache distribution** - Ship pre-compiled cache

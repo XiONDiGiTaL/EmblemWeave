@@ -1,4 +1,4 @@
-# Engine stability and data-pipeline audit — 19 November 2026
+# Engine stability and data-pipeline audit: 19 November 2026
 
 **Status: Phase 1, read-only.** This document is the written audit required before
 broad engine changes. No source file was changed in this pass. The working tree
@@ -7,10 +7,10 @@ already contains unrelated uncommitted work, which was left untouched.
 This audit builds on [ENGINE_AUDIT.md](ENGINE_AUDIT.md) (18 November 2026) rather
 than replacing it. It concentrates on the issues that are still open:
 
-- **#70** — cinematics lag and voices cut; rebuilding from `.nup` reportedly fixed it.
-- **#37** — freeze after roughly two hours, and `VK_ERROR_DEVICE_LOST` on an RTX 5060.
-- **#26** — only TAUU is recognised; copying FSR files under `upscaler/fsr` did not help.
-- **#29** — Z1 Extreme + RX 6850M XT: 720p drops, torch-lighting glitches, cutscene
+- **#70**: cinematics lag and voices cut; rebuilding from `.nup` reportedly fixed it.
+- **#37**: freeze after roughly two hours, and `VK_ERROR_DEVICE_LOST` on an RTX 5060.
+- **#26**: only TAUU is recognised; copying FSR files under `upscaler/fsr` did not help.
+- **#29**: Z1 Extreme + RX 6850M XT, 720p drops, torch-lighting glitches, cutscene
   audio/video problems, upscalers not found.
 
 The primary conclusion is narrow and testable: **the `.nup` and extracted-folder
@@ -576,13 +576,13 @@ and reporting.
 
 ## H. Prioritized roadmap and gates
 
-### Phase 1 — this audit
+### Phase 1: this audit
 
 - Read-only source and issue review.
 - `.nup` vs folder data-path analysis.
 - No source changes.
 
-### Phase 2A — data correctness (highest priority)
+### Phase 2A: data correctness (highest priority)
 
 1. Add the evidence capture in B.8, including the reporter’s two trees.
 2. Fix the overlay identity/manifest/orphan rules (B.9).
@@ -600,7 +600,7 @@ and reporting.
 **Gate:** no decoder changes until B.8 shows the file sets and hashes match, or
 shows a decoder-specific failure with matching inputs.
 
-### Phase 2B — diagnostics for #37/#29
+### Phase 2B: diagnostics for #37/#29
 
 1. Device-fault capture when supported.
 2. Breadcrumb ring and richer freeze/device-loss headers.
@@ -611,7 +611,7 @@ shows a decoder-specific failure with matching inputs.
 **Gate:** no recovery/restart policy and no rendering changes until a capture
 identifies the failing stage.
 
-### Phase 2C — performance, capture-driven only
+### Phase 2C: performance, capture-driven only
 
 1. Same-route before/after captures in the hub, Dagsion crowd, battle, and
    cutscenes.
@@ -621,7 +621,7 @@ identifies the failing stage.
 4. Keep p50/p95/p99, 1% lows, memory plateau, and audio/video sync as acceptance
    metrics, not average FPS alone.
 
-### Phase 2D — build hardening
+### Phase 2D: build hardening
 
 1. `env.cmd` selection order and logging.
 2. One job-count policy across launcher and scripts.

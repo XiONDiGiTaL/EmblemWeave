@@ -51,10 +51,10 @@ and [UPGRADE_AND_RECOVERY.md](UPGRADE_AND_RECOVERY.md).
 **Updating by hand.** This is the fallback when the launcher cannot update itself, for example on a read-only folder:
 
 - **Unzip the new release into the same folder.** It replaces the launcher, docs and engine sources, and leaves `data\` and
-  the built game alone — your saves, settings, decoded modules, build output and the game itself keep working.
+  the built game alone: your saves, settings, decoded modules, build output and the game itself keep working.
 - **If you would rather unpack into a fresh folder**, keep these two from the old one and move them across:
-  - `data\` — in a portable install this is where your saves (`data\save`), settings and build output live;
-  - `engine\` — the engine checkout and the built `fefw.exe`, plus the tools fetched into `engine\fefw-recomp\tools`.
+  - `data\`: in a portable install this is where your saves (`data\save`), settings and build output live;
+  - `engine\`: the engine checkout and the built `fefw.exe`, plus the tools fetched into `engine\fefw-recomp\tools`.
 
   Copy them in before the first launch and the new copy is the old one with a newer launcher.
 - **Or keep the engine anywhere at all.** A fresh copy that cannot find an engine asks for one on **Game Setup > Engine
@@ -78,7 +78,7 @@ The one part of the install that is still the player's is the build toolchain. T
 than the other recompilations ask for, and the difference is not the engine: it is what each project ships.
 
 `FireEmblemEngage-EngagePCRecomp` is the clearest comparison, because it is installed here and can be measured. Its
-`START-HERE.txt` lists four requirements — Windows 10/11 x64, an AVX2 CPU, a Vulkan 1.3 driver, 40 GiB free — and no
+`START-HERE.txt` lists four requirements: Windows 10/11 x64, an AVX2 CPU, a Vulkan 1.3 driver, 40 GiB free, and no
 build tools at all. Its folder carries `llvm/` (316 MB: clang and the MinGW-w64 target), `python/` (101 MB, a relocatable
 interpreter with its packages), `bin/ninja.exe` (0.6 MB), its extractor and its translator. The player runs the setup,
 points it at their dump, and waits. NX2navi does the same thing in the other direction: its launcher "downloads the build

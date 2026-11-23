@@ -36,14 +36,14 @@ line. "Cancelled" = Start ends the applet at once and GetResult answers 128-22 (
 |---|---|---|---|
 | 0x1020011 swkbd | `nn::swkbd::ShowKeyboard` (main 0x7101141f00, 0x7101142190) | the on-screen keyboard's text or `[applet] swkbd_text`; text check round trip | takes the name |
 | 0x100000E error | `nn::err::ShowError(Result)`, `ShowApplicationError`; also `ldn::Connect`, `pctl::TryBeginFreeCommunication`, GameShare failures via ShowError | logged (code, messages), ends with success, no UI | ShowError ignores the result |
-| 0x1000010 player select, mode 0 | not imported directly (kept for completeness) | the one user, result 0 | — |
+| 0x1000010 player select, mode 0 | not imported directly (kept for completeness) | the one user, result 0 | nothing |
 | 0x1000010 player select, mode 2 / 10 / 11 | `nn::account::EnsureNetworkServiceAccountAvailable` (12 call sites, e.g. main 0x7100542f20, 0x7100583860), `ShowLicenseRequirementsForNetworkService` (0x7100543098), `err::ShowError` for some network results | output result 0x27C (124-1 CancelledByUser), no user | the callers check 0x27C and stop quietly. Was result 0 before: mode 2 then made them retry the NSA token request in a loop, since acc keeps answering 124-200 |
 | 0x1000014 shop | `nn::ec::ShowShopAddOnContentList` (main 0x7100fd2620) | cancelled | ShowShopPage returns 0x690 (closed), which ShowShopAddOnContentListImpl accepts |
 | 0x100001A MyPage | `nn::friends::StartFriendInvitation`, `StartSendingFriendInvitation` | cancelled (see row above) | ignored / failure branch |
 | 0x100000D data erase | `nn::fs::EnsureSaveData`, `ExtendSaveData`, only when IApplicationFunctions 20/25 report a required size above 0 (they answer 0 here, so not reached) | cancelled | fs returns 0x3E02 (not enough space) |
 | 0x0F net connect | `nn::nifm::HandleNetworkRequestErrorResult` | both imports are replaced in core/switch2.cpp (not resolved) before the SDK runs; cancelled if reached | stays offline |
 | 0x1000024 / 0x1030024 GameShare matchmaking | `nn::streamplay::OpenSessionWithMatchmakeSupport` (main 0x7101132f60) | cancelled | the SDK returns 0x3D1F, which main 0x7101133704 treats as backing out (no error). Reached once stpl:u answers the host path (see the stpl:u rows) |
-| any other id | not launchable from Pokopia | ends at once, no output, GetResult success; logged at Warn | — |
+| any other id | not launchable from Pokopia | ends at once, no output, GetResult success; logged at Warn | nothing |
 
 Not launchable from Pokopia (no import reaches them): controller support / strap guide / firmware update (nn::hid), web, offline web,
 album / photo viewer, Mii edit, amiibo settings, parental controls (nn::la::auth), chat, save data backup, inline (modeless) keyboard.

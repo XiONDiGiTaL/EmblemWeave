@@ -1,4 +1,4 @@
-# Engine and launcher audit — 18 November 2026
+# Engine and launcher audit, 18 November 2026
 
 This is a source-level audit of EmblemWeave at `755c29f` plus the local
 changes described at the end. It is deliberately not a feature wish list: it
@@ -129,12 +129,15 @@ cache-accounting measurements; no real `.elf.zst` package was available for a
 process-RSS measurement.
 
 The game then decompresses the inner `.elf.zst` frame through
-`nx_hle_zstd_multiframe` (`game-build/fefw/src/fefw_hle.cpp`). It calls
+`nx_hle_zstd_multiframe` (`runtime/games/fefw/fefw_hle.cpp`, in `fefw_rt.dll` for a packaged build). It calls
 `ZSTD_decompressDCtx` directly into the guest destination (`c->x[1]`, capacity
 `c->x[2]`); there is no host-side output allocation, cache or reference. The
 `ZSTD_DCtx` is `thread_local` and persists for the thread, retaining zstd's
 internal window/tables (bounded by the checked `2^27 + 1` window) but not the
-previous output. A native error falls back to the lifted original. Whether the
+previous output. A native error falls back to the lifted original and records
+`ZSTD_getErrorName` plus the newest recent-file ring entry for the decoding
+thread (or the newest overall when that thread has none) in the log and the
+crash report's `last zstd error` section. Whether the
 guest frees its decoded audio buffer is title-side behaviour; this runtime does
 not retain it.
 
@@ -194,7 +197,7 @@ changing culling, streaming or draw batching.
 
 ## E. Prioritized roadmap
 
-### Tier 1 — low risk, evidence already exists
+### Tier 1: low risk, evidence already exists
 
 1. **DLC folder wiring** (done here): scan, `[aoc] dir`, Setup/Overview.
 2. **Per-program derived state** (done in the local engine changes):
@@ -202,7 +205,7 @@ changing culling, streaming or draw batching.
 3. **Build correctness**: host `/EHsc` so `ipc.cpp`/`crash.cpp` compile; the
    full runtime build and EH/lift tests pass.
 
-### Tier 2 — needs a capture or a real asset
+### Tier 2: needs a capture or a real asset
 
 4. **Add-on extraction** (done here): unpack filtered `.nup` packages and
    `.nsp`/`.xci` data NCAs with progress/cancel, a cleanup guard and a reuse

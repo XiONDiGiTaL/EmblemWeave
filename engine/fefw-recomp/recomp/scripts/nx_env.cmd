@@ -13,7 +13,20 @@ if not defined NX_LLVM if defined NX_TOOLCHAIN if exist "%NX_TOOLCHAIN%\llvm\bin
 if not defined NX_LLVM set "NX_LLVM=%ProgramFiles%\LLVM\bin"
 if not defined NX_TOOLS set "NX_TOOLS=%ProgramFiles%\CMake\bin"
 call "%NX_VCVARS%" >nul
-set "PATH=%NX_LLVM%;%NX_TOOLS%;%LOCALAPPDATA%\Microsoft\WinGet\Links;%~dp0..\..\tools\.venv\Scripts;%PATH%"
+rem Build the PATH for the build environment: LLVM, CMake/Ninja, winget links, venv Scripts first.
+rem Explicitly exclude the portable tools\bin (which has python312.dll) to avoid DLL version conflicts
+rem with the venv Python (3.14). The venv Python must load its own extension modules, not the 3.12 ones.
+set "TOOLS_BIN=%~dp0..\..\tools\bin"
+set "CLEAN_PATH=%NX_LLVM%;%NX_TOOLS%;%LOCALAPPDATA%\Microsoft\WinGet\Links;%~dp0..\..\tools\.venv\Scripts;"
+rem Remove tools\bin from the inherited PATH if present
+set "INHERITED_PATH=%PATH%"
+if defined INHERITED_PATH (
+    set "INHERITED_PATH=;%INHERITED_PATH%;"
+    set "INHERITED_PATH=%INHERITED_PATH:;%TOOLS_BIN%;=;%"
+    if "%INHERITED_PATH:~0,1%"==";" set "INHERITED_PATH=%INHERITED_PATH:~1%"
+    if "%INHERITED_PATH:~-1%"==";" set "INHERITED_PATH=%INHERITED_PATH:~0,-1%"
+)
+set "PATH=%CLEAN_PATH%%INHERITED_PATH%"
 
 rem Check for structured events mode
 if "%~1"=="--structured-events" (

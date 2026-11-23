@@ -72,7 +72,7 @@ Counts are from the tree at this commit.
 | Files | 28 | 122 | POSIX file API | `CloseHandle`, `GetProcAddress`, `GetFileAttributesW`, `CreateFileW` |
 | Registry | 1 | 3 | config files instead | `RegOpenKeyExW`, `RegEnumValueW`, `RegCloseKey` |
 | Window | 1 | 2 | SDL3 window | `MonitorFromWindow`, `GetMonitorInfoW` |
-| Input | 0 | 0 | SDL3 gamepad | — |
+| Input | 0 | 0 | SDL3 gamepad | n/a |
 | Audio | 4 | 16 | PipeWire/ALSA | `CoInitializeEx`, `CoUninitialize`, `CoCreateInstance` |
 | Media | 1 | 3 | FFmpeg/libvpx | `MFCreateMediaType`, `MFStartup`, `MFCreateSourceReaderFromURL` |
 | Console/diag | 43 | 150 | POSIX equivalent | `GetCurrentProcess`, `GetLastError`, `WideCharToMultiByte`, `TerminateProcess` |
@@ -83,7 +83,7 @@ are the five things the lifted code touches on almost every call it makes, so th
 get right. The window is not a project: it is already SDL3, and two monitor queries are the whole of it. Input does
 not appear because SDL's gamepad API already does that job. Audio is four files and thirteen COM calls (XAudio2),
 media is three Media Foundation calls, and one file reads three values from the registry. The 150 calls under
-*Console/diag* are process ids, last-error text and UTF-16 conversion — a header and an `#if` each, not a subsystem.
+*Console/diag* are process ids, last-error text and UTF-16 conversion: a header and an `#if` each, not a subsystem.
 
 The files that carry the most of it are the ones to open first: `src/diag/crash.cpp` (six subsystems),
 `src/mem/write_watch.cpp`, `src/testtools/tt_core.cpp`, `src/services/audio_xaudio2.cpp` (five each),
@@ -130,7 +130,7 @@ ctest --test-dir build-linux --output-on-failure     # one entry: platform
 ```
 
 `runtime/CMakeLists.txt` builds only the platform layer there (`NXRT_PLATFORM_ONLY` is forced on when the host is not
-Windows), because the rest of nxrt — the graphics shell, the game module, the lifted code — still asks for Windows
+Windows), because the rest of nxrt (the graphics shell, the game module, the lifted code) still asks for Windows
 headers. Nothing else in the tree is needed for that build, and nothing in it writes to the Windows side of the tree.
 
 ## SteamOS and the Steam Deck
@@ -158,8 +158,8 @@ Each phase ends with something that was built and run, not something that was de
 1. **Launcher on Linux.** A window opens, Game Setup reads a folder, Requirements explains that the build is
    Windows-only, Play is refused with the same sentence. Done when `cargo build --target
    x86_64-unknown-linux-gnu` links and the window runs on this machine. Most of it exists: the check passes.
-2. **Engine platform layer.** *Started.* `runtime/include/nxrt/platform.h` now carries the host interface — memory,
-   threads, synchronisation, time and files — with `src/platform/win32` (VirtualAlloc, `_beginthreadex`, SRW locks,
+2. **Engine platform layer.** *Started.* `runtime/include/nxrt/platform.h` now carries the host interface (memory,
+   threads, synchronisation, time and files) with `src/platform/win32` (VirtualAlloc, `_beginthreadex`, SRW locks,
    QueryPerformanceCounter, the high-resolution waitable timer, CreateFileW) and `src/platform/posix` (mmap, pthreads,
    clock_gettime, nanosleep, file descriptors) behind it. The time subsystem (`kernel/time.cpp`) is the first call site
    moved: it no longer includes `<windows.h>`, and on Windows the tick and the sleep are the same calls as before.

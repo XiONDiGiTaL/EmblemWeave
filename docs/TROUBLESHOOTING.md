@@ -179,6 +179,21 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 | `main.npdm is compressed in the .nup`, `... is compressed in the .nup; the game reads RomFS files in place`, or the game exits two seconds after Play | 0.1.19 and older refused any `.nup` that packs some of its files with zstd (#24) | 0.1.20 and newer write those files into `engine\fefw-recomp\work\romfs-overlay` and the engine reads them from there: press Play, which writes them first and then starts the game, or **Check my game folder** on Game Setup if you would rather not start it yet. Neither compiles anything. A compressed ExeFS no longer matters at all |
 
+## An emulator save is not offered
+
+The **Save data** section scans the yuzu NAND layout used by yuzu, suyu, sudachi, Citron, Eden, LICHII, Fritchii and torzu:
+
+    %APPDATA%\<emulator>\nand\user\save\<save id>\<profile>\<title id>
+
+It looks in both `%APPDATA%` and `%LOCALAPPDATA%`, at `<save id>\<title id>` and at `<save id>\<profile>\<title id>`. A folder with no files is not a save: it is listed as an empty folder, with no Import button, because there is nothing to copy.
+
+- **The folder you can see in Explorer is empty.** Emulators create the title folder before a save is written, and an unused profile stays empty. Look at the other `<save id>` folders and profiles: a console can hold more than one save id, and the real save is often under a different profile. In yuzu and Eden, opening the game once normally makes it write to the profile you launched.
+- **Eden.** Eden uses the yuzu NAND layout and is scanned. If `%APPDATA%\eden\nand\user\save` does not exist, Eden has not written a save on this PC yet, so there is nothing to import.
+- **Ryujinx.** Ryujinx keeps numbered save folders and resolves them through its own index. EmblemWeave does not read that index, so Ryujinx folders are not scanned. Export or back up the save from Ryujinx, then use **Import from folder** on the exported folder.
+- **A save from a console or another PC.** Point **Import from folder** at the folder that directly contains the save files (`000`, `Global`, `Route_*`, or a single `.sav`), or at a ZIP of that folder.
+
+Import copies into EmblemWeave's own save folder (`%APPDATA%\EmblemWeave\save\account\0100000000000000706d635257464546\000` by default) and moves any existing save to `backups` first. It never changes or deletes the emulator's copy.
+
 ## The graphics device was lost on Intel graphics (#72)
 
 `GPU DEVICE LOST` in the first seconds of a launch on an Intel GPU (Iris Xe, UHD, Core Ultra or Arc) has two known

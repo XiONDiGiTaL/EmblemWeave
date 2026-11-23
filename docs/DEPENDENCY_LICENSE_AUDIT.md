@@ -119,32 +119,32 @@ and `tools/zbic_extract.py` paths are development tools, not package contents.
 
 ## Gaps and recommendations
 
-**G1 — FFmpeg GPL source offer.** The DLLs are GPL-2.0-or-later and the build includes libx264/libx265. Shipping the GPL
+**G1: FFmpeg GPL source offer.** The DLLs are GPL-2.0-or-later and the build includes libx264/libx265. Shipping the GPL
 text and source links is not the same as shipping the corresponding source; the current README offers links and says a
 source request will be honoured. Keep that offer working, and consider attaching the exact FFmpeg/BtbN build scripts and
 source archive or a written offer to the release assets. This is the highest-risk distribution item because the codec
 build is GPL, not LGPL.
 
-**G2 — Intel XeSS is not open source.** The license permits unmodified redistribution with the notice but forbids
+**G2: Intel XeSS is not open source.** The license permits unmodified redistribution with the notice but forbids
 reverse engineering/decompilation and modification. It is not compatible with adding the XeSS SDK code to a GPL-covered
 work in a way that ignores those terms. Keep it as a separate vendored SDK/header with its `LICENSE.txt`; do not modify
 it. The actual XeSS runtime DLL is user-supplied and is not in the zip.
 
-**G3 — Ryujinx translator notice — resolved.** The Windows translator is built from MIT-licensed Ryujinx sources. The
+**G3: Ryujinx translator notice, resolved.** The Windows translator is built from MIT-licensed Ryujinx sources. The
 package now places `LICENSE.Ryujinx.MIT.txt` next to `spirv_harness.exe`; the text is the Ryujinx MIT copyright and
 permission notice, also kept under `tools/shaders/licenses/` for source builds. The archive and CI verification require
 the file.
 
-**G4 — .NET self-contained runtime notices — resolved.** The translator folder now includes `DOTNET-LICENSE.txt`
+**G4: .NET self-contained runtime notices, resolved.** The translator folder now includes `DOTNET-LICENSE.txt`
 (Microsoft .NET Library terms) and `DOTNET-THIRD-PARTY-NOTICES.txt` (Microsoft's .NET runtime third-party notices),
 beside `spirv_harness.exe`. Both are tracked source files and are required by archive and CI verification.
 
-**G5 — Upstream licenses for fetched build inputs.** zstd, SDL3, Vulkan-Headers, volk, VMA and ImGui are fetched during a
+**G5: Upstream licenses for fetched build inputs.** zstd, SDL3, Vulkan-Headers, volk, VMA and ImGui are fetched during a
 build rather than vendored as license files in this repository. Their licenses are compatible (BSD/MIT/Apache/Zlib), but
 a consolidated `THIRD_PARTY_NOTICES` file would make the shipped runtime notices auditable. The source URLs/versions are
 in `runtime/cmake/`.
 
-**G6 — No missing Cargo license metadata.** `cargo metadata` found no package without a license expression. The
+**G6: No missing Cargo license metadata.** `cargo metadata` found no package without a license expression. The
 `Unlicense OR MIT` and `r-efi` expressions have permissive options; keep using those options. Re-run the inventory when
 `Cargo.lock` changes.
 

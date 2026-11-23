@@ -47,11 +47,11 @@ The game queries 0x10, 0x11/0x12, 0x24/0x25, 0x2A, 0x5A; their numbering matches
 | changed signature | 2 | 0 |
 | not in the NX NVN1 table | 256 | 6 |
 
-Of the 256, 222 are NVN2 feature families by name (ray tracing, mesh tasks, DLSS, device command/message buffers, HDR/colour space, push constants, ProgramBuilder, dirty tile maps, shading rate, checkpoints, debug groups per engine…); 34 look like NVN1-era API the NX table never had (`*Deferred` binds, `*Builder*GetDevice`, `QueueBuilderGet*`, `EventGet*`…) — *inferred* from names. NVN1 table names missing from NVN2: `CommandBufferInsertDebugMarkerStatic/Dynamic`, `PushDebugGroupStatic/Dynamic`, `PopDebugGroupId`, `QueueAcquireTexture`, `DeviceApplyDeferredFinalizes` (plus the two loader names).
+Of the 256, 222 are NVN2 feature families by name (ray tracing, mesh tasks, DLSS, device command/message buffers, HDR/colour space, push constants, ProgramBuilder, dirty tile maps, shading rate, checkpoints, debug groups per engine…); 34 look like NVN1-era API the NX table never had (`*Deferred` binds, `*Builder*GetDevice`, `QueueBuilderGet*`, `EventGet*`…); *inferred* from names. NVN1 table names missing from NVN2: `CommandBufferInsertDebugMarkerStatic/Dynamic`, `PushDebugGroupStatic/Dynamic`, `PopDebugGroupId`, `QueueAcquireTexture`, `DeviceApplyDeferredFinalizes` (plus the two loader names).
 
 **Changed signatures (checked in assembly):**
-- `nvnCommandBufferPopDebugGroup(cmdbuf, uint32 domainId)` — NVN1 took only `cmdbuf` (NVN1's `PopDebugGroupId` folded in).
-- `nvnCommandBufferInsertDebugMarker(cmdbuf, uint32 domainId, const char*)` — NVN1 `(cmdbuf, const char*)`; x2 goes to `strlen`.
+- `nvnCommandBufferPopDebugGroup(cmdbuf, uint32 domainId)`: NVN1 took only `cmdbuf` (NVN1's `PopDebugGroupId` folded in).
+- `nvnCommandBufferInsertDebugMarker(cmdbuf, uint32 domainId, const char*)`: NVN1 `(cmdbuf, const char*)`; x2 goes to `strlen`.
 
 **Not-in-NX-table procs the game calls** (signatures checked in assembly): `CommandBufferPushDebugGroupGraphics/Compute(cmdbuf, uint32, const char*)`, `CommandBufferPopDebugGroupGraphics/Compute(cmdbuf, uint32)`, `CommandBufferSetRecordingMode(cmdbuf, int)` (stores to cmdbuf+0x18; values 0–4 are used by the sdk, the game passes 0/1/2), `QueueBuilderSetPrimaryQueue(builder, NVNqueue*)` (stores to +0x18).
 

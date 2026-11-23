@@ -32,17 +32,26 @@ EmblemWeave reads the game data you point it at. It does not write to that
 folder. Decoded modules and generated C are derived from your own copy and stay
 on your machine; they must not be redistributed.
 
-## Free software, no monetisation
+## Free software and independent funding
 
 EmblemWeave is free software under the GNU General Public License, version 3
 only (`GPL-3.0-only`). The source is public so you can inspect it, build it, and
-share it under the same licence.
+share it under the same licence. These terms add no non-commercial restriction
+to that licence: the rights the GPL gives you are unchanged.
 
-The project is not sold, does not accept donations, and does not monetise
-usage, support, or access to releases. No payment is required to use it, to
-receive support, or to report a problem. The project does not sell game
-content, keys, saves, mods, or priority access, and no contributor may use the
-project to profit from copyrighted material or from a licence to the game.
+EmblemWeave is not sold, and no payment is required to use it, to receive
+support, to report a problem, or to obtain a release. There is no paid tier, no
+subscription, no early access, and no feature, save, mod, or priority access for
+sale. The project does not sell game content, keys, saves, mods, or access to
+the game.
+
+XiØN Digital is independently operated. Its creator may accept voluntary
+contributions through a general creator-support page (Buy Me a Coffee). Those
+contributions support the creator's broader independent software and creative
+work. They are not payment for EmblemWeave, for the game, for Nintendo content,
+or for any feature or access; they do not create a contract for a deliverable,
+and they grant no licence to any third-party intellectual property. They are
+not charitable donations and are not tax-deductible.
 
 ## Changes, availability and support
 

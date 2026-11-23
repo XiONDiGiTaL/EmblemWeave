@@ -86,7 +86,7 @@ absent, the message is an inert registered message.
 | Slow drag (40 steps of 4 px) | not previously measured after release | 1:1 tracking throughout; `1006` at release and `1006` through 800 ms | `work/drag-slow.csv`, same fixed build |
 | Maximized caption press | restore transition and post-release motion | first 2 px stay maximized; the 5 px sample restores under the pointer, then tracks 1:1; `206` at release and `206` through 800 ms | `work/final-drag-maximize.csv` |
 | DWM transitions | `DwmSetWindowAttribute` result was not recorded | `hr=0x00000000 (success)` for `DWMWA_TRANSITIONS_FORCEDISABLED`, and `0x00000000` for the corner preference | `target/release/data/logs/launcher.log` written at install |
-| Content versus HWND | — | a 240×28 client-relative top-bar crop before and after a 40 px drag had `mean_abs_rgb=0.00`, `0/6720` changed pixels while the HWND moved `206 -> 246` | screen capture with `CopyFromScreen`, same client-relative coordinates |
+| Content versus HWND | n/a | a 240×28 client-relative top-bar crop before and after a 40 px drag had `mean_abs_rgb=0.00`, `0/6720` changed pixels while the HWND moved `206 -> 246` | screen capture with `CopyFromScreen`, same client-relative coordinates |
 
 `DwmGetWindowAttribute` returns `0x80070057` for `DWMWA_TRANSITIONS_FORCEDISABLED` on this system; the probe reports
 that query but it is not a useful success signal. The install log records the actual `DwmSetWindowAttribute` result.
@@ -160,8 +160,8 @@ The rest of the frame was redundant work:
   with `extra_letter_spacing`, shaped and cached once per label.
 * `widgets::backdrop` rebuilt a 400-vertex radial mesh (and, for Arcade, over a thousand grid lines) every
   frame. The finished shape is cached per size and colourway.
-* The Log page rebuilt its filtered row list — up to 50,000 lines, with a lower-case copy of each while
-  searching — on every frame. It is rebuilt only when new lines arrive or a filter changes.
+* The Log page rebuilt its filtered row list (up to 50,000 lines, with a lower-case copy of each while
+  searching) on every frame. It is rebuilt only when new lines arrive or a filter changes.
 * The Controls page asked for a frame every 20 ms for a still picture; it now follows the pad at 4 frames a
   second and only speeds up while a binding is being captured. The Cheats page asks for nothing unless a game is
   attached, and the About marquee runs at 20 rather than 30 frames a second.
@@ -190,7 +190,7 @@ on the development PC, not the reporter's machine.
 ## This pass: the Yenilume typefaces and a softer surface
 
 The launcher's type came from whichever Segoe UI a machine had. It now carries its own pair, the one the xiØN
-front end (Yenilume) sets its pages in: **Baloo 2** for display — titles, the wordmark, card values — and
+front end (Yenilume) sets its pages in: **Baloo 2** for display (titles, the wordmark, card values) and
 **Nunito** for everything read at length. Both are bundled as TrueType (converted from the Google Fonts release),
 SIL Open Font License 1.1, with `OFL.txt` beside them; Segoe stays behind them for glyphs neither face carries, and
 Chinese and Japanese keep their own fallback chain. The look no longer depends on the machine.

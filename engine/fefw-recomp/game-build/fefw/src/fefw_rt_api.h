@@ -6,7 +6,7 @@
 #pragma once
 #include <stdint.h>
 
-#define FEFW_RT_API 1u     // bump when this struct or the exported set changes (a field added at the end is told apart by size)
+#define FEFW_RT_API 2u     // 2: nx_hle_zstd_multiframe; bump when this struct or the exported set changes (a field added at the end is told apart by size)
 
 // The processor features a build of the game code needs (tools/build/fefw_build.py CPU_VARIANTS): the stub passes its build's set
 // in cpu_needs, fefw_rt.dll checks it before the first game instruction (fefw_cpu.h).

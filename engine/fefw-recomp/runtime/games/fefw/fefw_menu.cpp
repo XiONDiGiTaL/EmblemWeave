@@ -155,6 +155,8 @@ constexpr IniKey kIni[] = {
     {"nvn", "tex_prep", "1", Norm::Bool, true, "background texture preparation"},
     {"nvn", "tex_prep_threads", "0", Norm::Number, true, "texture preparation threads"},
     {"nvn", "tex_prep_mb", "1024", Norm::Number, true, "texture preparation budget"},
+    {"nvn", "render_prep", "1", Norm::Bool, true, "background render preparation"},
+    {"nvn", "render_prep_threads", "0", Norm::Number, true, "render preparation threads"},
     {"gfx", "residency", "auto", Norm::Text, true, "VRAM residency policy"},
     {"gfx", "residency_percent", "80", Norm::Number, true, "VRAM residency budget"},
     {"nvn", "gpl", "1", Norm::Bool, true, "pipeline library"},
@@ -1342,6 +1344,10 @@ void performance_page(Menu& m) {
                     "0 chooses a third of the hardware threads (2 to 8). Lower it on a low-core CPU to keep the game and render threads responsive.", 0, 8, 1, "%d threads");
         ini_int_row(m, *ini_key("nvn", "tex_prep_mb"), "Preparation memory budget",
                     "Most finished or queued texture data held at once. Over it, the oldest unused results are dropped and prepared again only if needed.", 128, 4096, 128, "%d MB");
+        ini_check_row(m, *ini_key("nvn", "render_prep"), "Background render preparation",
+                      "Builds descriptor sets (sets 0-3) on worker threads in parallel, reducing the render thread's bind_sets time. Each set is constructed independently.");
+        ini_int_row(m, *ini_key("nvn", "render_prep_threads"), "Render preparation workers",
+                    "0 chooses a quarter of the hardware threads (1 to 4).", 0, 4, 1, "%d threads");
         ini_combo_row(m, *ini_key("gfx", "residency"), "VRAM residency",
                       "Demotes textures no recent draw uses when video memory approaches the budget, then restores them whole when a draw needs them again. Auto follows the GPU's capability and the Intel compatibility quirk.",
                       kResidencyNames, kResidencyVals, 3);
@@ -2140,6 +2146,7 @@ void overview_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ove
     section("Active systems");
     const auto state = [](bool on) { return on ? tr("on") : tr("off"); };
     ImGui::BulletText("%s: %s", tr("Background texture preparation"), state(config_get_bool("nvn", "tex_prep", true)));
+    ImGui::BulletText("%s: %s", tr("Background render preparation"), state(config_get_bool("nvn", "render_prep", true)));
     ImGui::BulletText("%s: %s", tr("Upload staging ring"), state(config_get_int("nvn", "staging_ring_mb", 256) > 0));
     ImGui::BulletText("%s: %s", tr("VRAM residency"), state(config_get_str("gfx", "residency", "auto") != "off"));
     ImGui::BulletText("%s: %s", tr("Pipeline prewarm"), state(config_get_bool("nvn", "prewarm", true)));
