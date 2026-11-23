@@ -575,7 +575,9 @@ impl ToolchainManager {
                 expected_path: Some(vs.path.display().to_string()),
                 sha256: None,
                 archive_sha256: None,
-                version_cmd: Some(vec!["vswhere".to_string(), "-path".to_string(), vs.path.display().to_string(), "-property".to_string(), "installationVersion".to_string()]),
+                // The absolute vswhere: it is not on PATH, and the expected path above is the install folder,
+                // which is not a program.
+                version_cmd: Some(vec![crate::toolchain::vswhere().display().to_string(), "-path".to_string(), vs.path.display().to_string(), "-property".to_string(), "installationVersion".to_string()]),
                 version_regex: Some(r"(\d+\.\d+\.\d+\.\d+)".to_string()),
                 on_path: false,
                 env_vars: BTreeMap::new(),
@@ -853,15 +855,29 @@ impl ToolchainManager {
         if let Some(path) = &found_path {
             verification.found_path = Some(path.clone());
 
-            // Verify version
-            if let Some(version) = self.get_tool_version(tool, path)? {
+            // Verify version. A probe that fails is this tool's problem, not a reason to abort the whole build.
+            let mut probe_error = None;
+            let version = match self.get_tool_version(tool, path) {
+                Ok(v) => v,
+                Err(e) => {
+                    probe_error = Some(format!("its version could not be read: {e}"));
+                    None
+                }
+            };
+            // Visual Studio, the MSVC toolset and the Windows SDK are folders, not executables. The lock's version
+            // came from this machine's probe, so an existing folder is the component that probe named.
+            let version = version.or_else(|| path.is_dir().then(|| tool.version.clone()));
+            if let Some(version) = version {
                 verification.found_version = Some(version.clone());
                 if self.version_satisfies(&version, &tool.min_version.as_ref().unwrap_or(&tool.version)) {
                     verification.status = VerificationStatus::Verified;
+                    verification.error = None;
                 } else {
                     verification.status = VerificationStatus::VersionMismatch;
                     verification.error = Some(format!("Version {} does not satisfy minimum {}", version, tool.min_version.as_ref().unwrap_or(&tool.version)));
                 }
+            } else {
+                verification.error = probe_error;
             }
 
             // Verify checksum if provided
@@ -928,7 +944,10 @@ impl ToolchainManager {
 
     fn get_tool_version(&self, tool: &ToolSpec, path: &Path) -> Result<Option<String>> {
         if let Some(cmd) = &tool.version_cmd {
-            let mut command = Command::new(path);
+            // Run the program the command names. Visual Studio's command is `vswhere -path <folder> -property …`;
+            // running `path` (the folder) instead is what returned `Access is denied (os error 5)` before any build
+            // stage could log a line.
+            let mut command = Command::new(version_program(tool, path));
             if cmd.len() > 1 {
                 command.args(&cmd[1..]);
             }
@@ -1003,6 +1022,25 @@ impl ToolchainManager {
             calc
         };
         calc.get_info()
+    }
+}
+
+/// The executable a tool's version command names. `path` is the file `find_tool` chose; when the command is the
+/// tool itself (`clang-cl --version`, `cmake --version`) that found file is exactly what to run. When the command
+/// names another program (Visual Studio's `vswhere`), that program is what to run: the tool's own `expected_path`
+/// is a folder, and Windows answers a folder with `Access is denied`.
+fn version_program(tool: &ToolSpec, path: &Path) -> PathBuf {
+    let Some(first) = tool.version_cmd.as_ref().and_then(|c| c.first()) else {
+        return path.to_path_buf();
+    };
+    let named = Path::new(first);
+    let stem = named.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let own = stem.eq_ignore_ascii_case(&tool.name)
+        || stem.eq_ignore_ascii_case(&tool.name.replace('_', "-"));
+    if own {
+        path.to_path_buf()
+    } else {
+        named.to_path_buf()
     }
 }
 
@@ -1095,5 +1133,127 @@ mod tests {
         let events: Vec<BuildEvent> = rx.iter().collect();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], BuildEvent::BuildStarted { .. }));
+    }
+
+    fn tool_spec(
+        name: &str,
+        version: &str,
+        expected: Option<&Path>,
+        version_cmd: Option<Vec<String>>,
+    ) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            display_name: name.into(),
+            category: ToolCategory::Required,
+            version: version.into(),
+            min_version: Some(version.into()),
+            platform: Platform::Windows,
+            source: ToolSource::System {
+                hint: String::new(),
+            },
+            expected_path: expected.map(|p| p.display().to_string()),
+            sha256: None,
+            archive_sha256: None,
+            version_cmd,
+            version_regex: Some(r"(\d+\.\d+\.\d+(?:\.\d+)?)".into()),
+            on_path: false,
+            env_vars: BTreeMap::new(),
+            depends_on: vec![],
+            description: None,
+        }
+    }
+
+    /// Visual Studio's version command asks `vswhere`; its expected path is the install folder, and running a
+    /// folder is what produced `Access is denied (os error 5)` before the build logged anything.
+    #[test]
+    fn a_version_command_runs_the_program_it_names_not_the_folder() {
+        let dir = std::env::temp_dir().join(format!("ew-tool-program-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let vs = tool_spec(
+            "visual_studio",
+            "18.0.0",
+            Some(&dir),
+            Some(vec!["vswhere".into(), "-latest".into()]),
+        );
+        assert_eq!(version_program(&vs, &dir), PathBuf::from("vswhere"));
+
+        // A command that names the tool itself still runs the exact file that was found.
+        let clang = dir.join("clang-cl.exe");
+        let own = tool_spec(
+            "clang_cl",
+            "23.0.0",
+            Some(&clang),
+            Some(vec![clang.display().to_string(), "--version".into()]),
+        );
+        assert_eq!(version_program(&own, &clang), clang);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The MSVC toolset and the Windows SDK are folders with no executable to ask. The version the probe recorded
+    /// when the lock was generated is the version that is installed, so a present folder must verify.
+    #[test]
+    fn a_folder_backed_tool_is_verified_by_the_version_the_probe_recorded() {
+        let dir = std::env::temp_dir().join(format!("ew-tool-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = tool_spec("msvc_toolset", "14.44.35207", Some(&dir), None);
+        let mut mgr = ToolchainManager::new(dir.clone());
+        mgr.tools_lock = Some(ToolsLock {
+            version: TOOLS_LOCK_VERSION,
+            generated_at: String::new(),
+            git_commit: None,
+            platform: Platform::Windows,
+            tools: vec![spec.clone()],
+            metadata: BTreeMap::new(),
+        });
+
+        let verified = mgr.verify_tool(&spec).unwrap();
+        assert_eq!(verified.status, VerificationStatus::Verified);
+        assert_eq!(verified.found_version.as_deref(), Some("14.44.35207"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The whole generated lock against this machine's real tools. Ignored by default because it needs Visual Studio;
+    /// run it with `--ignored` on a build PC. This is the path that returned `Access is denied` before any stage logged.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "asks this machine for its real toolchain"]
+    fn the_generated_lock_verifies_on_this_machine() {
+        let root = std::env::temp_dir().join(format!("ew-tool-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut mgr = ToolchainManager::new(root.clone());
+        mgr.generate_tools_lock().unwrap();
+        let checked = mgr.verify_all().expect("verification must not abort the build");
+        let missing: Vec<&str> = checked
+            .iter()
+            .filter(|v| v.status == VerificationStatus::Missing)
+            .map(|v| v.tool_name.as_str())
+            .collect();
+        assert!(missing.is_empty(), "required tools missing: {missing:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// End to end on Windows: the command runs, even though the tool's expected path is a folder.
+    #[cfg(windows)]
+    #[test]
+    fn a_version_command_that_names_another_program_is_not_run_against_the_folder() {
+        let dir = std::env::temp_dir().join(format!("ew-tool-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = tool_spec(
+            "visual_studio",
+            "17.0.0",
+            Some(&dir),
+            Some(vec!["cmd.exe".into(), "/C".into(), "echo 17.1.2".into()]),
+        );
+        let mgr = ToolchainManager::new(dir.clone());
+        assert_eq!(
+            mgr.get_tool_version(&spec, &dir).unwrap().as_deref(),
+            Some("17.1.2")
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
