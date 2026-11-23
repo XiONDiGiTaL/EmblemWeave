@@ -732,11 +732,12 @@ impl ToolchainManager {
             });
         }
 
-        // .NET SDK (for SpirvHarness)
+        // .NET SDK (for SpirvHarness). Optional: this release carries the shader translator and its own runtime,
+        // so a PC without .NET can still build.
         tools.push(ToolSpec {
             name: "dotnet".to_string(),
             display_name: ".NET SDK".to_string(),
-            category: ToolCategory::Required,
+            category: ToolCategory::Optional,
             version: "8.0".to_string(),
             min_version: Some("8.0.0".to_string()),
             platform: Platform::All,
@@ -907,19 +908,38 @@ impl ToolchainManager {
             }
         }
 
-        // Check toolchain_root/tools/bin for bundled tools
-        let bundled = self.toolchain_root.join("tools").join("bin").join(format!("{}.exe", tool.name));
-        if bundled.exists() {
-            return Ok(Some(bundled));
+        // The release carries CMake, Ninja, Python, clang-cl and lld-link. The build creates this manager for the
+        // engine folder's parent, so the tools are under `<root>/fefw-recomp/tools/bin`; the old lookup checked only
+        // `<root>/tools/bin` and then the process PATH, which a launcher started from Explorer may not have refreshed
+        // since a tool was installed. A carried tool is the known-good one anyway, so it wins over PATH.
+        let mut names = vec![format!("{}.exe", tool.name), format!("{}.cmd", tool.name)];
+        let dashed = tool.name.replace('_', "-");
+        if dashed != tool.name {
+            names.push(format!("{dashed}.exe"));
+            names.push(format!("{dashed}.cmd"));
+        }
+        for base in [
+            self.toolchain_root.clone(),
+            self.toolchain_root.join("fefw-recomp"),
+        ] {
+            for name in &names {
+                let bundled = base.join("tools").join("bin").join(name);
+                if bundled.is_file() {
+                    return Ok(Some(bundled));
+                }
+            }
         }
 
         // Search in PATH if on_path
         if tool.on_path {
             if let Ok(path_var) = std::env::var("PATH") {
                 for dir in path_var.split(';') {
-                    let exe_path = PathBuf::from(dir).join(format!("{}.exe", tool.name));
-                    if exe_path.exists() {
-                        return Ok(Some(exe_path));
+                    let dir = dir.trim().trim_matches('"');
+                    for name in &names {
+                        let exe_path = PathBuf::from(dir).join(name);
+                        if exe_path.is_file() {
+                            return Ok(Some(exe_path));
+                        }
                     }
                 }
             }
@@ -931,7 +951,7 @@ impl ToolchainManager {
                 if let Ok(path_var) = std::env::var("PATH") {
                     for dir in path_var.split(';') {
                         let exe_path = PathBuf::from(dir).join(exe_name);
-                        if exe_path.exists() {
+                        if exe_path.is_file() {
                             return Ok(Some(exe_path));
                         }
                     }
@@ -1233,6 +1253,27 @@ mod tests {
             .map(|v| v.tool_name.as_str())
             .collect();
         assert!(missing.is_empty(), "required tools missing: {missing:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The release carries Ninja and CMake in `engine/fefw-recomp/tools/bin`; the build creates the manager for
+    /// `engine`, so the checkout beside it is where they actually are.
+    #[test]
+    fn a_carried_tool_is_found_beside_the_engine_checkout() {
+        let root = std::env::temp_dir().join(format!("ew-tool-carried-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("fefw-recomp").join("tools").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("ninja.exe"), b"").unwrap();
+        std::fs::write(bin.join("clang-cl.exe"), b"").unwrap();
+
+        let mgr = ToolchainManager::new(root.clone());
+        let ninja = tool_spec("ninja", "1.13.1", None, Some(vec!["ninja".into(), "--version".into()]));
+        assert_eq!(mgr.find_tool(&ninja).unwrap(), Some(bin.join("ninja.exe")));
+
+        // `clang_cl` names the carried `clang-cl.exe`, with a hyphen.
+        let clang = tool_spec("clang_cl", "23.1.5", None, Some(vec!["clang-cl".into(), "--version".into()]));
+        assert_eq!(mgr.find_tool(&clang).unwrap(), Some(bin.join("clang-cl.exe")));
         let _ = std::fs::remove_dir_all(root);
     }
 
