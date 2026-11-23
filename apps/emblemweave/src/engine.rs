@@ -2514,8 +2514,9 @@ pub fn build(
     }
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
 
-    // Initialize the unified ToolchainManager with tools.lock
-    let toolchain_root = root.join(".."); // engine/fefw-recomp
+    // Initialize the unified ToolchainManager with tools.lock. The manager is rooted at the engine folder, where
+    // tools.lock lives; find_tool also checks the checkout beside it, which is where the carried tools\bin is.
+    let toolchain_root = root.join("..");
     let mut toolchain_mgr = ToolchainManager::new(toolchain_root);
     toolchain_mgr.load_tools_lock().ok(); // Load if exists, otherwise generate
     if toolchain_mgr.tools_lock().is_none() {

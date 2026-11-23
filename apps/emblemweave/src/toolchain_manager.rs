@@ -752,7 +752,7 @@ impl ToolchainManager {
             on_path: true,
             env_vars: BTreeMap::new(),
             depends_on: vec![],
-            description: Some("Required for SpirvHarness shader translator".to_string()),
+            description: Some("Only for rebuilding the shader translator; the release ships it prebuilt".to_string()),
         });
 
         // Python (for nxrecomp)
@@ -908,10 +908,10 @@ impl ToolchainManager {
             }
         }
 
-        // The release carries CMake, Ninja, Python, clang-cl and lld-link. The build creates this manager for the
-        // engine folder's parent, so the tools are under `<root>/fefw-recomp/tools/bin`; the old lookup checked only
-        // `<root>/tools/bin` and then the process PATH, which a launcher started from Explorer may not have refreshed
-        // since a tool was installed. A carried tool is the known-good one anyway, so it wins over PATH.
+        // The release carries CMake, Ninja, Python, clang-cl and lld-link in `<checkout>/tools/bin`. The build roots
+        // the manager at the engine folder, so check the checkout beside it as well as the root itself. A carried tool
+        // is the known-good one, so it wins over the process PATH — which a launcher started from Explorer may not
+        // have refreshed since a tool was installed.
         let mut names = vec![format!("{}.exe", tool.name), format!("{}.cmd", tool.name)];
         let dashed = tool.name.replace('_', "-");
         if dashed != tool.name {
@@ -1256,24 +1256,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// The release carries Ninja and CMake in `engine/fefw-recomp/tools/bin`; the build creates the manager for
-    /// `engine`, so the checkout beside it is where they actually are.
+    /// The release carries Ninja and CMake in `<checkout>/tools/bin`. A manager rooted at the checkout finds them
+    /// directly, and one rooted at the engine folder above still finds them through the checkout beside it.
     #[test]
-    fn a_carried_tool_is_found_beside_the_engine_checkout() {
+    fn a_carried_tool_is_found_in_the_engine_checkout() {
         let root = std::env::temp_dir().join(format!("ew-tool-carried-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let bin = root.join("fefw-recomp").join("tools").join("bin");
+        let checkout = root.join("fefw-recomp");
+        let bin = checkout.join("tools").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("ninja.exe"), b"").unwrap();
         std::fs::write(bin.join("clang-cl.exe"), b"").unwrap();
 
-        let mgr = ToolchainManager::new(root.clone());
         let ninja = tool_spec("ninja", "1.13.1", None, Some(vec!["ninja".into(), "--version".into()]));
-        assert_eq!(mgr.find_tool(&ninja).unwrap(), Some(bin.join("ninja.exe")));
-
-        // `clang_cl` names the carried `clang-cl.exe`, with a hyphen.
         let clang = tool_spec("clang_cl", "23.1.5", None, Some(vec!["clang-cl".into(), "--version".into()]));
+
+        let mgr = ToolchainManager::new(checkout.clone());
+        assert_eq!(mgr.find_tool(&ninja).unwrap(), Some(bin.join("ninja.exe")));
+        // `clang_cl` names the carried `clang-cl.exe`, with a hyphen.
         assert_eq!(mgr.find_tool(&clang).unwrap(), Some(bin.join("clang-cl.exe")));
+
+        let parent = ToolchainManager::new(root.clone());
+        assert_eq!(parent.find_tool(&ninja).unwrap(), Some(bin.join("ninja.exe")));
         let _ = std::fs::remove_dir_all(root);
     }
 
