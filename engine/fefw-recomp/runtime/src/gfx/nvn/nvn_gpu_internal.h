@@ -268,6 +268,12 @@ struct ViewRequest {
     VkComponentMapping swizzle = {};                  // identity when all IDENTITY
     bool depth_aspect = true;                         // depth/stencil images: sample depth (true) or stencil (false)
     uint8_t component = 0;                            // the shader's sampled type: 0 unknown, 1 float, 2 sint, 3 uint (raw-bit aliases of 32-bit formats)
+    bool operator==(const ViewRequest& o) const {
+        return type == o.type && depth_compare == o.depth_compare && base_level == o.base_level && level_count == o.level_count &&
+               base_layer == o.base_layer && layer_count == o.layer_count && format == o.format && swizzle.r == o.swizzle.r &&
+               swizzle.g == o.swizzle.g && swizzle.b == o.swizzle.b && swizzle.a == o.swizzle.a && depth_aspect == o.depth_aspect &&
+               component == o.component;
+    }
 };
 // Creates the VkImage if needed and returns it (null when the format cannot be created: logged once; callers then bind
 // the dummy). Does not upload.
@@ -339,6 +345,10 @@ bool tex_standin_swap_pending(Texture* t);
 bool tex_first_upload_uncompressed_deferrable(Texture* t);
 // Sampled image view for a binding (cached). Null when impossible (the caller binds the dummy view).
 VkImageView tex_sampled_view(Texture* t, const ViewRequest& req);
+// Combined sampled-binding lookup (render thread): resolves view + layout + aspect in one call using TexGpu's ViewRequest cache.
+VkImageView tex_bind_sampled(Texture* t, const ViewRequest& req, VkImageLayout* out_layout, VkImageAspectFlags* out_aspect);
+// Fast check for prepare_textures: true if t is CPU-dirty or not yet in its sampled layout (caller already verified tex_gpu(t) != null).
+bool tex_needs_sampled_prepare(Texture* t);
 // A float-declared sampler over this texture (the view format `requested`, UNDEFINED: the image's own): 0 when a float view gives the
 // shader the texel bits (float formats; 32-bit integer ones through their float alias), else 2 / 3: signed / unsigned integers that only
 // an integer view can read, so the shader needs its sampler retyped (spirv_int_samplers) and the binding an integer view.

@@ -312,6 +312,52 @@ bool release_page(Region* r, uint64_t page) {
     }
 }
 
+// Coalesces contiguous armed pages ahead of a sequential write fault into a single VirtualProtect call.
+// Caller holds SharedLock(r) and g_busy > 0. Returns the number of extra pages released starting at `start_page`.
+uint64_t release_pages_ahead(Region* r, uint64_t start_page, uint64_t max_count) {
+    if (start_page >= r->npages || max_count == 0) return 0;
+    const uint64_t limit = std::min(r->npages, start_page + max_count);
+    uint64_t cand = 0;
+    for (uint64_t p = start_page; p < limit; ++p) {
+        if (!test(r->prot.get(), p) || test(r->guard.get(), p)) break;
+        const uint64_t a = r->base + p * kPage;
+        if (freeze_overlaps(a, a + kPage)) break;
+        bool other_armed = false;
+        for (RegionCursor cursor; Region* o = cursor.next();) {
+            if (o == r || a < o->base || a >= o->base + o->npages * kPage) continue;
+            const uint64_t opg = (a - o->base) / kPage;
+            if (test(o->prot.get(), opg) || test(o->guard.get(), opg)) { other_armed = true; break; }
+        }
+        if (other_armed) break;
+        ++cand;
+    }
+    if (cand == 0) return 0;
+    uint64_t claimed = 0;
+    for (uint64_t i = 0; i < cand; ++i) {
+        const uint64_t p = start_page + i;
+        const uint64_t b = bit(p);
+        const uint64_t w = p >> 6;
+        std::atomic<uint16_t>& rel = r->releasing[p];
+        rel.fetch_add(1, std::memory_order_seq_cst);
+        const uint64_t old = r->prot[w].fetch_and(~b, std::memory_order_acq_rel);
+        if (!(old & b)) {
+            rel.fetch_sub(1, std::memory_order_seq_cst);
+            break;
+        }
+        r->valid[w].fetch_and(~b, std::memory_order_acq_rel);
+        r->written[w].fetch_or(b, std::memory_order_seq_cst);
+        ++claimed;
+    }
+    if (claimed > 0) {
+        r->has_written.store(true, std::memory_order_seq_cst);
+        g_write_seq.fetch_add(1, std::memory_order_seq_cst);
+        DWORD was = 0;
+        VirtualProtect(reinterpret_cast<void*>(r->base + start_page * kPage), static_cast<SIZE_T>(claimed * kPage), PAGE_READWRITE, &was);
+        for (uint64_t i = 0; i < claimed; ++i) r->releasing[start_page + i].fetch_sub(1, std::memory_order_seq_cst);
+    }
+    return claimed;
+}
+
 // [diag] ww_stats (env NXRT_DIAG_WW_STATS=1): faults per region and per 64 KiB block, the 10 busiest blocks logged every 10 s.
 std::mutex g_fs_lock;
 std::map<std::pair<uint64_t, uint64_t>, uint64_t> g_fs_blocks;   // (region base, 64 KiB block address) -> faults
@@ -440,7 +486,26 @@ retry:
             if (test(r->guard.get(), pg)) { guarded_now = true; continue; }
             if (pass == 0 && !test(r->prot.get(), pg)) continue;
             const bool mine = release_page(r, pg);
-            if (mine) fault_stat(r, addr);
+            if (mine) {
+                fault_stat(r, addr);
+                if (pass == 0) {
+                    // Sequential bulk-write coalescing: after 2+ consecutive sequential page faults on the same region,
+                    // release a small contiguous run (8-16 pages = 32-64 KiB) in one VirtualProtect call.
+                    thread_local const Region* tl_seq_r = nullptr;
+                    thread_local uint64_t tl_seq_next_pg = ~0ull;
+                    thread_local uint32_t tl_seq_run = 0;
+                    if (r == tl_seq_r && pg == tl_seq_next_pg) {
+                        ++tl_seq_run;
+                        uint64_t extra = 0;
+                        if (tl_seq_run >= 2) extra = release_pages_ahead(r, pg + 1, tl_seq_run >= 6 ? 15 : 7);
+                        tl_seq_next_pg = pg + 1 + extra;
+                    } else {
+                        tl_seq_r = r;
+                        tl_seq_next_pg = pg + 1;
+                        tl_seq_run = 0;
+                    }
+                }
+            }
             ours |= mine;
         }
     }

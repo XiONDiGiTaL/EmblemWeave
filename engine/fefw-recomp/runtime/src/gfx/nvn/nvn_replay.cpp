@@ -1636,7 +1636,7 @@ void prepare_textures(const ProgLayout& pl) {
         // owned by the pass; a compute dispatch runs outside every pass, so the graphics attachments do not own what it samples
         const bool is_depth = dt && (r.tex == dt || (dg && r.tex->gpu == dg) || (!dg && shares_image(r.tex, dt)));
         if (is_depth || (d.nvn_stage != kCompute && is_color_feedback(r.tex))) continue;
-        if (r.tex->cpu_dirty.load() || tex_layout(r.tex) != tex_sampled_layout(r.tex)) {
+        if (tex_needs_sampled_prepare(r.tex)) {
             need.push_back(r.tex);
             if (r.tex->cpu_dirty.load() && ft::on()) {
                 const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -2707,14 +2707,16 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
             // asked for a held-back texture: is_color_feedback makes its image (tex_gpu), which pool_image_lazy holds back until the upload's
             // turn, and a deferrable texture (ASTC / BC) is never a colour attachment.
             const bool feedback = r.tex && !waiting && d.nvn_stage != kCompute && is_color_feedback(r.tex);
-            if (r.tex && !waiting && tex_gpu(r.tex) && !feedback) {
+            if (r.tex && !waiting && !feedback) {
                 ViewRequest q = make_request(b, r);
                 if (int_comp) q.component = int_comp;
-                VkImageView v = tex_sampled_view(r.tex, q);
+                VkImageLayout img_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                VkImageAspectFlags img_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                VkImageView v = tex_bind_sampled(r.tex, q, &img_layout, &img_aspect);
                 if (v) {
                     ii.imageView = v;
                     // GENERAL: the op also writes it as a storage image (prepare_textures left it there)
-                    ii.imageLayout = tex_layout(r.tex) == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : tex_sampled_layout(r.tex);
+                    ii.imageLayout = img_layout;
                     // Integer views (the integer sampler variant, and images the shader reads only as integer bits, reflected as uint) take the
                     // unfiltered sampler: Vulkan has no linear filtering of integer formats (VUID-vkCmdDrawIndexed-magFilter-04553), and Maxwell
                     // takes the nearest texel of them anyway. [nvn] int_view_nearest = false: the game's sampler as before.
@@ -2726,14 +2728,14 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                     }
                     // [nvn] reserved_sampler (default on): a texel-fetch handle (sampler id 0, the driver's reserved range) sampled with filtering
                     // gets the linear reserved sampler, as on the console; integer and depth textures keep the nearest dummy
-                    else if (r.sid0 && component == 1 && !(tex_aspect(r.tex) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+                    else if (r.sid0 && component == 1 && !(img_aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
                              reserved_sampler_on())
                         ii.sampler = reserved_sampler();
                     if (r.tex == g_su_tex && g_su_view) {            // the upscaled scene replaces the small one for this draw (S14)
                         ii.imageView = g_su_view;
                         ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
                     }
-                } else if (first_time_id(1, d.shader, static_cast<uint64_t>(d.index), r.tex->id)) {
+                } else if (tex_gpu(r.tex) && first_time_id(1, d.shader, static_cast<uint64_t>(d.index), r.tex->id)) {
                     NXLOG_W(kTag, "sampled texture %u (%s, target %d, %dx%dx%d) has no view of the shader's view type %d, sampled type %d: shader %s binding %s (NVN slot %d, set %u binding %u) gets the dummy view",
                             r.tex->id, r.tex->fmt ? r.tex->fmt->name : "?", r.tex->b.target, r.tex->b.width, r.tex->b.height, r.tex->b.depth,
                             static_cast<int>(view_type_for(b)), static_cast<int>(q.component), d.shader->hash.c_str(), b.name.c_str(), b.nvn.index, d.set, d.binding);

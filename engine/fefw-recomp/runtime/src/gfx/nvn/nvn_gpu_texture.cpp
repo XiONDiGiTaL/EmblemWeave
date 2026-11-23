@@ -106,6 +106,8 @@ struct TexGpu {
     bool last_sampled_ok = false;
     std::array<uint32_t, 12> last_key = {};             // view_for's last answer (render thread): most lookups repeat it (rt agent)
     VkImageView last_view = VK_NULL_HANDLE;
+    gpu::ViewRequest last_req = {};                     // tex_sampled_view's last ViewRequest (render thread)
+    VkImageView last_req_view = VK_NULL_HANDLE;
     int refs = 1;                                      // texture objects over the same storage share one image (render thread)
     struct SparseState* sparse = nullptr;               // a sparse-residency image (a big texture of a virtual pool), else null
     // CPU-streamed textures (tex_ensure_current): uploads for CPU writes that came at most kStreamGap presents apart, in a row
@@ -2953,6 +2955,7 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     if (!g) return VK_NULL_HANDLE;
     g->sampled_at.store(static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + 1, std::memory_order_relaxed);
     if (!g_resid_pool_view) g->seen_ms.store(resid_ms(), std::memory_order_relaxed);   // a binding's view is a use; a pool descriptor is not
+    if (g->last_req_view && g->last_req == req) return g->last_req_view;
     const bool is3d = g->type == VK_IMAGE_TYPE_3D;
     const uint32_t total_layers = is3d ? g->base.depth : g->layers;   // 3D images: the slices are the layers of 2D views
     // NVN levels to image levels: an image stored without its top level ([gfx] texture_detail) answers a view that starts there from
@@ -3028,7 +3031,34 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
         g->last_sampled_ok = feature->second;
     }
     if (!g->last_sampled_ok) return bad_view(*t, "view format does not support sampling");
-    return view_for(*g, req.type, bl, nl, bly, nly, fmt, asp, req.swizzle);
+    VkImageView v = view_for(*g, req.type, bl, nl, bly, nly, fmt, asp, req.swizzle);
+    if (v) {
+        g->last_req = req;
+        g->last_req_view = v;
+    }
+    return v;
+}
+
+VkImageView tex_bind_sampled(Texture* t, const ViewRequest& req, VkImageLayout* out_layout, VkImageAspectFlags* out_aspect) {
+    TexGpu* g = tex_or_null(t);
+    if (!g) return VK_NULL_HANDLE;
+    g->sampled_at.store(static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + 1, std::memory_order_relaxed);
+    if (!g_resid_pool_view) g->seen_ms.store(resid_ms(), std::memory_order_relaxed);
+    VkImageView v = (g->last_req_view && g->last_req == req) ? g->last_req_view : tex_sampled_view(t, req);
+    if (v) {
+        *out_layout = g->layout == VK_IMAGE_LAYOUT_GENERAL
+                          ? VK_IMAGE_LAYOUT_GENERAL
+                          : (g->depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        *out_aspect = g->aspect;
+    }
+    return v;
+}
+
+bool tex_needs_sampled_prepare(Texture* t) {
+    if (!t || !t->gpu || t->gpu->failed) return false;
+    if (t->cpu_dirty.load(std::memory_order_relaxed)) return true;
+    const VkImageLayout want = t->gpu->depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return t->gpu->layout != want;
 }
 
 uint8_t tex_int_sampler_component(Texture* t, VkFormat requested) {
