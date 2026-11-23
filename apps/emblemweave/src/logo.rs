@@ -14,6 +14,9 @@ use std::sync::Mutex;
 
 use crate::theme::Palette;
 
+/// The square application icon, used as the header's brand mark.
+pub const ICON: &[u8] = include_bytes!("../../../assets/branding/icon-source.png");
+
 pub const LOGO_XION: &[u8] = include_bytes!("../../../assets/branding/logo-xion.png");
 pub const LOGO_ARCADE: &[u8] = include_bytes!("../../../assets/branding/logo-arcade.png");
 pub const LOGO_FE: &[u8] = include_bytes!("../../../assets/branding/logo-fe.png");
@@ -91,6 +94,17 @@ fn glow(p: &egui::Painter, centre: egui::Pos2, radius: Vec2, colour: Color32) {
         }
     }
     p.add(egui::Shape::mesh(mesh));
+}
+
+/// Draw the square application icon into `rect`, fitted and centred.
+pub fn icon(painter: &egui::Painter, rect: Rect, tint: Color32) {
+    let Some(tex) = texture(painter.ctx(), ICON) else { return };
+    let [w, h] = tex.size();
+    let scale = (rect.width() / w as f32).min(rect.height() / h as f32);
+    let size = Vec2::new(w as f32, h as f32) * scale;
+    let at = Rect::from_center_size(rect.center(), size);
+    let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    painter.image(tex.id(), at, uv, tint);
 }
 
 /// The logo inline in a layout, sized by width.

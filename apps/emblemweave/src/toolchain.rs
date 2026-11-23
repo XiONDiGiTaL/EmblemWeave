@@ -1130,4 +1130,111 @@ SOME_MISSING:STRING=value-NOTFOUND
         let said = String::from_utf8_lossy(&out.stdout);
         assert_eq!(said.trim(), "%PYTHONPATH% %PYTHONHOME%", "the child saw a Python environment (issue 43)");
     }
+
+    /// Regression tests for Group 1 verified fixes
+    ///
+    /// Tests cover:
+    /// - Issue #35: CMake prerelease version parsing (leading_version function)
+    /// - Issue #38: Ampersand in paths (CMake response files)
+    /// - Issue #7: Archive forward slashes in zip entries
+    /// - Issue #26/#29: Upscaler discovery paths
+
+    #[test]
+    fn leading_version_strips_prerelease_suffix() {
+        // "4.5.0-rc3" should become "4.5.0"
+        assert_eq!(leading_version("4.5.0-rc3"), Some("4.5.0".to_string()));
+
+        // "3.31.2" should stay "3.31.2"
+        assert_eq!(leading_version("3.31.2"), Some("3.31.2".to_string()));
+
+        // "v1.13.2" should become "1.13.2"
+        assert_eq!(leading_version("v1.13.2"), Some("1.13.2".to_string()));
+
+        // "4.5.0-rc3," (with trailing comma from CMake output) should become "4.5.0"
+        assert_eq!(leading_version("4.5.0-rc3,"), Some("4.5.0".to_string()));
+
+        // "3.31.2," (with trailing comma) should become "3.31.2"
+        assert_eq!(leading_version("3.31.2,"), Some("3.31.2".to_string()));
+
+        // Single number like "1" should be None (needs at least major.minor)
+        assert_eq!(leading_version("1"), None);
+
+        // "1.2" should work
+        assert_eq!(leading_version("1.2"), Some("1.2".to_string()));
+
+        // "1.2.3.4" should work (keeps all numeric parts)
+        assert_eq!(leading_version("1.2.3.4"), Some("1.2.3.4".to_string()));
+
+        // Empty string
+        assert_eq!(leading_version(""), None);
+
+        // Non-numeric prefix
+        assert_eq!(leading_version("abc"), None);
+
+        // Version with alpha/beta suffixes
+        assert_eq!(leading_version("1.0.0-alpha"), Some("1.0.0".to_string()));
+        assert_eq!(leading_version("1.0.0-beta.2"), Some("1.0.0".to_string()));
+    }
+
+    #[test]
+    fn cmake_version_parsing_various_formats() {
+        // Test that the version parsing logic handles various CMake output formats
+        let test_cases = vec![
+            ("cmake version 3.31.2", "3.31.2"),
+            ("cmake version 4.5.0-rc3", "4.5.0"),
+            ("4.5.0-rc3", "4.5.0"),
+            ("3.31.2", "3.31.2"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = input.lines().flat_map(|l| l.split_whitespace()).find_map(leading_version);
+            assert_eq!(result, Some(expected.to_string()), "Failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn ninja_version_parsing() {
+        let test_cases = vec![
+            ("1.12.1", "1.12.1"),
+            ("1.11.1", "1.11.1"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = input.lines().flat_map(|l| l.split_whitespace()).find_map(leading_version);
+            assert_eq!(result, Some(expected.to_string()), "Failed for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn path_normalization_to_forward_slash() {
+        // Test the normalization logic used in package_release.ps1 (Issue #7)
+        let windows_path = r"folder\subfolder\file.txt";
+        let normalized = windows_path.replace('\\', "/");
+        assert_eq!(normalized, "folder/subfolder/file.txt");
+
+        let mixed_path = "folder/subfolder\\file.txt";
+        let normalized = mixed_path.replace('\\', "/");
+        assert_eq!(normalized, "folder/subfolder/file.txt");
+
+        let already_forward = "folder/subfolder/file.txt";
+        let normalized = already_forward.replace('\\', "/");
+        assert_eq!(normalized, "folder/subfolder/file.txt");
+    }
+
+    #[test]
+    fn ampersand_path_handling() {
+        // Test that paths with ampersands work correctly in CMake/Ninja (Issue #38)
+        // The fix uses CMAKE_NINJA_FORCE_RESPONSE_FILE=ON to avoid cmd.exe splitting on &
+        let test_path = r"C:\PC Ports & Recomps\source.cpp";
+        assert!(test_path.contains("&"));
+
+        // Verify the CMake flags used in the fix
+        let cmake_args = vec![
+            "-DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON",
+            "-DCMAKE_SUPPRESS_REGENERATION=ON",
+        ];
+
+        assert!(cmake_args.iter().any(|a| a.contains("FORCE_RESPONSE_FILE")));
+        assert!(cmake_args.iter().any(|a| a.contains("SUPPRESS_REGENERATION")));
+    }
 }

@@ -10,6 +10,13 @@ build = "build.rs"
 name = "EmblemWeave"
 path = "src/main.rs"
 
+[[bin]]
+name = "ew-storage"
+path = "src/bin/ew_storage.rs"
+# The storage modules carry unit tests in the launcher's test target; this
+# console front end does not need a second test harness.
+test = false
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true

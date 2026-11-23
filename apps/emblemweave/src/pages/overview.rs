@@ -271,7 +271,7 @@ fn hero(
         .unwrap_or_else(|| (TITLE_NAME.to_string(), String::new()));
     let (data_text, data_tone) = data_summary(app);
     let stale = if ready {
-        crate::engine::stale_build()
+        app.stale_build_cache.clone()
     } else {
         None
     };

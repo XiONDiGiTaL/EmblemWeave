@@ -195,6 +195,12 @@ pub struct App {
     pub log_ui: pages::log::Ui,
     /// A built engine found in an older copy of this launcher, offered on Overview until it is used or declined.
     pub reuse: Option<crate::engine::Existing>,
+    /// Background channel for the async reuse offer detection.
+    reuse_arc: std::sync::Arc<std::sync::Mutex<Option<crate::engine::Existing>>>,
+    /// Cached stale build check result, updated periodically in background.
+    stale_build_cache: Option<(Option<String>, &'static str)>,
+    /// When the stale build cache was last refreshed.
+    stale_build_cached_at: Option<Instant>,
     /// `--tour`: walk through the features by itself, for recordings.
     tour: Option<Instant>,
     tour_step: usize,
@@ -266,9 +272,8 @@ impl App {
             let _ = crate::engine::brand_game();
         });
         // The dependency report takes a second (vswhere, dotnet, one vcvars
-        // run); warming it here is what lets the Overview and Requirements
-        // pages draw it without waiting.
-        std::thread::spawn(|| crate::deps::warm());
+        // run); warm it on demand when the Requirements page opens instead of
+        // at startup to avoid blocking the UI thread on heavy detection work.
         // A failed or interrupted update used to leave its download behind in
         // %TEMP%. It is never needed by the running launcher, so clear it at
         // startup; saves, profiles, mods and the engine build live elsewhere.
@@ -281,12 +286,25 @@ impl App {
         });
         // A fresh copy has no build of its own. Find one already on the PC — an older copy beside this one, or a checkout an
         // earlier copy's `engine.txt` names — and offer it before the player is asked to compile the engine again.
-        let reuse = crate::engine::existing_build().filter(|e| {
-            !config
-                .reuse_dismissed
-                .contains(&e.root.display().to_string())
+        // Run in background to avoid blocking startup on filesystem scans.
+        let reuse_arc = std::sync::Arc::new(std::sync::Mutex::new(None::<crate::engine::Existing>));
+        let reuse_clone = reuse_arc.clone();
+        let config_clone = config.clone();
+        std::thread::spawn(move || {
+            if let Some(e) = crate::engine::existing_build() {
+                if !config_clone.reuse_dismissed.contains(&e.root.display().to_string()) {
+                    *reuse_clone.lock().unwrap() = Some(e);
+                }
+            }
+        });
+        // The build stamp refresh (checking if fefw.exe is newer than fefw.ini)
+        // can run in the background; the Overview page will read the cache.
+        std::thread::spawn(|| {
+            let _ = crate::engine::refresh_build_stamp();
         });
         let mut app = App {
+            stale_build_cache: None,
+            stale_build_cached_at: None,
             applied: config.theme,
             config,
             saved,
@@ -320,7 +338,8 @@ impl App {
             discord: Default::default(),
             ingame: Default::default(),
             log_ui: Default::default(),
-            reuse,
+            reuse: None, // Will be populated by background thread
+            reuse_arc,
             tour: None,
             tour_step: 0,
             show_activity: false,
@@ -343,9 +362,6 @@ impl App {
         }
         // Command line: `--page <name>` opens a page, `--boot-test` runs the
         // boot test as soon as the game data is detected.
-        // A `fefw.exe` rebuilt outside the launcher leaves the old `built_by` stamp behind, which reads as a stale folder and
-        // puts the different-version notice back on the Overview. Refresh it before any page reads it.
-        crate::engine::refresh_build_stamp();
         let args: Vec<String> = std::env::args().collect();
         for (i, a) in args.iter().enumerate() {
             match a.as_str() {
@@ -1077,6 +1093,32 @@ impl App {
     }
 }
 
+/// Poll the background-loaded reuse offer and update the cached stale build check.
+impl App {
+    /// Check if the background thread has found an existing build to offer.
+    fn poll_reuse(&mut self) {
+        if self.reuse.is_none() {
+            if let Ok(mut guard) = self.reuse_arc.lock() {
+                if let Some(e) = guard.take() {
+                    self.reuse = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Refresh the stale build cache if it's older than 30 seconds.
+    fn poll_stale_build(&mut self) {
+        let now = Instant::now();
+        let should_refresh = self.stale_build_cached_at.map_or(true, |t| now.duration_since(t) > Duration::from_secs(30));
+        if should_refresh {
+            if let Some(stale) = crate::engine::stale_build() {
+                self.stale_build_cache = Some(stale);
+            }
+            self.stale_build_cached_at = Some(now);
+        }
+    }
+}
+
 /// The launcher's redraw ceiling. egui asks for the next frame the moment a
 /// hover animation is live, and with no vsync that runs the window at the
 /// monitor's refresh rate (144 frames a second here) for a 2D interface that
@@ -1101,6 +1143,9 @@ impl eframe::App for App {
             self.applied = self.config.theme;
             theme::apply(ctx, self.config.theme);
         }
+        // Poll background-loaded caches.
+        self.poll_reuse();
+        self.poll_stale_build();
         self.poll_jobs();
         // The dependency report is warmed off the render thread. Keep the
         // status chips and setup guide live until its result arrives.
@@ -1584,6 +1629,10 @@ fn main() -> eframe::Result<()> {
     }
     // Before anything reads the settings: a fresh copy keeps its data beside the program, so the first run writes its config there.
     platform::adopt_portable_on_first_run();
+    // Prime the tool_path cache with the correct PATH (including portable tools) before any
+    // background thread or CLI command calls it. This ensures --check-toolchain and --build-engine
+    // see the same CMake discovery as the build (issue #35).
+    let _ = crate::toolchain::tool_path();
     // A copy without `tools\bin` carries the missing toolchain pieces into it on first run, in the background; the
     // Requirements page reports them as Carried once they land. Pieces the PC already has are not downloaded. `--fetch-tools`
     // forces all four in the foreground, so do not start the background fetch as well: both would download the same archives.
