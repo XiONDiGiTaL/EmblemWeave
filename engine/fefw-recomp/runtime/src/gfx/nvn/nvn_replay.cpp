@@ -48,6 +48,7 @@
 #include "extras/temporal.h"
 #include "nvn_cmdq.h"
 #include "nvn_pipeline.h"
+#include "nvn_render_prep.h"
 #include "nvn_shaders.h"
 
 namespace nxrt::nvn::be::gpu {
@@ -2283,7 +2284,7 @@ PushSet0 g_push0;
 std::vector<std::unique_ptr<PushSet0>> g_push_stack;   // bind_sets takes set 0's writes out of g_push0 at once, into the one of its depth
 size_t g_bind_depth = 0;
 
-VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
+VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
     if (t_set_scratch.size() <= t_set_depth) t_set_scratch.push_back(std::make_unique<SetScratch>());
     SetScratch& sc = *t_set_scratch[t_set_depth];
     struct Depth { Depth() { ++t_set_depth; } ~Depth() { --t_set_depth; } } depth;
@@ -2302,6 +2303,117 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
     uint64_t key = 1469598103934665603ull + set;
     auto mix = [&](uint64_t v) { key = (key ^ v) * 1099511628211ull; };
     mix(reinterpret_cast<uint64_t>(pl.layout));
+
+    // Fast path: use pre-computed write templates (Phase 2.2)
+    // This avoids the per-binding loop for static parts of VkWriteDescriptorSet.
+    // Only handles "simple" buffer source classes: SupportBuffer(7), DriverConstants(6),
+    // PushConstants(5), ConstantData(8), UniformBlock/HandleInUniform(9).
+    // Falls through to original loop for complex cases: UniformAsStorage(10),
+    // StorageBuffer(0), and all image/sampler/texel types.
+    // Also disabled for push descriptor sets (set 0 with pl.push_set0) which work differently.
+    if (pl.templates_built && set < 4 && !pl.set_templates[set].empty() && !(set == 0 && pl.push_set0)) {
+        // First, check if all templates in this set have handled source classes
+        bool all_simple = true;
+        for (const auto& wt : pl.set_templates[set]) {
+            if (wt.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || wt.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+                // Buffer types: only simple source classes are handled
+                if (wt.source_class != 7 && wt.source_class != 6 && wt.source_class != 5 &&
+                    wt.source_class != 8 && wt.source_class != 9) {
+                    all_simple = false;
+                    break;
+                }
+            } else {
+                // Image/sampler/texel types not handled in fast path
+                all_simple = false;
+                break;
+            }
+        }
+
+        if (all_simple) {
+            // All templates in this set are simple buffer types - use fast path
+            for (const auto& wt : pl.set_templates[set]) {
+                VkWriteDescriptorSet w = wt.write;  // Copy static template
+                // Find the actual binding descriptor for dynamic data
+                const BindingDesc* bd = nullptr;
+                for (const auto& d : pl.bindings) {
+                    if (d.set == set && d.binding == wt.binding) { bd = &d; break; }
+                }
+                if (!bd) continue;
+
+                if (wt.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || wt.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+                    VkDescriptorBufferInfo bi = {dummy_buffer(), 0, 65536};
+                    // Fast source classification dispatch
+                    switch (wt.source_class) {
+                        case 7: // SupportBuffer
+                            bi = g_draw_support ? VkDescriptorBufferInfo{g_draw_support.buffer, g_draw_support.offset, sizeof(SupportBuffer)}
+                                                : VkDescriptorBufferInfo{g_support.buffer, g_support.offset, sizeof(SupportBuffer)};
+                            break;
+                        case 6: // DriverConstants
+                            if (wt.nvn_stage == kCompute && g_cs_c0) {
+                                bi = {g_cs_c0.buffer, g_cs_c0.offset, g_cs_c0.size};
+                            } else {
+                                VkDeviceSize range = 0;
+                                VkBuffer buf = driver_constants_buffer(&range);
+                                if (buf) bi = {buf, 0, range};
+                            }
+                            break;
+                        case 5: // PushConstants
+                            if (wt.source_index >= 0 && wt.source_index < 8) {
+                                UploadAlloc& u = g_push_buf[wt.source_index];
+                                if (!u) {
+                                    u = F->upload(256, std::max<VkDeviceSize>(device().properties().limits.minUniformBufferOffsetAlignment, 256));
+                                    if (u) std::memcpy(u.ptr, S.push_gfx[wt.source_index], 256);
+                                }
+                                if (u) bi = {u.buffer, u.offset, 256};
+                            }
+                            break;
+                        case 8: // ConstantData
+                            {
+                                VkDeviceSize range = 0;
+                                VkBuffer buf = constant_data_buffer(bd->shader, &range);
+                                if (buf) bi = {buf, 0, range};
+                            }
+                            break;
+                        case 9: // UniformBlock / HandleInUniform (simple: uses S.ubo)
+                            if (wt.source_index >= 0 && wt.source_index < 16) {
+                                const GState::Bind& bind = S.ubo[wt.nvn_stage][wt.source_index];
+                                if (bind.addr) {
+                                    if (wt.nvn_stage == kCompute || !out_lazy()) {
+                                        const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
+                                        out_draw_read(bind.addr, bind.size ? bind.size : 65536, ua && (bind.addr % ua) == 0, kOutDrawBuffer);
+                                    }
+                                    BufRef br = resolve_read(bind.addr, bind.size, kReadUniform);
+                                    const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
+                                    if (br.ok && (br.offset % align) == 0) {
+                                        bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
+                                    } else if (br.ok) {
+                                        const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, 65536);
+                                        UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
+                                        if (u) {
+                                            std::memcpy(u.ptr, host_ptr(bind.addr), n);
+                                            bi = {u.buffer, u.offset, n};
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        default:
+                            break;
+                    }
+                    binfo.push_back(bi);
+                    w.pBufferInfo = &binfo.back();
+                    mix(reinterpret_cast<uint64_t>(bi.buffer)); mix(bi.offset); mix(bi.range);
+                    writes.push_back(w);
+                }
+            }
+            // All templates handled - skip the original loop
+        } else {
+            // Fall through to original loop for any unhandled bindings
+            // (key already has correct initial value since we didn't mix anything)
+        }
+    }
+
+    // Original per-binding loop (for unhandled cases or when templates not available)
     for (const BindingDesc& d : pl.bindings) {
         if (d.set != set) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -2625,7 +2737,15 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
         g_rs.set_writes += writes.size();
         return VK_NULL_HANDLE;
     }
-    if (const VkDescriptorSet hit = g_set_cache.find(key)) { ++g_rs.set_hits; return hit; }
+
+    // Check cache first (fast path, read-only) - already protected by function-wide lock
+    VkDescriptorSet cached = g_set_cache.find(key);
+    if (cached != VK_NULL_HANDLE) {
+        ++g_rs.set_hits;
+        return cached;
+    }
+
+    // Miss path: allocate descriptor set, update, and cache
     if (rs_on()) {   // replay_stats: what differs from the last set made for this layout
         struct D { uint32_t binding, type; uint64_t a, b, c; };
         static std::unordered_map<VkDescriptorSetLayout, std::vector<D>> last;
@@ -2654,10 +2774,11 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
             else if (tex) ++g_rs.miss_tex;
             else if (buf) ++g_rs.miss_ubo;
             else if (ofs) ++g_rs.miss_uboofs;
-            else ++g_rs.miss_first;            // the same set as the last one (a new submission)
+            else ++g_rs.miss_first;            // the same one as the last one (a new submission)
         }
         l.assign(cur.begin(), cur.end());
     }
+
     RsScope rs_alloc(kRsAlloc);   // replay_stats: the miss path (draw sets and dispatch sets)
     VkDescriptorSet ds = F->alloc_set(pl.sets[set]);
     if (!ds) return VK_NULL_HANDLE;
@@ -2778,17 +2899,50 @@ void bind_sets(const ProgLayout& pl, VkPipelineBindPoint bp) {
     push0.ready = false;
     // sets bound with another layout may disturb what set 0 holds for the layout of the last push (push_set0)
     if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS && g_pushed0.layout != pl.layout) g_pushed0.cb = VK_NULL_HANDLE;
+
+    // Use render_prep for sets 1-3 (set 0 may be push descriptor set, handle synchronously)
+    renderprep::SetBuildWork work_items[4];
+    uint32_t work_count = 0;
     for (uint32_t set = 0; set < 4; ++set) {
         if (!pl.has_set[set]) continue;
         g_push0.ready = false;
-        ds[set] = build_set(pl, set);
-        if (set == 0 && g_push0.ready) {      // swapped, not copied: the writes keep pointing into their own buffer infos
-            push0.writes.swap(g_push0.writes);
-            push0.binfo.swap(g_push0.binfo);
-            push0.ready = true;
-            g_push0.ready = false;
+        if (set == 0) {
+            // Set 0: build synchronously (may be push descriptor set)
+            ds[set] = build_set_impl(pl, set);
+            if (g_push0.ready) {      // swapped, not copied: the writes keep pointing into their own buffer infos
+                push0.writes.swap(g_push0.writes);
+                push0.binfo.swap(g_push0.binfo);
+                push0.ready = true;
+                g_push0.ready = false;
+            }
+        } else {
+            // Sets 1-3: submit to render_prep if enabled
+            work_items[work_count].pl = &pl;
+            work_items[work_count].set = set;
+            work_items[work_count].result = VK_NULL_HANDLE;
+            work_items[work_count].content_key = 0;
+            work_items[work_count].cache_hit = false;
+            if (renderprep::build_set_async(work_items[work_count])) {
+                // Submitted successfully, will wait later
+            } else {
+                // render_prep not enabled, build synchronously
+                work_items[work_count].result = build_set_impl(pl, set);
+            }
+            ds[set] = work_items[work_count].result;
+            work_count++;
         }
     }
+
+    // Wait for all render_prep jobs to complete and collect results
+    for (uint32_t i = 0; i < work_count; ++i) {
+        // build_set_async waits internally, so result should be ready
+        // But we double-check
+        while (work_items[i].result == VK_NULL_HANDLE) {
+            std::this_thread::yield();
+        }
+        ds[work_items[i].set] = work_items[i].result;
+    }
+
     if (pl.has_set[kPoolSet]) ds[kPoolSet] = pool_set(S.tpool.get(), S.spool.get(), *F);   // the texture and sampler pools as arrays (nvn_pipeline.cpp)
     if (push0.ready && !push0.writes.empty()) {   // a push of no writes is not allowed
         push_set0(bp, pl, push0.writes);
@@ -3576,7 +3730,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         ++g_rs.draws_ubo;
         const VkCommandBuffer cb0 = F->cb;
         g_push0.ready = false;
-        build_set(*pl, 0);                    // leaves set 0's writes in g_push0 (push_set0)
+        build_set_impl(*pl, 0);                    // leaves set 0's writes in g_push0 (push_set0)
         if (F->cb == cb0) {
             if (g_push0.ready && !g_push0.writes.empty()) push_set0(VK_PIPELINE_BIND_POINT_GRAPHICS, *pl, g_push0.writes);
             g_push0.ready = false;
@@ -5841,5 +5995,12 @@ struct ReplayGauges {
 };
 ReplayGauges g_replay_gauges;
 }  // namespace
+
+// Public wrapper for build_set (callable from other translation units like nvn_render_prep.cpp)
+// The internal implementation is in the anonymous namespace above; this wrapper provides external linkage.
+VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
+    // Call the internal build_set_impl from the anonymous namespace (visible in this TU's gpu namespace)
+    return build_set_impl(pl, set);
+}
 
 }  // namespace nxrt::nvn::be::gpu

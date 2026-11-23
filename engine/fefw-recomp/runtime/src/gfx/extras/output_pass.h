@@ -21,6 +21,7 @@
 
 #include "nxrt/extras.h"
 #include "nxrt/gfx.h"
+#include "extras/spatial_upscaler.h"
 #include "extras/fsr1_spatial.h"
 
 // Feature gate macros for optional spatial upscalers

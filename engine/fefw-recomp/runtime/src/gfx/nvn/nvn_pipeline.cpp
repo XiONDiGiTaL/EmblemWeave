@@ -807,6 +807,54 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
         const bool written_ssbo = d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && !(ssbo_ro_pass && !d.shader->refl.bindings[d.index].written);
         pl.writes_storage = pl.writes_storage || storage_image || written_ssbo;
     }
+
+    // Build invariant write templates for fast descriptor set construction (Phase 2.2)
+    // This avoids the per-binding loop in build_set for the static parts of VkWriteDescriptorSet.
+    for (const BindingDesc& d : pl.bindings) {
+        if (d.set >= 4) continue;  // Only sets 0..3 have templates (kPoolSet is shared)
+        ProgLayout::WriteTemplate wt;
+        wt.write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wt.write.dstBinding = d.binding;
+        wt.write.descriptorCount = 1;
+        wt.write.descriptorType = d.type;
+        wt.binding = d.binding;
+        wt.type = d.type;
+        wt.nvn_stage = d.nvn_stage;
+
+        // Classify the source for fast dynamic data lookup
+        const DescriptorBinding& b = d.shader->refl.bindings[d.index];
+        if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+            switch (b.nvn.source) {
+                case NvnSource::SupportBuffer: wt.source_class = 7; break;
+                case NvnSource::DriverConstants: wt.source_class = 6; break;
+                case NvnSource::PushConstants: wt.source_class = 5; wt.source_index = b.nvn.index; break;
+                case NvnSource::ConstantData: wt.source_class = 8; break;
+                case NvnSource::UniformBlock:
+                case NvnSource::HandleInUniform:
+                    wt.source_class = 9; wt.source_index = b.nvn.index; break;  // Simple: uses S.ubo
+                case NvnSource::UniformAsStorage:
+                    wt.source_class = 10; wt.source_index = b.nvn.index; break; // Complex: needs resolve_buffer + held_or_pool
+                case NvnSource::StorageBuffer:
+                    wt.source_class = 0; break;  // Complex: needs resolve_buffer + shadowing + gfx_ssbo_readonly
+                default: wt.source_class = 0; break;
+            }
+        } else if (d.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+            wt.source_class = 2; wt.source_index = b.nvn.index;
+        } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+                   d.type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+                   d.type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+            wt.source_class = 3; wt.source_index = b.nvn.index;
+        } else if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+                   d.type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+            wt.source_class = 4; wt.source_index = b.nvn.index;
+        } else {
+            wt.source_class = 0;
+        }
+
+        pl.set_templates[d.set].push_back(std::move(wt));
+    }
+    pl.templates_built = true;
+
     return &g_layouts.emplace(key, std::move(pl)).first->second;
 }
 
