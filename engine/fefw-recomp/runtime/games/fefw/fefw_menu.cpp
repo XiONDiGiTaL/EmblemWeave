@@ -293,7 +293,7 @@ void draw_header(const play::LiveStatus& live) {
                 ImGui::GetColorU32(kAccentHi), logo);
 
     const float title_x = p.x + px(64);
-    dl->AddText(ImGui::GetFont(), px(16), ImVec2(title_x, p.y + px(10)), ImGui::GetColorU32(kInk), "EMBLEMWAVE");
+    dl->AddText(ImGui::GetFont(), px(16), ImVec2(title_x, p.y + px(10)), ImGui::GetColorU32(kInk), "EMBLEMWEAVE");
     dl->AddText(ImGui::GetFont(), px(10), ImVec2(title_x + px(1), p.y + px(31)), ImGui::GetColorU32(kMuted),
                 tr("XiØN interface  /  Fire Emblem: Fortune's Weave"));
     dl->AddText(ImGui::GetFont(), px(9), ImVec2(title_x + px(1), p.y + px(45)), ImGui::GetColorU32(kAccentHi), "XIONDIGITAL.NET");

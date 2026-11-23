@@ -6,7 +6,18 @@ use crate::pages::Page;
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::{logo, App};
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, RichText, Sense, Vec2};
+
+/// A lightweight panel opened from the header or a status button. Only one is
+/// open at a time, so the page never accumulates floating cards.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Popup {
+    WhatsNew,
+    QuickHelp,
+    GameStatus,
+    BuildStatus,
+    SetupGuide,
+}
 
 /// One honest word for the sidebar: what the user can do right now.
 pub fn readiness(app: &App) -> (&'static str, Tone) {
@@ -324,5 +335,161 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
             }
             Err(e) => app.notify(format!("Could not load the profile: {e}"), Tone::Bad),
         }
+    }
+}
+
+struct SetupStage {
+    name: &'static str,
+    ok: bool,
+    counts: bool,
+}
+
+/// Draws any open overview popup (Quick Help, What's New, etc.).
+pub fn popups(app: &mut App, ctx: &egui::Context) {
+    if app.screenshot.is_some() || app.tour.is_some() {
+        return;
+    }
+    let Some(kind) = app.overview_popup else {
+        return;
+    };
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.overview_popup = None;
+        return;
+    }
+    let p = app.config.theme.palette();
+    let (title, subtitle) = match kind {
+        Popup::WhatsNew => {
+            let update = match &app.update.state {
+                crate::UpdateState::Ready(release) => format!("{} is available", release.tag),
+                crate::UpdateState::UpToDate(tag) => format!("Up to date ({tag})"),
+                _ => format!("Launcher v{}", env!("CARGO_PKG_VERSION")),
+            };
+            ("What's new", update)
+        }
+        Popup::QuickHelp => ("Quick help", "Checks, logs and troubleshooting".to_string()),
+        Popup::GameStatus => ("Game status", data_summary(app).0),
+        Popup::BuildStatus => {
+            let summary = if app.running(JobKind::Engine).is_some() {
+                "Building now"
+            } else if crate::engine::ready() {
+                "Native build ready"
+            } else {
+                "Not built yet"
+            };
+            ("Build status", summary.to_string())
+        }
+        Popup::SetupGuide => {
+            let stages = setup_stages(app);
+            let total = stages.iter().filter(|s| s.counts).count();
+            let done = if crate::engine::ready() {
+                total
+            } else {
+                stages
+                    .iter()
+                    .filter(|s| s.counts && s.ok)
+                    .count()
+            };
+            ("Setup guide", format!("{done}/{total} ready"))
+        }
+    };
+    let mut close = false;
+    egui::Area::new(egui::Id::new(("overview-popup", kind as u8)))
+        .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-18.0, 54.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::alpha(p.surface, 238))
+                .stroke(egui::Stroke::new(1.0_f32, p.line_strong))
+                .corner_radius(egui::CornerRadius::same(14))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 10],
+                    blur: 28,
+                    spread: 0,
+                    color: Color32::from_black_alpha(150),
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width(280.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(theme::SPACE_S);
+                        ui.label(
+                            RichText::new(title)
+                                .font(theme::semibold(15.0))
+                                .color(p.ink),
+                        );
+                        ui.add_space(theme::SPACE_XS);
+                        ui.label(RichText::new(subtitle).size(13.0).color(p.body));
+                        ui.add_space(theme::SPACE_M);
+                        ui.horizontal(|ui| {
+                            if widgets::button(ui, &p, "Close", true).clicked() {
+                                close = true;
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if widgets::button(ui, &p, "Open page", true).clicked() {
+                                    match kind {
+                                        Popup::WhatsNew => app.page = Page::About,
+                                        Popup::QuickHelp => app.page = Page::Troubleshoot,
+                                        Popup::GameStatus => app.page = Page::Overview,
+                                        Popup::BuildStatus => app.page = Page::Recompile,
+                                        Popup::SetupGuide => app.page = Page::Setup,
+                                    }
+                                    close = true;
+                                }
+                            });
+                        });
+                    });
+                });
+        });
+    if close {
+        app.overview_popup = None;
+    }
+}
+
+fn setup_stages(app: &App) -> Vec<SetupStage> {
+    let mut stages = Vec::new();
+    let exefs = app.game.exefs.is_some();
+    let romfs = app.game.romfs.is_some();
+    let title = app.game.title.is_some();
+    let control = app.game.nacp.is_some();
+    let tools = crate::engine::missing_tools().is_empty();
+    let built = crate::engine::ready();
+    stages.push(SetupStage {
+        name: "ExeFS",
+        ok: exefs,
+        counts: true,
+    });
+    stages.push(SetupStage {
+        name: "RomFS",
+        ok: romfs,
+        counts: true,
+    });
+    stages.push(SetupStage {
+        name: "Title",
+        ok: title,
+        counts: true,
+    });
+    stages.push(SetupStage {
+        name: "control.nacp",
+        ok: control,
+        counts: true,
+    });
+    stages.push(SetupStage {
+        name: "Build tools",
+        ok: tools,
+        counts: true,
+    });
+    stages.push(SetupStage {
+        name: "Game built",
+        ok: built,
+        counts: true,
+    });
+    stages
+}
+
+fn data_summary(app: &App) -> (String, Tone) {
+    let worst = app.game.worst();
+    match worst {
+        Severity::Ok | Severity::Info => ("Ready".to_string(), Tone::Ok),
+        Severity::Warn => ("Needs attention".to_string(), Tone::Warn),
+        Severity::Error => ("Incomplete".to_string(), Tone::Bad),
     }
 }
