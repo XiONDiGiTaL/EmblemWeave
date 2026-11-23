@@ -12,6 +12,7 @@
   <a href="https://xiondigital.net/EmblemWeave/">Site</a> ·
   <a href="https://github.com/XiONDiGiTaL/EmblemWeave/releases">Releases</a> ·
   <a href="docs/OVERVIEW.md">Docs</a> ·
+  <a href="https://github.com/XiONDiGiTaL/EmblemWeave/wiki">Wiki</a> ·
   <a href="https://github.com/XiONDiGiTaL/EmblemWeave">GitHub</a> ·
   <a href="https://gitlab.com/XiONDiGiTaL/emblemweave">GitLab</a> ·
   <a href="https://gitgud.io/xiondigital/EmblemWeave">GitGud</a> ·
@@ -39,11 +40,8 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current release: 0.1.41.** A measured Adaptive Performance Controller and Frame-Time Stability system now sit
-> behind a dedicated launcher Performance page and a nine-tab F1 menu, all native overlays share the XiØN design
-> tokens and Sora typeface, the master volume goes to 200%, the GPU picker lists the PC's real Vulkan adapters, and
-> the launcher's post-release drag glide is removed. See the
-> [0.1.41 changelog](docs/changelog/0.1.41.md).
+> **Current release: 0.1.42.** Cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash fixed, HDR state restored, save directory reconciliation. Field tests pending for #75, #76, #77 (cycles), #78. See the
+> [0.1.42 changelog](docs/changelog/0.1.42.md).
 
 ## Documentation
 
@@ -59,7 +57,7 @@ game code, no assets and no keys, and it only ever reads your files.
 | [Building from source](docs/BUILDING.md) | The launcher, the command-line tools and the engine build. |
 | [How the recompilation works](docs/ARCHITECTURE.md#how-the-recompilation-works) | The pipeline, the stages and what each piece owns. |
 | 📊 **Status** |  |
-| [Current status](docs/STATUS.md#current-status) | The game is playable — what was measured, and what is next. |
+| [Current status](docs/STATUS.md#current-status) | The game is playable, and this page covers what was measured and what is next. |
 | [Development status](docs/DEVELOPMENT.md) | Playable-build evidence, engine integration and known limitations. |
 | [Roadmap](docs/ROADMAP.md) | What is planned next, in priority order. |
 | [Changelog](docs/changelog/README.md) | What changed in each release, newest first. |
