@@ -40,6 +40,8 @@ bool arm(Region* r, uint64_t first, uint64_t count);
 // Owner: true when every page of the run is armed and nobody wrote it since.
 bool all_valid(const Region* r, uint64_t first, uint64_t count);
 bool page_valid(const Region* r, uint64_t page);
+// Direct pointer to the atomic valid-page bitmap (for inlined hot-path checks on the owner thread).
+const std::atomic<uint64_t>* valid_bitmap(const Region* r);
 // Owner: some page of [first, first + count) is valid (pages past the region are not); word by word (rt agent).
 bool any_valid(const Region* r, uint64_t first, uint64_t count);
 bool page_banned(const Region* r, uint64_t page);

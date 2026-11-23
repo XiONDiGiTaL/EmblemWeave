@@ -325,7 +325,7 @@ std::atomic<bool> g_tex_prep_on{false};
 void textures_note_bound(TexturePool* tp, const uint64_t* handles, int count) {
     if (!tp || !handles || count <= 0 || !g_tex_prep_on.load(std::memory_order_relaxed) || !gpu::active()) return;
     thread_local uint64_t t_epoch = 0;
-    thread_local uint64_t t_seen[256];
+    thread_local uint64_t t_seen[2048];
     const uint64_t ep = g_tex_scan_epoch.load(std::memory_order_relaxed);
     if (ep != t_epoch) {
         std::memset(t_seen, 0, sizeof t_seen);
@@ -334,7 +334,7 @@ void textures_note_bound(TexturePool* tp, const uint64_t* handles, int count) {
     std::shared_lock<std::shared_mutex> lk(tp->lock, std::defer_lock);
     for (int i = 0; i < count; ++i) {
         const uint64_t key = handles[i] * 0x9E3779B97F4A7C15ull ^ reinterpret_cast<uint64_t>(tp);
-        uint64_t& slot = t_seen[(key >> 56) & 255];
+        uint64_t& slot = t_seen[(key >> 53) & 2047];
         if (slot == key) continue;                         // looked at since the last bump: nothing new can be waiting behind it
         slot = key;
         if (!lk.owns_lock()) lk.lock();

@@ -72,6 +72,7 @@ struct PoolGpu {
     std::deque<PoolChunk> spans;      // imports of ranges longer than the overlap that cross a stride boundary (deque: stable addresses)
     gpu::Mirror* mirror = nullptr;  // device-local copy of the pages draws read (S38, [nvn] pool_mirror); render thread
     bool mirror_tried = false;
+    bool has_copy_chunk = false;    // true when any chunk or span currently uses a copy fallback buffer
 };
 
 MemoryPool::~MemoryPool() {
@@ -391,6 +392,7 @@ bool copy_fallback(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size) {
             return false;
         }
         c.copy_used = true;
+        g->has_copy_chunk = true;
         g_copy_touched.store(true, std::memory_order_relaxed);
         c.buffer = c.copy.buffer;
         c.host = g->base + off;
@@ -557,36 +559,61 @@ BufRef resolve_buffer_imported(uint64_t gpu_address, uint64_t size) {
 }
 
 namespace {
+struct RtPoolCache {
+    struct Entry { uint64_t lo = 0, len = 0; MemoryPool* mp = nullptr; PoolGpu* pg = nullptr; };
+    static constexpr size_t kWays = 64;
+    uint64_t gen = ~0ull;
+    Entry e[kWays];
+    void clear() { gen = ~0ull; }
+};
+RtPoolCache g_rt_pool_cache;
+
 // out.buffer / out.offset name the chunk (or span) import holding the range; *pool_off_out receives the offset from the pool's aligned base
 // (what the mirror's pages count from). out.avail is what is left of that import, at least the chunk overlap for a chunked pool.
 BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_out, PoolGpu** gpu_out, uint64_t* pool_off_out) {
     BufRef out;
-    const PoolHit hit = pool_lookup(gpu_address);
+    MemoryPool* mp_hit = nullptr;
     PoolGpu* pg = nullptr;
-    if (hit.pool) {
-        if (!hit.pool->gpu) {
-            MemoryPool* mp = hit.pool;
-            int expect = 1;
-            if (mp->prefetch.load() == 1 && mp->prefetch.compare_exchange_strong(expect, 4)) {
-                // still queued: import it here and now rather than behind the pools queued before it
-            } else if (mp->prefetch.load() == 3) {
-                NXFT("pool.wait");
-                nxrt::HitchTimer ht(nxrt::kHpRenderLockWait);
-                std::unique_lock<std::mutex> lk(g_pf_mu);
-                // Wait with timeout: if prefetch thread is disabled or stuck, fall back to importing ourselves
-                if (!g_pf_cv.wait_for(lk, std::chrono::seconds(5), [mp] { return mp->prefetch.load() == 2 || g_pf_stop; })) {
-                    // Timeout: prefetch didn't complete. Try to import ourselves by transitioning to state 4.
-                    int expect = 3;
-                    if (mp->prefetch.compare_exchange_strong(expect, 4)) {
-                        NXLOG_W(kTag, "prefetch timeout for pool %p, importing on render thread", static_cast<void*>(mp));
+    const uint64_t cur_gen = pool_gen();
+    RtPoolCache::Entry& slot = g_rt_pool_cache.e[(gpu_address >> 20) & (RtPoolCache::kWays - 1)];
+    if (g_rt_pool_cache.gen == cur_gen && gpu_address - slot.lo < slot.len && slot.pg) {
+        mp_hit = slot.mp;
+        pg = slot.pg;
+    } else {
+        const PoolHit hit = pool_lookup(gpu_address);
+        mp_hit = hit.pool;
+        if (mp_hit) {
+            if (!mp_hit->gpu) {
+                MemoryPool* mp = mp_hit;
+                int expect = 1;
+                if (mp->prefetch.load() == 1 && mp->prefetch.compare_exchange_strong(expect, 4)) {
+                    // still queued: import it here and now rather than behind the pools queued before it
+                } else if (mp->prefetch.load() == 3) {
+                    NXFT("pool.wait");
+                    nxrt::HitchTimer ht(nxrt::kHpRenderLockWait);
+                    std::unique_lock<std::mutex> lk(g_pf_mu);
+                    // Wait with timeout: if prefetch thread is disabled or stuck, fall back to importing ourselves
+                    if (!g_pf_cv.wait_for(lk, std::chrono::seconds(5), [mp] { return mp->prefetch.load() == 2 || g_pf_stop; })) {
+                        // Timeout: prefetch didn't complete. Try to import ourselves by transitioning to state 4.
+                        int expect = 3;
+                        if (mp->prefetch.compare_exchange_strong(expect, 4)) {
+                            NXLOG_W(kTag, "prefetch timeout for pool %p, importing on render thread", static_cast<void*>(mp));
+                        }
                     }
                 }
+                if (mp->prefetch.load() == 2) mp->gpu = mp->prefetched.exchange(nullptr);
+                if (!mp->gpu) mp->gpu = import_pool(mp);
+                ft::mark("pool.used", static_cast<uint32_t>(mp->flags) << 16 | static_cast<uint32_t>(std::min<uint64_t>(mp->size >> 20, 0xffff)));
             }
-            if (mp->prefetch.load() == 2) mp->gpu = mp->prefetched.exchange(nullptr);
-            if (!mp->gpu) mp->gpu = import_pool(mp);
-            ft::mark("pool.used", static_cast<uint32_t>(mp->flags) << 16 | static_cast<uint32_t>(std::min<uint64_t>(mp->size >> 20, 0xffff)));
+            pg = mp_hit->gpu;
+            if (pg && !pg->failed) {
+                if (g_rt_pool_cache.gen != cur_gen) {
+                    for (auto& x : g_rt_pool_cache.e) x = RtPoolCache::Entry();
+                    g_rt_pool_cache.gen = cur_gen;
+                }
+                slot = {mp_hit->gpu_base, mp_hit->size, mp_hit, pg};
+            }
         }
-        pg = hit.pool->gpu;
     }
     // the import starts at the aligned base, which may be below the pool's own base
     const uint64_t off = pg ? gpu_address - reinterpret_cast<uint64_t>(pg->base) : 0;
@@ -617,7 +644,7 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
     out.offset = off - c->off + c->buffer_offset;
     out.avail = c->off + c->size - off;
     out.ok = size <= out.avail;
-    if (pool_out) *pool_out = hit.pool;
+    if (pool_out) *pool_out = mp_hit;
     if (gpu_out) *gpu_out = pg;
     if (pool_off_out) *pool_off_out = off;
     return out;
@@ -665,6 +692,12 @@ void retry_imports() {
                 static_cast<unsigned long long>(c->off), static_cast<unsigned long long>(c->size >> 10));
         auto* old = new PoolChunk(std::move(*c));
         *c = std::move(fresh);
+        if (PoolGpu* ow = old->owner) {
+            bool any = false;
+            for (const PoolChunk& ch : ow->chunks) if (ch.copy.buffer) { any = true; break; }
+            if (!any) for (const PoolChunk& sp : ow->spans) if (sp.copy.buffer) { any = true; break; }
+            ow->has_copy_chunk = any;
+        }
         defer_destroy([old] { destroy_chunk(*old); delete old; });
     }
 }
@@ -718,6 +751,7 @@ void pool_shutdown() {
         left.assign(g_live.begin(), g_live.end());
     }
     for (PoolGpu* p : left) pool_gpu_destroy(p);
+    g_rt_pool_cache.clear();
     spare_shutdown();
     { std::lock_guard<std::mutex> lock(g_slabs_mu); g_slabs.clear(); g_rejected_slabs.clear(); }
     if (g_dummy_buf.buffer) buffer_views_forget(g_dummy_buf.buffer);
@@ -763,6 +797,7 @@ struct Mirror {
     std::vector<gfx::Buffer> chunks;    // the copy, kChunkBytes each (the last one may be shorter); empty until a draw wants a page in it
     PoolGpu* pg = nullptr;              // the pool (the copies read its chunk imports, mirror_src)
     mem::ww::Region* ww = nullptr;      // the CPU's writes to the pool's pages
+    const std::atomic<uint64_t>* valid_bits = nullptr;   // cached mem::ww::valid_bitmap(ww) for inlined page_valid/range_valid
     uint64_t npages = 0;
     std::vector<uint64_t> want;         // bitmap: a draw wanted the page while it was not valid
     std::vector<uint64_t> gpu_inv;      // bitmap (diagnostics): the page was last made invalid by a GPU write, not by the CPU
@@ -924,12 +959,27 @@ void bit_put(std::vector<uint64_t>& v, uint64_t i, bool on) {
     else v[static_cast<size_t>(i >> 6)] &= ~(uint64_t{1} << (i & 63));
 }
 
-bool page_valid(const Mirror& m, uint64_t p) { return mem::ww::page_valid(m.ww, p); }
+inline bool page_valid(const Mirror& m, uint64_t p) {
+    return m.valid_bits && p < m.npages && ((m.valid_bits[p >> 6].load(std::memory_order_acquire) >> (p & 63)) & 1u) != 0;
+}
 void out_register(Mirror* m);
 bool new_servable(const Mirror& m, uint64_t first, uint64_t last);
 
+inline bool range_all_valid_inline(const Mirror& m, uint64_t first, uint64_t count) {
+    if (!m.valid_bits || !count || first >= m.npages || count > m.npages - first) return false;
+    const uint64_t end = first + count;
+    for (uint64_t p = first; p < end;) {
+        const uint64_t lo = p & 63;
+        const uint64_t hi = std::min<uint64_t>(64, lo + (end - p));
+        const uint64_t mask = (hi - lo == 64) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo)) - 1) << lo);
+        if ((m.valid_bits[p >> 6].load(std::memory_order_acquire) & mask) != mask) return false;
+        p += hi - lo;
+    }
+    return true;
+}
+
 bool range_valid(const Mirror& m, uint64_t first, uint64_t count) {
-    if (mem::ww::all_valid(m.ww, first, count)) return true;
+    if (range_all_valid_inline(m, first, count)) return true;
     if (m.tv_list.empty()) return false;
     for (uint64_t p = first; p < first + count; ++p)
         if (!page_valid(m, p) && !bit_get(m.tv, p)) return false;
@@ -951,8 +1001,7 @@ void mirror_present_budget_tick() {
 }
 
 Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
-    for (const PoolChunk& c : pg->chunks) if (c.copy.buffer) return nullptr;
-    for (const PoolChunk& c : pg->spans) if (c.copy.buffer) return nullptr;
+    if (pg->has_copy_chunk) return nullptr;
     if (pg->mirror || pg->mirror_tried) return pg->mirror;
     if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) { pg->mirror_tried = true; return nullptr; }
     // Tracked copies change the protection of the CPU's view of the pages. With [nvn] pool_view = false the GPU import is that same view;
@@ -977,6 +1026,7 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
                 static_cast<void*>(pg->base), static_cast<unsigned long long>(pg->size >> 10));
         return nullptr;
     }
+    m->valid_bits = mem::ww::valid_bitmap(m->ww);
     m->chunks.resize(static_cast<size_t>((pg->size + kChunkBytes - 1) / kChunkBytes));
     m->pg = pg;
     m->pool_flags = mp->flags;
@@ -1265,7 +1315,8 @@ void storage_probe(uint64_t gpu_address, uint64_t size, bool vertex) {
     g_sto_bytes[s][row] += size;
 }
 
-BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
+BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use, bool* from_mirror) {
+    if (from_mirror) *from_mirror = false;
     MemoryPool* mp = nullptr;
     PoolGpu* pg = nullptr;
     uint64_t poff = 0;
@@ -1280,7 +1331,9 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
     if (first / chunk_pages != last / chunk_pages) { g_use_skip[use]++; g_skip_why[3]++; return out; }
     const VkBuffer cb = mirror_chunk(*m, first);
     if (!cb) { g_use_skip[use]++; g_skip_why[4]++; return out; }
-    const bool rv = range_valid(*m, first, last - first + 1);
+    const bool rv = (first == last)
+        ? (page_valid(*m, first) || (!m->tv_list.empty() && bit_get(m->tv, first)))
+        : range_valid(*m, first, last - first + 1);
     if (rv || (out_lazy() && new_servable(*m, first, last))) {
         out.buffer = cb;
         out.offset = poff - (first / chunk_pages) * kChunkBytes;
@@ -1313,6 +1366,7 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
         }
         g_st_dev_binds.store(g_st_dev_binds.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         g_use_dev[use]++;
+        if (from_mirror) *from_mirror = true;
         return out;
     }
     g_use_host[use]++;
@@ -1340,7 +1394,7 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use) {
     }
     for (uint64_t p = first; p <= last; ++p) bit_put(m->want, p, true);
     m->any_want = true;
-    g_st_host_binds.fetch_add(1, std::memory_order_relaxed);
+    g_st_host_binds.store(g_st_host_binds.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     return out;
 }
 
@@ -1885,8 +1939,7 @@ struct OutOverlapCache {
     std::vector<std::pair<uint64_t, uint64_t>> iv;
     OutOverlapSnap snap;
 };
-const OutOverlapSnap& out_cache_snap() {
-    thread_local OutOverlapCache oc;
+const OutOverlapSnap& out_cache_snap_fill(OutOverlapCache& oc) {
     const uint64_t cur = g_out_gen.load(std::memory_order_acquire);
     if (oc.gen != cur) {
         std::lock_guard<std::mutex> lk(g_out_mu);
@@ -1925,11 +1978,16 @@ const OutOverlapSnap& out_cache_snap() {
     }
     return oc.snap;
 }
+OutOverlapCache g_out_rt_cache;   // render-thread non-TLS cache (avoids Windows DLL TLS lookup on every draw)
+const OutOverlapSnap& out_cache_snap() {
+    thread_local OutOverlapCache oc;
+    return out_cache_snap_fill(oc);
+}
 }  // namespace
 
 const OutOverlapSnap* out_overlap_snap() {
     if (!out_any()) return nullptr;
-    return &out_cache_snap();
+    return &out_cache_snap_fill(g_out_rt_cache);
 }
 
 bool out_overlaps(uint64_t addr, uint64_t size) {

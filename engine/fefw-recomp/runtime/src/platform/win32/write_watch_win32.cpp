@@ -781,6 +781,7 @@ bool all_valid(const Region* r, uint64_t first, uint64_t count) {
 }
 
 bool page_valid(const Region* r, uint64_t page) { return r && page < r->npages && test(r->valid.get(), page); }
+const std::atomic<uint64_t>* valid_bitmap(const Region* r) { return r ? r->valid.get() : nullptr; }
 bool any_valid(const Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages) return false;
     const uint64_t end = first + std::min(count, r->npages - first);

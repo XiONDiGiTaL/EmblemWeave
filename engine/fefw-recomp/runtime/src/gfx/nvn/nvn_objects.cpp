@@ -83,6 +83,8 @@ void pool_unregister(MemoryPool* p) {
     g_pool_gen.fetch_add(1, std::memory_order_release);
 }
 
+uint64_t pool_gen() { return g_pool_gen.load(std::memory_order_acquire); }
+
 // Each thread keeps the pools it found (64 slots by the address's MiB), valid while no pool was registered or removed (g_pool_gen): the render thread looks up
 // the same few pools thousands of times a frame, and the map walk under the shared lock was ~7 % of its time (rt agent, notes/rt.md).
 // A pool's gpu_base and size are set before it is registered and never change. [nvn] pool_cache (default on).

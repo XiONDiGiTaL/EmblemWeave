@@ -24,6 +24,7 @@
 #include <intrin.h>
 #include <bit>
 
+#include "nxrt/write_watch.h"
 #include "nxrt/config.h"
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
@@ -76,6 +77,13 @@ struct GState {
     VertexStreamInfo stream[16];
     uint32_t stream_count = 0;
     BlendInfo blend[8];
+    struct BlendVk {
+        uint8_t src_rgb = VK_BLEND_FACTOR_ONE, dst_rgb = VK_BLEND_FACTOR_ZERO;
+        uint8_t src_a = VK_BLEND_FACTOR_ONE, dst_a = VK_BLEND_FACTOR_ZERO;
+        uint8_t op_rgb = VK_BLEND_OP_ADD, op_a = VK_BLEND_OP_ADD;
+        uint8_t dual_src = 0;
+    };
+    BlendVk blend_vk[8];
     ColorInfo color;
     ChannelMaskInfo chmask;
     DepthStencilInfo ds;
@@ -288,7 +296,10 @@ int g_tsr_ubo_cache_n = 0;
 int g_tsr_ubo_cache_next = 0;
 uint64_t g_tsr_ubo_cache_serial = ~0ull;
 
+uint64_t g_mirror_inv_seq = 0;   // bumped on gpu_wrote / submission start (invalidates OutSlot::servable memo)
+
 void gpu_wrote(uint64_t addr, uint64_t size, int use) {
+    ++g_mirror_inv_seq;
     g_tsr_ubo_cache_n = 0;
     note_gw(addr, size);
     if (note_gpu_write(addr, size, use)) {
@@ -768,7 +779,7 @@ uint64_t g_split_t0 = 0;
 uint32_t g_split_draws = 0;
 uint64_t split_ticks() {
     static const uint64_t t = [] {
-        const double ms = nxrt::config_get_double("nvn", "split_submit_ms", 0.0);
+        const double ms = nxrt::config_get_double("nvn", "split_submit_ms", 4.0);
         if (ms > 0) NXLOG_I(kTag, "split_submit_ms %.2f: long submissions go to the GPU in parts at pass boundaries", ms);
         return ms > 0 ? static_cast<uint64_t>(ms * 1e6) : 0;     // ns
     }();
@@ -783,7 +794,7 @@ void wm_close();
 void maybe_split() {
     const uint64_t ticks = split_ticks();
     static const uint32_t min_draws = static_cast<uint32_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "split_min_draws", 16)));   // tests use 0
-    if (!ticks || P.open || g_split_draws < min_draws) return;
+    if (!ticks || P.open || g_split_draws < min_draws || !F || !F->split_ok) return;
     if (g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0 || g_xfb_active || g_xfb_began) return;   // queries, stream-out: one buffer
     const uint64_t now = qpc_now();
     if (now - g_split_t0 < ticks) return;
@@ -1026,6 +1037,9 @@ struct TPoolCache {
 };
 TPoolCache g_tpool_cache;
 
+int g_tune_aniso = 0;
+float g_tune_bias = 0.0f;
+
 SamplerInfo unfiltered(SamplerInfo s);
 struct SPoolCache {
     static constexpr size_t kSlots = 256;
@@ -1054,8 +1068,8 @@ struct SPoolCache {
                 if (sl.used) {
                     r.smp = sl.smp;
                     r.has_sampler = true;
-                    const int aniso = nxrt::gfx::tuning().anisotropy.load(std::memory_order_relaxed);
-                    const float bias = nxrt::gfx::tuning().lod_bias.load(std::memory_order_relaxed);
+                    const int aniso = g_tune_aniso;
+                    const float bias = g_tune_bias;
                     if (sl.aniso != aniso || sl.bias != bias) {
                         sl.vk_smp = sampler_for(sl.smp);
                         sl.vk_smp_unfilt = VK_NULL_HANDLE;
@@ -1343,6 +1357,7 @@ bool samples_depth_target(const ProgLayout& pl) {
 // A colour attachment cannot be sampled in the pass that renders to it (no feedback loops): the binding gets the dummy view.
 bool is_color_feedback(Texture* t) {
     if (!t || !S.ncolor) return false;
+    if (t->fmt && t->fmt->compressed) return false;   // block-compressed textures cannot be color render targets
     static const bool fast = nxrt::config_get_bool("nvn", "feedback_fast", true);
     if (!fast) {
         for (uint32_t i = 0; i < S.ncolor; ++i) {
@@ -1470,7 +1485,7 @@ void feedback_prepare(const ProgLayout& pl) {
         if (b.nvn.source == NvnSource::ImageBinding) continue;
         TexResolved tmp;
         struct { Texture* tex; } const r = {resolve_texture_ref(d, tmp).tex};   // only the texture is used below
-        if (!r.tex || !tex_gpu(r.tex) || !is_color_feedback(r.tex) || r.tex->b.samples > 1 || g_fb_use.count(r.tex)) continue;
+        if (!r.tex || !is_color_feedback(r.tex) || !tex_gpu(r.tex) || r.tex->b.samples > 1 || g_fb_use.count(r.tex)) continue;
         any = true;
         Texture* c = feedback_clone(r.tex);
         if (!c) continue;
@@ -1632,11 +1647,13 @@ void prepare_textures(const ProgLayout& pl) {
         TexResolved tmp;
         const TexResolved& r = resolve_texture_ref(d, tmp);
         if (!r.tex) continue;
-        if (!r.tex->gpu && tex_first_upload_deferrable(r.tex)) {   // an asset with no image yet: made when its upload runs (it may wait)
-            need.push_back(r.tex);
-            continue;
+        if (!r.tex->gpu) {
+            if (tex_first_upload_deferrable(r.tex)) {   // an asset with no image yet: made when its upload runs (it may wait)
+                need.push_back(r.tex);
+                continue;
+            }
+            if (!tex_gpu(r.tex)) continue;
         }
-        if (!tex_gpu(r.tex)) continue;
         // owned by the pass; a compute dispatch runs outside every pass, so the graphics attachments do not own what it samples
         const bool is_depth = dt && (r.tex == dt || (dg && r.tex->gpu == dg) || (!dg && shares_image(r.tex, dt)));
         if (is_depth || (d.nvn_stage != kCompute && is_color_feedback(r.tex))) continue;
@@ -1663,13 +1680,15 @@ void prepare_textures(const ProgLayout& pl) {
                                   }),
                    need.end());
     }
+    if (need.empty() && need_storage.empty()) return;
     // an image this op also writes (an NVN2 compute shader sampling its own image) stays in GENERAL, the layout both descriptors name
-    need.erase(std::remove_if(need.begin(), need.end(),
-                              [&](Texture* t) {
-                                  if (!t->gpu && tex_first_upload_deferrable(t)) return false;
-                                  return std::any_of(storage_bound.begin(), storage_bound.end(), [&](Texture* s) { return shares_image(t, s); });
-                              }),
-               need.end());
+    if (!storage_bound.empty())
+        need.erase(std::remove_if(need.begin(), need.end(),
+                                  [&](Texture* t) {
+                                      if (!t->gpu && tex_first_upload_deferrable(t)) return false;
+                                      return std::any_of(storage_bound.begin(), storage_bound.end(), [&](Texture* s) { return shares_image(t, s); });
+                                  }),
+                   need.end());
     // [nvn] pool_upload_ms (default 24; 0 = no limit): the first uploads of asset textures that a draw needs only because a texture pool holds
     // them (not bound by the draw itself) take at most this much render-thread time per presented frame; the rest stay not ready (their pool
     // elements are the dummy) and go in the next frames. A load-in registers thousands of textures and uploaded them all before its first
@@ -1955,7 +1974,11 @@ bool out_memo_on() {
     static const bool on = nxrt::config_get_bool("nvn", "out_memo", true);
     return on;
 }
-struct OutSlot { uint64_t addr = 0, size = 0, gen = ~0ull; };
+struct OutSlot {
+    uint64_t addr = 0, size = 0, gen = ~0ull;
+    uint64_t ww_seq = ~0ull, inv_seq = ~0ull;
+    bool servable = false;
+};
 constexpr int kOutSlots = 16 + kCompute * 32 + 4;
 OutSlot g_out_slot[kOutSlots];
 // [nvn] out_memo_dirty (default on): on top of the memo, out_draw_bindings only looks at the slots a BindBuffers changed since the last draw
@@ -1964,6 +1987,10 @@ OutSlot g_out_slot[kOutSlots];
 bool g_out_all = true;                 // the next draw checks every slot
 uint64_t g_out_last_gen = ~0ull;       // out_gen() at the last check
 bool g_out_unmemo = false;             // a slot ended unmemoised (it held a result): the next draw checks every slot
+uint16_t g_out_servable_list[kOutSlots];
+int g_out_servable_n = 0;              // slots currently memoised as overlapping-but-servable
+uint64_t g_out_last_ww = ~0ull;
+uint64_t g_out_last_inv = ~0ull;
 uint8_t g_out_dirty[kOutSlots] = {};
 uint16_t g_out_dirty_list[kOutSlots];
 int g_out_dirty_n = 0;
@@ -2000,8 +2027,8 @@ void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why
     if (!b.addr) return;
     const uint64_t sz = b.size ? b.size : 65536;
     if (m.gen != ~0ull && m.addr == b.addr && m.size == b.size &&
-        (m.gen == gen || out_clear_since(b.addr, sz, m.gen))) {   // clear then, and nothing held there was added since
-        if (rt_check()) chk(!out_overlaps(b.addr, sz), "out memo");
+        (m.gen == gen || (!m.servable && out_clear_since(b.addr, sz, m.gen)))) {   // clear then, and nothing held there was added since
+        if (rt_check()) chk(!out_overlaps(b.addr, sz) || (m.servable && copy_ok && out_servable(b.addr, sz)), "out memo");
         m.gen = gen;
         return;
     }
@@ -2010,10 +2037,28 @@ void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why
         m.addr = b.addr;
         m.size = b.size;
         m.gen = gen;
+        m.servable = false;
+        return;
+    }
+    if (copy_ok && out_servable(b.addr, sz)) {
+        const bool was_servable = m.servable;
+        m.addr = b.addr;
+        m.size = b.size;
+        m.gen = gen;
+        m.servable = true;
+        if (!was_servable) {
+            const int idx = static_cast<int>(&m - g_out_slot);
+            if (g_out_servable_n == 0) {
+                g_out_last_ww = mem::ww::write_seq();
+                g_out_last_inv = g_mirror_inv_seq;
+            }
+            if (g_out_servable_n < kOutSlots) g_out_servable_list[g_out_servable_n++] = static_cast<uint16_t>(idx);
+        }
         return;
     }
     m.gen = ~0ull;
-    out_draw_read(b.addr, b.size, copy_ok, why);
+    m.servable = false;
+    compute_out_guard(b.addr, sz, why);
     snap = out_overlap_snap();
 }
 
@@ -2054,19 +2099,41 @@ void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua, const OutOverlapSnap
 
 // The reads of a draw's bound buffers (out_before_op).
 const OutOverlapSnap* out_draw_bindings() {
-    if (out_memo_on()) {
+    static const bool memo_on_v = out_memo_on();
+    if (memo_on_v) {
         const OutOverlapSnap* snap = out_overlap_snap();
         if (!snap) return nullptr;
         const uint64_t gen = snap->gen;
-        const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
+        if (g_out_servable_n > 0) {
+            const uint64_t ww = mem::ww::write_seq();
+            if (ww != g_out_last_ww || g_mirror_inv_seq != g_out_last_inv) {
+                g_out_last_ww = ww;
+                g_out_last_inv = g_mirror_inv_seq;
+                for (int i = 0; i < g_out_servable_n; ++i) {
+                    const uint16_t idx = g_out_servable_list[i];
+                    if (g_out_slot[idx].servable) {
+                        g_out_slot[idx].gen = ~0ull;
+                        g_out_slot[idx].servable = false;
+                        out_slot_changed(static_cast<int>(idx));
+                    }
+                }
+                g_out_servable_n = 0;
+            }
+        }
+        static const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
+        static const bool dirty_on_v = out_memo_dirty_on();
         const bool held_path = out_memo_held_on() && g_out_held_ok;
+        if (dirty_on_v && !g_out_all && !g_out_unmemo && g_out_dirty_n == 0 && gen == g_out_last_gen) {
+            if (rs_on()) ++g_rs.out_fast;
+            return snap;
+        }
         if (rs_on()) {
-            if (out_memo_dirty_on() && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen) ++g_rs.out_fast;
+            if (dirty_on_v && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen) ++g_rs.out_fast;
             else if (g_out_all) ++g_rs.out_full_all;
             else if (gen != g_out_last_gen) ++g_rs.out_full_gen;
             else ++g_rs.out_full_unmemo;
         }
-        if (out_memo_dirty_on() && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen) {
+        if (dirty_on_v && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen) {
             // the slots unmemoised at the last check are checked again with the changed ones (out_memo_held); the list is rebuilt
             uint16_t prev[kOutSlots];
             const int pn = g_out_unmemo ? g_out_held_n : 0;
@@ -2083,7 +2150,10 @@ const OutOverlapSnap* out_draw_bindings() {
                     const GState::Bind* b = idx < 16 ? &S.vtx[idx] : idx >= 16 + kCompute * 32 ? &S.xfb[idx - 16 - kCompute * 32]
                                           : !S.stage[(idx - 16) / 32] ? nullptr : (idx - 16) % 32 < 16 ? &S.ubo[(idx - 16) / 32][(idx - 16) % 32]
                                                                                                         : &S.ssbo[(idx - 16) / 32][(idx - 16) % 32 - 16];
-                    if (b && b->addr) chk(!out_overlaps(b->addr, b->size ? b->size : 65536), "out memo dirty");
+                    if (b && b->addr) {
+                        const uint64_t sz = b->size ? b->size : 65536;
+                        chk(!out_overlaps(b->addr, sz) || (g_out_slot[idx].servable && out_servable(b->addr, sz)), "out memo dirty");
+                    }
                 }
             }
             out_dirty_clear();
@@ -2470,6 +2540,11 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
     const VkDeviceSize ubo_align = device().properties().limits.minUniformBufferOffsetAlignment;
     const bool tsr_wanted = extras::temporal_wanted() && S.depth_tex;
     const uint64_t ufs_want = nxrt::gfx::tuning().ufs_hash.load(std::memory_order_relaxed);
+    static const int sto_mode = static_cast<int>(nxrt::config_get_int("nvn", "storage_read_copy", 2));
+    static const bool ssbo_ro = nxrt::config_get_bool("nvn", "gfx_ssbo_readonly", true);
+    static const std::string null_fmt = nxrt::config_get_str("nvn", "debug_null_format", "");
+    static const bool has_null_fmt = !null_fmt.empty();
+    static const bool int_nearest = nxrt::config_get_bool("nvn", "int_view_nearest", true);
     uint64_t key = 1469598103934665603ull + set;
     auto mix = [&](uint64_t v) { if (!is_push0) key = (key ^ v) * 1099511628211ull; };
     if (!is_push0) mix(reinterpret_cast<uint64_t>(pl.layout));
@@ -2613,6 +2688,15 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                     const int slot = b.nvn.index >= 0 ? b.nvn.index : storage_slot_for(d.nvn_stage, b.nvn.c0_offset);   // NVN2 compute: index from the c[0] table
                     if (slot >= 0 && slot < 16 && S.ssbo[d.nvn_stage][slot].addr) {
                         const GState::Bind& bind = S.ssbo[d.nvn_stage][slot];
+                        if (!g_shadowing && d.nvn_stage != kCompute && bind.size && sto_mode && (d.nvn_stage == kVertex || sto_mode >= 2) &&
+                            (!out_lazy() || !out_overlaps(bind.addr, bind.size))) {
+                            bool served = false;
+                            const BufRef rr = resolve_read(bind.addr, bind.size, kReadStorage, &served);
+                            bi = {rr.buffer, rr.offset, std::min<VkDeviceSize>(bind.size, rr.avail)};
+                            const bool read_only_gfx = ssbo_ro && !b.written;
+                            if (rr.ok && !served && !read_only_gfx) gpu_wrote(bind.addr, bi.range, kWriteStorage);
+                            break;
+                        }
                         BufRef br = resolve_buffer(bind.addr, bind.size);
                         bi = {br.buffer, br.offset, std::min<VkDeviceSize>(bind.size ? bind.size : br.avail, br.avail)};
                         if (!g_shadowing && br.ok && out_lazy() && out_overlaps(bind.addr, bi.range)) {   // a draw over a held compute result: the copy
@@ -2632,24 +2716,21 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                         }
                         bool served = false;
                         if (d.nvn_stage != kCompute && !g_shadowing && br.ok) {
-                            storage_probe(bind.addr, bi.range, d.nvn_stage == kVertex);
+                            if (sto_mode == 0) storage_probe(bind.addr, bi.range, d.nvn_stage == kVertex);
                             // [nvn] storage_read_copy = 1: a vertex shader's storage buffer is read from the device copy when it is valid; 2: any graphics stage.
                             // Assumes the shader does not write the buffer (the pages stay valid: no gpu_wrote).
-                            static const int sto_mode = static_cast<int>(nxrt::config_get_int("nvn", "storage_read_copy", 2));
                             if (sto_mode && (d.nvn_stage == kVertex || sto_mode >= 2)) {
-                                const BufRef rr = resolve_read(bind.addr, bi.range, kReadStorage);
-                                if (rr.ok && rr.buffer != br.buffer) {
+                                const BufRef rr = resolve_read(bind.addr, bi.range, kReadStorage, &served);
+                                if (rr.ok && served) {
                                     bi.buffer = rr.buffer;
                                     bi.offset = rr.offset;
                                     bi.range = std::min<VkDeviceSize>(bi.range, rr.avail);
-                                    served = true;
                                 }
                             }
                         }
                         // [nvn] gfx_ssbo_readonly (NXRT_NVN_GFX_SSBO_READONLY): a graphics shader that never stores to or applies an atomic to the buffer
                         // (reflection: DescriptorBinding::written) leaves the pages valid: no GPU write is recorded, the device copies of the pool stay usable
                         // and the next draw does not have to bind again. (In the translated Fortune's Weave shaders no vertex or fragment shader writes one.)
-                        static const bool ssbo_ro = nxrt::config_get_bool("nvn", "gfx_ssbo_readonly", true);
                         const bool read_only_gfx = ssbo_ro && d.nvn_stage != kCompute && !b.written;
                         if (br.ok && !served && !read_only_gfx) gpu_wrote(bind.addr, bi.range, kWriteStorage);      // a storage buffer may be written by the shader
                     }
@@ -2698,15 +2779,14 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
             }
             // [nvn] debug_null_format = "BPTC_UFLOAT" or "RGBA8:256x64": every sampled texture of that NVN format (and size) gets the dummy view
             // (term isolation, debugging only)
-            static const std::string null_fmt = nxrt::config_get_str("nvn", "debug_null_format", "");
-            static const bool has_null_fmt = !null_fmt.empty();
             if (has_null_fmt && rp->tex && rp->tex->fmt) {
                 const std::string sized = std::string(rp->tex->fmt->name) + ":" + std::to_string(rp->tex->b.width) + "x" + std::to_string(rp->tex->b.height);
                 if (null_fmt == rp->tex->fmt->name || null_fmt == sized) ensure_mut().tex = nullptr;
             }
             const TexResolved& r = *rp;
             // a first upload held back for a later frame ([nvn] bound_upload_defer): its image holds nothing yet, the dummy stands in
-            const bool waiting = r.tex && tex_layout(r.tex) == VK_IMAGE_LAYOUT_UNDEFINED && tex_first_upload_deferrable(r.tex);
+            // (when r.tex->gpu != nullptr, tex_bind_sampled handles VK_IMAGE_LAYOUT_UNDEFINED + deferrable without a second cross-TU call)
+            const bool waiting = r.tex && !r.tex->gpu && tex_first_upload_deferrable(r.tex);
             // a compute dispatch is never inside the graphics pass: a colour attachment of the last pass is an ordinary texture to it. Not
             // asked for a held-back texture: is_color_feedback makes its image (tex_gpu), which pool_image_lazy holds back until the upload's
             // turn, and a deferrable texture (ASTC / BC) is never a colour attachment.
@@ -2724,7 +2804,6 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                     // Integer views (the integer sampler variant, and images the shader reads only as integer bits, reflected as uint) take the
                     // unfiltered sampler: Vulkan has no linear filtering of integer formats (VUID-vkCmdDrawIndexed-magFilter-04553), and Maxwell
                     // takes the nearest texel of them anyway. [nvn] int_view_nearest = false: the game's sampler as before.
-                    static const bool int_nearest = nxrt::config_get_bool("nvn", "int_view_nearest", true);
                     const bool int_view = int_comp || (int_nearest && component >= 2);
                     if (r.has_sampler) {
                         if (!int_view && r.vk_smp) ii.sampler = r.vk_smp;
@@ -3137,9 +3216,14 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
             }
         }
     }
+    static const bool feat_unused_att = device().features().dynamic_rendering_unused_attachments;
+    static const bool feat_xfb = device().features().transform_feedback;
+    static const bool feat_fill_non_solid = device().features().fill_mode_non_solid;
+    static const bool feat_depth_clamp = device().features().depth_clamp;
+    static const bool feat_logic_op = device().features().logic_op;
     key.color_count = P.ncolor;
     if (!P.ncolor && S.stage[kFragment] && !S.stage[kFragment]->refl.outputs.empty()) key.no_out = 1;   // a depth-only pass: no outputs
-    if (!key.no_out && device().features().dynamic_rendering_unused_attachments) {
+    if (!key.no_out && feat_unused_att) {
         // the fragment shader may write outputs the pass has no attachment for: they are listed as unused (format UNDEFINED)
         if (const ShaderInfo* fs = S.stage[kFragment])
             for (const ShaderIo& o : fs->refl.outputs)
@@ -3154,34 +3238,28 @@ bool build_key(GraphicsKey& key, VkPrimitiveTopology topo) {
         }
         key.color_format[i] = P.color_fmt[i];
         key.blend_enable[i] = (S.color.blend_enable_mask >> i) & 1;
-        const BlendInfo& b = S.blend[i];
-        key.blend_src_rgb[i] = b.src_rgb ? vk_blend_factor(b.src_rgb) : VK_BLEND_FACTOR_ONE;
-        key.blend_dst_rgb[i] = b.dst_rgb ? vk_blend_factor(b.dst_rgb) : VK_BLEND_FACTOR_ZERO;
-        key.blend_src_a[i] = b.src_a ? vk_blend_factor(b.src_a) : VK_BLEND_FACTOR_ONE;
-        key.blend_dst_a[i] = b.dst_a ? vk_blend_factor(b.dst_a) : VK_BLEND_FACTOR_ZERO;
-        key.blend_op_rgb[i] = b.eq_rgb ? vk_blend_op(b.eq_rgb) : VK_BLEND_OP_ADD;
-        key.blend_op_a[i] = b.eq_a ? vk_blend_op(b.eq_a) : VK_BLEND_OP_ADD;
+        const GState::BlendVk& bv = S.blend_vk[i];
+        key.blend_src_rgb[i] = bv.src_rgb;
+        key.blend_dst_rgb[i] = bv.dst_rgb;
+        key.blend_src_a[i] = bv.src_a;
+        key.blend_dst_a[i] = bv.dst_a;
+        key.blend_op_rgb[i] = bv.op_rgb;
+        key.blend_op_a[i] = bv.op_a;
         key.write_mask[i] = S.chmask.mask[i] & 0xf;
         if (P.color_fmt[i] == VK_FORMAT_UNDEFINED) key.write_mask[i] = 0;
-        auto uses_src1 = [](VkBlendFactor f) {
-            return f == VK_BLEND_FACTOR_SRC1_COLOR || f == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR || f == VK_BLEND_FACTOR_SRC1_ALPHA ||
-                   f == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
-        };
-        if (key.blend_enable[i] && (uses_src1(static_cast<VkBlendFactor>(key.blend_src_rgb[i])) || uses_src1(static_cast<VkBlendFactor>(key.blend_dst_rgb[i])) ||
-                                    uses_src1(static_cast<VkBlendFactor>(key.blend_src_a[i])) || uses_src1(static_cast<VkBlendFactor>(key.blend_dst_a[i]))))
-            key.dual_src = 1;
+        if (key.blend_enable[i] && bv.dual_src) key.dual_src = 1;
     }
-    key.xfb = g_xfb_active && device().features().transform_feedback && S.stage[kVertex] && xfb_stride(S.stage[kVertex]) ? 1 : 0;
+    key.xfb = g_xfb_active && feat_xfb && S.stage[kVertex] && xfb_stride(S.stage[kVertex]) ? 1 : 0;
     key.depth_format = P.depth_fmt;
     key.stencil_format = P.has_stencil ? P.depth_fmt : VK_FORMAT_UNDEFINED;
     key.samples = P.samples;
     key.topology = static_cast<uint8_t>(topo);
     key.polygon_mode = static_cast<uint8_t>(vk_polygon_mode(S.poly.polygon_mode));
-    if (key.polygon_mode != VK_POLYGON_MODE_FILL && !device().features().fill_mode_non_solid) key.polygon_mode = VK_POLYGON_MODE_FILL;
-    key.depth_clamp = S.depth_clamp && device().features().depth_clamp;
+    if (key.polygon_mode != VK_POLYGON_MODE_FILL && !feat_fill_non_solid) key.polygon_mode = VK_POLYGON_MODE_FILL;
+    key.depth_clamp = S.depth_clamp && feat_depth_clamp;
     key.alpha_to_coverage = S.ms.alpha_to_coverage && S.ms.enable ? 1 : 0;
     key.depth_neg_one = S.depth_mode == NVN_DEPTH_MODE_NEAR_IS_MINUS_W ? 1 : 0;
-    if (S.color.logic_op != 0 && S.color.logic_op != NVN_LOGIC_OP_COPY && device().features().logic_op) {
+    if (S.color.logic_op != 0 && S.color.logic_op != NVN_LOGIC_OP_COPY && feat_logic_op) {
         key.logic_op_enable = 1;
         key.logic_op = static_cast<uint8_t>(vk_logic_op(S.color.logic_op));
         for (uint32_t i = 0; i < 8; ++i) key.blend_enable[i] = 0;
@@ -3640,7 +3718,12 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (g_dirty & (kDesc | kPipe)) {
         ++g_rs.draws_desc;
         g_prog_writes = pl->writes_storage;   // worked out once per layout (prog_layout), not over every binding per draw
-        attach_targets(false);
+        bool need_attach = S.depth_tex && !S.depth_tex->gpu;
+        if (!need_attach) {
+            for (uint32_t i = 0; i < S.ncolor && i < 8; ++i)
+                if (S.color_tex[i] && !S.color_tex[i]->gpu) { need_attach = true; break; }
+        }
+        if (need_attach) attach_targets(false);
         g_want_depth_ro = samples_depth_target(*pl);
         prepare_textures(*pl);
         if (g_trace) {   // [nvn] trace_dump_tex: also the block-compressed level 0 as the GPU holds it, to compare with the prepared data
@@ -4693,15 +4776,16 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     // Float-declared samplers over 8- or 16-bit integer textures (the light probe shader's RGBA8UI cubes): the variant that reads them
     // as integer images, so the shader gets the integer bits as on the console (spirv_int_samplers). 32-bit integer textures keep the
     // translated module: their float alias gives the bits (tex_sampled_view).
-    std::vector<SpvIntSampler> ints;
+    static std::vector<SpvIntSampler> ints;
+    ints.clear();
     g_int_pl = nullptr;
     g_int_comp.assign(pl->bindings.size(), 0);
-    for (size_t i = 0; i < pl->bindings.size(); ++i) {
+    for (uint16_t i : pl->sampled_tex_bindings) {
         const BindingDesc& d = pl->bindings[i];
-        if (d.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
         if (b.image.component != ScalarType::Float || b.image.depth || b.count != 1) continue;
-        const TexResolved r = resolve_texture(d);
+        TexResolved r_tmp;
+        const TexResolved& r = resolve_texture_ref(d, r_tmp);
         if (!r.tex || !tex_gpu(r.tex)) continue;
         const uint8_t c = tex_int_sampler_component(r.tex, make_request(b, r).format);
         if (!c) continue;
@@ -5216,7 +5300,9 @@ void apply_bind_program(const P_BindProgram& p) {
             if (rs_on()) g_rs.out_prog_marked += std::popcount(S.ubo_mask[st]) + std::popcount(S.ssbo_mask[st]);
         }
     } else {
-        g_out_all = true;     // out_draw_bindings: the active stages may change
+        g_out_all = true;
+    g_out_servable_n = 0;
+    for (OutSlot& s : g_out_slot) s = OutSlot();     // out_draw_bindings: the active stages may change
     }
     for (int st = 0; st < 6; ++st)
         if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
@@ -5242,17 +5328,17 @@ uint32_t g_raw_attr[16] = {};
 uint64_t g_raw_stream[16] = {};
 
 bool raw_same(RawLast& l, const uint8_t* bytes) {
-    const bool same = l.valid && std::memcmp(l.b, bytes, sizeof l.b) == 0;
+    if (l.valid && std::memcmp(l.b, bytes, sizeof l.b) == 0) return true;
     std::memcpy(l.b, bytes, sizeof l.b);
     l.valid = true;
-    return same;
+    return false;
 }
 template <typename T> bool raw_list_same(uint32_t& last_n, T* last, uint32_t count, const uint8_t* blob) {
     const uint32_t n = std::min<uint32_t>(count, 16);
-    const bool same = last_n == count && std::memcmp(last, blob, n * sizeof(T)) == 0;
+    if (last_n == count && std::memcmp(last, blob, n * sizeof(T)) == 0) return true;
     last_n = count;
     std::memcpy(last, blob, n * sizeof(T));
-    return same;
+    return false;
 }
 void raw_binds_reset() {
     for (RawLast& l : g_raw_state) l.valid = false;
@@ -5389,18 +5475,126 @@ bool counter_window_has_gpu_draw(RecordReader look, uint32_t type) {
     return false;
 }
 
+inline bool op_needs_out_lazy(Op op) {
+    switch (op) {
+        case Op::Dispatch: case Op::DispatchIndirect: case Op::Barrier: case Op::CallCommands: case Op::PushDebugGroup: case Op::PopDebugGroup:
+        case Op::ClearColor: case Op::ClearDepthStencil: case Op::ClearTexture: case Op::CopyTextureToTexture: case Op::Downsample:
+        case Op::DrawTexture: case Op::DiscardColor: case Op::DiscardDepthStencil: case Op::ResolveDepth: case Op::FenceSync: case Op::WaitSync:
+        case Op::ResetCounter: case Op::WaitEvent: case Op::SetRenderEnable: case Op::EvaluateDlss:
+        case Op::PushConstants: case Op::CopyBufferToTexture: case Op::CopyTextureToBuffer:
+            return false;
+        default:
+            return op >= Op::DrawArrays;
+    }
+}
+
 void run_list(const CmdList& list, int depth) {
     if (depth > kMaxDepth) { NVN_LOG_ONCE("depth", "CallCommands nesting too deep"); return; }
     counters().lists_replayed.fetch_add(1, std::memory_order_relaxed);
+    static const bool out_lazy_v = out_lazy();
+    const bool fast_binds = same_binds_on() && !g_trace;
     for (RecordReader r(list); r.next();) {
-        if (mark_dirty(r)) continue;
         const Op op = r.op();
+        if (fast_binds) {
+            if (op == Op::BindBuffers) {
+                ++g_rs.binds;
+                const auto& p = r.payload<P_BindBuffers>();
+                const NVNbufferRange* rg = reinterpret_cast<const NVNbufferRange*>(r.blob<P_BindBuffers>());
+                bool changed = false;
+                if (p.kind == kBufUniform && p.stage < 6) {
+                    const bool gfx = p.stage < kCompute;
+                    const int base = 16 + static_cast<int>(p.stage) * 32;
+                    for (uint32_t i = 0; i < p.count; ++i) {
+                        const uint32_t k = p.first + i;
+                        if (k >= 16) continue;
+                        GState::Bind& dst = S.ubo[p.stage][k];
+                        if (dst.addr != rg[i].address || dst.size != rg[i].size) {
+                            dst = {rg[i].address, rg[i].size};
+                            const uint32_t bit = 1u << k;
+                            S.ubo_mask[p.stage] = (S.ubo_mask[p.stage] & ~bit) | (rg[i].address ? bit : 0u);
+                            if (gfx) out_slot_changed(base + static_cast<int>(k));
+                            changed = true;
+                        }
+                    }
+                    if (changed) g_dirty |= kDescUbo; else ++g_rs.binds_same;
+                    continue;
+                } else if (p.kind == kBufVertex) {
+                    for (uint32_t i = 0; i < p.count; ++i) {
+                        const uint32_t k = p.first + i;
+                        if (k >= 16) continue;
+                        GState::Bind& dst = S.vtx[k];
+                        if (dst.addr != rg[i].address || dst.size != rg[i].size) {
+                            dst = {rg[i].address, rg[i].size};
+                            const uint32_t bit = 1u << k;
+                            S.vtx_mask = (S.vtx_mask & ~bit) | (rg[i].address ? bit : 0u);
+                            out_slot_changed(static_cast<int>(k));
+                            changed = true;
+                        }
+                    }
+                    if (changed) g_dirty |= kVb; else ++g_rs.binds_same;
+                    continue;
+                } else if (p.kind == kBufStorage && p.stage < 6) {
+                    const bool gfx = p.stage < kCompute;
+                    const int base = 16 + static_cast<int>(p.stage) * 32 + 16;
+                    for (uint32_t i = 0; i < p.count; ++i) {
+                        const uint32_t k = p.first + i;
+                        if (k >= 16) continue;
+                        GState::Bind& dst = S.ssbo[p.stage][k];
+                        if (dst.addr != rg[i].address || dst.size != rg[i].size) {
+                            dst = {rg[i].address, rg[i].size};
+                            const uint32_t bit = 1u << k;
+                            S.ssbo_mask[p.stage] = (S.ssbo_mask[p.stage] & ~bit) | (rg[i].address ? bit : 0u);
+                            if (gfx) out_slot_changed(base + static_cast<int>(k));
+                            changed = true;
+                        }
+                    }
+                    if (changed) g_dirty |= kDesc; else ++g_rs.binds_same;
+                    continue;
+                } else if (p.kind == kBufXfb) {
+                    for (uint32_t i = 0; i < p.count; ++i) {
+                        const uint32_t k = p.first + i;
+                        if (k >= 4) continue;
+                        GState::Bind& dst = S.xfb[k];
+                        if (dst.addr != rg[i].address || dst.size != rg[i].size) {
+                            dst = {rg[i].address, rg[i].size};
+                            const uint32_t bit = 1u << k;
+                            S.xfb_mask = (S.xfb_mask & ~bit) | (rg[i].address ? bit : 0u);
+                            out_slot_changed(16 + kCompute * 32 + static_cast<int>(k));
+                        }
+                    }
+                    g_dirty |= kDesc;
+                    continue;
+                }
+                ++g_rs.binds_same;
+                continue;
+            }
+            if (op == Op::BindTextures) {
+                ++g_rs.binds;
+                const auto& p = r.payload<P_BindTextures>();
+                const uint64_t* h = reinterpret_cast<const uint64_t*>(r.blob<P_BindTextures>());
+                bool changed = false;
+                if (p.stage < 6) {
+                    uint64_t* dst = S.tex[p.stage];
+                    for (uint32_t i = 0; i < p.count; ++i) {
+                        const uint32_t k = p.first + i;
+                        if (k < 64 && dst[k] != h[i]) { dst[k] = h[i]; changed = true; }
+                    }
+                }
+                if (changed) g_dirty |= kDesc; else ++g_rs.binds_same;
+                continue;
+            }
+        }
+        if (mark_dirty(r)) continue;
         if (g_cs_open && !cs_keeps_open(op)) cs_close();
         if (g_wm_open && !wm_keeps_open(op)) wm_close();
-        if (op >= Op::DrawArrays || (!out_lazy() && (op == Op::SetRenderEnable || op == Op::SetRenderTargets))) {
+        if (out_lazy_v) {
+            if (op_needs_out_lazy(op)) {
+                RsScope rs(kRsOut);
+                out_before_op(r);
+            }
+        } else if (op >= Op::DrawArrays || op == Op::SetRenderEnable || op == Op::SetRenderTargets) {
             RsScope rs(kRsOut);
-            if (out_lazy()) out_before_op(r);                                               // compute shadows: results back to the pool first
-            else if (out_any() && !compute_out_may_wait(op)) flush_compute_out(kOutOther);
+            if (out_any() && !compute_out_may_wait(op)) flush_compute_out(kOutOther);
         }
         switch (op) {
             case Op::Nop: break;
@@ -5470,7 +5664,21 @@ void run_list(const CmdList& list, int depth) {
             case Op::BindBlend: {
                 NVNblendState st; std::memcpy(&st, r.payload<P_RawState>().bytes, sizeof st);
                 BlendInfo b = decode(&st);
-                if (b.target >= 0 && b.target < 8) S.blend[b.target] = b;
+                if (b.target >= 0 && b.target < 8) {
+                    S.blend[b.target] = b;
+                    GState::BlendVk& bv = S.blend_vk[b.target];
+                    bv.src_rgb = static_cast<uint8_t>(b.src_rgb ? vk_blend_factor(b.src_rgb) : VK_BLEND_FACTOR_ONE);
+                    bv.dst_rgb = static_cast<uint8_t>(b.dst_rgb ? vk_blend_factor(b.dst_rgb) : VK_BLEND_FACTOR_ZERO);
+                    bv.src_a = static_cast<uint8_t>(b.src_a ? vk_blend_factor(b.src_a) : VK_BLEND_FACTOR_ONE);
+                    bv.dst_a = static_cast<uint8_t>(b.dst_a ? vk_blend_factor(b.dst_a) : VK_BLEND_FACTOR_ZERO);
+                    bv.op_rgb = static_cast<uint8_t>(b.eq_rgb ? vk_blend_op(b.eq_rgb) : VK_BLEND_OP_ADD);
+                    bv.op_a = static_cast<uint8_t>(b.eq_a ? vk_blend_op(b.eq_a) : VK_BLEND_OP_ADD);
+                    auto uses_src1 = [](uint8_t f) {
+                        return f == VK_BLEND_FACTOR_SRC1_COLOR || f == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR ||
+                               f == VK_BLEND_FACTOR_SRC1_ALPHA || f == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+                    };
+                    bv.dual_src = (uses_src1(bv.src_rgb) || uses_src1(bv.dst_rgb) || uses_src1(bv.src_a) || uses_src1(bv.dst_a)) ? 1 : 0;
+                }
                 break;
             }
             case Op::BindColor: { NVNcolorState st; std::memcpy(&st, r.payload<P_RawState>().bytes, sizeof st); S.color = decode(&st); break; }
@@ -5950,6 +6158,9 @@ void replay_begin_submit(Frame& f) {
     F = &f;
     tex_poll_cpu_writes();
     resid_tick();      // the residency clock, once per submission
+    ++g_mirror_inv_seq;
+    g_tune_aniso = nxrt::gfx::tuning().anisotropy.load(std::memory_order_relaxed);
+    g_tune_bias = nxrt::gfx::tuning().lod_bias.load(std::memory_order_relaxed);
     if (extras::LowLatency* ll = extras::lowlat()) ll->submit_begin();     // RENDERSUBMIT_START of the frame (S14)
     if (g_trace_frame == -2) {
         // [nvn] trace_frame = "6050" or "6050,9300": every listed presented frame is traced (the first one is the main one)
@@ -6186,6 +6397,8 @@ void replay_shutdown() {
     for (LayoutCacheSlot& sl : g_layout_cache) sl = LayoutCacheSlot();
     S = GState();
     g_out_all = true;
+    g_out_servable_n = 0;
+    for (OutSlot& s : g_out_slot) s = OutSlot();
     raw_binds_reset();
     P = Pass();
     g_pending.clear();

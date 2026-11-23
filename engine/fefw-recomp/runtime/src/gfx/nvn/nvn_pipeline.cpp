@@ -82,9 +82,16 @@ struct GfxFastSlot {
     GraphicsKey key;
     VkPipeline pipe = VK_NULL_HANDLE;
 };
-constexpr size_t kGfxFastSlots = 512;
+constexpr size_t kGfxFastSlots = 2048;
 GfxFastSlot g_gfx_fast[kGfxFastSlots];
 // Compute pipelines by (shader, layout, integer samplers: set << 17 | binding << 1 | signed, see spirv_int_samplers; empty for the translated module).
+struct CompFastSlot {
+    const ShaderInfo* cs = nullptr;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+};
+constexpr size_t kCompFastSlots = 64;
+CompFastSlot g_comp_fast[kCompFastSlots];
 std::map<std::tuple<const ShaderInfo*, VkPipelineLayout, std::vector<uint32_t>>, VkPipeline> g_compute;
 std::map<std::pair<const ShaderInfo*, std::vector<uint32_t>>, VkShaderModule> g_int_samplers;   // their modules (null: could not be made)
 VkPipelineCache g_cache = VK_NULL_HANDLE;
@@ -1139,14 +1146,16 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     const uint64_t h = key.hash();
     GfxFastSlot& fast = g_gfx_fast[(h ^ (h >> 19)) & (kGfxFastSlots - 1)];
     if (fast.pipe && fast.hash == h && fast.key == key) {
-        counters().pipeline_cache_hits.fetch_add(1, std::memory_order_relaxed);
+        auto& hits = counters().pipeline_cache_hits;
+        hits.store(hits.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         return fast.pipe;
     }
     auto& bucket = g_gfx[h];
     for (auto& e : bucket)
         if (e.first == key) {
             nxrt::rp::pipeline_creation_stats().cache_hits.fetch_add(1, std::memory_order_relaxed);
-            counters().pipeline_cache_hits.fetch_add(1, std::memory_order_relaxed);
+            auto& hits = counters().pipeline_cache_hits;
+            hits.store(hits.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
             if (e.up && e.up->state.load(std::memory_order_acquire) != 0) gpl_take_upgrade(e.second, e.alt, e.up);
             if (e.alt && gpl_ab_whole()) return e.alt;
             if (!e.up && !e.alt && e.second) {
@@ -1336,11 +1345,23 @@ void compute_progress_log() {
 
 VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, const std::vector<SpvIntSampler>& ints) {
     ensure_cache();
+    if (ints.empty()) {
+        const size_t h = (reinterpret_cast<uintptr_t>(cs) >> 4) ^ (reinterpret_cast<uintptr_t>(layout.layout) >> 3);
+        CompFastSlot& fast = g_comp_fast[h & (kCompFastSlots - 1)];
+        if (fast.pipe && fast.cs == cs && fast.layout == layout.layout) {
+            nxrt::rp::pipeline_creation_stats().cache_hits.fetch_add(1, std::memory_order_relaxed);
+            return fast.pipe;
+        }
+    }
     std::vector<uint32_t> ikey;
     for (const SpvIntSampler& s : ints) ikey.push_back(s.set << 17 | s.binding << 1 | (s.is_signed ? 1u : 0u));
     const auto k = std::make_tuple(cs, layout.layout, ikey);
     auto it = g_compute.find(k);
     if (it != g_compute.end()) {
+        if (ints.empty() && it->second) {
+            const size_t h = (reinterpret_cast<uintptr_t>(cs) >> 4) ^ (reinterpret_cast<uintptr_t>(layout.layout) >> 3);
+            g_comp_fast[h & (kCompFastSlots - 1)] = {cs, layout.layout, it->second};
+        }
         nxrt::rp::pipeline_creation_stats().cache_hits.fetch_add(1, std::memory_order_relaxed);
         return it->second;
     }
@@ -2250,6 +2271,7 @@ void pipeline_shutdown() {
     for (auto& [k, p] : g_compute)
         if (p) vkDestroyPipeline(d, p, nullptr);
     g_compute.clear();
+    for (CompFastSlot& s : g_comp_fast) s = CompFastSlot();
     for (auto& [k, m] : g_int_samplers)
         if (m) vkDestroyShaderModule(d, m, nullptr);
     g_int_samplers.clear();

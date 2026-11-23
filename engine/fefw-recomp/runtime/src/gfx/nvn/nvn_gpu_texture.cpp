@@ -3045,8 +3045,12 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
 VkImageView tex_bind_sampled(Texture* t, const ViewRequest& req, VkImageLayout* out_layout, VkImageAspectFlags* out_aspect) {
     TexGpu* g = tex_or_null(t);
     if (!g) return VK_NULL_HANDLE;
-    g->sampled_at.store(static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + 1, std::memory_order_relaxed);
-    if (!g_resid_pool_view) g->seen_ms.store(resid_ms(), std::memory_order_relaxed);
+    if (g->layout == VK_IMAGE_LAYOUT_UNDEFINED && tex_first_upload_deferrable(t)) return VK_NULL_HANDLE;
+    const uint32_t cur_p = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)) + 1;
+    if (g->sampled_at.load(std::memory_order_relaxed) != cur_p) {
+        g->sampled_at.store(cur_p, std::memory_order_relaxed);
+        if (!g_resid_pool_view) g->seen_ms.store(resid_ms(), std::memory_order_relaxed);
+    }
     VkImageView v = (g->last_req_view && g->last_req == req) ? g->last_req_view : tex_sampled_view(t, req);
     if (v) {
         *out_layout = g->layout == VK_IMAGE_LAYOUT_GENERAL
