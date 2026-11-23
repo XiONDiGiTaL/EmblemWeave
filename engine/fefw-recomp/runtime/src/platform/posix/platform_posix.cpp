@@ -5,9 +5,10 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
-#include <semaphore.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -22,11 +24,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include "nxrt/platform.h"
-
 #if defined(__linux__)
-#include <sys/syscall.h>
+#include <ucontext.h>
 #endif
+
+#include "nxrt/platform.h"
 
 namespace nxrt::platform {
 
@@ -124,7 +126,6 @@ uint32_t thread_id() {
 Thread* thread_self() {
     static thread_local Thread self;
     self.thread = pthread_self();
-    self.id = static_cast<unsigned>(pthread_self());
     self.name = nullptr;
     self.fn = nullptr;
     self.arg = nullptr;
@@ -385,8 +386,10 @@ bool thread_set_ideal_processor(Thread* t, int processor) {
 }
 
 bool thread_set_priority(Thread* t, ThreadPriority prio) {
-    // On POSIX, we use nice values. pthread_setschedparam requires CAP_SYS_NICE for real-time.
-    // We'll use setpriority which affects the process/thread nice value.
+    // Linux carries a nice value per thread, so the priority can be set on the thread the caller named instead of the
+    // whole process (setpriority(PRIO_PROCESS, 0, ...) would move every thread, the launcher included). SCHED_OTHER only:
+    // raising above nice 0 needs CAP_SYS_NICE and is not required for the console core model.
+    if (!t) return false;
     int nice_val = 0;
     switch (prio) {
         case ThreadPriority::Lowest: nice_val = 19; break;
@@ -396,9 +399,12 @@ bool thread_set_priority(Thread* t, ThreadPriority prio) {
         case ThreadPriority::Highest: nice_val = -10; break;
         case ThreadPriority::TimeCritical: nice_val = -20; break;
     }
-    // Try pthread_setschedparam first for real-time, fall back to nice
-    // For now, just use setpriority
+#if defined(__linux__) && defined(__GLIBC__) && __GLIBC_PREREQ(2, 30)
+    return setpriority(PRIO_PROCESS, static_cast<id_t>(pthread_gettid_np(t->thread)), nice_val) == 0;
+#else
+    (void)t;
     return setpriority(PRIO_PROCESS, 0, nice_val) == 0;
+#endif
 }
 
 void thread_disable_boost(Thread* t) {
@@ -408,7 +414,10 @@ void thread_disable_boost(Thread* t) {
 
 int thread_current_processor() {
 #if defined(__linux__)
-    return static_cast<int>(syscall(SYS_getcpu, nullptr, nullptr, nullptr));
+    // sched_getcpu() returns the CPU number; syscall(SYS_getcpu, ...) returns 0 on success and would report CPU 0 for
+    // every thread.
+    const int cpu = sched_getcpu();
+    return cpu >= 0 ? cpu : -1;
 #else
     return 0;
 #endif
@@ -441,27 +450,52 @@ bool process_set_priority_class(int priority_class) {
     return setpriority(PRIO_PROCESS, 0, nice_val) == 0;
 }
 
+namespace {
+
+// The named mutex is an advisory lock on a file rather than a named semaphore: closing a semaphore leaves its name in
+// /dev/shm, while an flock is released when the handle is closed or the process dies, which is what a "is another copy
+// running" check needs. The name is reduced to a file name so a caller cannot escape the directory.
+std::string named_mutex_path(const char* name) {
+    std::string leaf = "nxrt-";
+    for (const char* p = name; p && *p; ++p) {
+        const char c = *p;
+        leaf.push_back((c == '/' || c == '\\' || c == ':') ? '_' : c);
+    }
+    const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+    return std::string(runtime && *runtime ? runtime : "/tmp") + "/" + leaf + ".lock";
+}
+
+struct NamedMutex {
+    int fd = -1;
+};
+
+}  // namespace
+
 void* named_mutex_create(const char* name, bool* already_exists) {
 #if defined(__linux__)
-    // Use a named semaphore for cross-process mutex
-    // Name must start with '/' for POSIX named semaphores
-    std::string sem_name = "/nxrt_";
-    sem_name += name;
-    // Replace backslashes with underscores
-    for (char& c : sem_name) if (c == '\\') c = '_';
-    sem_t* sem = sem_open(sem_name.c_str(), O_CREAT | O_EXCL, 0644, 1);
-    if (sem == SEM_FAILED) {
-        if (errno == EEXIST) {
-            if (already_exists) *already_exists = true;
-            // Open existing
-            sem = sem_open(sem_name.c_str(), 0);
-            if (sem == SEM_FAILED) return nullptr;
-            return sem;
+    if (!name) return nullptr;
+    const std::string path = named_mutex_path(name);
+    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) return nullptr;
+    bool existed = false;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno != EWOULDBLOCK) {
+            ::close(fd);
+            return nullptr;
         }
-        return nullptr;
+        existed = true;
+        // Another live holder: wait for it, as CreateMutexA does when the name already exists.
+        while (flock(fd, LOCK_EX) != 0) {
+            if (errno != EINTR) {
+                ::close(fd);
+                return nullptr;
+            }
+        }
     }
-    if (already_exists) *already_exists = false;
-    return sem;
+    if (already_exists) *already_exists = existed;
+    auto* m = new NamedMutex;
+    m->fd = fd;
+    return m;
 #else
     (void)name; (void)already_exists;
     return nullptr;
@@ -470,7 +504,13 @@ void* named_mutex_create(const char* name, bool* already_exists) {
 
 void named_mutex_destroy(void* handle) {
 #if defined(__linux__)
-    if (handle) sem_close(static_cast<sem_t*>(handle));
+    auto* m = static_cast<NamedMutex*>(handle);
+    if (!m) return;
+    if (m->fd >= 0) {
+        flock(m->fd, LOCK_UN);
+        ::close(m->fd);
+    }
+    delete m;
 #else
     (void)handle;
 #endif
@@ -506,7 +546,9 @@ uint64_t section_map_view(Section* s, uint64_t addr, uint64_t offset, uint64_t s
 #if defined(__linux__)
     int prot = write ? (PROT_READ | PROT_WRITE) : PROT_READ;
     int flags = MAP_SHARED;
-    if (addr != 0) flags |= MAP_FIXED;
+    // NOREPLACE, not MAP_FIXED: MapViewOfFileEx fails when the requested range is taken, and silently replacing an
+    // existing guest mapping to satisfy a heap view would corrupt it.
+    if (addr != 0) flags |= MAP_FIXED_NOREPLACE;
     void* p = mmap(reinterpret_cast<void*>(addr), static_cast<size_t>(size), prot, flags, s->fd, static_cast<off_t>(offset));
     if (p == MAP_FAILED) return 0;
     return reinterpret_cast<uint64_t>(p);
@@ -666,28 +708,26 @@ PageFaultHandler g_page_fault_handler = nullptr;
 struct sigaction g_old_sigsegv{};
 bool g_sigsegv_installed = false;
 
-void sigsegv_handler(int sig, siginfo_t* info, void* ucontext) {
+void sigsegv_handler(int sig, siginfo_t* info, void* uc) {
     (void)sig;
-    (void)ucontext;
     if (!info) return;
     const uint64_t addr = reinterpret_cast<uint64_t>(info->si_addr);
-    int kind = 0;
-    // si_code: SEGV_MAPERR=1 (address not mapped), SEGV_ACCERR=2 (permission denied)
-    // We can't easily distinguish read vs write from si_code alone on Linux
-    // The fault address is in si_addr. We'll report as write (1) since that's the main use case.
-    // For a more accurate implementation, we'd need to check the instruction that faulted.
-    kind = 1;  // assume write
-    if (g_page_fault_handler) {
-        bool handled = g_page_fault_handler(addr, kind);
-        // If handled, the handler should have made the page accessible (via mprotect)
-        // The signal return will retry the faulting instruction
-        // If not handled, we fall through to the default handler (which will crash)
-        (void)handled;  // suppress unused warning
-    }
-    // Note: On POSIX, we can't easily control whether the instruction is retried from a signal handler.
-    // The typical pattern is: handler makes page accessible -> returns -> instruction retries.
-    // If the handler returns false, the page remains inaccessible and the process will crash (or we could siglongjmp).
-    // For now, we assume the handler makes the page accessible when returning true.
+    // The runtime's write-watch needs read and write faults told apart. si_code only says whether the address was
+    // mapped or protected; on x86-64 the hardware error code is in the ucontext and bit 1 is set for a write.
+    int kind = 1;
+#if defined(__linux__) && defined(__x86_64__) && defined(REG_ERR)
+    if (auto* u = static_cast<ucontext_t*>(uc)) kind = (u->uc_mcontext.gregs[REG_ERR] & 0x2) ? 1 : 0;
+#else
+    (void)uc;
+#endif
+    if (g_page_fault_handler && g_page_fault_handler(addr, kind)) return;   // the handler made the page accessible
+    // Nothing made the page accessible. Returning would re-execute the faulting instruction forever, so restore the
+    // default action and take the fault again: the process dies with a real SIGSEGV and a crash report.
+    struct sigaction dfl{};
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(SIGSEGV, &dfl, nullptr);
+    raise(SIGSEGV);
 }
 
 }  // namespace

@@ -220,11 +220,21 @@ void rwlock_unlock_exclusive(RWLock* lk);
 uint32_t page_protect(uint64_t addr);
 
 // Cross-platform page protection constants (match POSIX sys/mman.h values).
-// On Windows, these map to PAGE_* constants; on POSIX they are the native values.
-constexpr uint32_t PROT_NONE  = 0x0;
-constexpr uint32_t PROT_READ  = 0x1;
+// On Windows, these map to PAGE_* constants; on POSIX they are the native values. <sys/mman.h> defines the same names as
+// macros, so each is only declared when the system header has not already defined it: a translation unit that includes
+// mman.h first keeps the macros, one that does not still gets the namespaced constants.
+#if !defined(PROT_NONE)
+constexpr uint32_t PROT_NONE = 0x0;
+#endif
+#if !defined(PROT_READ)
+constexpr uint32_t PROT_READ = 0x1;
+#endif
+#if !defined(PROT_WRITE)
 constexpr uint32_t PROT_WRITE = 0x2;
-constexpr uint32_t PROT_EXEC  = 0x4;
+#endif
+#if !defined(PROT_EXEC)
+constexpr uint32_t PROT_EXEC = 0x4;
+#endif
 
 // Installs a handler for page faults (SIGSEGV on POSIX, VEH on Windows).
 // The handler receives the fault address and the access kind (0=read, 1=write, 8=execute).

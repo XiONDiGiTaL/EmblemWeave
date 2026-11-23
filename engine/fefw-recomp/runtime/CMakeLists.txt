@@ -29,6 +29,18 @@ if(NXRT_PLATFORM_ONLY)
     file(GLOB NXRT_PLATFORM_SOURCES CONFIGURE_DEPENDS "${NXRT_PLATFORM_DIR}/*.cpp")
     add_library(nxrt_platform STATIC ${NXRT_PLATFORM_SOURCES})
     target_include_directories(nxrt_platform PUBLIC include)
+    # The POSIX backend is pthreads; the Windows build gets threading through the CRT, and FindThreads reports no
+    # Threads::Threads target there.
+    if(NOT WIN32)
+        find_package(Threads REQUIRED)
+        target_link_libraries(nxrt_platform PUBLIC Threads::Threads)
+    endif()
+    # A diagnostic binary, not a test: it reports the loader and the devices a Linux bug report has to name.
+    option(NXRT_BUILD_LINUX_PROBE "Build nxrt_linux_probe (Vulkan loader and device report)" ON)
+    if(NXRT_BUILD_LINUX_PROBE AND NOT WIN32)
+        add_executable(nxrt_linux_probe tools/linux_probe.cpp)
+        target_link_libraries(nxrt_linux_probe PRIVATE nxrt_platform ${CMAKE_DL_LIBS})
+    endif()
     enable_testing()
     add_executable(nxrt_platform_tests tests/platform_selftest.cpp)
     target_link_libraries(nxrt_platform_tests PRIVATE nxrt_platform)

@@ -7,6 +7,7 @@
 #include <process.h>
 
 #include <string>
+#include <vector>
 
 #include "nxrt/platform.h"
 

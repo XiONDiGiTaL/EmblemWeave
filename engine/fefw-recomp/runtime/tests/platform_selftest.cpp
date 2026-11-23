@@ -44,9 +44,13 @@ int main() {
             check(commit(p, span), "commit the reserved range");
             for (std::size_t i = 0; i < span; i += page) p[i] = static_cast<unsigned char>(i / page + 1);   // faults if not writable
             check(p[page] == 2, "committed pages hold what was written");
-            check(protect(p, span, false), "protect read-only");
+            // The third argument is the POSIX-style protection mask, not a bool: false/true would be PROT_NONE and
+            // PROT_READ, and reading the page after `false` faults.
+            check(protect(p, span, PROT_READ), "protect read-only");
             check(p[page] == 2, "the data survives the protection change");
-            check(protect(p, span, true), "protect writable again");
+            check(protect(p, span, PROT_READ | PROT_WRITE), "protect writable again");
+            p[page] = 3;
+            check(p[page] == 3, "a writable page takes a write after the protection round trip");
             release(p, span);
         }
     }
