@@ -96,7 +96,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 ## Credits
 
 - **[XiØN](https://github.com/XiONDiGiTaL)**: Creator, Project Lead, Architecture & Design
-- [Goldoire](https://github.com/Goldoire/fefw-recomp): fefw-recomp, the baseline engine, and everyone who contributed to that project. Its repository is no longer online; EmblemWeave continues from the snapshot in `engine/`
+- [Goldoire](https://github.com/Goldoire): Creator of fefw-recomp, the baseline engine, and everyone who contributed to that project. Its repository is no longer online; EmblemWeave continues from the snapshot in `engine/`
 - [Obersteinn](https://github.com/Obersteinn): preserved the final fefw-recomp 0.2.0 release and its files after the original repository was removed, keeping the reference build, its build tools and its tested-dump manifest available ([docs/UPSTREAM.md](docs/UPSTREAM.md))
 - [ranbinrang-rgb](https://github.com/ranbinrang-rgb): code mods, the DLL interface (`nxrt/mod_api.h`), the mod hook-site format and the loader (issue #31, PR #32)
 - [Mi-Kel](https://github.com/Mi-Kel): Code Mods API V4 (the F1 menu's Mods tab and the panel widgets; PR #71)
