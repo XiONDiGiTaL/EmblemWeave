@@ -2550,7 +2550,13 @@ pub fn build(
             }
             crate::toolchain_manager::VerificationStatus::Missing => {
                 if v.tool_name != "sccache" && v.tool_name != "uv" && v.tool_name != "nasm" {
-                    return Err(format!("Required tool '{}' not found. {}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
+                    // Name the path when one was found but its version could not be read: "not found" alone sends the
+                    // player looking for an install that is already there.
+                    let saw = match &v.found_path {
+                        Some(p) => format!(" It ran {} but read no version there.", p.display()),
+                        None => String::new(),
+                    };
+                    return Err(format!("Required tool '{}' not found. {}{saw}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
                 }
                 ctx.log(format!("Optional tool '{}' not found: {}", v.tool_name, v.error.as_ref().unwrap_or(&String::new())));
             }

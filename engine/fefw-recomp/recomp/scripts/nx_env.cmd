@@ -1,4 +1,8 @@
 @echo off
+rem Each call starts from the environment its caller had. build_game.cmd calls this script once to configure and once to
+rem build; without its own scope, the second call's vcvars64.bat ran with the first call's INCLUDE, LIB and PATH still set,
+rem and the expanded environment crossed cmd.exe's 8191-character line limit ("The input line is too long.", exit 255).
+setlocal
 rem Sets up the build environment: MSVC x64 (vcvars64), LLVM clang-cl 23, CMake, Ninja, sccache.
 rem Usage from cmd:  scripts\nx_env.cmd cmake --build build\x
 rem                  scripts\nx_env.cmd            (no arguments: just prints the tool versions)
