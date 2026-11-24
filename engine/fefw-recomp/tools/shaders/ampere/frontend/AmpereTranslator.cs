@@ -70,6 +70,9 @@ namespace Ryujinx.Graphics.Shader.Translation
     {
         private const int ThreadsPerWarp = 32;
 
+        /// Emit integer abs as SPIR-V SAbs (the old output) instead of x * ((x >> 31) | 1); see InstEmit.IAbs.
+        public static bool NativeIAbs;
+
         /// Builds the translation context. `insts` are the program's instructions (addresses from 0 = first
         /// instruction after the SPH); the SPH itself is read through gpuAccessor at address 0 (graphics only).
         public static TranslatorContext CreateContext(IGpuAccessor gpuAccessor, TranslationOptions options, IReadOnlyList<SassInst> insts, out AmpereProgram program,

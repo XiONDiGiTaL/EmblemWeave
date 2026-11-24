@@ -206,6 +206,7 @@ namespace SpirvHarness
                 writer.Write(key.Glsl);
                 writer.Write(key.DrawParametersFromBuiltIns);
                 writer.Write(TranslatorVersion);
+                writer.Write(AmpereTranslator.NativeIAbs);
                 writer.Write(_translatorBuildId);
                 writer.Write(_spirvValId);
                 writer.Write(_validate);
@@ -333,6 +334,7 @@ namespace SpirvHarness
             StaticGpuAccessor.TexturePoolLength = int.Parse(Opt(args, "--texture-pool", "65536"));
             StaticGpuAccessor.SamplerPoolLength = int.Parse(Opt(args, "--sampler-pool", "4096"));
             Debug = args.Contains("--debug-mode");
+            AmpereTranslator.NativeIAbs = args.Contains("--native-iabs");
             try
             {
                 if (args.Length >= 2 && args[0] == "--warp-tests") return WarpTests.Run(args[1]);

@@ -180,6 +180,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         static IrOperand Gpr(int r) => r >= 255 ? Const(0) : Register(r, RegisterType.Gpr);
         static IrOperand UGpr(int r) => r >= 63 ? Const(0) : Register(UGprBase + r, RegisterType.Flag);
 
+        // Integer abs as x * ((x >> 31) | 1), not SPIR-V's SAbs. NVIDIA's shader compiler (drivers 610 to 621, Turing to
+        // Blackwell) can hang the GPU ("instruction pointer invalid", device lost after a TDR) on an integer abs of a small
+        // select such as abs(c ? 0 : 1). The product is bit-exact for every input (INT_MIN wraps as abs does).
+        // Technique from Mario Kart World Recomp (adriadam10/mkw-recomp 0f7038e, their #22); no code taken.
+        // AmpereTranslator.NativeIAbs (--native-iabs) brings SAbs back for comparison.
+        static IrOperand IAbs(EmitterContext ctx, IrOperand v) =>
+            AmpereTranslator.NativeIAbs ? ctx.IAbsolute(v) : ctx.IMultiply(v, ctx.BitwiseOr(ctx.ShiftRightS32(v, Const(31)), Const(1)));
+
         static bool HasSuffix(Op o, string s) => (o.Suffixes != null && o.Suffixes.Contains(s)) || (o.Kind == OperandKind.Mem && o.Text != null && System.Text.RegularExpressions.Regex.IsMatch(o.Text, @"R(\d+|Z)" + System.Text.RegularExpressions.Regex.Escape(s) + @"(?![0-9A-Z])"));
 
         /// Raw 32-bit value of a source operand (no modifiers), `word` = 0/1 for the low/high register of a pair.
@@ -226,7 +234,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (o.Kind is OperandKind.Pred or OperandKind.UPred) return PredSrc(ctx, o);
             IrOperand v = Raw(ctx, o);
             if (o.Kind == OperandKind.Imm || o.Kind == OperandKind.FImm) return v;   // sign already folded in
-            if (o.Abs) v = ctx.IAbsolute(v);
+            if (o.Abs) v = IAbs(ctx, v);
             if (o.Neg) v = ctx.INegate(v);
             if (o.Not) v = ctx.BitwiseNot(v);
             return v;
@@ -388,7 +396,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                         Dst(ctx, o[0], ctx.ConditionalSelect(Src(ctx, o[3]), min, max));
                         return;
                     }
-                case "IABS": Dst(ctx, o[0], ctx.IAbsolute(Src(ctx, o[1]))); return;
+                case "IABS": Dst(ctx, o[0], IAbs(ctx, Src(ctx, o[1]))); return;
                 case "POPC": Dst(ctx, o[0], ctx.BitCount(Src(ctx, o[1]))); return;
                 case "BREV": Dst(ctx, o[0], ctx.BitfieldReverse(Src(ctx, o[1]))); return;
                 case "FLO":
@@ -899,7 +907,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int byteSel = HasSuffix(o[1], ".B1") ? 1 : HasSuffix(o[1], ".B2") ? 2 : HasSuffix(o[1], ".B3") ? 3 : HasSuffix(o[1], ".H1") ? 2 : 0;
             if (bits < 32 || byteSel != 0)
                 v = unsigned ? ctx.BitfieldExtractU32(v, Const(byteSel * 8), Const(bits)) : ctx.BitfieldExtractS32(v, Const(byteSel * 8), Const(bits));
-            if (o[1].Abs) v = ctx.IAbsolute(v);
+            if (o[1].Abs) v = IAbs(ctx, v);
             if (o[1].Neg) v = ctx.INegate(v);
             Dst(ctx, o[0], unsigned ? ctx.IConvertU32ToFP32(v) : ctx.IConvertS32ToFP32(v));
         }
