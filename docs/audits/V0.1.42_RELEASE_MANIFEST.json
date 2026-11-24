@@ -27,7 +27,7 @@
       "827f09f4",
       "113cc8fa"
     ],
-    "excludedUncommittedWork": "FCC MAKO/Vulkan/Linux changes (24 modified, 9 untracked paths) are not part of any canonical artifact"
+    "excludedUncommittedWork": "FCC MAKO/Vulkan/Linux changes (25 modified/deleted and 13 untracked paths at the final check) are not part of any canonical artifact"
   },
   "artifactClasses": {
     "historicalDocumented": {
@@ -115,8 +115,8 @@
         }
       ],
       "worktree": {
-        "modifiedPaths": 24,
-        "untrackedPaths": 9,
+        "modifiedPaths": 25,
+        "untrackedPaths": 13,
         "committed": false,
         "note": "FCC MAKO/Vulkan/Linux work; do not overwrite or build into a release"
       }
@@ -135,7 +135,7 @@
     },
     "engine": {
       "status": "not-built",
-      "reason": "FCC's 24 modified engine files are active; a clean canonical C++ build would compile or contend with them.",
+      "reason": "FCC's 25 modified/deleted engine paths are active, including an in-progress write_watch platform split; a clean canonical C++ build would compile or contend with them.",
       "canonicalRuntimeSha256": null,
       "note": "No single definitive production-runtime hash is asserted while no reproducible canonical engine build exists."
     },
