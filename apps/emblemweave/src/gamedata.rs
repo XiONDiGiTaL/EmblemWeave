@@ -486,6 +486,8 @@ pub fn overlay_identity(nup_path: &Path) -> Result<OverlayIdentity, String> {
             nup_path.display()
         ));
     };
+    // fefw.ini spells the path with `/`, the build with `\`; both must give one key, or Play re-checks the overlay forever.
+    let shown = nup_path.components().collect::<PathBuf>().display().to_string();
     let modified = std::fs::metadata(nup_path)
         .and_then(|m| m.modified())
         .ok()
@@ -494,7 +496,7 @@ pub fn overlay_identity(nup_path: &Path) -> Result<OverlayIdentity, String> {
         .unwrap_or(0);
     let mut digest = Sha256::new();
     digest.update(b"emblemweave romfs overlay 2\0");
-    digest.update(nup_path.display().to_string().as_bytes());
+    digest.update(shown.as_bytes());
     digest.update(nup.size.to_le_bytes());
     digest.update(modified.to_le_bytes());
     let (mut count, mut bytes) = (0usize, 0u64);
@@ -513,7 +515,7 @@ pub fn overlay_identity(nup_path: &Path) -> Result<OverlayIdentity, String> {
     let sum: [u8; 32] = digest.finalize().into();
     let hex: String = sum.iter().map(|b| format!("{b:02x}")).collect();
     Ok(OverlayIdentity {
-        key: format!("{}|{count} files|{bytes} bytes|{hex}", nup_path.display()),
+        key: format!("{shown}|{count} files|{bytes} bytes|{hex}"),
         count,
         bytes,
     })
@@ -2321,6 +2323,27 @@ mod tests {
         assert!(overlay_is_current(&nup, &dest));
         let third = write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
         assert!(third.reused);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Play reads the package path from fefw.ini (`/`); the build wrote the marker for the `\` path.
+    #[cfg(windows)]
+    #[test]
+    fn an_overlay_written_for_a_backslash_path_is_current_for_the_slash_path() {
+        let dir = std::env::temp_dir().join(format!("ew-overlay-slashes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let nup = dir.join("game.nup");
+        let dest = dir.join("work").join("romfs-overlay");
+        write_overlay_nup(&nup, &[("voice.bin", b"VOICE\n")]);
+        write_romfs_overlay(&nup, &dest, &mut |_| {}).unwrap();
+
+        let slashed = PathBuf::from(nup.display().to_string().replace('\\', "/"));
+        assert_ne!(slashed.as_os_str(), nup.as_os_str());
+        assert!(
+            overlay_is_current(&slashed, &dest),
+            "the overlay the build wrote did not count for the path fefw.ini holds"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
