@@ -2888,6 +2888,10 @@ pub fn build(
     if let Some(vc) = &vc_env {
         envs.push(("NX_VCVARS", vc));
     }
+    // The scripts must not run vcvars64 again: run_env passes the environment toolchain::init already ran it for
+    // (INCLUDE, LIB and PATH), and a second run costs about 2 s per nx_env.cmd call, expands a long PATH past cmd's
+    // 8191-character line limit, and could pick a different toolset than the one validated before the build.
+    envs.push(("NX_ENV_READY", "1"));
     // Hook sites code mods bring (sites.rs): main is lifted with main.sites plus theirs. The list is only rewritten when it
     // changes, and with no such mods it is main.sites itself, so ninja lifts main again only when the sites really change.
     let (site_list, mod_sites) = crate::sites::prepare(&root, &mods_dir)?;

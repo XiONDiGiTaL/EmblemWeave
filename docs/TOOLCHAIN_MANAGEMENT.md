@@ -396,6 +396,10 @@ Stages with structured events:
 Neither script accepts `--structured-events`. The launcher emits the game build's events
 itself as the `recompile` stage above; `build_game.cmd <id>` builds the lifted modules and
 `nx_env.cmd <command>` runs one command with the toolchain's environment.
+The launcher already ran `vcvars64.bat` once for the build (`toolchain.rs`) and sets `NX_ENV_READY`, so
+`nx_env.cmd` keeps that environment instead of running `vswhere` and `vcvars64.bat` again; started directly, it
+runs them itself. Either way it hands `vcvars64.bat` a short `PATH` and merges the result afterwards, so a `PATH`
+close to cmd's 8191-character line limit no longer fails the build with `The input line is too long.`
 
 ### PowerShell BuildEvents.psm1
 
