@@ -81,7 +81,6 @@ namespace SpirvHarness
             readonly string _indexPath;
             readonly Dictionary<string, CacheEntry> _index = new();
             readonly object _indexLock = new();
-            readonly SHA256 _sha256 = SHA256.Create();
             readonly string _translatorBuildId;
             readonly string _spirvValId;
             readonly bool _validate;
@@ -210,7 +209,9 @@ namespace SpirvHarness
                 writer.Write(_spirvValId);
                 writer.Write(_validate);
                 writer.Write(CacheSchemaVersion);
-                var hash = _sha256.ComputeHash(ms.ToArray());
+                // Static and thread-safe: the worker's Parallel.ForEach jobs hash at the same time, and one shared SHA256 instance threw
+                // "Concurrent operations from multiple threads on this type are not supported", which took the worker down.
+                var hash = SHA256.HashData(ms.ToArray());
                 return Convert.ToHexString(hash).ToLowerInvariant();
             }
 
