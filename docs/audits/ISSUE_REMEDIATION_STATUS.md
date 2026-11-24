@@ -154,3 +154,33 @@ Landed on `main` after the FCC pass, in addition to the review and merge of PRs 
 | `fb0c9f25` | GPU row note wraps inside the control column (issue #92) | `cargo check -p emblemweave`; not viewed in the running launcher |
 | `c5d2bbf7` | Credits for mmkzer0 (PRs #81, #83, #85, #87, #89, #91) | README and About page read back |
 | `8a4e5d9d` | `package_release.ps1` runs the cmd script check before building or packing | PowerShell parser check; the added command run directly (exit 0) |
+
+## 2026-11-24 engine pass: unclaimed read faults and the freeze watchdog
+
+Found by running the whole engine suite (`nxrt_tests.exe --all`) instead of one group at a time: 7 of 987 tests
+failed, and six of them only when an earlier group had created a write-watch region.
+
+- **Read faults were still being rescued.** `e9c0ccc9` removed the four write-fault fallbacks that made foreign
+  or decommitted pages writable, but the read path kept two of the same: a read fault inside a live write-watch
+  region, or anywhere in the `[kHeapBase, kHeapBase + kHeapMax)` window, turned the page read-write and retried
+  the read. A process that had created one NVN pool region therefore never saw a guest read of decommitted or
+  guest-no-access memory fault: host protection silently disagreed with the page table (`heap_decommit`,
+  `svcSetMemoryPermission`, stack guards) and invalid reads were hidden. The unbounded rescues are gone; an
+  active `ImportFreeze` still restores the page it froze, the only case bounded by an owner.
+- **A scripted run's freeze watchdog outlived the run.** `tt::init` starts a watchdog with `on_fire` set when
+  `[test]` asks a freeze to end the run (exit code 5); nothing stopped it at `end_run` or in `tt::shutdown`.
+  In a long-lived process (the test binary, a launcher that keeps the runtime loaded) the leftover watchdog then
+  fired on the idle process. `tt` now records that it started the watchdog and stops it in `tt::shutdown`, and
+  `watchdog_stop` detaches instead of joining when it runs on the watchdog thread itself, so the freeze path
+  (`on_fire` -> `end_run` -> shutdown) cannot deadlock.
+- **The shared-font empty case depended on the working directory.** `svc_pl.pl_no_font_found_still_answers`
+  asserts no DejaVu is found, but the lookup also searches `assets/fonts` under the current directory, so
+  running the suite from `runtime/` found the repository font; it passed only from `build/release`. The case now
+  runs from its empty temporary folder (restoring the old one afterwards), so it means the same thing everywhere.
+
+Validation: `powershell -File scripts/t.ps1 -All` -> `SUMMARY --all: 958 passed, 0 failed, 29 skipped (of 987)`
+(before: 951 passed, 7 failed). `svc_pl` 10/10 from `runtime/` and from a neutral directory; `memory` 27/27,
+`svc_memory` 21/21, `crash` 15/15, `write_watch` 17/17, `watchdog` 12/12 standalone; `tt_live,watchdog` 14/14
+(was 13/14). Not verified: the read-fault change under real gameplay (no game dump or long session was
+available). It is covered by the memory and svc_memory groups, which fault on decommitted, unmapped and
+guest-no-access pages with a live write-watch region in the same process.
