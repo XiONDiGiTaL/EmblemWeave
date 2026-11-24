@@ -29,7 +29,7 @@ Status vocabulary is the one the readiness audit uses:
 | #76 Find Units stutter | Implemented - unverified | Parallel scan, cancellation, progress | An in-battle frame-time measurement |
 | #77 Return-to-title stability | Implemented - unverified | Fault-handler initialisation and fallbacks; write-watch platform split now builds | 10+ menu/title cycles; the write-watch race path exercised |
 | #78 HDR left enabled after exit | Implemented - partially verified | Full display snapshot (mode, HDR, SDR white, per monitor), sidecar snapshot for crash recovery, restore of only what the session changed, `SET_HDR_STATE`, 16 tests | A real exclusive-fullscreen round trip, an HDR-on session, a real crash, and a second monitor. SDR white is read-only in Windows and is captured, not restored. |
-| #79 Saves not read | Implemented - fixture runs done, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 19 and 22 ran against the real engine: a missing `.meta` was regenerated and a foreign account ignored; rows 16/17/20/24 and a reporter's own save are still unrun (see `SAVE_VALIDATION_ISSUE79.md`) |
+| #79 Saves not read | Implemented - fixture matrix run, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 16, 17, 19, 20 and 22 ran against the real engine: stale absolute paths honoured, nested save not adopted, missing `.meta` regenerated, foreign account ignored. Row 24's launcher import/backup/restore round-trip ran in a portable copy; its empty-profile UI flow and a reporter's own save remain (see `SAVE_VALIDATION_ISSUE79.md`) |
 | #7 Linux / Steam Deck | Outstanding - platform layer builds | POSIX platform layer, `write_watch_linux.cpp` compiles and links, platform self-test passes on Ubuntu 24.04, Vulkan probe runs | The rest of the runtime: core still links `psapi`, `diag/registry.cpp` includes `<windows.h>`, the graphics shell is Win32. `docs/LINUX.md` is missing (see `LINUX_BUILD_STATUS.md`) |
 
 ---
@@ -111,5 +111,5 @@ save loading, so the issue stays implemented-unverified.
 | #76 | In-battle frame-time percentiles with the scan open and closed |
 | #77 | 10+ return-to-title cycles in one session with no fault |
 | #78 | Start with HDR on, exit, and show Windows still has HDR on with the original SDR white level and mode |
-| #79 | A fixture run plus a game launch that lists and loads the fixture save |
+| #79 | A reporter's own save, listed and loaded (the fixture matrix is done; row 24's UI flow is still open) |
 | #7 | A native Linux build of `nxrt` + `nxrt_gfx`, then a runtime test; Proton and Gamescope as separate targets |
