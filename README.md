@@ -105,6 +105,8 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 - [ranbinrang-rgb](https://github.com/ranbinrang-rgb): code mods, the DLL interface (`nxrt/mod_api.h`), the mod hook-site format and the loader (issue #31, PR #32)
 - [Mi-Kel](https://github.com/Mi-Kel): Code Mods API V4 (the F1 menu's Mods tab and the panel widgets; PR #71)
 - [moistman7](https://github.com/moistman7): the GT tone-curve HDR patch for Fortune's Weave's `ImageProcessing` shader (PR #40), the fefw-recomp 0.2.3/0.2.4 engine integration (PR #52), and the replay/HDR/sampler improvements (PRs #53–#55)
+- [mmkzer0](https://github.com/mmkzer0): the build_game.cmd parse error, the overlay path spelling, the
+  dependency report, the loading card, the Vulkan device scan and the build PATH (PRs #81, #83, #85, #87, #89, #91)
 - [metrist38](https://github.com/metrist38/fefw-recomp): maintains the fefw-recomp fork that supplies updates beyond the original 0.2.0
 - [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) (MIT): shader translator
 - [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber): another fork based on fefw-recomp, with updates beyond 0.2.0. We are in full support of others extending the life of the original beyond its development

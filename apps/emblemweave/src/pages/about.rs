@@ -251,6 +251,7 @@ fn credits(ui: &mut egui::Ui, p: &theme::Palette) {
             ("Goldoire", "fefw-recomp, the baseline engine, and everyone who contributed to that project"),
             ("Obersteinn", "preserving the final fefw-recomp 0.2.0 release after its repository was removed"),
             ("moistman7", "the GT tone-curve HDR patch and the 0.2.3/0.2.4 engine improvements (PRs #40, #52-#55)"),
+            ("mmkzer0", "the build-script, overlay and launcher fixes (PRs #81, #83, #85, #87, #89, #91)"),
             ("metrist38", "the fefw-recomp fork that supplies the 0.2.3 and 0.2.4 engine updates"),
             ("xinthefreefallxai / ObeliskChamber", "another fefw-recomp fork with updates beyond 0.2.0; we support others extending the original's life"),
             ("Shader translator", "SPIR-V shader translation (MIT)"),
