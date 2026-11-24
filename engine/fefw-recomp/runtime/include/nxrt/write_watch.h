@@ -49,6 +49,8 @@ bool page_banned(const Region* r, uint64_t page);
 void invalidate(Region* r, uint64_t first, uint64_t count);
 // Owner: appends the pages written by the CPU since the last call (page indices) and clears that record.
 void take_written(Region* r, std::vector<uint64_t>& out);
+// Monotonic sequence bumped whenever any region marks a page written (lets callers with many regions skip scanning when idle).
+uint64_t write_seq();
 
 // Any thread: the operating system is about to write [p, p + n) (a file read into guest memory): armed pages in the range become writable
 // and count as written. Cheap when no region exists.

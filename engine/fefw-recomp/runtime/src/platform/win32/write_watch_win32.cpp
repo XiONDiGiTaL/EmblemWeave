@@ -124,6 +124,7 @@ std::atomic<int> g_busy{0};            // fault handlers and os-write calls look
 std::atomic<int> g_live{0};
 std::atomic<uint64_t> g_generation{0};
 std::atomic<uint64_t> g_faults{0};
+std::atomic<uint64_t> g_write_seq{0};   // bumped after any region marks a page written (write_seq)
 std::atomic<uint64_t> g_waits{0};      // rounds a fault waited for another releaser (statistics, tests)
 std::atomic<uint64_t> g_guard_faults{0};   // accesses that hit a guarded page
 std::atomic<GuardHandler> g_guard_fn{nullptr};
@@ -281,6 +282,7 @@ bool release_page(Region* r, uint64_t page) {
     const uint64_t old = r->prot[w].fetch_and(~b, std::memory_order_acq_rel);
     r->valid[w].fetch_and(~b, std::memory_order_acq_rel);
     r->written[w].fetch_or(b, std::memory_order_acq_rel);
+    g_write_seq.fetch_add(1, std::memory_order_seq_cst);
     const uint64_t addr = r->base + page * kPage;
     if (old & b) {
         bool ok = true;
@@ -349,10 +351,9 @@ uint64_t release_pages_ahead(Region* r, uint64_t start_page, uint64_t max_count)
         ++claimed;
     }
     if (claimed > 0) {
-        r->has_written.store(true, std::memory_order_seq_cst);
         g_write_seq.fetch_add(1, std::memory_order_seq_cst);
-        DWORD was = 0;
-        VirtualProtect(reinterpret_cast<void*>(r->base + start_page * kPage), static_cast<SIZE_T>(claimed * kPage), PAGE_READWRITE, &was);
+        nxrt::platform::protect(reinterpret_cast<void*>(r->base + start_page * kPage), static_cast<std::size_t>(claimed * kPage),
+                               nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
         for (uint64_t i = 0; i < claimed; ++i) r->releasing[start_page + i].fetch_sub(1, std::memory_order_seq_cst);
     }
     return claimed;
@@ -854,6 +855,8 @@ bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const s
 
 uint64_t guard_faults() { return g_guard_faults.load(std::memory_order_relaxed); }
 
+uint64_t write_seq() { return g_write_seq.load(std::memory_order_seq_cst); }
+
 void take_written(Region* r, std::vector<uint64_t>& out) {
     if (!r) return;
     for (uint64_t w = 0; w < r->nwords; ++w) {
@@ -1077,6 +1080,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
             if (test(r->prot.get(), q)) release_page(r, q);
         set_bits(r->valid.get(), first, count, false);
         set_bits(r->written.get(), first, count, true);
+        g_write_seq.fetch_add(1, std::memory_order_seq_cst);
     });
 }
 

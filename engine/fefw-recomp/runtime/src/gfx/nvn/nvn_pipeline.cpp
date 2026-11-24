@@ -1971,7 +1971,7 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
                 std::lock_guard<std::mutex> lk(device().queue_mutex());
                 wr = vkQueueWaitIdle(device().queue());
             }
-            if (wr != VK_SUCCESS) diag_vk_note(static_cast<int>(wr), "vkQueueWaitIdle (nvn pool_set)", __FILE__, __LINE__);
+            if (wr != VK_SUCCESS) NXLOG_W(kTag, "vkQueueWaitIdle (nvn pool_set) failed: VkResult %d", static_cast<int>(wr));
             const uint64_t now_done = poll_completed();
             for (PoolCopy& cp : pp->copies) {
                 if (cp.used == f.serial && cp.used_split < f.split_seq) {

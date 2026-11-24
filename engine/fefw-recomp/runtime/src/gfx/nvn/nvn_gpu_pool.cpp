@@ -865,6 +865,7 @@ std::vector<VkBufferCopy> g_copy_tmp;
 // submissions. Render thread.
 int64_t g_arm_spent_ns = 0;
 std::atomic<uint64_t> g_st_arm_deferred{0};
+std::atomic<uint64_t> g_st_evictions{0};   // mirror copy chunks given back (mirror_destroy): invalidates the servable-slot memo
 std::atomic<uint64_t> g_st_chunk_bytes_made{0};   // video memory of the copy chunks made, ever (the hitch line: new chunks during a slow frame)
 
 int64_t arm_budget_ns() {
@@ -1673,6 +1674,7 @@ void mirror_destroy(PoolGpu* p) {
             g_mirror_bytes -= std::min<uint64_t>(g_mirror_bytes, c.size);
             device().destroy_buffer(c);
         }
+    g_st_evictions.fetch_add(1, std::memory_order_relaxed);
     g_st_live_bytes.store(static_cast<int64_t>(g_mirror_bytes), std::memory_order_relaxed);
     delete m;
 }

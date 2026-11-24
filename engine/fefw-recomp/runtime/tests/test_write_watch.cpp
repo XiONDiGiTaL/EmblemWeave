@@ -87,7 +87,10 @@ NXTEST(take_written_covers_ctz_boundaries) {
     REQUIRE(ww::arm(r, 0, kPages));
     // Bit 0 (no trailing zeros), low/high bits of each 32-bit half, and the 64-bit high bit.
     const uint64_t pages[] = {0, 1, 2, 31, 32, 63};
-    for (uint64_t p : pages) *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + p * kPg) = 0x5a;
+    // Written out of order: three faults on consecutive pages would release the pages after them as well (sequential-write coalescing,
+    // covered by sequential_faults_release_pages_ahead), and this test is about the bit scan, not the fault order.
+    const uint64_t order[] = {0, 31, 2, 63, 1, 32};
+    for (uint64_t p : order) *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + p * kPg) = 0x5a;
     std::vector<uint64_t> w;
     ww::take_written(r, w);
     REQUIRE(w.size() == 6);
@@ -95,6 +98,28 @@ NXTEST(take_written_covers_ctz_boundaries) {
     w.clear();
     ww::take_written(r, w);   // a zero written word is skipped, not passed to the count-trailing-zeros helper
     CHECK(w.empty());
+    teardown(r);
+}
+
+NXTEST(sequential_faults_release_pages_ahead) {
+    ww::Region* r = setup();
+    REQUIRE(r != nullptr);
+    REQUIRE(ww::arm(r, 0, kPages));
+    const uint64_t before = ww::faults();
+    // From the third consecutive page fault on, the handler releases a short run ahead in one protection change: those pages count as
+    // written (the owner copies them again) and a write to them no longer faults.
+    for (uint64_t p = 10; p < 13; ++p) *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + p * kPg) = 0x5a;
+    const uint64_t faulted = ww::faults() - before;
+    CHECK_EQ(faulted, 3u);
+    CHECK_EQ(prot_of(mem::kHeapBase + 13 * kPg), static_cast<DWORD>(PAGE_READWRITE));
+    *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + 13 * kPg) = 0x5a;   // released ahead: no fault
+    CHECK_EQ(ww::faults() - before, faulted);
+    std::vector<uint64_t> w;
+    ww::take_written(r, w);
+    REQUIRE(w.size() > 4);
+    for (size_t i = 0; i < w.size(); ++i) CHECK_EQ(w[i], 10 + i);   // one contiguous run from the first faulting page
+    CHECK(!ww::page_valid(r, 13));
+    CHECK(ww::page_valid(r, 9) && ww::page_valid(r, 10 + w.size()));
     teardown(r);
 }
 
