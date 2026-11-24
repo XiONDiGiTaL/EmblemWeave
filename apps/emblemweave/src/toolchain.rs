@@ -213,10 +213,21 @@ pub fn tool_path() -> String {
     // Every version probe asks for this, and each call would run `clang-cl --version` again through `find_clang`: ten probes cost
     // seconds of a page that has to answer at once, so the answer is kept.
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CACHE.get_or_init(build_tool_path).clone()
+    CACHE.get_or_init(|| prepend_dirs(tool_dirs(), &std::env::var("PATH").unwrap_or_default())).clone()
 }
 
-fn build_tool_path() -> String {
+/// `dirs` in front of `path`.
+fn prepend_dirs(dirs: &[String], path: &str) -> String {
+    dirs.iter().map(String::as_str).chain(std::iter::once(path)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(";")
+}
+
+/// The folders [`tool_path`] puts in front of the inherited PATH, kept once.
+fn tool_dirs() -> &'static [String] {
+    static CACHE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(build_tool_dirs)
+}
+
+fn build_tool_dirs() -> Vec<String> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let mut dirs: Vec<String> = Vec::new();
     // Tools the release carries itself, first. A zip that ships clang-cl, lld-link,
@@ -261,9 +272,7 @@ fn build_tool_path() -> String {
         // launcher's own process.
         dirs.push(format!(r"{home}\.local\bin"));
     }
-    let mut path: Vec<String> = dirs.into_iter().filter(|d| Path::new(d).is_dir()).collect();
-    path.push(std::env::var("PATH").unwrap_or_default());
-    path.join(";")
+    dirs.into_iter().filter(|d| Path::new(d).is_dir()).collect()
 }
 
 fn program_files_x86() -> PathBuf {
@@ -952,8 +961,10 @@ fn resolve() -> Result<Resolved, String> {
         None => return Err(no_sdk_problem()),
     }
     let mut env = dev.env.clone();
-    // PATH from vcvars, with the LLVM and CMake folders in front of it.
-    let path = format!("{};{}", tool_path(), vars.get("PATH").cloned().unwrap_or_default());
+    // PATH from vcvars, with the LLVM and CMake folders in front of it. Not `tool_path()`: vcvars already carries the
+    // inherited PATH, and a second copy pushed build_game.cmd's own vcvars call past cmd's 8191-character line.
+    let vcvars_path = vars.get("PATH").cloned().unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+    let path = prepend_dirs(tool_dirs(), &vcvars_path);
     if let Some(slot) = env.iter_mut().find(|(k, _)| k == "PATH") {
         slot.1 = path;
     } else {
