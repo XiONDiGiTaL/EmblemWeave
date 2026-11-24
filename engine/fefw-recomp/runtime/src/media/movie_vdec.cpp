@@ -1050,6 +1050,8 @@ bool install_movie_decoder_hle() {
     return g_enabled;
 }
 
+uint64_t movie_frames_acquired() { return s_acquired.load(std::memory_order_relaxed); }
+
 #else   // built without dav1d
 
 bool install_movie_decoder_hle() {
@@ -1060,6 +1062,8 @@ bool install_movie_decoder_hle() {
     }
     return false;
 }
+
+uint64_t movie_frames_acquired() { return 0; }
 
 #endif
 
