@@ -216,11 +216,13 @@ slot.
 |---|---|
 | Branch | `main` |
 | Base HEAD | `ea4a7adc` |
-| This change | pending commit (see deployment notes) |
-| Launcher tests | `cargo check` + 45 save tests pass |
-| Runtime build | `release2/fefw.exe`, build passed |
-| Deployed launcher SHA-256 | pending |
-| Deployed runtime SHA-256 | pending |
+| This change | `42d9a612` |
+| Launcher tests | `cargo test -p emblemweave --locked`: 424 passed, 0 failed; `saves::tests`: 45 passed |
+| Runtime build | `release2/fefw.exe` (working) and clean `target/issue79/clean-runtime/fefw.exe` (deployment), both built |
+| Deployed launcher SHA-256 | `b6162725a5450a874a046f4da790e73fe3e27eca979693bac628f034533a43f7` |
+| Deployed runtime SHA-256 | `8a2d0af5392ae8aa93141c4515d5ef5e21dadf5b839286b7dc966f50e8a77ef6` |
+| X: backup | `X:\EmblemWeave-backup-20261123-2130` (8.707 GB; robocopy 104,598 files, 0 failed) |
+| X: version after deploy | launcher `0.1.42 (42d9a612)`, Saves page opened |
 
 Issue #79 remains **open**. Do not close it from this work: the reporters have
 not confirmed recovery, and the exact cause of their lost saves is still
