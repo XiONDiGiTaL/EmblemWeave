@@ -316,6 +316,12 @@ void starvation_guard_stop() {
     g.th.join();
 }
 
+bool starvation_guard_running() {
+    Guard& g = guard();
+    std::lock_guard<std::mutex> lk(g.m);
+    return g.th.joinable();
+}
+
 uint64_t starvation_boosts() { return guard().boosts.load(); }
 
 namespace {

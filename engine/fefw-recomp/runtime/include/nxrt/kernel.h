@@ -177,6 +177,7 @@ std::string sync_wait_report();          // the guest threads blocked in WaitFor
 void yield_host();                       // the calling thread offers its processor to another ready thread (SwitchToThread), unless the starvation guard aged it
 void starvation_guard_start();           // ages guest threads the host leaves ready but never runs (starvation_guard.cpp, [sched] starvation_guard)
 void starvation_guard_stop();
+bool starvation_guard_running();
 uint64_t starvation_boosts();            // boosts given so far
 void install_spin_hint();                // WFE / YIELD of the lifted code hand the host processor over (busy_mutex.cpp, [sched] spin_yield)
 void install_busy_mutex_hle();           // nn::os::LockBusyMutex as host code that yields while it waits (busy_mutex.cpp, [sched] busy_mutex_hle)

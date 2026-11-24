@@ -19,7 +19,8 @@ struct InitOptions {
 
 // Idempotent. Logs the effective configuration. Returns false when a mandatory piece (the address-space layout) failed.
 bool init(const InitOptions& opt = {});
-// Logs the end-of-run summary (svc, ipc, hle stubs, modules, threads) and stops the watchdog and the memory guard.
+// Logs the end-of-run summary (svc, ipc, hle stubs, modules, threads) and stops the workers init started, including the watchdog,
+// memory guard, starvation guard, samplers and test tooling. Also runs when init failed partway through.
 void shutdown();
 // The same summary as text (also written to the log by shutdown()).
 std::string summary();

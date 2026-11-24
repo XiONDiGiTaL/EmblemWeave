@@ -89,6 +89,7 @@ uint32_t crash_exceptions_reported();
 // folded stacks are written at shutdown to `[prof] sample_out`. The label (a scene name set by the test script) is the first field of each stack.
 void prof_sampler_start();
 void prof_sampler_stop();
+bool prof_sampler_running();
 void prof_sampler_label(const char* label);
 
 // ---- freeze watchdog ------------------------------------------------------------------------------------------------------

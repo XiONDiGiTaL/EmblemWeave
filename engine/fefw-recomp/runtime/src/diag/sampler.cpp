@@ -284,4 +284,10 @@ void prof_sampler_stop() {
     NXLOG_I("prof", "sampling profiler: samples written to %s", s.out.c_str());
 }
 
+bool prof_sampler_running() {
+    State& s = st();
+    std::lock_guard<std::mutex> g(s.ctl);
+    return s.th.joinable();
+}
+
 }  // namespace nxrt

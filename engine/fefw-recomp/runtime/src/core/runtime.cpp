@@ -34,11 +34,13 @@ void trace_sites_install();   // src/diag/trace_sites.cpp
 namespace {
 std::mutex g_lock;
 bool g_up = false;
+bool g_init_started = false;   // init has run at least once: shutdown must tear down what it started, even if it failed
 }  // namespace
 
 bool init(const InitOptions& opt) {
     std::lock_guard<std::mutex> lk(g_lock);
     if (g_up) return true;
+    g_init_started = true;
     const char* ini = opt.ini_path ? opt.ini_path : std::getenv("NXRT_INI");
     config_load_file(ini && *ini ? ini : "nxrt.ini");
     LogOptions lo;
@@ -111,8 +113,8 @@ std::string summary() {
 
 void shutdown() {
     std::lock_guard<std::mutex> lk(g_lock);
-    if (!g_up) return;
-    NXLOG_I("runtime", "end-of-run summary:\n%s", summary().c_str());
+    if (!g_init_started) return;
+    if (g_up) NXLOG_I("runtime", "end-of-run summary:\n%s", summary().c_str());
     timestep::shutdown();
     tt::shutdown();
     prof_sampler_stop();
@@ -123,6 +125,7 @@ void shutdown() {
     memguard_stop();
     log_flush();
     g_up = false;
+    g_init_started = false;
 }
 
 bool initialised() {
