@@ -1,195 +1,118 @@
-# EmblemWeave v0.1.42 - Remediation Summary
+# EmblemWeave v0.1.42 - Remediation Summary (historical record)
 
-## Executive Summary
-Successfully completed remediation for **five** GitHub issues (#70, #75, #76, #77, #78) plus fixed the write_watch null g_transitions crash. The game now runs **120+ seconds (4000+ frames) stably** without any crashes. Issue #70 (Cinematic Performance) is implemented with build verification complete; runtime verification pending game data.
+> **Historical record, corrected 2026-11-24.** This summarises the 2026-11-22/23 FCC session. It is not current release
+> evidence and not a sign-off. See `docs/audits/V0.1.42_RELEASE_READINESS.md` for the current assessment and
+> `docs/audits/V0.1.42_RELEASE_MANIFEST.json` for artifact provenance.
 
----
+## Session summary
 
-## Issues Fixed
+The session implemented candidates for #70, #75, #76, #77, #78 and #79 and fixed a `write_watch` initialization crash.
+It reported a 120-second/4000-frame run and a deployment to `E:\EmblemWeave`. The independent audit reproduced the
+launcher build and tests on a clean tree, but not the runtime claims, the deployment record or the reported test totals.
 
-### Issue #70: Cinematic Performance (dav1d Assembly) - **IMPLEMENTED (Build Verified)**
-**Status**: Build verified, runtime verification pending (needs game data)
+## Status as corrected
 
-**Root Cause**: Broken CMake generator expression mixing MSVC flags (`/O2`) with GCC/Clang flags (`-w -fno-strict-aliasing`) in single expression, causing clang-cl build failures. NASM auto-detection already robust but undocumented.
+| Issue | Status | What exists | What is missing |
+| --- | --- | --- | --- |
+| #70 Cinematic AV1 assembly | Implemented - unverified | per-compiler dav1d flags, NASM documentation | clean engine build; real AV1 playback |
+| #75 Cinematic AV1 + Opus | Implemented - unverified | WebM/MP4 AV1 parsing, FFmpeg Opus path, bundled DLLs | end-to-end A/V sync test |
+| #76 Find Units | Implemented - unverified | parallel scan, cancellation, progress, timeout, thread cap | in-battle measurement |
+| #77 Return-to-title | Implemented - unverified | fault-handler init, PAGE_NOACCESS fallback, pool coverage, retired-bit clear | 10+ menu/title cycles |
+| #78 HDR after exit | Partially implemented | `play::stop()` forces windowed mode | capture and restore of original HDR/display state; edge-case paths |
+| #79 Saves not read | Implemented - unverified | R1-R8 reconciliation/adoption/diagnostics | a demonstrated game load after restart/update |
 
-**Fixes Applied** (commit `7b59b0ad`):
-1. **Fixed C Compilation Flags** (`engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt:95-97`): Per-compiler generator expressions for MSVC, Clang, GNU
-2. **Added CONFIG.md Documentation** (`engine/fefw-recomp/runtime/docs/CONFIG.md`): Documented `dav1d_asm`, `dav1d_asm_auto`, `nasm_dir` options
-3. **Verified NASM Auto-Detection**: Handles all 6 scenarios via `NXRT_DAV1D_ASM_AUTO=ON` with `unset(NXRT_NASM CACHE)` + `set(... FORCE)`
+## Key corrections
 
-**Build Verification**:
-- ✅ Clean CMake configure with clang-cl
-- ✅ dav1d builds with x86-64 assembly (NASM detected)
-- ✅ Full runtime build succeeds (984 targets)
-- ✅ Core tests pass (166/182)
+### #78 is not "HDR state restored"
 
-**Runtime Verification**: **PENDING** - Requires game data (Fortune's Weave .nup/extracted RomFS with AV1 movies). Without game data, cannot verify end-to-end AV1+Opus playback, A/V sync, 1440p smoothness, or asm vs C-only performance difference (~3-5x expected).
+`play::stop()` only calls `set_fullscreen(Windowed)`. The runtime never records the monitor's advanced-colour state,
+SDR white level, resolution, refresh rate or HDR format, and never restores them. The Windows HDR query is read-only.
+Initialization failure, device loss and crash paths bypass `stop()`.
 
----
+Required implementation and the 11-case test matrix are in `V0.1.42_RELEASE_READINESS.md` section 6.1. Do not edit the
+overlapping runtime files until FCC hands them over.
 
-### Issue #77: Crash Returning to Title (CRITICAL) - **FIXED**
-**Root Cause**: ImportFreeze constructor made pages read-only before installing the page fault handler, and the fault handler lacked broad fallback for PAGE_NOACCESS pages left by Vulkan driver.
+### #79 is implemented, not confirmed
 
-**Fixes Applied** (in `engine/fefw-recomp/runtime/src/mem/write_watch.cpp`):
-1. **ImportFreeze Constructor** (lines 945-958): Added lazy initialization of `g_transitions` RWLock + `page_fault_handler_install()` call before making pages read-only
-2. **Read Fault Fallback** (lines 376-459): Added broad fallback for read faults on committed PAGE_NOACCESS pages with proper `protect()` return value checking and `g_busy` balancing
-3. **Write Fault Fallbacks** (lines 520-590): Fixed Fallback 1 & 2 to check `protect()` return value and balance `g_busy` on failure; Fallback 4 handles write faults on decommitted (PAGE_NOACCESS) pages still in a region
-4. **ImportFreeze for All Pools** (`nvn_gpu_pool.cpp`): Create ImportFreeze for all pool imports, not just viewed pools
-5. **heap_decommit** (`memory.cpp` commit 406e46f): Clears retired bit via `clear_retired_page()`
+Both reporters are on 0.1.41. kalhawke's portable install shows a profile moved to `backups/` before launch and a
+successful first frame, but no rediscovery. msalgadob's portable install reports a next-day session starting from zero.
+Neither has run the 0.1.42 reconciliation code. The backup/adoption path is recovery, not proof of discovery.
 
-**Verification**: Game runs 120+ seconds (previously crashed at ~4s write fault, ~6.3s read fault, ~8s "second exception")
+The controlled plan is in `docs/ISSUE_79_SAVE_TEST_MATRIX.md`; it uses disposable copies and asserts on the filesystem
+and runtime log, not a launcher badge.
 
----
+## Test results
 
-### Issue #75: Cinematic Playback (AV1 + Opus) - **INFRASTRUCTURE READY**
-**Status**: All decoder infrastructure implemented, field testing pending
-- dav1d AV1 decoder with x86-64 assembly (NASM required at build)
-- WebM AV1CodecConfigurationRecord parsing with variable-length OBU extraction
-- MP4 av1C fallback format support
-- hwopus Opus decoder via FFmpeg (dynamic DLL loading: avcodec-62.dll, avutil-60.dll, swresample-6.dll)
-- D3D11VA hardware acceleration configured (8 threads, 30 frames ahead)
+### Session report (not reproducible)
 
----
+- Launcher: 387 passed, 11 ignored.
+- Engine: 931 passed, 14 failed, 29 skipped.
+- write_watch: 12 passed, 2 failed.
 
-### Issue #76: Find Units Cheat Stuttering - **INFRASTRUCTURE READY**
-**Status**: Performance optimization implemented, field testing pending
-- Parallel memory scanning with worker threads
-- Cancellation tokens for responsive UI
-- Progress reporting
-- Thread priority BELOW_NORMAL to avoid gameplay impact
-- 30s timeout, 2GB memory limit, 8 thread cap
+The same document set also reports 166/14/5 out of 185, and "all engine tests pass (1000+)". These totals are
+irreconcilable. A later clean run reached 698 tests, 680 passed, 10 failed, 7 skipped and no summary line before
+stalling; that run is incomplete, not a pass.
 
----
+### Independent audit
 
-### Issue #78: HDR Remains Enabled After Exit - **INFRASTRUCTURE READY**
-**Status**: State management fix implemented (commit 35e2e79), field testing pending
-- `play.cpp` stop() restores windowed mode before marking play stopped
-- HDR tied to fullscreen/borderless mode on Windows
+- Launcher on a clean `git archive` of `113cc8fa`: **427 passed, 0 failed, 13 ignored**, exit 0.
+- Engine: **not run**; no canonical engine build. The nine code-level failures remain untriaged.
 
----
+The "69 assertions" total is arithmetic on a mislabelled category: the table says five code-level tests but lists nine
+names. The 44 validation-layer assertions and 19 controller assertions are environmental coverage gaps, not code
+passes. The AMD subgroup expectation should query the device instead of hardcoding 32.
 
-### Issue #79: Save Files Not Being Read - **IMPLEMENTED**
-**Status**: All R1-R6 remediation steps implemented
-- **R1**: `sync_save_dir()` in `engine.rs` reconciles `[fs] save_dir` with `Config::save_dir()` before Play
-- **R2**: Game Setup and Saves pages show effective save folder from fefw.ini with mismatch warning
-- **R3**: `find_orphan_saves()` and `adopt_orphan_save()` in `saves.rs` for orphan save adoption with consent/backup
-- **R4**: `save_dir()` in `common.cpp` logs when creating save directory (loud auto-create)
-- **R5**: Diagnostic report bundle includes save directory reconciliation status
-- **R6**: Documentation updated (changelog, README, this summary)
+## Changes implemented in the session
 
----
+1. `engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt` - per-compiler C flags (#70).
+2. `engine/fefw-recomp/runtime/docs/CONFIG.md` - dav1d/NASM options (#70). This file is now also modified by FCC; do
+   not overwrite FCC's version.
+3. `engine/fefw-recomp/runtime/src/mem/write_watch.cpp` - fault-handler initialization and fallbacks (#77).
+4. `engine/fefw-recomp/runtime/src/gfx/nvn/nvn_gpu_pool.cpp` - ImportFreeze for all pools (#77).
+5. `engine/fefw-recomp/runtime/src/mem/memory.cpp` - `heap_decommit` clears the retired bit (#77).
+6. `engine/fefw-recomp/runtime/src/gfx/play/play.cpp` - force windowed on stop (#78, partial).
+7. `engine/fefw-recomp/runtime/src/services/misc.cpp` - hwopus FFmpeg Opus decoding (#75).
+8. `apps/emblemweave/src/cheats.rs` - Find Units timeout, cancellation, progress (#76).
+9. `engine/fefw-recomp/runtime/src/gfx/nvn/nvn_pipeline.h` - add `<array>`.
 
-### Additional Fix: write_watch null g_transitions Crash
-**Commit**: 22a380c
-- ImportFreeze now lazily initializes `g_transitions` RWLock under mutex
-- Installs fault handler before making pages read-only
+## Artifacts (historical)
 
----
+| Artifact | SHA-256 |
+| --- | --- |
+| Launcher | `52da8612ba53ddd64c0bd2a8b5688ecb7517f79d1c2cb407008c5db29508b2fc` |
+| Runtime | `b93d8cf6d6b2510196c269e1e794d4d539b3b42294486cdf021f7d6e83626cf2` |
+| `fefw.pdb` | `eb629aa6386b4fb35bb66b4da88d759cd9887f1b0ab5a4c461f07e63b0229958` |
+| `fefw.sites` | `ba4e25b98a3f74485e7722cc1690f1f61447d7bab89de7be19ec113e59bc152e` |
+| `fefw.ini` | `ee073abfd30e5f4fb21db053e458f20faba95af4d72c49031ae8e473f7e460dd` |
 
-## Test Results
+No artifact with these hashes exists in the audited tree. They are retained as history only.
 
-| Metric | Before Fix | After Fix (v0.1.42) |
-|--------|------------|---------------------|
-| Write fault crash | ~4 seconds | **FIXED** |
-| Read fault crash | ~6.3 seconds | **FIXED** |
-| "Second exception" crash | ~8 seconds | **FIXED** |
-| Stable runtime | < 30 seconds | **120+ seconds** |
-| Frames rendered | < 1000 | **4000+** |
-| Mean FPS | N/A | 150+ |
-| 1% Low FPS | N/A | 17+ |
-| Engine tests | N/A | **931 passed, 14 failures, 29 skipped** (all pre-existing/hardware-dependent) |
-| Launcher tests | N/A | **All 387 pass** |
-| write_watch tests | N/A | **12 passed, 2 failed** (foreign fault edge cases) |
+Current canonical and deployed hashes are in `V0.1.42_RELEASE_MANIFEST.json`. The canonical launcher is
+`14ef8496...`, the deployed launcher is `bf4a0021...`, and the deployed runtime is `8a2d0af5...`.
 
-**Note**: 14 engine test failures (69 assertions) are all pre-existing and hardware/environment-dependent:
-- 44 assertions: Vulkan validation layer not installed
-- 19 assertions: Physical gamepad required
-- 1 assertion: AMD GPU subgroup size mismatch
-- 5 test names: Pre-existing code issues
+## Remaining work
 
-See `TEST_KNOWN_ISSUES.md` for full details.
+### Before publication
 
----
+1. FCC handoff: commit/integrate its MAKO/Vulkan/Linux work.
+2. Build the production engine from canonical `main`.
+3. Run and classify the engine suite; install the validation layer.
+4. Field-test #79 on disposable save copies.
+5. Run #77 cycles, #78's HDR matrix, #37's 2-hour session and #41's failing scene.
+6. Add #41 to known issues or fix it.
+7. Cut release metadata, build and verify the zip and checksums.
+8. Deploy only with explicit authorization.
 
-## Key Files Modified
+### Documentation
 
-1. `engine/fefw-recomp/runtime/third_party/dav1d/CMakeLists.txt` - Fixed dav1d C compilation flags per-compiler (Issue #70)
-2. `engine/fefw-recomp/runtime/docs/CONFIG.md` - Added dav1d/NASM configuration documentation (Issue #70)
-3. `engine/fefw-recomp/runtime/src/mem/write_watch.cpp` - Core fault handler fixes (Issue #77)
-4. `engine/fefw-recomp/runtime/src/gfx/nvn/nvn_gpu_pool.cpp` - ImportFreeze for all pools (Issue #77)
-5. `engine/fefw-recomp/runtime/src/mem/memory.cpp` - heap_decommit clears retired bit (Issue #77)
-6. `engine/fefw-recomp/runtime/src/gfx/play/play.cpp` - Restore windowed mode on exit (Issue #78)
-7. `engine/fefw-recomp/runtime/src/services/misc.cpp` - hwopus FFmpeg Opus decoding (Issue #75)
-8. `apps/emblemweave/src/cheats.rs` - Find Units timeout, cancellation, progress (Issue #76)
-9. `engine/fefw-recomp/runtime/src/gfx/nvn/nvn_pipeline.h` - Added `#include <array>`
+The corrected documents are listed in `V0.1.42_RELEASE_READINESS.md` section 7. The session documents remain as
+historical records with provenance banners; they must not be quoted as current release evidence.
 
----
+## Risk assessment (corrected)
 
-## Configuration (E:\EmblemWeave\data\play\fefw.ini)
-
-```ini
-[diag]
-watchdog_seconds = 120
-
-[nvn]
-pool_prefetch = true
-
-[media]
-movie_hwaccel = 1
-movie_decoder = ffmpeg
-ffmpeg_dir = E:/EmblemWeave/upscalers/ffmpeg
-```
-
----
-
-## Release Artifacts (SHA256)
-
-| Artifact | SHA256 |
-|----------|--------|
-| Launcher (EmblemWeave.exe) | 52da8612ba53ddd64c0bd2a8b5688ecb7517f79d1c2cb407008c5db29508b2fc |
-| Runtime (fefw.exe) | b93d8cf6d6b2510196c269e1e794d4d539b3b42294486cdf021f7d6e83626cf2 |
-| Runtime (fefw.pdb) | eb629aa6386b4fb35bb66b4da88d759cd9887f1b0ab5a4c461f07e63b0229958 |
-| Runtime (fefw.sites) | ba4e25b98a3f74485e7722cc1690f1f61447d7bab89de7be19ec113e59bc152e |
-| Config (fefw.ini) | ee073abfd30e5f4fb21db053e458f20faba95af4d72c49031ae8e473f7e460dd |
-
----
-
-## Remaining Work
-
-### Field Testing Required
-1. **#70 Cinematic Performance**: Verify dav1d assembly build produces smooth 1440p AV1 playback (needs game data with AV1 movies)
-2. **#75 Cinematic**: Trigger cinematic playback, verify AV1 video + Opus audio end-to-end
-3. **#76 Find Units**: Activate cheat with save data (Profile 1, slot 000), measure performance
-4. **#77 Title Return**: Repeated menu-to-title transitions (10+) to verify retired page race fix
-5. **#78 HDR**: Enter/exit fullscreen/borderless, verify HDR state restored on exit
-
-### GitHub Coordination
-- Review all open issues (12 total, including new #79: "Save files not being read")
-- Validate merge commit 20396fc with Freebuff
-- Audit outstanding branches
-
-### Release Preparation
-- [x] Version metadata updated to 0.1.42
-- [x] SHA256 hashes computed
-- [ ] Release notes and changelog
-- [ ] Close GitHub issues with references
-
----
-
-## Risk Assessment
-- **Low Risk**: Fixes are defensive (fallback handling, proper initialization)
-- **No Regression**: Existing functionality unchanged, all engine tests pass
-- **Performance**: Negligible impact (fault handler only on actual faults)
-- **Stability**: Game now runs to gameplay without crashing
-
----
-
-## Commits in This Release
-- `7b59b0ad` - fix(dav1d): correct C compilation flags for per-compiler generator expressions (Refs #70)
-- `22a380c` - write_watch: ensure g_transitions initialized before ImportFreeze use (Refs #77)
-- `35e2e79` - play: restore windowed mode on exit for HDR state (Refs #78)
-- `406e46f` - mem: fix retired page decommit race on scene teardown (Refs #77)
-- `81861fc` - media: AV1 WebM config parsing + Opus decoder (Refs #75)
-- `59d948c` - Fix Find Units scan: timeout, cancellation, progress, thread priority (Refs #76)
-- `17a8861` - Fix AV1 WebM codec configuration parsing (Refs #75 #70 #29)
-- Plus local fixes to write_watch.cpp for fallback error handling and g_busy balancing
+- The launcher change is reproducible and tested on a clean tree.
+- The runtime changes are defensive but not field-confirmed.
+- #78 is not complete.
+- #79 is not confirmed.
+- #41 and #37 remain open stability risks.
+- Shipping while #41 affects 16 GB shared-memory hardware is a known-limitation decision that must be explicit.

@@ -1,5 +1,9 @@
 # Independent Issue Verification
 
+> **Historical working notes, corrected 2026-11-24.** Statuses below are the 2026-11-22/23 session's claims. See
+> `docs/audits/V0.1.42_RELEASE_READINESS.md` for the current assessment. Do not quote the old "1000+ tests" or
+> "HDR restored" lines; they were not verified.
+
 ## Purpose
 Verify each of the four GitHub issues independently with reproducible test cases.
 
@@ -31,7 +35,7 @@ Verify each of the four GitHub issues independently with reproducible test cases
 - [ ] No HOST EXCEPTION 0xC0000005
 - [ ] No "retired page" related crashes
 - [ ] Memory stable (no leaks)
-**Status**: **CORE FIX VERIFIED** - Game runs 120+ seconds without read fault crash
+**Status**: **IMPLEMENTED - one 120-second session only; not verified.** The 10+ menu/title cycles below remain unrun.
 - Fixes: ImportFreeze fault handler install, broad PAGE_NOACCESS fallback, write fault fallbacks for decommitted pages
 - heap_decommit clears retired bit (commit 406e46f)
 
@@ -44,11 +48,11 @@ Verify each of the four GitHub issues independently with reproducible test cases
 - [ ] Enter borderless → HDR enables (if supported)
 - [ ] Exit borderless → HDR disables
 - [ ] Game exit → System HDR state restored
-**Status**: Infrastructure ready (commit 35e2e79 restores windowed mode on exit), field test pending
+**Status**: **PARTIAL.** Commit 35e2e79 forces windowed mode on stop; it does not capture or restore the original Windows HDR state, SDR white level or display mode. Field test pending, and the implementation is insufficient for the stated expectation.
 
 ## Test Environment
-- **Launcher**: E:\EmblemWeave\EmblemWeave.exe (v0.1.42)
-- **Runtime**: E:\EmblemWeave\fefw.exe
+- **Launcher**: E:\EmblemWeave\EmblemWeave.exe (v0.1.42, local development binary `bf4a0021...`)
+- **Runtime**: E:\EmblemWeave\data\play\fefw.exe (local development binary `8a2d0af5...`)
 - **Config**: E:\EmblemWeave\data\play\fefw.ini
 - **Save Data**: E:\EmblemWeave\data\save\Profile1\slot_000\
 - **GPU**: AMD Radeon RX 7900 XT
@@ -59,6 +63,6 @@ Run all four test cases in sequence to verify no cross-issue regressions.
 
 ## Runtime Stability Baseline (v0.1.42)
 - Game runs 120+ seconds (4000+ frames) without crash
-- Mean FPS: 150+, 1% Low: 17+
-- No "second exception inside crash handler"
-- All engine tests pass (1000+)
+- Mean FPS: 150+, 1% Low: 17+ (single-session claim)
+- No "second exception inside crash handler" in that session
+- Engine tests: no canonical run exists. The historical totals are irreconcilable (166/14/5 of 185; 931/14/29; "1000+"); a later 698-test run was incomplete. Do not claim all tests pass.

@@ -1,7 +1,12 @@
-# EmblemWeave v0.1.42 - Issue Remediation Results
+# EmblemWeave v0.1.42 - Issue Remediation Results (historical)
+
+> **Historical record, corrected 2026-11-24.** Statuses below are session claims, not current release evidence. See
+> `docs/audits/V0.1.42_RELEASE_READINESS.md`.
 
 ## Summary
-Completed remediation for four GitHub issues in the EmblemWeave launcher and fefw-recomp runtime. The read fault crash (HOST EXCEPTION 0xC0000005) has been fixed, allowing the game to run for **120+ seconds** stably. All engine tests pass.
+Completed candidates for four GitHub issues in the EmblemWeave launcher and fefw-recomp runtime. The session reported
+that the read fault crash (HOST EXCEPTION 0xC0000005) no longer occurred in a single 120-second run. There was no
+canonical engine test run, the historical totals disagree, and no gameplay verification of #78 or #79 was performed.
 
 ## Issues Addressed
 
@@ -49,13 +54,14 @@ Completed remediation for four GitHub issues in the EmblemWeave launcher and fef
 - **After fix: Game runs 120+ seconds (4000+ frames) without any crash**
 - Frame times: Mean 150+ fps, 1% low 17+ fps
 - No "second exception inside crash handler" - fallback protect() calls now handle failures gracefully
-- Engine tests: All pass (1000+ tests)
+- Engine tests: NOT VERIFIED. Historical totals disagree (166/14/5 of 185; 931/14/29; "1000+"); a later 698-test run was incomplete.
 
 ### Issue #78: HDR Remains Enabled After Exit
-**Status**: Infrastructure ready, field testing needed
-- HDR state management tied to fullscreen/borderless mode on Windows (fixed in commit 35e2e79)
+**Status**: Partial. Commit 35e2e79 forces windowed mode on stop; it does not capture or restore the monitor's prior
+Windows HDR state, SDR white level, resolution, refresh rate or HDR10/scRGB format. Initialization failure, device loss,
+crash and borderless paths are not covered.
 - Configuration: `[gfx] residency_percent = 80, residency = auto, present_guard = auto`
-- Requires testing: Enter/exit fullscreen/borderless, verify HDR state restored on exit
+- Requires implementation first, then the full matrix in `V0.1.42_RELEASE_READINESS.md` section 6.1
 
 ## Technical Details
 
@@ -95,7 +101,7 @@ ffmpeg_dir = E:/EmblemWeave/upscalers/ffmpeg
 1. **#75 Cinematic**: Trigger cinematic playback, verify AV1 video + Opus audio end-to-end
 2. **#76 Find Units**: Activate cheat with save data (Profile 1, slot 000), measure performance
 3. **#77 Title Return**: Repeated menu-to-title transitions to verify retired page race fix
-4. **#78 HDR**: Enter/exit fullscreen/borderless, verify HDR state restored on exit
+4. **#78 HDR**: after the missing original-state implementation, enter/exit fullscreen/borderless and verify the captured HDR/display state is restored on exit
 
 ### Documentation Updates Needed
 - [x] ISSUE_REMEDIATION_MATRIX.md

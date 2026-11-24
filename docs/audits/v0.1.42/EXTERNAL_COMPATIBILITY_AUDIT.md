@@ -8,7 +8,7 @@
 ## GitHub Issues
 - **Repository**: https://github.com/XiONDiGiTaL/EmblemWeave/issues
 - **Open Issues (12)**: #79, #78, #77, #76, #75, #70, #59, #41, #37, #29, #26, #7
-- **Fixed in v0.1.42**: #75 (infrastructure), #76 (infrastructure), #77 (FIXED), #78 (infrastructure)
+- **Work in v0.1.42**: #75 (infrastructure), #76 (infrastructure), #77 (implemented; one session, cycles pending), #78 (partial: forces windowed mode only), #79 (implemented, unverified)
 - **New Issue #79**: Save files not being read (reported Nov 22, 2026) - needs investigation
 
 ## Dependencies

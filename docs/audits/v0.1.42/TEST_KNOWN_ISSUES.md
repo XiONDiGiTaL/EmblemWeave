@@ -1,7 +1,12 @@
-# EmblemWeave v0.1.42 - Known Test Issues
+# EmblemWeave v0.1.42 - Known Test Issues (historical)
+
+> **Historical record, corrected 2026-11-24.** These are the session's failure notes for a subset suite. "Pre-existing"
+> was not proven by a baseline or bisect. The assertion totals below are not a verified full-engine count. See
+> `docs/audits/V0.1.42_RELEASE_READINESS.md` section 5.
 
 **Date**: 2026-11-23  
-**Context**: These test failures are **pre-existing, hardware-dependent, or environmental** - none introduced by recent changes. All reproduce consistently across runs.
+**Context**: These test failures were reported as hardware-dependent or environmental by the session. Code-level faults
+remain unclassified until a clean baseline and bisect exist.
 
 ---
 
@@ -12,8 +17,8 @@
 | Vulkan Validation Layer Missing | 44 | `extras_output` (7), `gfx_device` (1), `gfx_nvn_mask_clear` (3), `gfx_nvn_present_pass` (5), `gfx_nvn_subgroup` (2), `gfx_nvn_texgpu` (22) |
 | Physical Hardware Required | 19 | `play_pad_live` (19) - requires DualSense/Xbox controller |
 | GPU-Specific Behavior | 1 | `gfx_nvn_subgroup` (1) - AMD subgroup size 64 vs expected 32 |
-| Pre-existing Code Issues | 5 | `kernel_sync`, `kernel_threads`, `soak`, `svc_fs_romfs`, `svc_info`, `svc_memory`, `tt_live`, `write_watch` (2), `launcher_game_info` (2) |
-| **Total** | **69** | **14 unique test names, 69 assertions** |
+| Pre-existing Code Issues | 9 test names | `kernel_sync`, `kernel_threads`, `soak`, `svc_fs_romfs`, `svc_info`, `svc_memory`, `tt_live`, `write_watch` (2), `launcher_game_info` (2) |
+| **Total** | **not verified** | **14 unique test names; the 69-assertion total was arithmetic on a mislabelled category** |
 
 ---
 
@@ -93,7 +98,7 @@
 | Launcher tests | 22 | 2 | 0 | 24 |
 | **TOTAL** | **166** | **14** | **5** | **185** |
 
-**Pass Rate**: 91% (166/182 runnable tests)
+**Pass Rate**: 91% of this subset suite as reported. This is not a full-engine result and must not be quoted as one.
 
 ---
 

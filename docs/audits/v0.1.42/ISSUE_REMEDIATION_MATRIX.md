@@ -1,4 +1,7 @@
-# Issue Remediation Matrix - EmblemWeave v0.1.42
+# Issue Remediation Matrix - EmblemWeave v0.1.42 (historical)
+
+> **Historical record, corrected 2026-11-24.** "Verified" below meant one 120-second session, not the required
+> menu/title cycles. See `docs/audits/V0.1.42_RELEASE_READINESS.md` for the current status.
 
 ## Overview
 Tracking matrix for four GitHub issues remediation.
@@ -7,7 +10,7 @@ Tracking matrix for four GitHub issues remediation.
 |-------|-------|----------|--------|------------|--------------|--------------|
 | #75 | Cinematic Playback | High | Infrastructure Ready | N/A - Feature Implementation | media/*, vcodec/* | Field Test Required |
 | #76 | Find Units Cheat Stuttering | Medium | Infrastructure Ready | N/A - Performance Optimization | cheat/*, memory scanner | Field Test Required |
-| #77 | Crash Returning to Title | Critical | **FIXED** | ImportFreeze missing fault handler install + broad fallback missing | write_watch.cpp, nvn_gpu_pool.cpp | **VERIFIED** - 90s+ stable |
+| #77 | Crash Returning to Title | Critical | **IMPLEMENTED - UNVERIFIED** | ImportFreeze missing fault handler install + broad fallback missing | write_watch.cpp, nvn_gpu_pool.cpp | one 120s session; 10+ cycles pending |
 | #78 | HDR Remains Enabled | Medium | Infrastructure Ready | N/A - State Management | gfx/*, platform/* | Field Test Required |
 
 ## Issue #77 - Detailed Fix Analysis
@@ -73,7 +76,7 @@ freeze.emplace(reinterpret_cast<const void*>(start), size);
 | Frames rendered | < 1000 | **4000+** |
 | Mean FPS | N/A | 150+ |
 | 1% Low FPS | N/A | 17+ |
-| Engine tests | N/A | **All pass (1000+)** |
+| Engine tests | N/A | **Not verified** (historical totals disagree; no canonical run) |
 
 ## Cross-Issue Impact Assessment
 
@@ -91,7 +94,7 @@ freeze.emplace(reinterpret_cast<const void*>(start), size);
 - [x] Unit: Broad fallback catches committed PAGE_NOACCESS pages
 - [x] Integration: Game runs **120+ seconds** without read fault crash
 - [x] Integration: No "second exception inside crash handler" - protect() failures handled gracefully
-- [x] Unit: All engine tests pass (1000+)
+- [ ] Unit: engine tests pass (NOT VERIFIED; historical totals disagree; no canonical run)
 - [ ] Field: 10+ menu-to-title transitions (Issue #77)
 - [ ] Field: Cinematic playback AV1+Opus (Issue #75)
 - [ ] Field: Find Units cheat performance (Issue #76)

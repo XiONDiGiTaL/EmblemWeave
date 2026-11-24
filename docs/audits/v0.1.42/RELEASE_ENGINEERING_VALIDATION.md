@@ -1,4 +1,8 @@
-# Release Engineering Validation - v0.1.42
+# Release Engineering Validation - v0.1.42 (historical)
+
+> **Historical record, corrected 2026-11-24.** The paths and hashes below are from the 2026-11-22 session and do not
+> describe the current tree or the installed build. They are not release evidence. See
+> `docs/audits/V0.1.42_RELEASE_MANIFEST.json` for current artifact classes.
 
 ## Version Metadata
 - **Version**: 0.1.42
@@ -11,7 +15,7 @@
 | Artifact | Path | SHA256 |
 |----------|------|--------|
 | Launcher | E:\EmblemWeave\EmblemWeave.exe | 52da8612ba53ddd64c0bd2a8b5688ecb7517f79d1c2cb407008c5db29508b2fc |
-| Runtime | E:\EmblemWeave\fefw.exe | f4af373fd8f1f597288607482d31267fa5353f9b917a0f029bbf7ab25fe7450e |
+| Runtime (historical claim; actual path is `data\play\fefw.exe`) | E:\EmblemWeave\fefw.exe | f4af373fd8f1f597288607482d31267fa5353f9b917a0f029bbf7ab25fe7450e |
 | Config | E:\EmblemWeave\data\play\fefw.ini | ee073abfd30e5f4fb21db053e458f20faba95af4d72c49031ae8e473f7e460dd |
 | Overlay | work/romfs-overlay (28.9 GB) | TBD (large directory) |
 
@@ -56,7 +60,7 @@
 - **Pool Imports**: Background prefetch working
 - **Page Faults**: ~20k initial, ~130k during heavy scene
 - **Memory**: 12 GB heap, 16 GB limit
-- **Engine Tests**: All pass (1000+ tests)
+- **Engine Tests**: NOT VERIFIED. The historical totals disagree (166/14/5 of 185; 931/14/29; "1000+"); a later 698-test run was incomplete.
 
 ## Known Issues
 1. RomFS file count mismatch: 252695 vs 252686 expected (9 extra files)
@@ -72,7 +76,7 @@
 
 ## Sign-off Checklist
 - [x] Core runtime crash fixed (Issue #77)
-- [x] Engine tests all pass (1000+ tests)
+- [ ] Engine tests pass (NOT VERIFIED; historical totals disagree and no canonical run exists)
 - [x] Version metadata updated to 0.1.42
 - [x] SHA256 hashes computed for launcher, runtime, config
 - [ ] All four issues verified independently (field tests pending)
