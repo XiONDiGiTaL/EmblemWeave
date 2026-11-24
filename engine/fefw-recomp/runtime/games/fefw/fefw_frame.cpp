@@ -21,6 +21,13 @@
 // entry hook) for 3 more letters each frame; off the 30 Hz ticks the entry hook answers "not finished" (0) without running it, as
 // Fortune's Eden v1.6.8.6 did. Showing the whole line (a button press asks for more than 3) is left alone.
 //
+// Cloth gravity and wind ([fefw] cloth_gravity): each cloth point is moved by (velocity kept + gravity + wind) and then turned a share k
+// of the way back to its parent bone's direction. That turn acts on the position, so where a point settles is about gravity x (1 - k) / k.
+// With k -> 1 - (1 - k)^s (about k x s) and gravity x s^2 (`accel`, the first rule), a point settles s times as far from its rest pose as
+// at 30 fps: half the sag at 60, a quarter at 120. Hair whose rest pose points up (a high ponytail) then stands up. `match` scales
+// gravity and wind by F = Q (1 - Q^s) / ((1 - Q) Q^s), Q = 1 - k, which keeps the settled position of the 30 fps step for every k (F is
+// about s for a weak turn and tends to s^2 only as k -> 0, where nothing holds the point and gravity is a plain acceleration).
+//
 // [fefw] frame_fixes = 1 (default; the menu changes it live) and [fefw] frame_fixes_skip = a comma list of groups to leave alone: dt, shader,
 // physics, cloth, quake, anim, map, ui, text. At 30 fps every hook leaves the game's values as they are.
 #include "fefw_game.h"
@@ -54,6 +61,7 @@ enum class Rule : uint8_t {
     Pow,     // q^s: a factor per frame
     Ease,    // 1 - (1 - k)^s: an ease / lerp weight per frame
     Div,     // / s: frames to hold
+    Force,   // the cloth step's gravity: x s^2 ([fefw] cloth_gravity = accel) or the factor that keeps the settled position (match)
 };
 
 struct MovkSite {
@@ -75,7 +83,7 @@ constexpr MovkSite kMovk[] = {
     {0x0ab248c, 8, 0x3d08ab85, Rule::Mul, kShader},     // shader time per frame
     {0x0da1f48, 9, 0x3d088889, Rule::Mul, kPhysics},    // PhysX async step 1/30
     {0x14cfdbc, 8, 0x3d088889, Rule::Mul, kPhysics},    // PhysX sync step
-    {0x0a687e4, 8, 0xbc888889, Rule::Mul2, kCloth},     // cloth gravity per step
+    {0x0a687e4, 8, 0xbc888889, Rule::Force, kCloth},    // cloth gravity per step
     {0x112bfc8, 9, 0x3f733333, Rule::Pow, kAnim},       // CustomModifier_Auto x0.95 per frame
     {0x112c010, 9, 0x3f733333, Rule::Pow, kAnim},
     {0x11e62c0, 9, 0x3f4ccccd, Rule::Div, kAnim},       // CharacterBuilder hold frames
@@ -111,6 +119,8 @@ struct State {
     std::atomic<float> s{1.0f};                 // the frame's share of a 1/30 s step
     std::atomic<float> s_count{1.0f};           // native / target, for frame counts
     std::atomic<bool> tick{true};               // a 30 Hz step falls in this frame
+    std::atomic<bool> cloth_match{true};        // [fefw] cloth_gravity = match
+    std::atomic<bool> cloth_logged{false};
     float tick_acc = 0.0f;                      // main thread (frame_step)
     std::atomic<uint64_t> applied[kGroups] = {};
     std::atomic<uint64_t> quake_held{0};
@@ -160,6 +170,28 @@ float pow_cached(float q, float s) {
 }
 inline float ease(float k, float s) { return 1.0f - pow_cached(std::clamp(1.0f - k, 0.0f, 1.0f), s); }
 
+// What the cloth step's gravity and wind are multiplied by for a point turned back by k each step (see the top of the file). The gravity
+// site sets it for the point; the wind site, later in the same pass of the loop, uses it.
+thread_local float t_cloth_force = 1.0f;
+float cloth_force(::Ctx* c, float s) {
+    State& st_ = st();
+    float f = s * s;
+    const float k = c->v[5].f[0];      // s5: the point's turn back to its parent's direction (its own or the module's)
+    if (st_.cloth_match.load(std::memory_order_relaxed) && k > 1e-4f && k < 1.0f) {
+        const float q = 1.0f - k, qs = pow_cached(q, s);
+        if (qs > 0.0f) f = std::clamp(q * (1.0f - qs) / (k * qs), s * s, 1.0f);
+    }
+    if (!st_.cloth_logged.load(std::memory_order_relaxed) && !st_.cloth_logged.exchange(true)) {
+        float step = 0.0f;             // sp + 0x90: min(the step's argument, 1), which the whole move is multiplied by
+        if (c->x[31] >= 0x10000) std::memcpy(&step, reinterpret_cast<const void*>(c->x[31] + 0x90), 4);
+        NXLOG_I(kTag, "frame-rate fixes: cloth gravity ([fefw] cloth_gravity = %s): first point: s %.3f, turn back k %.4f, the step's own "
+                      "factor %.3f, gravity and wind x %.4f (accel would be %.4f)",
+                st_.cloth_match.load() ? "match" : "accel", s, k, step, f, s * s);
+    }
+    t_cloth_force = f;
+    return f;
+}
+
 void hook_movk(::Ctx* c, uint64_t, void* user) {
     const MovkSite& m = *static_cast<const MovkSite*>(user);
     const float s = scale(m.group);
@@ -172,6 +204,7 @@ void hook_movk(::Ctx* c, uint64_t, void* user) {
         case Rule::Pow: r = std::pow(v, s); break;
         case Rule::Ease: r = ease(v, s); break;
         case Rule::Div: r = v / s; break;
+        case Rule::Force: r = v * cloth_force(c, s); break;
     }
     c->x[m.reg] = f_bits(r);      // as the movk left it: the upper half zero
     count(m.group);
@@ -203,11 +236,12 @@ void hook_cloth_damp(::Ctx* c, uint64_t, void*) {
     c->v[2].f[0] = pow_cached(q, s);
     count(kCloth);
 }
-// the wind force added this step (v0, four lanes): an acceleration, x s^2
+// the wind force added this step (v0, four lanes): scaled like the gravity of the same point
 void hook_cloth_wind(::Ctx* c, uint64_t, void*) {
     const float s = scale(kCloth);
     if (full(s)) return;
-    for (float& f : c->v[0].f) f *= s * s;
+    const float k = st().cloth_match.load(std::memory_order_relaxed) ? t_cloth_force : s * s;
+    for (float& f : c->v[0].f) f *= k;
     count(kCloth);
 }
 // the pull towards the parent bone's direction: s2 = 1 - k (s5 = k) -> s2 = (1 - k)^s, s5 = 1 - that
@@ -375,6 +409,11 @@ void frame_install(uint64_t base) {
     s.base = base;
     s.on.store(config_get_bool("fefw", "frame_fixes", true));
     s.skip = parse_skip(config_get_str("fefw", "frame_fixes_skip", ""));
+    {
+        const std::string g = config_get_str("fefw", "cloth_gravity", "match");
+        if (g != "accel" && g != "match") NXLOG_W(kTag, "[fefw] cloth_gravity = %s: not match or accel, match is used", g.c_str());
+        s.cloth_match.store(g != "accel");
+    }
     size_t n = 0, checked = 0, missing = 0;
     if (!services::modapi::site_list_known())
         NXLOG_W(kTag, "frame-rate fixes: no fefw.sites next to the exe, so the frame-fix hook sites cannot be checked against this build");
