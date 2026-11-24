@@ -1,5 +1,17 @@
 # EmblemWeave: Complete Dependency Matrix
 
+> **Historical dependency inventory - not a build or release pass (reviewed 2026-11-24).**
+> The authoritative status is `docs/audits/V0.1.42_RELEASE_READINESS.md`. This matrix is a Phase A/B snapshot; it is not
+> a build, regression or performance validation. No canonical engine build or engine test run exists.
+>
+> **Status corrections:**
+> - Phase B items in section 8 are code-level implementations. Regression tests and performance measurements remain
+>   pending; do not read them as a release pass.
+> - `No toolchain lockfile` and `No structured build protocol` in section 5.1 describe Phase A. Phase B added
+>   `tools.lock`, BuildEvents and `ConcurrencyCalculator`.
+> - `No write-watch tracking` in section 5.4 is superseded by FCC's uncommitted platform split; it is not integrated
+>   into canonical `main`.
+
 Generated from Phase A audit. Every dependency classified into 7 categories.
 
 ---
@@ -281,9 +293,9 @@ Generated from Phase A audit. Every dependency classified into 7 categories.
 
 | Issue | Location | Impact | Recommendation |
 |-------|----------|--------|----------------|
-| No toolchain lockfile | All builds | No reproducibility, no cache invalidation | Implement `tools.lock` with SHA-256 (LongshotLauncher pattern) |
+| No toolchain lockfile (Phase A; superseded in Phase B) | All builds | No reproducibility, no cache invalidation | Implement `tools.lock` with SHA-256 (LongshotLauncher pattern) |
 | .NET SDK required when unbundled | Shader translator | 200+ MB install, version conflicts | Bundle .NET NativeAOT translator (dkb-pc-recomp) |
-| No structured build protocol | `engine.rs` | Fragile log parsing, no progress API | Adopt `MakeGameProtocol` (LongshotLauncher) |
+| No structured build protocol (Phase A; superseded in Phase B) | `engine.rs` | Fragile log parsing, no progress API | Adopt `MakeGameProtocol` (LongshotLauncher) |
 | No compiler memory limit | `build.ps1`, `build_game.cmd` | OOM on low-RAM machines | Add `HOOKSHOT_MEM_LIMIT_GB` equivalent |
 
 ### 5.2 High Priority Issues
@@ -310,7 +322,7 @@ Generated from Phase A audit. Every dependency classified into 7 categories.
 |-------|----------|--------|----------------|
 | uv not used in CI | `.github/workflows/` | Slower Rust builds | Add uv to CI |
 | No `VK_EXT_graphics_pipeline_library` | `runtime/src/gfx/` | Slower pipeline linking | Adopt extension (dkb-pc-recomp) |
-| No write-watch tracking | `runtime/src/gfx/` | Full texture uploads | Implement (dkb-pc-recomp) |
+| Write-watch not integrated in canonical main | `runtime/src/gfx/` | Full texture uploads | FCC's uncommitted platform split has replacements; integrate after handoff |
 
 ---
 
@@ -378,7 +390,7 @@ Generated from Phase A audit. Every dependency classified into 7 categories.
 1. [x] Create `tools.lock` schema with SHA-256 for all toolchain components
 2. [x] Implement structured build protocol in `engine.rs` (replace log parsing)
 3. [x] Add `NX_JOBS` memory-aware calculation to `build_game.cmd` (port from `build.ps1`)
-4. [x] Move `ruzstd` to workspace-only dependency (pending)
+4. [ ] Move `ruzstd` to workspace-only dependency (still pending)
 
 ### Short-term (Week 2-3)
 5. [ ] Investigate .NET NativeAOT for shader translator
@@ -392,23 +404,23 @@ Generated from Phase A audit. Every dependency classified into 7 categories.
 11. [ ] "Free up space" UI implementation
 12. [ ] Hard-link RomFS optimization
 
-### Phase B Completion Status
+### Phase B Implementation Status (code-level; not release validation)
 
-**Completed:**
+**Implemented in the working tree (not independently validated here):**
 - ✅ `tools.lock` manifest with 12 tool specifications (engine/fefw-recomp/tools.lock)
 - ✅ Unified ToolchainManager in Rust (apps/emblemweave/src/toolchain_manager.rs)
 - ✅ Structured build protocol (JSON Lines) via BuildEvents.psm1 and build.ps1
 - ✅ Adaptive memory-aware concurrency (ConcurrencyCalculator in toolchain_manager.rs, Get-AdaptiveJobCount in build.ps1)
 - ✅ sccache configuration preserved and integrated
-- ✅ DEPENDENCY_MATRIX.md reconciled with actual usage
+- ✅ Dependency inventory reconciled with Phase A usage; this is not a build or test verification
 - ✅ nx_env.cmd and build_game.cmd updated for structured events
 - ✅ engine.rs fully integrated with ToolchainManager and event emission
 
-**Pending:**
+**Validation still pending:**
 - [ ] Regression tests (clean/incremental/fresh/partial toolchain scenarios)
 - [ ] Performance measurements (discovery, provisioning, startup, clean/incremental build, memory, cache hit rate)
-- [ ] Documentation (TOOLCHAIN_MANAGEMENT.md, BUILD_PROTOCOL.md, BUILD_CONCURRENCY.md, PHASE_B_VALIDATION.md)
+- [ ] Independent review of the Phase B documentation and implementation
 
 ---
 
-*Generated: 2026-11-20 | Phase A Complete | Phase B In Progress*
+*Generated: 2026-11-20 | Phase A snapshot | Phase B implementation present; validation pending (reviewed 2026-11-24)*

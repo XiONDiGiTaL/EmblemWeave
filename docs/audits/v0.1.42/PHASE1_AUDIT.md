@@ -1,5 +1,11 @@
 # EmblemWeave: Phase 1 - Complete Codebase Audit
 
+> **Historical Phase 1 snapshot - not release evidence (reviewed 2026-11-24).**
+> The authoritative status is `docs/audits/V0.1.42_RELEASE_READINESS.md`. This dependency and pipeline inventory predates
+> Phase B. The "no artifact caching" and "fixed job count" observations describe this snapshot; Phase B code now has
+> `tools.lock`, structured build events and adaptive `ConcurrencyCalculator`, but those are not independently validated
+> here. No canonical engine build or engine test run exists.
+
 ## Project Overview
 
 EmblemWeave is a native PC recompilation launcher for Fire Emblem: Fortune's Weave. It consists of:
@@ -190,12 +196,14 @@ sha2 = "0.10"
 2. **sccache integration** - Already in build.ps1, cache dir configurable
 3. **Unity build not used** - Each .cpp compiled separately
 4. **Precompiled headers not used** - Could help with ImGui/SDL/Vulkan headers
-5. **Fixed job count** - Default 10, overridden by NX_JOBS env
+5. **Fixed job count** - Default 10, overridden by NX_JOBS env (Phase 1 snapshot; Phase B adds adaptive
+   `ConcurrencyCalculator`, not validated in this audit)
 6. **Shader translator** - Heavy .NET build, only needed when not bundled
 
 ### Build Pipeline
 1. **Repeated work** - Python venv created each build, shader translator cloned each CI
-2. **No artifact caching** - Pipeline stages don't track input hashes
+2. **No artifact caching** - Pipeline stages don't track input hashes (Phase 1 snapshot; Phase B adds `tools.lock`
+   and structured events, but this audit did not validate an artifact cache)
 3. **Blocking operations** - Launcher spawns processes synchronously on background threads
 4. **Log file per stage** - Good for debugging, but many small files
 

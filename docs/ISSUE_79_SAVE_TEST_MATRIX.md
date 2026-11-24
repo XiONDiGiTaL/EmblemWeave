@@ -110,6 +110,10 @@ This plan verifies the R1-R8 reconciliation and adoption work on disposable copi
    cannot touch `E:`.
 5. Capture the filesystem tree, the runtime log and the launcher's displayed effective folder after each step.
 6. Restore nothing into the source; the source must remain byte-identical.
+7. The direct-row part of steps 1-3 is automated by `tools/issue79_fixture.py`: it refuses `E:\EmblemWeave`,
+   `%APPDATA%\EmblemWeave` and this repository's `data` folder, copies one fixture per direct row, writes a dedicated
+   ini, hashes the source before and after, and prints the commands. It never launches the game. `--verify <scratch>`
+   re-hashes the source and lists the game's writes in each fixture. Launcher-side rows still require manual UI steps.
 
 ### E.2 Scenario mapping
 
@@ -137,6 +141,17 @@ This plan verifies the R1-R8 reconciliation and adoption work on disposable copi
 For every run retain: the source manifest before/after, the fixture tree, `fefw.log` lines (`save data in '<path>'`,
 `OpenSaveDataFileSystem account/<uid>`, `save data created` and any copy refusal), the launcher's effective-folder line,
 and a screenshot showing the loaded save. A launcher badge or carousel label is not evidence.
+
+Prepare the direct-row fixtures with:
+
+```bash
+python tools/issue79_fixture.py --source <save-copy> --scratch target/validation/issue79/<run> \
+  --engine <fefw.exe> --romfs <romfs> --rows 19,20,16,17,22
+```
+
+Run only the printed commands. Afterwards, `python tools/issue79_fixture.py --verify <scratch>` re-hashes the source and
+lists the game's writes per fixture. A source change is a failure; fixture changes are expected. `--rows all` also prints
+the manual instructions for the launcher-side rows.
 
 ### E.4 Status rules
 

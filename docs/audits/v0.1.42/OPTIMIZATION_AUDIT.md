@@ -1,5 +1,18 @@
 # EmblemWeave: Phase A - Comparative Architecture Research & Dependency Audit
 
+> **Historical Phase A snapshot - not release evidence (reviewed 2026-11-24).**
+> The authoritative status is `docs/audits/V0.1.42_RELEASE_READINESS.md`. This research predates Phase B and FCC's
+> current engine refactor. The "EmblemWeave Current" columns are a 2026-11-20 baseline, not a release claim. No canonical
+> engine build or engine test run exists.
+>
+> **Post-Phase-A corrections:**
+> - `tools.lock`, structured build events and adaptive concurrency were added in Phase B. The "no lockfile" and
+>   "fixed NX_JOBS" findings below describe the Phase A baseline, not current code.
+> - The `write-watch ❌` row predates FCC's active platform split. FCC's uncommitted working tree adds
+>   `platform/win32/write_watch_win32.cpp` and `platform/posix/write_watch_linux.cpp`; this is not integrated into
+>   canonical `main` and is not release evidence.
+> - These recommendations are research, not a build, test or release pass.
+
 ## Overview
 
 This document presents the findings from Phase A of the Comprehensive Architecture, Dependency, Build Lifecycle and Launcher Optimization Initiative. It contains:
@@ -29,7 +42,7 @@ This document presents the findings from Phase A of the Comprehensive Architectu
 | Pattern | Recompia | Hookshot | LongshotLauncher | dkb-pc-recomp | **EmblemWeave Current** |
 |---------|----------|----------|------------------|---------------|------------------------|
 | **Build Driver** | CMake + Ninja | Python `make_game.py` | Python `make_game.py` via protocol | Python `build_game.py` | Rust `engine.rs` (8 stages) |
-| **Parallelism** | CMake `-j` | `HOOKSHOT_JOBS` + memory limit | Per-build `LONGSHOT_JOBS` | Ninja parallel | Fixed `NX_JOBS` (capped 16) |
+| **Parallelism** | CMake `-j` | `HOOKSHOT_JOBS` + memory limit | Per-build `LONGSHOT_JOBS` | Ninja parallel | Fixed `NX_JOBS` (capped 16; Phase A) |
 | **Incremental** | Preserves intermediates | Deletes build artifacts by default | Object/lift stores (`LONGSHOT_OBJ_STORE`) | Object hashing pre-link | sccache only (no object store) |
 | **Protocol** | CMake native | `@@` progress lines | `MakeGameProtocol` (structured) | Custom | Ad-hoc log parsing |
 
@@ -138,7 +151,7 @@ This document presents the findings from Phase A of the Comprehensive Architectu
 |-----------|-------------|------------------|----------|---------------|----------|
 | **Launcher Language** | Rust (eframe) | C# (Tauri?) | Python + GUI | Python + GUI | C++ (ImGui) |
 | **Build Driver** | Rust orchestrates 8 stages | Python protocol | Python script | Python script | CMake |
-| **Toolchain Lockfile** | ❌ | ✅ `tools.lock` | ❌ | ❌ | ❌ (packs) |
+| **Toolchain Lockfile** | ❌ (Phase A) | ✅ `tools.lock` | ❌ | ❌ | ❌ (packs) |
 | **Incremental Build** | sccache only | Object/lift stores | ❌ | Object hashing | Preserves intermediates |
 | **Shader Cache** | Content-addressable (NEW) | 10 GB smart migration | JIT disk | 29K pre + JIT | Catalog |
 | **Pipeline Cache** | Monolithic file | Smart migration | Driver | Keys + GPL | Driver |
@@ -149,8 +162,11 @@ This document presents the findings from Phase A of the Comprehensive Architectu
 | **Multi-Build** | Single `work/` | Track/version folders | Single | Single | Releases + current link |
 | **Cache GC UI** | ❌ | ✅ "Free up space" | ❌ | ❌ | `retcomm cache gc` |
 | **Shader Translator** | .NET (bundled or SDK) | Bundled self-contained | Built from source | .NET NativeAOT | N/A |
-| **Write-Watch** | ❌ | ❌ | ❌ | ✅ `MEM_WRITE_WATCH` | ❌ |
+| **Write-Watch** | ❌ (Phase A) | ❌ | ❌ | ✅ `MEM_WRITE_WATCH` | ❌ |
 | **Hard-Link Assets** | ❌ | ✅ RomFS | ✅ | ❌ | Links to ROMs |
+
+**2026-11-24 correction:** the EmblemWeave write-watch ❌ above is stale. FCC's uncommitted tree replaces
+`mem/write_watch.cpp` with platform implementations; they are not integrated into canonical `main`.
 
 ---
 
@@ -301,7 +317,8 @@ Every dependency is classified into one of 7 categories:
 
 #### High Priority
 
-1. **No toolchain lockfile** - Unlike LongshotLauncher's `tools.lock`, EmblemWeave has no SHA-256 verification of toolchain components
+1. **No toolchain lockfile (Phase A; superseded in Phase B)** - Unlike LongshotLauncher's `tools.lock`, the Phase A
+   baseline had no SHA-256 verification of toolchain components
 2. **`.NET SDK required when translator not bundled`** - Unlike dkb-pc-recomp's NativeAOT or LongshotLauncher's self-contained bundle
 3. **sccache only for C++** - Rust builds don't use sccache (though `.cargo/config.toml` configures it)
 4. **No object/lift stores** - Unlike LongshotLauncher's `LONGSHOT_OBJ_STORE`/`LONGSHOT_LIFT_STORE` for true incremental builds

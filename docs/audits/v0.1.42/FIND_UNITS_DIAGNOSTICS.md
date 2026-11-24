@@ -1,10 +1,16 @@
 # Find Units Cheat Diagnostics
 
+> **Historical working note - not release evidence (reviewed 2026-11-24).**
+> The authoritative status is `docs/audits/V0.1.42_RELEASE_READINESS.md`. #76 is **Implemented - unverified**: parallel
+> scan, cancellation and progress reporting exist, but there is no in-battle measurement. The install-relative paths
+> below are local examples, not release artifacts. The 120-second session cited in this note is one FCC report, not #77's
+> required 10+ menu/title cycles.
+
 ## Overview
 Memory scanning cheat for "Find Units" functionality with performance optimization.
 
 ## Configuration
-- Save data: Profile 1, slot 000 at `E:/EmblemWeave/data/save`
+- Save data: Profile 1, slot 000 at `<install>/data/save` (local example)
 - Thread priority: BELOW_NORMAL for background scanning
 - Parallel workers with cancellation tokens and progress reporting
 
@@ -31,10 +37,12 @@ Memory scanning cheat for "Find Units" functionality with performance optimizati
 - [ ] Test with Profile 1, slot 000 save data
 - [ ] Measure memory usage during scan
 
-## Expected Performance
+## Expected Performance (targets, unverified)
 - Initial scan: < 5 seconds for full memory range
 - Refined scan: < 1 second
 - Zero impact on gameplay FPS (background thread at BELOW_NORMAL)
+
+These are targets, not measured results. The readiness audit records no in-battle measurement for #76.
 
 ## Log Indicators
 - Look for memory scan start/complete messages
@@ -43,11 +51,16 @@ Memory scanning cheat for "Find Units" functionality with performance optimizati
 
 ## Save Data Location
 ```
-E:/EmblemWeave/data/save/Profile1/slot_000/
+<install>/data/save/Profile1/slot_000/
 ```
 
+This is a local example, not a canonical save path.
+
 ## Current Status (v0.1.42)
-- **Infrastructure**: Complete - parallel workers, cancellation, progress reporting, thread priority
-- **Runtime Stability**: Game now runs 120+ seconds without crashing (fixed read fault crash)
+- **Infrastructure**: **Implemented - unverified.** Parallel workers, cancellation, progress reporting and thread
+  priority exist; there is no in-battle measurement.
+- **Runtime evidence**: one FCC 120-second session is the only runtime report. It is not the required 10+ menu/title
+  cycles (#77) and does not establish scan performance or absence of audio/visual impact.
 - **Field Test**: Pending - requires reaching cheat menu in gameplay
-- **Commit**: 59d948c added timeout (30s), memory limit (2GB), thread cap (8), BELOW_NORMAL priority
+- **Commit**: 59d948c added timeout (30s), memory limit (2GB), thread cap (8), BELOW_NORMAL priority; this is a
+  code-level change, not an in-battle validation.
