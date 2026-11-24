@@ -442,7 +442,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Tone::Warn,
             "No current save",
             &format!(
-                "{} recoverable save(s) are present: {}. Load or restore one below; Play will not start an empty save when the account folder is missing.",
+                "{} recoverable save(s) are present: {}. Load or restore one below; Play asks before starting a new empty save.",
                 recoverable.len(),
                 names
             ),

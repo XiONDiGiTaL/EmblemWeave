@@ -110,11 +110,12 @@ wording was misleading and is now explicit.
   metadata is never replaced; no slot file is touched.
 - `saves::recoverable_saves()`: inventory of valid profiles, profile backups,
   whole-save backups and orphan saves with at least one slot file.
-- `saves::empty_namespace_blocker()`: refuses Play when the account folder is
-  **completely missing** and recoverable saves exist. The message names the
-  missing folder and the recoverable saves and sends the player to Saves. An
-  existing account folder (including a meta-only one) is left to the game, so a
-  deliberate new game is still possible.
+- `saves::empty_namespace_blocker()`: stops Play when the account save is
+  **missing or empty** and recoverable saves exist. The launcher shows an
+  explicit “Start with an empty save?” confirmation; the engine refuses the
+  empty namespace unless that one-shot confirmation was given. The message names
+  the account folder and recoverable saves, so a deliberate new game remains
+  possible without silently overwriting the path to the old one.
 - `saves::save_manifest()`: bounded save-tree listing for reports — filenames,
   sizes, timestamps, SHA-256 for files ≤ 1 MiB, metadata, profiles, backups,
   recoverable saves and the tail of the runtime's save log. Save contents are
@@ -122,7 +123,8 @@ wording was misleading and is now explicit.
 - Saves page: prominent “No current save” warning listing recoverable
   profiles/backups before the carousel.
 - `engine::sync_save_dir()`: repairs missing metadata before reconciliation.
-- `engine::play()`: applies the empty-namespace guard after reconciliation.
+- `engine::play(config, allow_empty)`: applies the empty-namespace guard after
+  reconciliation; `allow_empty` is set only by the launcher's confirmation.
 - `report::bundle()`: writes `saves.txt` with the manifest next to
   `report.txt`.
 
@@ -156,7 +158,7 @@ backup/restore behavior was changed.
 | Multiple profiles | Pass in library tests | `profiles_store_and_load`, profile backup/restore tests |
 | Autosave moved to backup and restored | Pass in library tests | slot archive/restore tests |
 | Missing `.meta`, populated `000` | **Pass** — repaired, 12 files preserved, game mounted the save | runtime log + unit test |
-| Missing save directory / empty namespace with recoverables | Guard and warning added; library test passes | `recoverable_inventory_and_empty_namespace_guard` |
+| Missing/empty current save with recoverables | Confirmation guard and Saves warning added; library tests pass | `recoverable_inventory_and_empty_namespace_guard` |
 | Launcher/runtime mismatch | Existing reconciliation tests pass; not reproduced from a reporter | `sync_save_dir`/`carry_save_across` tests |
 | Interrupted startup/shutdown | Existing journal recovery tests pass; no new corruption path | fs volume tests/build |
 | Actual new save created in gameplay, then relaunched | **Not tested** | requires driving a new playthrough; fixture was used read-only for this check |
@@ -198,8 +200,9 @@ different `data\save` and cannot see the first copy's files.
    overwrite a profile with the same name.
 4. If a whole-save backup is listed, use **Restore**. The save it replaces is
    moved to `backups` first.
-5. If the launcher says the save folder is missing while recoverable saves
-   exist, Play is refused deliberately. Restore/load one, then Play.
+5. If the launcher says the current save is empty while recoverable saves
+   exist, Play asks before starting a new save. Load/restore one, or confirm the
+   new game deliberately.
 6. If `.meta` is the only missing file, Play repairs it and keeps `000`.
 7. Never delete the backup folder until the game has loaded the restored
    progression and a restart has preserved it.

@@ -5160,7 +5160,7 @@ It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card
 
 /// Start the game from the run folder. It runs on its own; the launcher
 /// stays open.
-pub fn play(config: &crate::config::Config) -> Result<(), String> {
+pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), String> {
     let graphics = &config.graphics;
     let audio = &config.audio;
     let performance = &config.performance;
@@ -5175,12 +5175,15 @@ pub fn play(config: &crate::config::Config) -> Result<(), String> {
     // saves appear empty or missing even though they exist on disk. Refuse to launch when a save exists but
     // could not be put where the game reads it: starting anyway opens an empty game and looks like data loss.
     sync_save_dir(&dir)?;
-    // The account folder can be absent while profiles/backups still hold the
-    // playthrough. Starting then makes the game create a fresh save and look
-    // like the player's progress vanished; refuse and send them to Saves.
-    if let Some(save_dir) = Config::save_dir() {
-        if let Some(note) = crate::saves::empty_namespace_blocker(&save_dir) {
-            return Err(note);
+    // The account folder can be absent or empty while profiles/backups still
+    // hold the playthrough. Starting then makes the game create a fresh save
+    // and look like the player's progress vanished; the launcher asks first and
+    // passes `allow_empty` only after the player confirms a new game.
+    if !allow_empty {
+        if let Some(save_dir) = Config::save_dir() {
+            if let Some(note) = crate::saves::empty_namespace_blocker(&save_dir) {
+                return Err(note);
+            }
         }
     }
     // A build from an earlier release can point the game at a packed .nup, which the engine cannot read in place. The launcher writes those

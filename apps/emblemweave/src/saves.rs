@@ -1923,12 +1923,12 @@ pub fn recoverable_saves(save_dir: &Path) -> Vec<Recoverable> {
 /// can be recovered are present. This is the dangerous shape of issue #79: the
 /// game would create an empty save and look as if the playthrough was lost.
 ///
-/// An existing account folder, even one with only `.meta`, is left to the game:
-/// that is the normal state before a new playthrough and after a deliberate new
-/// game. Only a completely missing account folder is refused here.
+/// An existing but empty account folder is stopped too: that is the state a
+/// failed load or a moved save leaves behind. The launcher asks the player to
+/// confirm a deliberate new game instead of starting one silently.
 pub fn empty_namespace_blocker(save_dir: &Path) -> Option<String> {
     let account = account_dir(save_dir);
-    if account.exists() || has_save(&account) {
+    if has_save(&account) {
         return None;
     }
     let recoverable = recoverable_saves(save_dir);
@@ -1942,8 +1942,8 @@ pub fn empty_namespace_blocker(save_dir: &Path) -> Option<String> {
         .collect::<Vec<_>>()
         .join("; ");
     Some(format!(
-        "The game's save folder is missing: {}. {} recoverable save(s) were found: {}. \
-The game was not started on an empty save. Open Saves and load or restore one; nothing was deleted.",
+        "The current save is empty: {}. {} recoverable save(s) were found: {}. \
+The game was not started on an empty save. Open Saves and load or restore one, or confirm a new game; nothing was deleted.",
         account.display(),
         recoverable.len(),
         names
@@ -2416,8 +2416,10 @@ mod tests {
         let note = empty_namespace_blocker(&save).expect("a missing account folder is refused");
         assert!(note.contains("not started"), "{note}");
 
-        // Once the game's account folder exists, the guard leaves Play alone:
-        // an empty account is the normal state before a deliberate new game.
+        // An existing but empty account folder is still stopped: this is the
+        // shape a failed profile load leaves behind, and Play asks first.
+        std::fs::create_dir_all(account_dir(&save)).unwrap();
+        assert!(empty_namespace_blocker(&save).is_some());
         write(&account_dir(&save).join("000/Auto"), "current");
         assert!(empty_namespace_blocker(&save).is_none());
         let _ = std::fs::remove_dir_all(root);

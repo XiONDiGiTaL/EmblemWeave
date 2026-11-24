@@ -139,6 +139,9 @@ pub enum Confirm {
         pct: u32,
         previous: f32,
     },
+    /// The current account save is empty while recoverable profiles/backups
+    /// exist. Starting is allowed only after this explicit confirmation.
+    EmptySave,
 }
 
 /// The master volume to keep after an above-100% warning: the requested boost when accepted,
@@ -179,6 +182,8 @@ pub struct App {
     build_on_start: bool,
     /// Set when Play had to write a packed package's files first: the game starts when that finishes.
     play_after_repair: bool,
+    /// Set only by the EmptySave confirmation, and consumed by the next Play.
+    allow_empty_play: bool,
     /// `--screenshot PATH`: save the window's own rendered frame and close.
     screenshot: Option<(std::path::PathBuf, u32)>,
     applied: theme::Scheme,
@@ -330,6 +335,7 @@ impl App {
             boot_on_start: false,
             build_on_start: false,
             play_after_repair: false,
+            allow_empty_play: false,
             screenshot: None,
             saves_ui: Default::default(),
             trouble_ui: Default::default(),
@@ -541,7 +547,21 @@ impl App {
             self.start(JobKind::Repair);
             return;
         }
-        match engine::play(&self.config) {
+        // A missing or empty account save beside recoverable profiles/backups
+        // must not silently start a new game. Ask once; the confirmation sets
+        // the one-shot permission the engine checks.
+        if !self.allow_empty_play {
+            if let Some(save_dir) = crate::config::Config::save_dir() {
+                if let Some(note) = crate::saves::empty_namespace_blocker(&save_dir) {
+                    self.confirm = Some(Confirm::EmptySave);
+                    self.notify(note, Tone::Warn);
+                    return;
+                }
+            }
+        }
+        let allow_empty = self.allow_empty_play;
+        self.allow_empty_play = false;
+        match engine::play(&self.config, allow_empty) {
             Ok(()) => {
                 self.minimize_after_play = self.config.minimize_on_play;
                 self.startup.begin();
@@ -932,8 +952,13 @@ impl App {
                     "This raises the master volume above 100%, up to 200% (about +6 dB). Sustained loud output can damage speakers, headphones or your hearing. The engine's limiter prevents digital clipping, but it does not make a loud signal safe for your ears or your equipment. Start low and turn it up only as far as you need.",
                     "I know the risks",
                 ),
+                Confirm::EmptySave => (
+                    "Start with an empty save?",
+                    "The current save is empty, but profiles or backups still hold progress. Starting now lets the game create a new save; existing profiles and backups are not deleted. Load or restore one on Saves if you want that progress.",
+                    "Start empty",
+                ),
             };
-            let cancel_label = if matches!(confirm, Confirm::AudioBoost { .. }) {
+            let cancel_label = if matches!(confirm, Confirm::AudioBoost { .. } | Confirm::EmptySave) {
                 "Cancel"
             } else {
                 "Keep"
@@ -992,6 +1017,10 @@ impl App {
                         Some(Confirm::AudioBoost { pct, previous }) => {
                             self.config.audio.master = audio_boost_master(pct, previous, true);
                             self.notify("Master volume boost enabled. The next Play writes it; keep the level sensible.", Tone::Warn);
+                        }
+                        Some(Confirm::EmptySave) => {
+                            self.allow_empty_play = true;
+                            self.play();
                         }
                         None => {}
                     }
