@@ -55,6 +55,9 @@ pub struct Ui {
     pub sources_title: Option<u64>,
     pub sources_at: f64,
     ids: Option<Arc<Ids>>,
+    /// The background read of the game data, and whether it is still running.
+    ids_rx: Option<std::sync::mpsc::Receiver<Ids>>,
+    ids_loading: bool,
 }
 
 #[derive(Clone)]
@@ -235,26 +238,82 @@ pub fn romfs_dir(app: &App) -> Option<PathBuf> {
 }
 
 fn ids_for(app: &mut App) -> Arc<Ids> {
-    if app.saves_ui.ids.is_none() {
-        // Detection runs in a job, so the package the setup page records is
-        // also read directly: a slot opened before that job finishes still
-        // shows the game's English names instead of raw ids.
-        let nup = app.game.nup.clone().or_else(|| {
-            let root = PathBuf::from(&app.config.paths.game_root);
-            root.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("nup"))
-                .then_some(root)
-        });
-        let ids = match romfs_dir(app) {
+    start_ids_load(app);
+    app.saves_ui.ids.clone().unwrap_or_default()
+}
+
+/// Read the game data on a worker thread. A `.nup` is the launcher's usual
+/// game source and its message tables take seconds to read, so the page never
+/// waits for them on the UI thread. Detection runs in a job too, so the
+/// package the setup page recorded is used before that job has landed.
+fn start_ids_load(app: &mut App) {
+    if app.saves_ui.ids.is_some() || app.saves_ui.ids_loading {
+        return;
+    }
+    let nup = app.game.nup.clone().or_else(|| {
+        let root = PathBuf::from(&app.config.paths.game_root);
+        root.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("nup"))
+            .then_some(root)
+    });
+    let dir = romfs_dir(app);
+    if dir.is_none() && nup.is_none() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.saves_ui.ids_loading = true;
+    app.saves_ui.ids_rx = Some(rx);
+    std::thread::spawn(move || {
+        let ids = match dir {
             Some(dir) => Ids::from_romfs(&dir),
-            // A `.nup` is the launcher's usual game source: the message files
-            // are inside the package, not in a folder beside it.
             None => nup.map(|p| Ids::from_nup(&p)).unwrap_or_default(),
         };
-        app.saves_ui.ids = Some(Arc::new(ids));
+        let _ = tx.send(ids);
+    });
+}
+
+/// Take a finished background read, if there is one, and show it: the profile
+/// cards and an untouched editor are rebuilt with the game's English names.
+fn poll_ids(app: &mut App) {
+    let Some(mut rx) = app.saves_ui.ids_rx.take() else {
+        return;
+    };
+    match rx.try_recv() {
+        Ok(ids) => {
+            app.saves_ui.ids = Some(Arc::new(ids));
+            app.saves_ui.ids_loading = false;
+            app.saves_ui.profile_cache = None;
+            relocalize_editor(app);
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            app.saves_ui.ids_loading = false;
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            app.saves_ui.ids_rx = Some(rx);
+        }
     }
-    app.saves_ui.ids.clone().unwrap_or_default()
+}
+
+/// Re-derive the open editor's names once the background read lands. Changes
+/// made while it was loading are kept: only an untouched editor is rebuilt.
+fn relocalize_editor(app: &mut App) {
+    let Some(ids) = app.saves_ui.ids.clone() else {
+        return;
+    };
+    let Some(ed) = app.saves_ui.editor.as_mut() else {
+        return;
+    };
+    if (&ed.player, &ed.units, &ed.name) != (&ed.original.0, &ed.original.1, &ed.original.2) {
+        return;
+    }
+    let player = ed.slot.player();
+    let units = ed.slot.units(&ids);
+    let name = ed.slot.character_name();
+    ed.original = (player, units.clone(), name.clone());
+    ed.player = player;
+    ed.units = units;
+    ed.name = name;
 }
 
 /// Open a slot in the editor. Profile slots work too: the editor writes the
@@ -339,6 +398,11 @@ fn slot_summary(meta: &ProfileMeta, empty: bool) -> (String, Tone) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    poll_ids(app);
+    if app.saves_ui.ids_loading {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
     let p = app.config.theme.palette();
     widgets::page_header(ui, &p, "Saves", "Browse playthroughs as profiles, inspect their saves, and load one only when you choose to.");
     let Some(save_dir) = crate::config::Config::save_dir() else {
@@ -2511,6 +2575,7 @@ fn editor(
     let mut close = false;
     let mut saved = false;
     let named = !ids.people.is_empty();
+    let ids_loading = app.saves_ui.ids_loading;
     let name_limit = ed.slot.character_name_limit();
     let title = format!(
         "Editing {}",
@@ -2570,7 +2635,9 @@ fn editor(
         } else {
             ui.label(crate::i18n::text("This slot has no editable character name.").color(p.muted));
         }
-        if !named {
+        if ids_loading {
+            ui.label(crate::i18n::text("Reading the game's message files; the English unit, class and item names appear as soon as that finishes.").color(p.muted));
+        } else if !named {
             ui.label(crate::i18n::text("Units are found by the ids in your game data; choose your game on Game Setup to list them.").color(p.muted));
         } else if !ids.texts_loaded {
             ui.label(crate::i18n::text("The game's message files were not found, so names are the raw ids. Point Game Setup at the RomFS folder to read the translated names.").color(p.warn));
