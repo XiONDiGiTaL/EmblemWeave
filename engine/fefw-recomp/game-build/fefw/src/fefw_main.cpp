@@ -34,6 +34,7 @@
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/module.h"
+#include "nxrt/movie_vdec.h"
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/nxmodule.h"
@@ -470,6 +471,7 @@ int fefw_run(int argc, char** argv) {
                 TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
                 return code;
             }
+            nxrt::media::set_movie_render_gpu(g_gfx_device->gpu().name.c_str());   // [media] movie_decoder = auto decodes there
             nxrt::play::StartOptions po;
             po.device = g_gfx_device.get();
             po.renderer = g_gfx_renderer.get();

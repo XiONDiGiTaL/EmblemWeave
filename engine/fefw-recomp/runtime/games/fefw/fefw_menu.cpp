@@ -135,8 +135,7 @@ constexpr IniKey kIni[] = {
     {"dlss", "sharpness", "0", Norm::Number, true, "FSR 3 sharpening"},
     {"dlss", "history_weight", "12", Norm::Number, true, "TAAU history"},
     {"media", "movies", "host", Norm::Text, true, "movies"},
-    {"media", "movie_decoder", "dav1d", Norm::Text, true, "video decoder"},
-    {"media", "movie_hwaccel", "1", Norm::Bool, true, "video hardware acceleration"},
+    {"media", "movie_decoder", "auto", Norm::Text, true, "video decoder"},
     {"log", "level", "info", Norm::Text, false, "log level"},
     {"gfx", "log_fps", "1", Norm::Bool, true, "frame rate log"},
     {"play", "log_status", "0", Norm::Bool, true, "play status log"},
@@ -1765,7 +1764,7 @@ constexpr const char* kLangVals[] = {"",       "AmericanEnglish", "BritishEnglis
                                      "Italian", "Spanish",        "LatinAmericanSpanish", "Korean", "SimplifiedChinese", "TraditionalChinese"};
 constexpr int kLangCount = 13;
 
-void game_page(UiHost& host, Menu& m) {
+void game_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
     section("Language");
     if (begin_rows("lang")) {
         row(m, "Game language", When::Restart,
@@ -1790,21 +1789,34 @@ void game_page(UiHost& host, Menu& m) {
         constexpr const char* kVals[] = {"host", "skip"};
         ini_combo_row(m, *ini_key("media", "movies"), "Movies", "The game's movies are decoded by the video decoder below. Skip makes each one end at once, as a skip does.",
                       kNames, kVals, 2);
-        constexpr const char* kDecoderNames[] = {"dav1d (CPU)", "FFmpeg (libavcodec)"};
-        constexpr const char* kDecoderVals[] = {"dav1d", "ffmpeg"};
+        // Auto, dav1d, then each GPU the game's Vulkan lists, by the name the launcher writes too. The list is fixed for the process.
+        static const struct DecoderChoices {
+            std::vector<std::string> names, vals;
+            std::vector<const char*> name_ptrs, val_ptrs;
+        } choices = [&ov] {
+            DecoderChoices c;
+            c.names = {"Auto", "Software (dav1d)"};
+            c.vals = {"auto", "software"};
+            for (const gfx::GpuInfo& g : ov.context().device->gpus()) {
+                c.names.push_back("Hardware: " + g.name);
+                c.vals.push_back(g.name);
+            }
+            for (size_t i = 0; i < c.names.size(); ++i) {
+                c.name_ptrs.push_back(c.names[i].c_str());
+                c.val_ptrs.push_back(c.vals[i].c_str());
+            }
+            return c;
+        }();
         ini_combo_row(m, *ini_key("media", "movie_decoder"), "Video decoder",
-                      "dav1d is the engine's own AV1 decoder. FFmpeg uses a user-supplied libavcodec (avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg); its software path is libdav1d, and its hardware path is D3D11VA. Applies at the next start.",
-                      kDecoderNames, kDecoderVals, 2);
-        constexpr const char* kHwNames[] = {"Hardware (D3D11VA)", "Software"};
-        constexpr const char* kHwVals[] = {"1", "0"};
-        ini_combo_row(m, *ini_key("media", "movie_hwaccel"), "Video acceleration",
-                      "FFmpeg only: Hardware decodes AV1 on the GPU through D3D11VA and copies the NV12 frames back; if the GPU or driver cannot, FFmpeg's libdav1d runs. Software uses libdav1d directly. Applies at the next start.",
-                      kHwNames, kHwVals, 2);
+                      "Auto decodes the movies on the GPU the game renders on, through FFmpeg's Vulkan video decoder (the DLLs in upscalers\\ffmpeg); "
+                      "a GPU or driver without AV1 decoding leaves them to dav1d on the CPU, and so does every GPU but NVIDIA's before FFmpeg 9.1. "
+                      "Software always uses dav1d. Hardware picks one GPU. Applies at the next start.",
+                      choices.name_ptrs.data(), choices.val_ptrs.data(), static_cast<int>(choices.names.size()));
         end_rows();
     }
 }
 
-void advanced_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
+void advanced_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov) {
     ImGui::TextDisabled("%s", tr("Controls, game integration and code mods keep their own pages; nothing here was removed by the redesign."));
     if (ImGui::BeginTabBar("##advanced", ImGuiTabBarFlags_FittingPolicyShrink)) {
         if (ImGui::BeginTabItem(tr("Controls"))) {
@@ -1812,7 +1824,7 @@ void advanced_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(tr("Game"))) {
-            game_page(host, m);
+            game_page(host, m, ov);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(tr("Mods"))) {
@@ -2259,7 +2271,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
                     case kTabUpscaling: upscaling_page(host, m); break;
                     case kTabPacing: display_pacing_page(host, m, live, ov); break;
                     case kTabAudio: audio_page(host, m); break;
-                    case kTabAdvanced: advanced_page(host, m, live); break;
+                    case kTabAdvanced: advanced_page(host, m, live, ov); break;
                     case kTabDiagnostics: debug_page(host, m, ov); break;
                     case kTabSystem: system_page(host, ov); break;
                 }

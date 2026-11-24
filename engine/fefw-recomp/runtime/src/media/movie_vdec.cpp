@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// movie::VideoDecoder (the Switch 2 movie library; Fortune's Weave's subsdk2) on the host, decoding AV1 with dav1d or, optionally, FFmpeg's libavcodec. include/nxrt/movie_vdec.h.
+// movie::VideoDecoder (the Switch 2 movie library; Fortune's Weave's subsdk2) on the host, decoding AV1 on the GPU through FFmpeg's hardware
+// decoder (movie_ffmpeg.h) or with dav1d. include/nxrt/movie_vdec.h.
 //
 // Ported from nxnative-penis6 dm/host/hle_nx2_movie.c (MIT; commits 9d1a455e17 and 3f9113b10e). The library's own decoder drives nn::codec,
 // the NVDEC of the skipped GPU boot. Its nn::movie::MediaExtractor runs as it is, so the game demuxes and this decodes. The player (main
@@ -21,9 +22,12 @@
 // object's first word (where the library keeps its own), with a marker in the second.
 //   [media] movies = host | skip          host (default for a title with game::Info::movie_video_decoder); skip: every movie fails to open
 //                                         and the game moves on as after a skip (core/switch2.cpp)
-//   [media] movie_decoder = dav1d|ffmpeg  dav1d (default) is built in. ffmpeg loads the player's FFmpeg 8.x shared DLLs
-//                                         (avcodec-62.dll, avutil-60.dll, swresample-6.dll) from [media] ffmpeg_dir or upscalers\ffmpeg.
-//   [media] movie_hwaccel = 1             FFmpeg only: 1 asks for D3D11VA and copies NV12 frames back; 0 uses its libdav1d decoder.
+//   [media] movie_decoder = auto          auto (default): the GPU the game renders on decodes, through FFmpeg's Vulkan video decoder and
+//                                         the shipped avcodec-62.dll, avutil-60.dll and swresample-6.dll ([media] ffmpeg_dir or
+//                                         upscalers\ffmpeg); without the DLLs, on a GPU or driver without AV1 decoding, or on a GPU
+//                                         other than NVIDIA's (FFmpeg before 9.1, movie_ffmpeg.cpp), dav1d decodes. software: dav1d,
+//                                         built in. Any other value names the GPU (its Vulkan device name, as the launcher writes it;
+//                                         FFmpeg matches part of it, case-sensitive).
 //   [media] video_decoder_threads = 0     dav1d worker threads per decoder; 0 (default): half the logical processors, 4 to 8
 //   [media] video_decode_ahead = 30       decoded pictures held ahead of the player (4 to 120; 30 is about 1 s, 165 MiB at 2560x1440)
 //   [media] video_decoder_priority = above  Windows priority of the decode worker and dav1d's task threads: above (default), highest or
@@ -45,6 +49,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -76,7 +81,9 @@ namespace nxrt::media {
 
 namespace {
 std::atomic<bool> g_enabled{false};
-}
+std::mutex g_render_gpu_mu;
+std::string g_render_gpu;   // set_movie_render_gpu: where [media] movie_decoder = auto decodes
+}  // namespace
 
 #if NXRT_HAVE_DAV1D
 namespace {
@@ -113,9 +120,17 @@ bool g_log = false;
 int g_threads = 4;
 size_t g_ahead = 30;                        // decoded pictures held in host memory while no frame is free ([media] video_decode_ahead)
 int g_priority = THREAD_PRIORITY_ABOVE_NORMAL;   // of the decode worker and dav1d's task threads ([media] video_decoder_priority)
-bool g_hwaccel = true;                      // FFmpeg's D3D11VA path ([media] movie_hwaccel)
-enum class Av1Backend { Dav1d, Ffmpeg };
-Av1Backend g_backend = Av1Backend::Dav1d;   // [media] movie_decoder
+// [media] movie_decoder: a GPU decodes (auto, or a GPU's name in g_named_gpu; empty: the one the game renders on), else dav1d. Set at
+// install, so the unit tests, which do not install, decode with dav1d.
+bool g_hardware = false;
+std::string g_named_gpu;
+
+// The GPU the movies decode on: [media] movie_decoder's, else the one the game renders on (empty: FFmpeg's first).
+std::string movie_gpu() {
+    if (!g_named_gpu.empty()) return g_named_gpu;
+    std::lock_guard<std::mutex> lk(g_render_gpu_mu);
+    return g_render_gpu;
+}
 std::atomic<int> g_dav1d_threads{0};        // dav1d task threads alive (numbers their names)
 
 // The calling thread as a movie decoder thread: its priority, no power throttling (EcoQoS would clock it down on a hybrid or a laptop CPU),
@@ -387,16 +402,8 @@ FeedWait wait_for_room(Decoder& d, std::unique_lock<std::mutex>& lk, uint64_t pa
     return d.failed ? FeedWait::Stalled : FeedWait::Keep;
 }
 
-// Decodes one packet into pictures (worker thread, without the lock). `decoder` is the worker's own context.
-void decode_packet(Decoder& d, Av1& decoder, const Packet& k, std::vector<Picture>& out) {
-    if (decoder.ff) {
-        std::vector<ffmpeg::Frame> frames;
-        ffmpeg::decode(decoder.ff, k.data.data(), k.data.size(), k.time, frames);
-        for (ffmpeg::Frame& f : frames) out.push_back(Picture{std::move(f.nv12), f.width, f.height, f.time, false});
-        return;
-    }
-    Dav1dContext* av1 = decoder.dav1d;
-    if (!av1) return;
+// Decodes one packet with dav1d into pictures (worker thread, without the lock).
+void decode_dav1d(Decoder& d, Dav1dContext* av1, const Packet& k, std::vector<Picture>& out) {
     Dav1dData in{};
     uint8_t* b = dav1d_data_create(&in, k.data.size());
     if (!b) {
@@ -508,15 +515,7 @@ static std::vector<uint8_t> extract_av1_obus(const std::vector<uint8_t>& config)
     return {};
 }
 
-Av1 open_av1(Decoder& d, const std::vector<uint8_t>& config) {
-    Av1 out;
-    if (g_backend == Av1Backend::Ffmpeg) {
-        out.ff = ffmpeg::open(config, g_threads, g_hwaccel);
-        if (out.ff) return out;
-        static std::atomic<bool> warned{false};
-        if (!warned.exchange(true))
-            NXLOG_W(kTag, "FFmpeg is selected but its AV1 decoder could not start: using dav1d (put matching avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg)");
-    }
+Dav1dContext* open_dav1d(Decoder& d, const std::vector<uint8_t>& config) {
     Dav1dSettings s;
     dav1d_default_settings(&s);
     s.n_threads = g_threads;
@@ -524,17 +523,62 @@ Av1 open_av1(Decoder& d, const std::vector<uint8_t>& config) {
     Dav1dContext* av1 = nullptr;
     if (dav1d_open(&av1, &s) < 0) {
         NXLOG_E(kTag, "dav1d failed to start");
-        return out;
+        return nullptr;
     }
-    out.dav1d = av1;
     auto obus = extract_av1_obus(config);
     if (!obus.empty()) {
         Packet k;
         k.data = std::move(obus);
         std::vector<Picture> none;
-        decode_packet(d, out, k, none);
+        decode_dav1d(d, av1, k, none);
     }
+    return av1;
+}
+
+// Decodes one packet into pictures (worker thread, without the lock). `decoder` is the worker's own context.
+void decode_packet(Decoder& d, Av1& decoder, const Packet& k, std::vector<Picture>& out) {
+    if (decoder.ff) {
+        std::vector<ffmpeg::Frame> frames;
+        const bool ok = ffmpeg::decode(decoder.ff, k.data.data(), k.data.size(), k.time, frames);
+        for (ffmpeg::Frame& f : frames) out.push_back(Picture{std::move(f.nv12), f.width, f.height, f.time, false});
+        if (ok) return;
+        // A GPU or driver without AV1 decoding opens the decoder and refuses the first frame (FFmpeg's reason is logged above this). No
+        // picture came out before it, so in a stream that starts with a shown key frame, as every movie here, this is the first packet.
+        NXLOG_W(kTag, "the GPU refused this movie: dav1d %s takes it over at this packet", dav1d_version());
+        ffmpeg::close(decoder.ff);
+        decoder.ff = nullptr;
+        decoder.dav1d = open_dav1d(d, decoder.config);
+    }
+    if (decoder.dav1d) decode_dav1d(d, decoder.dav1d, k, out);
+}
+
+// The decoder for a new stream, by [media] movie_decoder, with one log line saying what decodes it.
+Av1 open_av1(Decoder& d, const std::vector<uint8_t>& config) {
+    Av1 out;
+    out.config = config;
+    if (g_hardware) {
+        const std::string gpu = movie_gpu();
+        const char* where = gpu.empty() ? "the first GPU" : gpu.c_str();
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string why;
+        out.ff = ffmpeg::open(config, gpu, why);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (out.ff) {
+            NXLOG_I(kTag, "decoding on %s (FFmpeg %s, %s; opened in %.1f ms)", where, ffmpeg::version(), ffmpeg::hardware_name(), ms);
+            return out;
+        }
+        NXLOG_W(kTag, "decoding with dav1d %s: %s cannot (%s)", dav1d_version(), where, why.c_str());
+    } else {
+        NXLOG_I(kTag, "decoding with dav1d %s (%d threads)", dav1d_version(), g_threads);
+    }
+    out.dav1d = open_dav1d(d, config);
     return out;
+}
+
+void close_av1(Av1& a) {
+    if (a.dav1d) dav1d_close(&a.dav1d);
+    if (a.ff) ffmpeg::close(a.ff);
+    a.ff = nullptr;
 }
 
 void worker_main(Decoder* d) {
@@ -554,10 +598,13 @@ void worker_main(Decoder* d) {
         }
         if (d->stop) break;
         if (gen != d->generation) {
-            if (av1.dav1d) dav1d_close(&av1.dav1d);
-            if (av1.ff) ffmpeg::close(av1.ff);
-            av1 = {};
+            // A flushed stream: its decoder closes outside the lock, as a GPU decoder's teardown would hold up the player's calls.
+            Av1 old = std::exchange(av1, Av1{});
             gen = d->generation;
+            lk.unlock();
+            close_av1(old);
+            lk.lock();
+            continue;
         }
         Packet k = std::move(d->queue.front());
         d->queue.pop_front();
@@ -576,6 +623,8 @@ void worker_main(Decoder* d) {
                 std::vector<ffmpeg::Frame> frames;
                 ffmpeg::drain(av1.ff, frames);
                 for (ffmpeg::Frame& f : frames) out.push_back(Picture{std::move(f.nv12), f.width, f.height, f.time, false});
+                ffmpeg::close(av1.ff);   // FFmpeg takes no packet after a drain: one after the end of the stream opens a new decoder
+                av1.ff = nullptr;
             }
             out.emplace_back();
             out.back().eos = true;
@@ -608,8 +657,8 @@ void worker_main(Decoder* d) {
             if (d->queue.empty()) d->in_ready.signal();
         }
     }
-    if (av1.dav1d) dav1d_close(&av1.dav1d);
-    if (av1.ff) ffmpeg::close(av1.ff);
+    lk.unlock();
+    close_av1(av1);
     diag_unregister_thread();
 }
 
@@ -975,15 +1024,11 @@ bool install_movie_decoder_hle() {
             NXLOG_I(kTag, "[media] movies = skip: every movie fails to open and is skipped");
             return;
         }
-        std::string decoder = config_get_str("media", "movie_decoder", "dav1d");
-        for (char& ch : decoder) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        if (decoder == "ffmpeg") {
-            g_hwaccel = config_get_bool("media", "movie_hwaccel", true);
-            if (ffmpeg::available()) g_backend = Av1Backend::Ffmpeg;
-            else             NXLOG_W(kTag, "[media] movie_decoder = ffmpeg, but the FFmpeg DLLs are missing or the wrong version: using dav1d (avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg)");
-        } else if (decoder != "dav1d" && decoder != "cpu") {
-            NXLOG_W(kTag, "[media] movie_decoder = %s is not dav1d or ffmpeg: using dav1d", decoder.c_str());
-        }
+        const std::string decoder = config_get_str("media", "movie_decoder", "auto");
+        std::string word = decoder;
+        for (char& ch : word) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        g_hardware = word != "software";
+        g_named_gpu = word.empty() || word == "auto" || word == "software" ? std::string() : decoder;
         g_log = config_get_bool("media", "video_decoder_log", false);
         const int64_t auto_threads = std::clamp<int64_t>(static_cast<int64_t>(std::thread::hardware_concurrency()) / 2, 4, 8);
         const int64_t threads = config_get_int("media", "video_decoder_threads", 0);
@@ -1006,20 +1051,20 @@ bool install_movie_decoder_hle() {
         }
         g_enabled = true;
         const char* prio_name = g_priority == THREAD_PRIORITY_NORMAL ? "normal" : g_priority == THREAD_PRIORITY_HIGHEST ? "highest" : "above normal";
-        if (g_backend == Av1Backend::Ffmpeg) {
-            NXLOG_I(kTag, "movie::VideoDecoder on the host: AV1 through FFmpeg %s (%s, %d threads at %s priority, %zu pictures ahead), %zu imports routed",
-                    ffmpeg::version(), g_hwaccel ? "D3D11VA requested" : "software", g_threads, prio_name, g_ahead,
-                    sizeof kImports / sizeof kImports[0]);
-        } else {
 #if NXRT_DAV1D_ASM
-            NXLOG_I(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s with x86-64 assembly (%d threads at %s priority, %zu pictures ahead), %zu imports routed",
-                    dav1d_version(), g_threads, prio_name, g_ahead, sizeof kImports / sizeof kImports[0]);
+        const char* dav1d_build = "with x86-64 assembly";
+        const LogLevel level = LogLevel::Info;
 #else
-            // A runtime built without NASM: 1440p pictures take 30-50 ms instead of 10-15, so the movies play below 30 fps (choppy cutscenes).
-            NXLOG_W(kTag, "movie::VideoDecoder on the host: AV1 through dav1d %s, C only: built without NASM, movies decode several times slower "
-                    "and may play below their frame rate (%d threads at %s priority, %zu pictures ahead), %zu imports routed", dav1d_version(), g_threads, prio_name, g_ahead, sizeof kImports / sizeof kImports[0]);
+        // A runtime built without NASM: 1440p pictures take 30-50 ms instead of 10-15, so dav1d plays the movies below 30 fps (choppy
+        // cutscenes). A warning where dav1d is the decoder, not only the fallback.
+        const char* dav1d_build = "C only: built without NASM, movies decode several times slower and may play below their frame rate";
+        const LogLevel level = g_hardware ? LogLevel::Info : LogLevel::Warn;
 #endif
-        }
+        const std::string via = g_hardware ? std::string("on ") + (g_named_gpu.empty() ? "the GPU the game renders on" : g_named_gpu.c_str()) +
+                                                 " through FFmpeg's " + ffmpeg::hardware_name() + " decoder, else through"
+                                           : std::string("through");
+        ::nxrt::logf(level, kTag, "movie::VideoDecoder on the host: AV1 %s dav1d %s %s (%d threads at %s priority); %zu pictures ahead, %zu imports routed",
+                     via.c_str(), dav1d_version(), dav1d_build, g_threads, prio_name, g_ahead, sizeof kImports / sizeof kImports[0]);
     });
     return g_enabled;
 }
@@ -1042,5 +1087,16 @@ uint64_t movie_frames_acquired() { return 0; }
 #endif
 
 bool movie_decoder_enabled() { return g_enabled; }
+
+void set_movie_render_gpu(const char* name) {
+    {
+        std::lock_guard<std::mutex> lk(g_render_gpu_mu);
+        g_render_gpu = name ? name : "";
+    }
+#if NXRT_HAVE_DAV1D
+    // Beside the boot, so the first movie finds the device ready (517 ms to load FFmpeg and create it on an RTX 4060).
+    if (g_hardware) std::thread([gpu = movie_gpu()] { ffmpeg::prepare(gpu); }).detach();
+#endif
+}
 
 }  // namespace nxrt::media

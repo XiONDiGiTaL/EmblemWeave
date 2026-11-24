@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Optional FFmpeg libavcodec backend for the Switch 2 movie decoder. See movie_ffmpeg.h.
+// FFmpeg's hardware AV1 decoder for the Switch 2 movie decoder. See movie_ffmpeg.h.
 //
 // No FFmpeg library is linked. A matching avcodec-*.dll / avutil-*.dll pair (plus its swresample-*.dll) is loaded from
 // [media] ffmpeg_dir, the play folder's upscalers\ffmpeg or upscalers folder, or beside fefw.exe. The public headers in
 // third_party/ffmpeg/include pin the ABI; a pair with a different libavcodec/libavutil major version is refused.
 //
-// Hardware uses FFmpeg's native AV1 decoder ("av1") because its libdav1d wrapper cannot expose D3D11VA. Software uses
-// FFmpeg's libdav1d decoder; the engine's own dav1d remains the default, faster software choice.
+// FFmpeg's own AV1 decoder ("av1") is hardware-only: without a working hwaccel it fails with ENOSYS at the first frame header. Its
+// software path would be the libdav1d wrapper, which runs outside the engine's thread policy; movie_vdec.cpp falls back to the
+// engine's own dav1d instead.
 #include <windows.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/log.h>
@@ -22,6 +24,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <climits>
 #include <cstddef>
@@ -50,10 +53,11 @@ struct Api {
     decltype(&::avcodec_version) avcodec_version = nullptr;
     decltype(&::av_version_info) av_version_info = nullptr;
     decltype(&::av_log_set_level) av_log_set_level = nullptr;
+    decltype(&::av_log_set_callback) av_log_set_callback = nullptr;
+    decltype(&::av_log_format_line2) av_log_format_line2 = nullptr;
     decltype(&::av_strerror) av_strerror = nullptr;
     decltype(&::av_mallocz) av_mallocz = nullptr;
     decltype(&::avcodec_find_decoder_by_name) avcodec_find_decoder_by_name = nullptr;
-    decltype(&::avcodec_find_decoder) avcodec_find_decoder = nullptr;
     decltype(&::avcodec_alloc_context3) avcodec_alloc_context3 = nullptr;
     decltype(&::avcodec_free_context) avcodec_free_context = nullptr;
     decltype(&::avcodec_open2) avcodec_open2 = nullptr;
@@ -68,12 +72,35 @@ struct Api {
     decltype(&::av_frame_unref) av_frame_unref = nullptr;
     decltype(&::av_hwdevice_ctx_create) av_hwdevice_ctx_create = nullptr;
     decltype(&::av_hwframe_transfer_data) av_hwframe_transfer_data = nullptr;
+    decltype(&::av_buffer_ref) av_buffer_ref = nullptr;
     decltype(&::av_buffer_unref) av_buffer_unref = nullptr;
 };
 
 std::mutex g_mu;
 const Api* g_api = nullptr;
 std::string g_version;
+
+// FFmpeg's warnings and errors, into the log under their own tag (the game's Opus decoder in services/misc.cpp shares the DLLs and so this
+// callback): why a GPU refused a movie is only in them (the Vulkan device's own complaint). A broken stream can warn on every packet, so
+// the count is capped; open() starts it again for every stream.
+decltype(&::av_log_format_line2) g_format_line = nullptr;
+std::atomic<int> g_log_lines{0};
+constexpr int kMaxLogLines = 200;
+
+void log_callback(void* avcl, int level, const char* fmt, va_list vl) {
+    if (level > AV_LOG_WARNING || !g_format_line) return;
+    const int n = g_log_lines.fetch_add(1, std::memory_order_relaxed);
+    if (n >= kMaxLogLines) {
+        if (n == kMaxLogLines) NXLOG_W("ffmpeg", "further messages are not logged until the next movie");
+        return;
+    }
+    thread_local int print_prefix = 1;   // FFmpeg's state for a message that comes in pieces
+    char line[1024];
+    if (g_format_line(avcl, level, fmt, vl, line, sizeof line, &print_prefix) < 0) return;
+    size_t len = std::strlen(line);
+    while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+    if (len) NXLOG_W("ffmpeg", "%s", line);
+}
 
 template <typename T>
 bool resolve(HMODULE module, const char* name, T& fn) {
@@ -185,10 +212,11 @@ const Api* load_pair(const fs::path& codec, const fs::path& util, std::string& w
     }
     if (!resolve(u, "av_version_info", api->av_version_info)) return fail("av_version_info");
     if (!resolve(u, "av_log_set_level", api->av_log_set_level)) return fail("av_log_set_level");
+    if (!resolve(u, "av_log_set_callback", api->av_log_set_callback)) return fail("av_log_set_callback");
+    if (!resolve(u, "av_log_format_line2", api->av_log_format_line2)) return fail("av_log_format_line2");
     if (!resolve(u, "av_strerror", api->av_strerror)) return fail("av_strerror");
     if (!resolve(u, "av_mallocz", api->av_mallocz)) return fail("av_mallocz");
     if (!resolve(c, "avcodec_find_decoder_by_name", api->avcodec_find_decoder_by_name)) return fail("avcodec_find_decoder_by_name");
-    if (!resolve(c, "avcodec_find_decoder", api->avcodec_find_decoder)) return fail("avcodec_find_decoder");
     if (!resolve(c, "avcodec_alloc_context3", api->avcodec_alloc_context3)) return fail("avcodec_alloc_context3");
     if (!resolve(c, "avcodec_free_context", api->avcodec_free_context)) return fail("avcodec_free_context");
     if (!resolve(c, "avcodec_open2", api->avcodec_open2)) return fail("avcodec_open2");
@@ -203,8 +231,11 @@ const Api* load_pair(const fs::path& codec, const fs::path& util, std::string& w
     if (!resolve(u, "av_frame_unref", api->av_frame_unref)) return fail("av_frame_unref");
     if (!resolve(u, "av_hwdevice_ctx_create", api->av_hwdevice_ctx_create)) return fail("av_hwdevice_ctx_create");
     if (!resolve(u, "av_hwframe_transfer_data", api->av_hwframe_transfer_data)) return fail("av_hwframe_transfer_data");
+    if (!resolve(u, "av_buffer_ref", api->av_buffer_ref)) return fail("av_buffer_ref");
     if (!resolve(u, "av_buffer_unref", api->av_buffer_unref)) return fail("av_buffer_unref");
-    api->av_log_set_level(AV_LOG_ERROR);
+    api->av_log_set_level(AV_LOG_WARNING);
+    g_format_line = api->av_log_format_line2;
+    api->av_log_set_callback(log_callback);
     g_version = api->av_version_info() ? api->av_version_info() : "";
     return api;
 }
@@ -242,14 +273,65 @@ const Api* find_api() {
     return nullptr;
 }
 
-void log_error(const char* what, int err) {
+std::string error_text(const Api* api, int err) {
     char text[AV_ERROR_MAX_STRING_SIZE] = {};
-    if (g_api && g_api->av_strerror) g_api->av_strerror(err, text, sizeof text);
-    NXLOG_W(kTag, "FFmpeg %s: %s (%d)", what, text[0] ? text : "error", err);
+    if (api && api->av_strerror) api->av_strerror(err, text, sizeof text);
+    return std::string(text[0] ? text : "error") + " (" + std::to_string(err) + ")";
 }
 
 uint64_t nv12_bytes(uint32_t w, uint32_t h) {
     return static_cast<uint64_t>(w) * h + static_cast<uint64_t>((w + 1) / 2) * 2 * ((h + 1) / 2);
+}
+
+#ifdef __APPLE__
+constexpr AVHWDeviceType kDeviceType = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;   // the Mac's one GPU: no device name
+constexpr const char* kHardwareName = "VideoToolbox";
+#else
+constexpr AVHWDeviceType kDeviceType = AV_HWDEVICE_TYPE_VULKAN;
+constexpr const char* kHardwareName = "Vulkan";
+#endif
+
+// The hardware device, created once (by prepare() during the boot, else by the first movie) and shared by every decoder after it (FFmpeg's
+// device context locks its queues). A failed creation is kept as well: the next movie goes to dav1d at once instead of trying again.
+struct Device {
+    bool tried = false;
+    std::string gpu, why;
+    AVBufferRef* ref = nullptr;
+};
+Device g_device;   // under g_mu
+
+// True when the loaded FFmpeg can decode into host memory on `gpu`. Before 9.1 (libavutil 61.17), FFmpeg gives the decoder's pictures
+// host-transfer usage on every Vulkan driver but NVIDIA's (libavutil/hwcontext_vulkan.c, vulkan_frames_init), and AMD's driver has no
+// memory for such an image: every picture fails with VK_ERROR_OUT_OF_DEVICE_MEMORY (Radeon 780M). 9.1 drops the usage where it cannot be
+// allocated (vulkan_host_transfer_usable). The check is on the DLL's version, as 9.0 has the same major. NVIDIA's device names start
+// with "NVIDIA".
+bool decodes_on(const Api* api, const std::string& gpu) {
+    constexpr unsigned kHostTransferChecked = AV_VERSION_INT(61, 17, 100);
+    return kDeviceType != AV_HWDEVICE_TYPE_VULKAN || api->avutil_version() >= kHostTransferChecked || gpu.rfind("NVIDIA", 0) == 0;
+}
+
+// A new reference to the device for `gpu`, or null with `why`.
+AVBufferRef* device_ref(const Api* api, const std::string& gpu, std::string& why) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_device.tried || g_device.gpu != gpu) {
+        if (g_device.ref) api->av_buffer_unref(&g_device.ref);
+        g_device = Device{true, gpu, {}, nullptr};
+        const char* name = kDeviceType == AV_HWDEVICE_TYPE_VULKAN && !gpu.empty() ? gpu.c_str() : nullptr;
+        if (!decodes_on(api, gpu)) {
+            g_device.why = "FFmpeg " + g_version + " decodes on NVIDIA's GPUs only; other GPUs need FFmpeg 9.1";
+        } else if (const int r = api->av_hwdevice_ctx_create(&g_device.ref, kDeviceType, name, nullptr, 0); r < 0 || !g_device.ref) {
+            if (g_device.ref) api->av_buffer_unref(&g_device.ref);
+            g_device.why = std::string("no ") + kHardwareName + " device" + (name ? std::string(" named ") + name : std::string()) + ": " +
+                           error_text(api, r);
+        }
+    }
+    if (!g_device.ref) {
+        why = g_device.why;
+        return nullptr;
+    }
+    AVBufferRef* ref = api->av_buffer_ref(g_device.ref);
+    if (!ref) why = "out of memory for a device reference";
+    return ref;
 }
 
 }  // namespace
@@ -261,244 +343,133 @@ const char* version() {
     return g_api ? g_version.c_str() : "";
 }
 
+const char* hardware_name() { return kHardwareName; }
+
 struct Decoder {
     const Api* api = nullptr;
     AVCodecContext* ctx = nullptr;
     AVPacket* pkt = nullptr;
     AVFrame* frame = nullptr;
-    AVFrame* sw = nullptr;
-    bool hardware = false;
-    const char* codec_name = nullptr;
-    std::vector<uint8_t> config;
-    int threads = 2;
+    AVFrame* sw = nullptr;     // the picture copied back from the GPU; its buffer is kept while the size and format stay
     int64_t last_time = 0;
-    bool decoded_any = false;
-    bool warned_format = false, warned_transfer = false;
+    uint64_t pictures = 0;     // pictures handed out
+    uint64_t errors = 0;
+    bool warned_lost = false;
 };
 
 namespace {
 
-void emit(Decoder* d, AVFrame* src, int64_t time, std::vector<Frame>& out) {
-    if (!src || src->width <= 0 || src->height <= 0) return;
-    if (src->format == AV_PIX_FMT_D3D11) {
-        if (!d->sw) return;
-        d->api->av_frame_unref(d->sw);
-        d->sw->format = AV_PIX_FMT_NV12;
-        d->sw->width = src->width;
-        d->sw->height = src->height;
-        const int r = d->api->av_hwframe_transfer_data(d->sw, src, 0);
-        if (r < 0) {
-            if (!d->warned_transfer) NXLOG_W(kTag, "FFmpeg: D3D11VA frame could not be copied back to NV12; this picture is dropped");
-            d->warned_transfer = true;
-            return;
-        }
-        src = d->sw;
-    }
-    const uint32_t w = static_cast<uint32_t>(src->width), h = static_cast<uint32_t>(src->height);
-    Frame f;
-    f.width = w;
-    f.height = h;
-    f.time = time;
-    f.nv12.resize(nv12_bytes(w, h));
-    if (src->format == AV_PIX_FMT_NV12) {
-        for (uint32_t y = 0; y < h; ++y)
-            std::memcpy(f.nv12.data() + static_cast<uint64_t>(y) * w, src->data[0] + static_cast<ptrdiff_t>(y) * src->linesize[0], w);
-        auto* uv = f.nv12.data() + static_cast<uint64_t>(w) * h;
-        for (uint32_t y = 0; y < h / 2; ++y)
-            std::memcpy(uv + static_cast<uint64_t>(y) * w, src->data[1] + static_cast<ptrdiff_t>(y) * src->linesize[1], w);
-    } else if (src->format == AV_PIX_FMT_YUV420P || src->format == AV_PIX_FMT_YUVJ420P) {
-        for (uint32_t y = 0; y < h; ++y)
-            std::memcpy(f.nv12.data() + static_cast<uint64_t>(y) * w, src->data[0] + static_cast<ptrdiff_t>(y) * src->linesize[0], w);
-        auto* uv = f.nv12.data() + static_cast<uint64_t>(w) * h;
-        const uint32_t cw = (w + 1) / 2, ch = (h + 1) / 2;
-        for (uint32_t y = 0; y < ch; ++y) {
-            const uint8_t* u = src->data[1] + static_cast<ptrdiff_t>(y) * src->linesize[1];
-            const uint8_t* v = src->data[2] + static_cast<ptrdiff_t>(y) * src->linesize[2];
-            uint8_t* o = uv + static_cast<uint64_t>(y) * w;
-            for (uint32_t x = 0; x < cw; ++x) {
-                o[2 * x] = u[x];
-                o[2 * x + 1] = v[x];
-            }
-        }
-    } else {
-        if (!d->warned_format) NXLOG_W(kTag, "FFmpeg: picture format %d is not handled (8-bit 4:2:0 only)", src->format);
-        d->warned_format = true;
-        return;
-    }
-    d->decoded_any = true;
-    out.push_back(std::move(f));
+void note_error(Decoder* d, const char* what, int err) {
+    if (++d->errors <= 3) NXLOG_W(kTag, "FFmpeg %s: %s", what, error_text(d->api, err).c_str());
 }
 
-void receive(Decoder* d, std::vector<Frame>& out, int64_t time) {
-    if (!d->ctx || !d->frame) return;
+// Copies one decoded picture back from the GPU into `out`. False when it is lost: the copy failed, or it did not come back as NV12 (the
+// device's format for 8-bit 4:2:0; FFmpeg's av1 decoder decodes on the GPU only).
+bool emit(Decoder* d, const AVFrame* src, int64_t time, std::vector<Frame>& out) {
+    if (!src->hw_frames_ctx || src->width <= 0 || src->height <= 0) return false;
+    const auto* frames = reinterpret_cast<const AVHWFramesContext*>(src->hw_frames_ctx->data);
+    AVFrame* pic = d->sw;
+    if (pic->buf[0] && (pic->format != frames->sw_format || pic->width != src->width || pic->height != src->height)) d->api->av_frame_unref(pic);
+    const int r = d->api->av_hwframe_transfer_data(pic, src, 0);   // into the kept buffer, else a new one in the device's format
+    if (r < 0 || pic->format != AV_PIX_FMT_NV12) {
+        if (!d->warned_lost) {
+            const std::string reason = r < 0 ? error_text(d->api, r) : "format " + std::to_string(pic->format) + " is not NV12";
+            NXLOG_W(kTag, "FFmpeg: a picture could not come back from the GPU: %s", reason.c_str());
+        }
+        d->warned_lost = true;
+        return false;
+    }
+    const uint32_t w = static_cast<uint32_t>(src->width), h = static_cast<uint32_t>(src->height);
+    const uint32_t chroma_rows = (h + 1) / 2, chroma_row = (w + 1) / 2 * 2;
+    Frame f{std::vector<uint8_t>(nv12_bytes(w, h)), w, h, src->pts != AV_NOPTS_VALUE ? src->pts : time};
+    uint8_t* const luma = f.nv12.data();
+    uint8_t* const chroma = luma + static_cast<uint64_t>(w) * h;
+    for (uint32_t y = 0; y < h; ++y)
+        std::memcpy(luma + static_cast<uint64_t>(y) * w, pic->data[0] + static_cast<ptrdiff_t>(y) * pic->linesize[0], w);
+    for (uint32_t y = 0; y < chroma_rows; ++y)
+        std::memcpy(chroma + static_cast<uint64_t>(y) * chroma_row, pic->data[1] + static_cast<ptrdiff_t>(y) * pic->linesize[1], chroma_row);
+    out.push_back(std::move(f));
+    return true;
+}
+
+// Takes every picture FFmpeg has ready; `time` stamps one that carries no timestamp. False on an error or a lost picture.
+bool receive(Decoder* d, std::vector<Frame>& out, int64_t time) {
+    bool ok = true;
     for (;;) {
         const int r = d->api->avcodec_receive_frame(d->ctx, d->frame);
-        if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return;
+        if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return ok;
         if (r < 0) {
-            log_error("avcodec_receive_frame", r);
-            return;
+            note_error(d, "avcodec_receive_frame", r);
+            return false;
         }
-        emit(d, d->frame, time, out);
+        if (emit(d, d->frame, time, out)) ++d->pictures;
+        else ok = false;
         d->api->av_frame_unref(d->frame);
     }
 }
 
-bool open_context(Decoder* d, const AVCodec* codec, const std::vector<uint8_t>& config, int threads, bool hardware, std::string& why) {
-    AVCodecContext* ctx = d->api->avcodec_alloc_context3(codec);
-    if (!ctx) {
-        why = "avcodec_alloc_context3 failed";
-        return false;
-    }
-    ctx->thread_count = std::max(1, threads);
-    ctx->thread_type = FF_THREAD_SLICE;
-    ctx->pkt_timebase = AVRational{1, 1000000};
-    // The movie library's av1C record is four bytes of record header followed by the configOBUs. FFmpeg's AV1 decoder
-    // wants the OBUs alone; the 0x81 marker byte is not an OBU header.
-    const size_t skip = config.size() > 4 && config[0] == 0x81 ? 4 : 0;
-    if (config.size() > skip) {
-        const size_t extra_size = config.size() - skip;
-        ctx->extradata = static_cast<uint8_t*>(d->api->av_mallocz(extra_size + AV_INPUT_BUFFER_PADDING_SIZE));
-        if (!ctx->extradata) {
-            why = "out of memory for the av1C extradata";
-            d->api->avcodec_free_context(&ctx);
-            return false;
-        }
-        std::memcpy(ctx->extradata, config.data() + skip, extra_size);
-        ctx->extradata_size = static_cast<int>(extra_size);
-    }
-    if (hardware) {
-        AVBufferRef* device = nullptr;
-        const int r = d->api->av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
-        if (r < 0 || !device) {
-            why = "the D3D11VA device is unavailable";
-            if (device) d->api->av_buffer_unref(&device);
-            d->api->avcodec_free_context(&ctx);
-            return false;
-        }
-        ctx->hw_device_ctx = device;   // the context owns this reference
-    }
-    const int r = d->api->avcodec_open2(ctx, codec, nullptr);
-    if (r < 0) {
-        char text[AV_ERROR_MAX_STRING_SIZE] = {};
-        d->api->av_strerror(r, text, sizeof text);
-        why = std::string("avcodec_open2: ") + (text[0] ? text : "error");
-        d->api->avcodec_free_context(&ctx);
-        return false;
-    }
-    d->ctx = ctx;
-    d->hardware = ctx->hw_device_ctx != nullptr;
-    return true;
-}
-
-// The movie library sends the av1C record once, out of band. FFmpeg's native av1 decoder reads it as extradata, but its
-// libdav1d decoder only parses the record there; it still needs the sequence-header OBU as its first packet, as the
-// engine's own dav1d path feeds it. A duplicate sequence header from a later packet is harmless.
-void send_config(Decoder* d) {
-    if (!d->ctx || d->config.size() <= 4) return;
-    const size_t skip = d->config[0] == 0x81 ? 4 : 0;
-    const size_t n = d->config.size() - skip;
-    if (!n || n > static_cast<size_t>(INT_MAX)) return;
-    int r = d->api->av_new_packet(d->pkt, static_cast<int>(n));
-    if (r < 0) {
-        log_error("av_new_packet (av1C)", r);
-        return;
-    }
-    std::memcpy(d->pkt->data, d->config.data() + skip, n);
-    r = d->api->avcodec_send_packet(d->ctx, d->pkt);
-    d->api->av_packet_unref(d->pkt);
-    if (r < 0 && r != AVERROR(EAGAIN)) {
-        log_error("avcodec_send_packet (av1C)", r);
-        return;
-    }
-    if (r == AVERROR(EAGAIN)) {
-        std::vector<Frame> none;
-        receive(d, none, 0);
-    }
-}
-
-// A GPU can offer a D3D11VA device and still not decode AV1. FFmpeg only finds that out on the first packet, so switch
-// to its libdav1d decoder then; no pictures have been produced yet, so nothing is lost.
-bool reopen_software(Decoder* d) {
-    const AVCodec* codec = d->api->avcodec_find_decoder_by_name("libdav1d");
-    if (!codec) {
-        NXLOG_W(kTag, "FFmpeg has no libdav1d decoder to fall back to");
-        return false;
-    }
-    AVCodecContext* old = d->ctx;
-    d->ctx = nullptr;
-    d->api->avcodec_free_context(&old);
-    d->hardware = false;
-    std::string why;
-    if (!open_context(d, codec, d->config, d->threads, false, why)) {
-        NXLOG_W(kTag, "FFmpeg: D3D11VA failed and the software decoder could not start: %s", why.c_str());
-        return false;
-    }
-    d->codec_name = codec->name;
-    send_config(d);
-    NXLOG_W(kTag, "FFmpeg: D3D11VA could not decode this movie; switched to its libdav1d software decoder");
-    return true;
-}
-
 }  // namespace
 
-Decoder* open(const std::vector<uint8_t>& config, int threads, bool hardware) {
+void prepare(const std::string& gpu) {
     const Api* api = find_api();
-    if (!api) return nullptr;
-    // FFmpeg's native av1 decoder is hardware-only: without a D3D11VA device it returns ENOSYS. Its libdav1d
-    // decoder is the software path. (When a build has neither, the caller falls back to the engine's own dav1d.)
-    const AVCodec* hw_codec = api->avcodec_find_decoder_by_name("av1");
-    const AVCodec* sw_codec = api->avcodec_find_decoder_by_name("libdav1d");
-    const bool has_soft = sw_codec != nullptr;
-    if (!sw_codec) sw_codec = hw_codec;
-    if (!sw_codec) {
-        NXLOG_W(kTag, "FFmpeg has no AV1 decoder");
+    if (!api) return;
+    std::string why;
+    if (AVBufferRef* device = device_ref(api, gpu, why)) api->av_buffer_unref(&device);
+}
+
+Decoder* open(const std::vector<uint8_t>& config, const std::string& gpu, std::string& why) {
+    g_log_lines.store(0, std::memory_order_relaxed);
+    const Api* api = find_api();
+    if (!api) {
+        why = "FFmpeg is not available";
         return nullptr;
     }
-    if (!hardware && !has_soft) {
-        NXLOG_W(kTag, "FFmpeg has no software AV1 decoder (libdav1d is missing): using the engine's dav1d");
+    const AVCodec* codec = api->avcodec_find_decoder_by_name("av1");
+    if (!codec) {
+        why = "this FFmpeg build has no av1 decoder";
         return nullptr;
     }
+    AVBufferRef* device = device_ref(api, gpu, why);
+    if (!device) return nullptr;
     auto* d = new Decoder();
     d->api = api;
-    d->config = config;
-    d->threads = threads;
     d->pkt = api->av_packet_alloc();
     d->frame = api->av_frame_alloc();
     d->sw = api->av_frame_alloc();
-    if (!d->pkt || !d->frame || !d->sw) {
-        NXLOG_W(kTag, "FFmpeg could not allocate its packet/frame");
+    d->ctx = api->avcodec_alloc_context3(codec);
+    if (!d->pkt || !d->frame || !d->sw || !d->ctx) {
+        why = "out of memory";
+        api->av_buffer_unref(&device);
         close(d);
         return nullptr;
     }
-    std::string why;
-    if (hardware && hw_codec && open_context(d, hw_codec, config, threads, true, why)) {
-        d->codec_name = hw_codec->name;
-        send_config(d);
-        NXLOG_I(kTag, "FFmpeg AV1 decoder: %s, %d threads, D3D11VA", d->codec_name, d->ctx->thread_count);
-        return d;
+    AVCodecContext* ctx = d->ctx;
+    ctx->thread_count = 1;        // the GPU decodes; FFmpeg's av1 decoder has no threads of its own
+    ctx->hw_device_ctx = device;  // the context owns this reference
+    // The movie library's av1C record, as FFmpeg reads it (cbs_av1: a first byte with the top bit set is an AV1CodecConfigurationRecord):
+    // the decoder takes the sequence header from its configOBUs, so the packets need not carry it.
+    if (!config.empty()) {
+        ctx->extradata = static_cast<uint8_t*>(api->av_mallocz(config.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (!ctx->extradata) {
+            why = "out of memory for the av1C extradata";
+            close(d);
+            return nullptr;
+        }
+        std::memcpy(ctx->extradata, config.data(), config.size());
+        ctx->extradata_size = static_cast<int>(config.size());
     }
-    if (hardware && hw_codec) NXLOG_W(kTag, "FFmpeg: hardware AV1 decode did not open (%s); using its software decoder", why.c_str());
-    if (!has_soft) {
-        NXLOG_W(kTag, "FFmpeg has no libdav1d software decoder to fall back to: using the engine's dav1d");
+    const int r = api->avcodec_open2(ctx, codec, nullptr);
+    if (r < 0) {
+        why = "avcodec_open2: " + error_text(api, r);
         close(d);
         return nullptr;
     }
-    why.clear();
-    if (!open_context(d, sw_codec, config, threads, false, why)) {
-        NXLOG_W(kTag, "FFmpeg could not open its AV1 decoder: %s", why.c_str());
-        close(d);
-        return nullptr;
-    }
-    d->codec_name = sw_codec->name;
-    send_config(d);
-    NXLOG_I(kTag, "FFmpeg AV1 decoder: %s, %d threads, software", d->codec_name, d->ctx->thread_count);
     return d;
 }
 
-bool hardware(const Decoder* d) { return d && d->hardware; }
-
 void close(Decoder* d) {
     if (!d) return;
+    if (d->errors > 3) NXLOG_W(kTag, "FFmpeg: %llu decode errors in this stream", static_cast<unsigned long long>(d->errors));
     if (d->api) {
         if (d->ctx) d->api->avcodec_free_context(&d->ctx);
         if (d->pkt) d->api->av_packet_free(&d->pkt);
@@ -508,40 +479,40 @@ void close(Decoder* d) {
     delete d;
 }
 
-void decode(Decoder* d, const uint8_t* data, size_t size, int64_t time, std::vector<Frame>& out) {
-    if (!d || !d->ctx || !data || !size) return;
+bool decode(Decoder* d, const uint8_t* data, size_t size, int64_t time, std::vector<Frame>& out) {
+    if (!d || !d->ctx || !data || !size) return true;
     if (size > static_cast<size_t>(INT_MAX)) {
         NXLOG_W(kTag, "FFmpeg: a %zu-byte packet is too large", size);
-        return;
+        return true;
     }
     d->last_time = time;
     int r = d->api->av_new_packet(d->pkt, static_cast<int>(size));
     if (r < 0) {
-        log_error("av_new_packet", r);
-        return;
+        note_error(d, "av_new_packet", r);
+        return true;
     }
     std::memcpy(d->pkt->data, data, size);
     d->pkt->pts = time;
+    bool ok = true;
     for (int attempt = 0; attempt < 2; ++attempt) {
         r = d->api->avcodec_send_packet(d->ctx, d->pkt);
         if (r != AVERROR(EAGAIN)) break;
-        receive(d, out, time);
-    }
-    if (r < 0 && d->hardware && !d->decoded_any && reopen_software(d)) {
-        r = d->api->avcodec_send_packet(d->ctx, d->pkt);
+        ok &= receive(d, out, time);   // no room for the packet: take the pictures in the way
     }
     d->api->av_packet_unref(d->pkt);
     if (r < 0) {
-        log_error("avcodec_send_packet", r);
-        return;
+        note_error(d, "avcodec_send_packet", r);
+        ok = false;
+    } else {
+        ok &= receive(d, out, time);
     }
-    receive(d, out, time);
+    return ok || d->pictures > 0;
 }
 
 void drain(Decoder* d, std::vector<Frame>& out) {
     if (!d || !d->ctx) return;
     const int r = d->api->avcodec_send_packet(d->ctx, nullptr);
-    if (r < 0 && r != AVERROR_EOF) log_error("avcodec_send_packet (drain)", r);
+    if (r < 0 && r != AVERROR_EOF) note_error(d, "avcodec_send_packet (drain)", r);
     receive(d, out, d->last_time);
 }
 

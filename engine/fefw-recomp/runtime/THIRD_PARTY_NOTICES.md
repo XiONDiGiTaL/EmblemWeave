@@ -47,8 +47,8 @@ later; the licence texts are `third_party/ffmpeg/COPYING.LGPLv2.1` and `third_pa
 The release also ships `avcodec-62.dll`, `avutil-60.dll` and `swresample-6.dll` in `upscalers/ffmpeg`. They are the
 FFmpeg GPL shared Windows build `N-123619-g44ad73031d` (2026-03-25; libavcodec 62.29.101, libavutil 60.29.100,
 swresample 6.4.100), with SHA-256 hashes in `SHA256SUMS`, the GPLv3 text in `LICENSE.txt` and `COPYING.GPLv3`, and source
-links in `README.md`. The build contains libx264 and libx265; the engine only uses FFmpeg's AV1 decoder (native AV1 with
-D3D11VA, or its bundled libdav1d in software). FFmpeg's upstream licence and copyright notices are at
+links in `README.md`. The build contains libx264 and libx265; the engine only uses FFmpeg's AV1 decoder on Vulkan video
+and, for the game's Opus sound, its Opus decoder. FFmpeg's upstream licence and copyright notices are at
 https://github.com/FFmpeg/FFmpeg; the source for the reported revision is
 https://github.com/FFmpeg/FFmpeg/commit/44ad73031d.
 

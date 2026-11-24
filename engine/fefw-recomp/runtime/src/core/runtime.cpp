@@ -65,7 +65,7 @@ bool init(const InitOptions& opt) {
         kernel::install_busy_mutex_hle();   // the SDK's spin lock yields under the console core model
         media::install_movie_hle();   // movie:: on Media Foundation ([media] movie = off keeps the library in subsdk0); Switch 1 only
         media::install_video_codec_hle();   // Switch 2: nn::codec VP9/VP8 decoders + fences on libvpx (src/media/video_codec.cpp)
-        media::install_movie_decoder_hle();   // Switch 2: movie::VideoDecoder on dav1d for AV1 movies (src/media/movie_vdec.cpp)
+        media::install_movie_decoder_hle();   // Switch 2: movie::VideoDecoder for AV1 movies, on the GPU or dav1d (src/media/movie_vdec.cpp)
         install_switch2_hle();        // Switch 2: the GPU driver boot answers on the host (src/core/switch2.cpp)
         trace_sites_install();        // [diag] trace_sites: bring-up register probes at mid hook sites (src/diag/trace_sites.cpp)
     }

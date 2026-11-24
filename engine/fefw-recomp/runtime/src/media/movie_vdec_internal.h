@@ -47,9 +47,10 @@ struct Picture {   // a decoded picture in host memory (NV12 at its width), or t
     bool eos = false;
 };
 
-struct Av1 {   // the worker's decoder: dav1d, or FFmpeg's libavcodec when selected and available
+struct Av1 {   // the worker's decoder: FFmpeg's on a GPU, or dav1d
     Dav1dContext* dav1d = nullptr;
     ffmpeg::Decoder* ff = nullptr;
+    std::vector<uint8_t> config;   // the track's av1C record: dav1d starts from it when the GPU refuses the stream
 };
 
 struct Decoder {

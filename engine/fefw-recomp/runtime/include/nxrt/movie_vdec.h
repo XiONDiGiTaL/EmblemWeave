@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// movie::VideoDecoder of the Switch 2 movie library on the host (src/media/movie_vdec.cpp): AV1 through dav1d into the player's CPU frames,
-// for a title with game::Info::movie_video_decoder. [media] movies = host (default) | skip (every movie fails to open, core/switch2.cpp).
+// movie::VideoDecoder of the Switch 2 movie library on the host (src/media/movie_vdec.cpp): AV1 on the GPU through FFmpeg, or through dav1d,
+// into the player's CPU frames, for a title with game::Info::movie_video_decoder. [media] movies = host (default) | skip (every movie fails to
+// open, core/switch2.cpp).
 #pragma once
 
 #include <cstddef>
@@ -32,5 +33,9 @@ bool movie_decoder_enabled();
 
 // Frames the game's player has taken from the host decoder so far; 0 when the decoder is off.
 uint64_t movie_frames_acquired();
+
+// The GPU the game renders on, by its Vulkan device name: [media] movie_decoder = auto decodes the movies there. Set once the graphics
+// device exists, before the first movie; it also creates the decode device then, so the first movie need not wait for it.
+void set_movie_render_gpu(const char* name);
 
 }  // namespace nxrt::media
