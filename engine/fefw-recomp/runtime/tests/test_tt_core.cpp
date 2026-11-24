@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "nxrt/game.h"
 #include "nxrt/config.h"
@@ -202,6 +204,42 @@ bool skip_unless_mpr() {
     if (std::string(nxrt::game::info().id) == "mpr") return false;
     nxtest::skip("the fake game has Metroid Prime Remastered's memory shape; the registered test game is not mpr");
     return true;
+}
+
+// Starts this exe as `--child <mode>` and waits for it. A watchdog deadlock must fail the
+// parent case after the timeout instead of hanging the whole test binary.
+bool run_child_until(const char* mode, DWORD timeout_ms, DWORD& exit_code) {
+    char exe[MAX_PATH * 4] = {};
+    if (!GetModuleFileNameA(nullptr, exe, sizeof exe)) return false;
+    const std::string cmd = std::string("\"") + exe + "\" --child " + mode;
+    std::vector<char> cmdline(cmd.begin(), cmd.end());
+    cmdline.push_back('\0');
+    STARTUPINFOA si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(exe, cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
+    const DWORD waited = WaitForSingleObject(pi.hProcess, timeout_ms);
+    if (waited == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &exit_code);
+    else TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return waited == WAIT_OBJECT_0;
+}
+
+std::atomic<bool> g_wd_shutdown_done{false};
+std::atomic<int> g_wd_second_fires{0};
+std::atomic<DWORD> g_wd_first_thread{0};
+std::atomic<DWORD> g_wd_second_thread{0};
+
+void on_exit_shutdown(int) {
+    g_wd_first_thread.store(GetCurrentThreadId());
+    nxrt::tt::shutdown();  // called from the freeze callback: the watchdog stops itself
+    g_wd_shutdown_done.store(true);
+}
+
+void second_fire(const char*, void*) {
+    g_wd_second_thread.store(GetCurrentThreadId());
+    g_wd_second_fires.fetch_add(1);
 }
 
 }  // namespace
@@ -551,6 +589,56 @@ NXTEST(watchdog_freeze_ends_a_scripted_run_with_code_5) {
     CHECK(slurp(r.out + "\\result.json").find("\"verdict\":\"freeze\"") != std::string::npos);
     shutdown();
     nxrt::watchdog_stop();
+}
+
+// The freeze callback runs on the watchdog thread. `tt::shutdown` calls watchdog_stop from
+// that same thread, so it must detach rather than join itself. Once it returns, a later
+// watchdog_start must create a new thread; if the stopped thread is still joinable, start is
+// silently ignored and the second watchdog never fires.
+NXTEST_CHILD(watchdog_shutdown_from_on_fire) {
+    // No frame boundary runs, so this lifecycle case does not read the fake game's memory and
+    // does not need the mpr-shaped probes the other cases in this group skip without.
+    nxrt::config_clear();
+    reset_for_tests();
+    g_wd_shutdown_done.store(false);
+    g_wd_second_fires.store(0);
+    g_wd_first_thread.store(0);
+    g_wd_second_thread.store(0);
+    set_exit_handler(on_exit_shutdown);
+    const std::string script = scriptfile("watchdog_restart.nxs", "100000\n");
+    nxrt::config_set("test", "out", "tt_test_out\\watchdog_restart");
+    nxrt::config_set("test", "frame_source", "manual");
+    nxrt::config_set("test", "script", script.c_str());
+    nxrt::config_set("diag", "watchdog_seconds", "0.2");
+    if (!init()) return 2;
+
+    // No frame boundary: the watchdog fires, end_run calls the exit handler, and shutdown
+    // stops the watchdog from its own thread. A self-join would leave this flag unset.
+    for (int i = 0; i < 500 && !g_wd_shutdown_done.load(); i++) Sleep(10);
+    if (!g_wd_shutdown_done.load()) return 3;
+    if (nxrt::watchdog_running()) return 4;
+    if (g_wd_first_thread.load() == GetCurrentThreadId()) return 7;  // must be the watchdog thread
+    Sleep(500);  // let the detached thread leave run_loop before reusing its control block
+
+    nxrt::WatchdogOptions wo;
+    wo.seconds = 0.2;
+    wo.poll_ms = 10;
+    wo.report_path = "";
+    wo.on_fire = second_fire;
+    nxrt::watchdog_start(wo);
+    if (!nxrt::watchdog_running()) return 5;
+    for (int i = 0; i < 300 && g_wd_second_fires.load() == 0; i++) Sleep(10);
+    nxrt::watchdog_stop();
+    if (g_wd_second_fires.load() == 0) return 6;
+    if (g_wd_second_thread.load() == g_wd_first_thread.load()) return 8;
+    return 0;
+}
+
+NXTEST(watchdog_shutdown_from_on_fire_restarts) {
+    DWORD code = 1;
+    const bool finished = run_child_until("watchdog_shutdown_from_on_fire", 20000, code);
+    CHECK_MSG(finished, "child watchdog_shutdown_from_on_fire did not exit within 20 s (shutdown deadlocked)");
+    CHECK_EQ(code, 0u);
 }
 
 // ---- scripted key steps (set_key_sink) ----------------------------------------------------------------------------------------
