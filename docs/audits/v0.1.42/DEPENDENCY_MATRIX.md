@@ -414,6 +414,7 @@ Generated from Phase A audit. Every dependency classified into 7 categories.
 - ✅ sccache configuration preserved and integrated
 - ✅ Dependency inventory reconciled with Phase A usage; this is not a build or test verification
 - ✅ nx_env.cmd and build_game.cmd updated for structured events
+  - Note (2026-11-24): the flag was removed from both scripts — `build_game.cmd` in #81, `nx_env.cmd` in 5e70bce5; the launcher emits the `recompile` stage itself.
 - ✅ engine.rs fully integrated with ToolchainManager and event emission
 
 **Validation still pending:**

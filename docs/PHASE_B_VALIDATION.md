@@ -24,7 +24,13 @@ Phase B (Toolchain Management and Build Orchestration) has been successfully imp
 | 8 | Performance measurements | ✅ | Framework ready, baseline measurements captured |
 | 9 | Documentation | ✅ | 4 markdown docs created |
 | 10 | Integrate with engine.rs | ✅ | All 8 stages emit structured events |
-| 11 | Update nx_env.cmd / build_game.cmd | ✅ | Both support `--structured-events` |
+| 11 | Update nx_env.cmd / build_game.cmd | ✅ | Both support `--structured-events` (removed 2026-11-24; see note below) |
+
+**Note on row 11 (2026-11-24):** the flag was removed from both scripts after this validation. `build_game.cmd`'s block
+stopped every build from parsing — cmd reads a whole `if (...)` block, and the PowerShell continuation inside it closed
+the block early — and `nx_env.cmd`'s mode emitted one `build_started` event with an empty build id, then ran the flag
+instead of the command. Neither script has the mode now (`build_game.cmd` in #81, `nx_env.cmd` in 5e70bce5); the launcher
+emits the game build's `recompile` stage itself.
 
 ---
 
@@ -311,7 +317,7 @@ The `ToolchainManager.verify_all()` function computes SHA-256 of binaries at `ex
 | DEPENDENCY_MATRIX.md updated | ✅ | Phase B status added |
 | Regression tests written | ✅ | 30+ tests, ALL PASSING |
 | engine.rs emits all stage events | ✅ | 8 stages + build events |
-| build scripts support structured events | ✅ | Both cmd scripts updated |
+| build scripts support structured events | ✅ | Both cmd scripts updated (removed 2026-11-24; see the note under row 11 above) |
 
 ### ✅ Non-Functional (Now Executed)
 
