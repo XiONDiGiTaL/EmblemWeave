@@ -166,23 +166,39 @@ namespace {
 // The periodic stats thread (start_periodic_stats). It never holds g_mu while it calls into a sink.
 class StatsLogger {
 public:
-    ~StatsLogger() {
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        if (th_.joinable()) th_.join();
-    }
+    ~StatsLogger() { stop(); }
     void start() {
         std::lock_guard<std::mutex> lk(mu_);
         if (started_) return;
         started_ = true;
+        stop_ = false;
         const double secs = config_get_double("audio", "stats_interval", 10.0);
         if (!(secs > 0.0)) return;
         interval_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(secs));
         th_ = std::thread([this] { run(); });
     }
+    // Idempotent. Called by runtime::shutdown() so a runtime teardown leaves no stats thread behind; start() may run again.
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!started_) return;
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (th_.joinable()) {
+            if (th_.get_id() == std::this_thread::get_id())
+                th_.detach();   // a sink callback cannot join its own stats thread; run() has already seen stop_
+            else
+                th_.join();
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        started_ = false;
+    }
+    bool running() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return started_ && th_.joinable();
+    }
+    mutable std::mutex mu_;
 
 private:
     void run() {
@@ -235,7 +251,6 @@ private:
         }
     }
 
-    std::mutex mu_;
     std::condition_variable cv_;
     std::thread th_;
     bool started_ = false;
@@ -246,6 +261,8 @@ StatsLogger g_stats_logger;
 }  // namespace
 
 void start_periodic_stats() { g_stats_logger.start(); }
+void stop_periodic_stats() { g_stats_logger.stop(); }
+bool periodic_stats_running() { return g_stats_logger.running(); }
 
 std::string stats_report() {
     std::shared_ptr<AudioSink> s;

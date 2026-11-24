@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 NXTEST_GROUP(watchdog)
 
@@ -77,6 +78,37 @@ struct FireCapture {
     std::string text;
     std::atomic<int> calls{0};
 };
+
+// Starts this exe as `--child <mode>` and waits for it: a stop deadlock must fail the parent after the timeout instead of
+// hanging the whole test binary.
+bool run_child_until(const char* mode, DWORD timeout_ms, DWORD& exit_code) {
+    char exe[MAX_PATH * 4] = {};
+    if (!GetModuleFileNameA(nullptr, exe, sizeof exe)) return false;
+    const std::string cmd = std::string("\"") + exe + "\" --child " + mode;
+    std::vector<char> cmdline(cmd.begin(), cmd.end());
+    cmdline.push_back('\0');
+    STARTUPINFOA si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(exe, cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
+    const DWORD waited = WaitForSingleObject(pi.hProcess, timeout_ms);
+    if (waited == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &exit_code);
+    else TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return waited == WAIT_OBJECT_0;
+}
+
+std::atomic<bool> g_cb_entered{false};
+std::atomic<bool> g_cb_release{false};
+std::atomic<bool> g_cb_stopped{false};
+
+void on_fire_concurrent_stop(const char*, void*) {
+    g_cb_entered.store(true);
+    while (!g_cb_release.load()) std::this_thread::sleep_for(milliseconds(1));
+    nxrt::watchdog_stop();
+    g_cb_stopped.store(true);
+}
 
 void capture_fire(const char* dump, void* user) {
     auto* f = static_cast<FireCapture*>(user);
@@ -279,6 +311,84 @@ NXTEST(threshold_from_config) {
     CHECK_EQ(nxrt::watchdog_fire_count() - base, 1u);
     nxrt::config_clear();
     std::remove(rep.c_str());
+}
+
+NXTEST_CHILD(watchdog_concurrent_stop) {
+    nxrt::config_clear();
+    nxrt::watchdog_stop();
+    g_cb_entered.store(false);
+    g_cb_release.store(false);
+    g_cb_stopped.store(false);
+    nxrt::WatchdogOptions wo;
+    wo.seconds = 0.02;
+    wo.poll_ms = 1;
+    wo.report_path = "";
+    wo.on_fire = on_fire_concurrent_stop;
+    nxrt::watchdog_start(wo);
+    if (!wait_for([] { return g_cb_entered.load(); }, 3000)) return 2;
+
+    std::atomic<bool> caller_done{false};
+    std::thread caller([&] {
+        nxrt::watchdog_stop();
+        caller_done.store(true);
+    });
+    std::this_thread::sleep_for(milliseconds(100));   // the caller is now joining the callback
+    g_cb_release.store(true);
+    if (!wait_for([&] { return caller_done.load(); }, 3000)) {   // old code deadlocked here
+        caller.detach();
+        return 3;
+    }
+    caller.join();
+    if (!g_cb_stopped.load()) return 4;
+    return 0;
+}
+
+NXTEST(concurrent_stop_from_callback_and_caller_does_not_deadlock) {
+    DWORD code = 1;
+    const bool finished = run_child_until("watchdog_concurrent_stop", 8000, code);
+    CHECK_MSG(finished, "concurrent watchdog_stop deadlocked (child did not exit)");
+    CHECK_EQ(code, 0u);
+}
+
+NXTEST(dump_latency_scales_with_thread_count) {
+    // Baseline for freeze-dump latency: registered busy threads make SuspendThread/GetThreadContext/stack capture measurable.
+    // Times are printed so a regression can be compared with the recorded audit numbers instead of guessed at.
+    for (const int count : {1, 8, 32}) {
+        std::atomic<bool> stop{false};
+        std::atomic<int> ready{0};
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(count));
+        for (int i = 0; i < count; i++) {
+            workers.emplace_back([&stop, &ready, i] {
+                const std::string name = "dumpbench" + std::to_string(i);
+                nxrt::diag_register_thread(name.c_str(), nullptr);
+                ready.fetch_add(1, std::memory_order_release);
+                while (!stop.load(std::memory_order_relaxed)) _mm_pause();
+                nxrt::diag_unregister_thread();
+            });
+        }
+        CHECK_MSG(wait_for([&] { return ready.load(std::memory_order_acquire) == count; }, 5000), "workers did not register");
+
+        nxrt::ThreadDumpTiming worst{};
+        std::string dump;
+        for (int round = 0; round < 3; round++) {
+            nxrt::ThreadDumpTiming t;
+            dump = nxrt::diag_thread_dump(&t);
+            CHECK_MSG(t.threads >= static_cast<size_t>(count), "dump missed registered worker threads");
+            CHECK(t.collect_ms >= t.snapshot_ms);
+            CHECK(t.total_ms >= t.collect_ms);
+            CHECK(t.format_ms >= 0.0);
+            CHECK(t.total_ms < 2000.0);   // a dump that takes seconds would itself look like a freeze
+            if (t.total_ms > worst.total_ms) worst = t;
+        }
+        CHECK_MSG(has(dump, "dumpbench"), "thread dump does not name a registered worker");
+        std::printf("freeze dump: %2d threads: total %.3f ms (collect %.3f: snapshot %.3f suspend %.3f context %.3f stack %.3f resume %.3f, format %.3f)\n",
+                    count, worst.total_ms, worst.collect_ms, worst.snapshot_ms, worst.suspend_ms, worst.context_ms, worst.stack_ms,
+                    worst.resume_ms, worst.format_ms);
+
+        stop.store(true);
+        for (auto& t : workers) t.join();
+    }
 }
 
 NXTEST(thread_dump_lists_registered_threads_not_caller) {

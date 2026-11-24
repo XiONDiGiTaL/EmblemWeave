@@ -35,6 +35,7 @@ namespace {
 std::mutex g_lock;
 bool g_up = false;
 bool g_init_started = false;   // init has run at least once: shutdown must tear down what it started, even if it failed
+bool g_services_registered = false;   // whether register_all() ran, so shutdown resets the service-owned threads exactly once
 }  // namespace
 
 bool init(const InitOptions& opt) {
@@ -64,6 +65,7 @@ bool init(const InitOptions& opt) {
     kernel::starvation_guard_start();
     if (opt.services) {
         services::register_all();
+        g_services_registered = true;
         kernel::install_busy_mutex_hle();   // the SDK's spin lock yields under the console core model
         media::install_movie_hle();   // movie:: on Media Foundation ([media] movie = off keeps the library in subsdk0); Switch 1 only
         media::install_video_codec_hle();   // Switch 2: nn::codec VP9/VP8 decoders + fences on libvpx (src/media/video_codec.cpp)
@@ -117,12 +119,22 @@ void shutdown() {
     if (g_up) NXLOG_I("runtime", "end-of-run summary:\n%s", summary().c_str());
     timestep::shutdown();
     tt::shutdown();
+    ft::stop();
     prof_sampler_stop();
     soak_stop();
     hitch_stop();
     watchdog_stop();
     kernel::starvation_guard_stop();
     memguard_stop();
+    // Service-owned workers (audren DSP, audout pacing, HID sampling, VI vsync) are not runtime workers, but they access the same
+    // process state and must not outlive a failed or successful runtime attempt. reset_all() stops each one; registry_reset() makes a
+    // later init's register_all() start from a clean registry. Both are idempotent.
+    if (g_services_registered) {
+        services::reset_all();
+        ipc::registry_reset();
+        g_services_registered = false;
+    }
+    audio::stop_periodic_stats();
     log_flush();
     g_up = false;
     g_init_started = false;

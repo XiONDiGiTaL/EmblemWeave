@@ -142,8 +142,10 @@ void apply_boost(int16_t* pcm, uint32_t frames, uint32_t channels, float boost, 
 // Periodic stats: while a sink is active, a low-priority thread samples its queue every 10 ms and every [audio] stats_interval seconds
 // (default 10, 0 = off) logs one line: queue depth (average, min..max in ms = the output latency), underruns, drops and the rate the
 // guest delivered frames at over the interval (should be the sample rate; less means the audio is starved or stretched).
-// Started by sink() when it picks the sink; stopped at exit.
+// Started by sink() when it picks the sink; stopped by stop_periodic_stats() (runtime shutdown) and at exit.
 void start_periodic_stats();
+void stop_periodic_stats();
+bool periodic_stats_running();
 
 // One line with the counters of the active sink, e.g. "sink xaudio2: written 4800, accepted 4800, ...".
 std::string stats_report();

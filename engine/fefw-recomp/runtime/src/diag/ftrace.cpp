@@ -46,13 +46,16 @@ std::string g_thread_names[kMaxThreads];
 uint32_t g_thread_tids[kMaxThreads];
 std::atomic<bool> g_thread_named[kMaxThreads];
 std::atomic<bool> g_stop{false};
+std::atomic<uint32_t> g_active_writers{0};   // event() calls in flight: stop() frees the event buffer only after they leave
 std::thread g_writer;
 FILE* g_file = nullptr;
 size_t g_written = 0;
 size_t g_zones_written = 0;
 size_t g_threads_written = 0;
 bool g_started = false;
+std::atomic<uint64_t> g_generation{0};   // a restarted trace must not reuse a thread's old index
 thread_local int t_index = -1;
+thread_local uint64_t t_generation = 0;
 
 uint64_t qpc_freq() {
     static const uint64_t f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return static_cast<uint64_t>(x.QuadPart); }();
@@ -60,6 +63,11 @@ uint64_t qpc_freq() {
 }
 
 int thread_index() {
+    const uint64_t generation = g_generation.load(std::memory_order_acquire);
+    if (t_generation != generation) {
+        t_generation = generation;
+        t_index = -1;
+    }
     if (t_index >= 0) return t_index;
     const uint16_t i = g_next_thread.fetch_add(1);
     if (i >= kMaxThreads) { t_index = static_cast<int>(kMaxThreads - 1); return t_index; }
@@ -156,9 +164,20 @@ uint16_t zone_id(const char* name) {
 }
 
 void event(uint16_t zone, uint64_t t0, uint64_t t1, uint32_t arg) {
-    if (!g_on.load(std::memory_order_relaxed)) return;
+    // Fast path keeps a disabled trace at one load per call (svc_memory calls this on hot paths). The counter is taken only
+    // after the trace looked on, then re-checked: stop() clears g_on and waits for the counter before it releases the event
+    // buffer, so an event that raced the clear either never touches the buffer or is counted while it does.
+    if (!g_on.load(std::memory_order_acquire)) return;
+    g_active_writers.fetch_add(1, std::memory_order_acq_rel);
+    if (!g_on.load(std::memory_order_acquire)) {
+        g_active_writers.fetch_sub(1, std::memory_order_acq_rel);
+        return;
+    }
     const size_t i = g_n.fetch_add(1, std::memory_order_relaxed);
-    if (i >= g_cap) return;
+    if (i >= g_cap) {
+        g_active_writers.fetch_sub(1, std::memory_order_acq_rel);
+        return;
+    }
     const int ti = thread_index();
     if (!g_thread_named[ti].load(std::memory_order_relaxed)) {
         const char* n = log_thread_name();
@@ -167,6 +186,7 @@ void event(uint16_t zone, uint64_t t0, uint64_t t1, uint32_t arg) {
     }
     const uint64_t d = t1 > t0 ? t1 - t0 : 0;
     g_ev[i] = {t0, d > 0xffffffffull ? 0xffffffffu : static_cast<uint32_t>(d), zone, static_cast<uint16_t>(ti), arg};
+    g_active_writers.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 void mark(const char* name, uint32_t arg) {
@@ -275,9 +295,21 @@ void start_from_config() {
     g_ev = static_cast<Ev*>(VirtualAlloc(nullptr, g_cap * sizeof(Ev), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!g_ev) return;
     g_file = std::fopen(path.c_str(), "wb");
-    if (!g_file) { VirtualFree(g_ev, 0, MEM_RELEASE); g_ev = nullptr; return; }
+    if (!g_file) { VirtualFree(g_ev, 0, MEM_RELEASE); g_ev = nullptr; g_cap = 0; return; }
     g_started = true;
     g_on.store(true);
+    g_stop.store(false);
+    g_n.store(0);
+    g_written = 0;
+    g_zones_written = 0;
+    g_threads_written = 0;
+    g_next_thread.store(0);
+    for (auto& named : g_thread_named) named.store(false, std::memory_order_relaxed);
+    for (auto& name : g_thread_names) name.clear();
+    for (auto& tid : g_thread_tids) tid = 0;
+    g_last_frame.store(0);
+    g_stall_ms.store(0);
+    g_generation.fetch_add(1, std::memory_order_release);
     g_writer = std::thread(writer_main);
     if (const int64_t sm = config_get_int("prof", "stall_ms", 0); sm > 0) {
         g_stall_ms.store(static_cast<uint32_t>(sm));
@@ -287,14 +319,38 @@ void start_from_config() {
 }
 
 void stop() {
-    if (!g_started) return;
-    g_on.store(false);
-    g_stop.store(true);
-    if (g_writer.joinable()) g_writer.join();
-    if (g_sampler.joinable()) g_sampler.join();
+    std::thread writer, sampler;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (!g_started) return;
+        g_on.store(false);
+        g_stop.store(true);
+        writer = std::move(g_writer);
+        sampler = std::move(g_sampler);
+    }
+    if (writer.joinable()) writer.join();
+    if (sampler.joinable()) sampler.join();
+    while (g_active_writers.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+
     std::lock_guard<std::mutex> lk(g_mu);
     flush_locked();
     if (g_file) { std::fclose(g_file); g_file = nullptr; }
+    if (g_ev) { VirtualFree(g_ev, 0, MEM_RELEASE); g_ev = nullptr; }
+    g_cap = 0;
+    g_n.store(0);
+    g_written = 0;
+    g_zones_written = 0;
+    g_threads_written = 0;
+    g_next_thread.store(0);
+    g_last_frame.store(0);
+    g_stall_ms.store(0);
+    g_started = false;
+    g_stop.store(false);
+}
+
+bool running() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_started;
 }
 
 }  // namespace nxrt::ft

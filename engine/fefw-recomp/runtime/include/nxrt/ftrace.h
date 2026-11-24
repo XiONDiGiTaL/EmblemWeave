@@ -22,7 +22,8 @@ void event(uint16_t zone, uint64_t t0, uint64_t t1, uint32_t arg = 0);
 void mark(const char* name, uint32_t arg = 0);
 void frame();                              // the "frame" mark (one per presented frame); also feeds the stall sampler
 void start_from_config();                  // reads [prof] trace / trace_events; a no-op when unset or already started
-void stop();                               // final flush
+void stop();                               // final flush and release; start_from_config may run again afterwards
+bool running();
 
 struct Scope {
     uint16_t id;

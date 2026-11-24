@@ -276,3 +276,83 @@ prior 1.5-6.8 % range). `cargo test -p emblemweave`: 432 passed, 0 failed, 13 ig
 
 Not verified: the reporter's Windows 10/11 hardware, physical mouse versus synthetic input, and
 multi-monitor/high-DPI drag. The fix targets frames that do run, not idle repaint.
+
+## 2026-11-24 runtime lifecycle, partial initialization and freeze-dump audit
+
+This pass traced `runtime::init()` / `runtime::shutdown()` and the workers they start. The summary is
+code-level and test-level evidence; no game dump or long gameplay session was available on this host.
+
+### What was wrong
+
+- `shutdown()` only ran the worker teardown when initialization had succeeded. A failed address-space
+  reservation (`mem::init()`) still started the watchdog, memory guard, starvation guard, sampler and frame
+  trace; `shutdown()` returned before stopping them, and a later init could not restart the trace.
+- The frame-trace writer and stall sampler were never stopped by `runtime::shutdown()`. Their threads and the
+  event buffer survived the runtime, and a restarted trace could reuse stale per-thread trace indices.
+- The audio stats thread was process-static and had no stop path; the audio renderer/audout pacing threads,
+  HID sampler and VI vsync thread are service-owned and were not reset by runtime shutdown.
+- `watchdog_stop()` held the watchdog control lock while joining. A freeze callback that called
+  `watchdog_stop()` (directly or through shutdown) could deadlock against a caller doing the same.
+- A freeze dump suspended, read and resumed one thread at a time. `SuspendThread` is asynchronous, so each
+  `GetThreadContext` waited for its own thread to reach a suspendable point; those waits serialized.
+
+### What changed
+
+- `g_up` still means "initialization succeeded", not "anything started". `g_init_started` means init was
+  attempted, and `g_services_registered` records whether the service layer was installed. Shutdown always
+  runs after an attempt, stops every runtime worker, resets the service-owned workers, and resets the IPC
+  registry so a later init registers services from a clean state. The summary is still printed only when
+  `g_up` is true.
+- `ft::stop()` joins the writer and sampler, waits for `event()` writers already inside the buffer, flushes
+  and frees the buffer, resets counters and thread-name state, and permits `start_from_config()` again.
+  `ft::running()` makes the state observable to tests.
+- `watchdog_stop()` moves the thread handle out under the control lock and joins outside it. `watchdog_start()`
+  waits for a detached generation without holding the control lock, re-checks after the wait, and refuses to
+  restart from the dying generation. The existing self-detach path remains for callback-driven shutdown.
+- `runtime::shutdown()` calls `services::reset_all()` (audren DSP, audout pacing, HID sampler, VI vsync, WAV
+  tee, service state) and `ipc::registry_reset()`, then stops the audio stats thread with
+  `audio::stop_periodic_stats()`.
+- Freeze dumps suspend every registered thread before reading any context, then read contexts/stacks, then
+  resume every thread. Formatting still runs only after all threads are running again. Storage and registry
+  snapshots are allocated before the first suspension, and no allocation or logging occurs while suspended.
+
+### Regression tests
+
+`runtime_lifecycle` now covers: failed-memory init teardown, repeated init/shutdown, reinit with services
+enabled, service reset, frame-trace stop/restart with active `event()` writers, six concurrent shutdown
+callers, a watchdog callback that shuts the runtime down and a later reinit, host thread-count return to the
+pre-init count, and the audio stats thread stopping. `watchdog` adds a child-process test where a caller and
+the freeze callback both call `watchdog_stop()`; the child fails by timeout if the old lock inversion returns.
+
+### Freeze-dump baseline
+
+Measured with `nxrt_tests watchdog` on this Windows host, three dumps per thread count, registered busy-spin
+threads (a worst case, not a game):
+
+| Registered threads | Before batching | After batching | After: collect | After: format |
+|---:|---:|---:|---:|---:|
+| 1 | 0.07-0.11 ms | 0.07-0.10 ms | 0.05-0.08 ms | 0.02 ms |
+| 8 | 0.31-0.56 ms | 0.25-0.31 ms | 0.19-0.25 ms | 0.05-0.06 ms |
+| 32 | 194-204 ms | 18.6-33.7 ms | 18.4-33.5 ms | 0.12-0.19 ms |
+
+The 32-thread before figure was almost entirely `GetThreadContext` (194-204 ms); after batching it is 0.6-0.7 ms,
+and the remaining interruption is `ResumeThread` wake-up (17.5-32.7 ms, host-load dependent). Dump content and symbolization are
+unchanged; the existing `thread_dump_lists_registered_threads_not_caller`, `suspended_threads_keep_running`,
+`dump_names_symbolised_host_function` and request-file tests pass.
+
+### Validation and limitations
+
+- Full suite: `SUMMARY --all: 967 passed, 0 failed, 29 skipped (of 996)`. Standalone: `runtime_lifecycle`
+  6/6, `watchdog` 14/14, `tt_core.watchdog_shutdown_from_on_fire_restarts` 1/1, `runtime_e2e` 1/1, `memguard`
+  8/8, `soak` 9/9, `svc_audio_out` 10/10, `write_watch` 17/17.
+- Only `mem::init()` has a failure return in the init sequence; the other stages are best-effort starts with
+  no failure state to inject. The actual memory-failure path is covered, and each worker's own stop/restart
+  path is covered separately. No artificial stage-failure hook was added.
+- `services::reset_all()` assumes guest execution has stopped. Callback-driven runtime shutdown with active
+  guest threads is not exercised; the watchdog callback test uses the core runtime without services.
+- The graphics backend and movie decoders are not owned by `nxrt`: the app calls `nvn::shutdown_backend()`
+  (as the graphics test app does), and decoder threads live on guest objects. `fefw_main` relies on process
+  exit after the entry point returns. Real return-to-title, scene recreation and extended gameplay remain
+  unverified on this host.
+- The uncommitted `test_write_watch.cpp` additions were preserved and their 17-case group passed; they are not
+  part of this audit's commit.

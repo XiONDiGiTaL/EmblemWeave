@@ -51,6 +51,7 @@ struct ThreadDump {
     bool have_guest = false;
     uint64_t guest_lr = 0, guest_sp = 0, guest_fp = 0;
     uint64_t cpu_user_ms = 0, cpu_kernel_ms = 0;   // CPU time the thread has used so far: two dumps tell a busy thread from a waiting one
+    bool suspended = false;
     size_t nframes = 0;
     uint64_t frames[kMaxFrames] = {};
 };
@@ -65,9 +66,14 @@ void appendf(std::string& out, const char* fmt, ...) {
     if (n > 0) out.append(b, static_cast<size_t>(n) < sizeof b ? static_cast<size_t>(n) : sizeof b - 1);
 }
 
+double since_ms(Clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+
 // Phase one. The registry snapshot and every allocation happen before the first thread is suspended. While a thread is
 // suspended nothing allocates and nothing logs, because the suspended thread may hold the heap or the log lock.
-void collect_threads(std::vector<ThreadDump>& out) {
+void collect_threads(std::vector<ThreadDump>& out, ThreadDumpTiming* timing = nullptr) {
+    const Clock::time_point dump_start = Clock::now();
     // Private handle duplicates (made under the registry lock): a thread unregistering mid-dump cannot close or recycle ours.
     std::vector<ThreadRecord> recs = diag_threads_dup();
     struct Release {
@@ -82,6 +88,12 @@ void collect_threads(std::vector<ThreadDump>& out) {
         out.emplace_back();
         out.back().rec = r;                // copy: recs keeps the handle so the release above closes it
     }
+    if (timing) {
+        *timing = ThreadDumpTiming{};
+        timing->threads = out.size();
+        timing->snapshot_ms = since_ms(dump_start);
+    }
+    // CPU times and all storage are read before the first suspension.
     for (ThreadDump& d : out) {
         HANDLE h = static_cast<HANDLE>(d.rec.host_handle);
         if (h) {
@@ -91,16 +103,37 @@ void collect_threads(std::vector<ThreadDump>& out) {
                 d.cpu_user_ms = ((static_cast<uint64_t>(user_t.dwHighDateTime) << 32) | user_t.dwLowDateTime) / 10000;
             }
         }
-        if (h == nullptr || SuspendThread(h) == static_cast<DWORD>(-1)) {
+    }
+    // Suspend every thread before reading any context. SuspendThread only asks for suspension, so doing it per thread and
+    // reading the context immediately after made each GetThreadContext wait for that thread to reach a suspendable point;
+    // with 32 busy threads that serialised the scheduler waits into ~200 ms. Asking for every suspension first lets those
+    // waits overlap, and no thread is left suspended once the context loop and the resume loop are done.
+    for (ThreadDump& d : out) {
+        HANDLE h = static_cast<HANDLE>(d.rec.host_handle);
+        const Clock::time_point suspend_start = Clock::now();
+        const DWORD previous = h ? SuspendThread(h) : static_cast<DWORD>(-1);
+        if (timing) timing->suspend_ms += since_ms(suspend_start);
+        if (h == nullptr || previous == static_cast<DWORD>(-1)) {
             d.status = Status::NoSuspend;
             continue;  // not suspended, nothing to resume
         }
+        d.suspended = true;
+    }
+    for (ThreadDump& d : out) {
+        if (!d.suspended) continue;
+        HANDLE h = static_cast<HANDLE>(d.rec.host_handle);
         CONTEXT tc{};
         tc.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         uint64_t frames[kMaxFrames];
         size_t n = 0;
+        const Clock::time_point context_start = Clock::now();
         const bool got = GetThreadContext(h, &tc) != 0;
-        if (got) n = detail::capture_stack(&tc, frames, kMaxFrames);
+        if (timing) timing->context_ms += since_ms(context_start);
+        if (got) {
+            const Clock::time_point stack_start = Clock::now();
+            n = detail::capture_stack(&tc, frames, kMaxFrames);
+            if (timing) timing->stack_ms += since_ms(stack_start);
+        }
         bool have_guest = false;
         uint64_t glr = 0, gsp = 0, gfp = 0;
         if (got && d.rec.ctx) {
@@ -110,7 +143,7 @@ void collect_threads(std::vector<ThreadDump>& out) {
             gfp = fp(c);
             have_guest = true;
         }
-        ResumeThread(h);  // resumed before anything else touches the thread's data
+        // Keep the copy in local storage until every thread is running again.
         if (!got) {
             d.status = Status::NoContext;
             continue;
@@ -123,7 +156,19 @@ void collect_threads(std::vector<ThreadDump>& out) {
         d.guest_sp = gsp;
         d.guest_fp = gfp;
     }
+    for (ThreadDump& d : out) {
+        if (!d.suspended) continue;
+        HANDLE h = static_cast<HANDLE>(d.rec.host_handle);
+        const Clock::time_point resume_start = Clock::now();
+        ResumeThread(h);
+        if (timing) timing->resume_ms += since_ms(resume_start);
+        d.suspended = false;
+    }
     for (ThreadDump& d : out) d.rec.host_handle = nullptr;   // the copies are about to dangle; phase two never needs them
+    if (timing) {
+        timing->collect_ms = since_ms(dump_start);
+        timing->total_ms = timing->collect_ms;
+    }
 }
 
 // Phase two: text for the collected threads. Runs with every thread resumed.
@@ -225,10 +270,15 @@ std::string memory_text() {
     return out;
 }
 
-std::string dump_text() {
+std::string dump_text(ThreadDumpTiming* timing = nullptr) {
     std::vector<ThreadDump> threads;
-    collect_threads(threads);
+    collect_threads(threads, timing);
+    const Clock::time_point format_start = Clock::now();
     std::string out = format_threads(threads);
+    if (timing) {
+        timing->format_ms = since_ms(format_start);
+        timing->total_ms = timing->collect_ms + timing->format_ms;
+    }
     out += "last files opened (oldest first):\n";
     const std::vector<std::string> files = diag_recent_files();
     if (files.empty()) out += "  (none)\n";
@@ -312,9 +362,12 @@ std::string default_report_path(const std::string& path) {
 
 struct Control {
     std::mutex ctl;  // serialises watchdog_start / watchdog_stop
-    std::mutex m;    // guards `stop`; the thread sleeps on `cv`
+    std::mutex m;    // guards `stop` and `alive`; the thread sleeps on `cv`
     std::condition_variable cv;
+    std::condition_variable exit_cv;   // a detached generation has left run_loop: its fields may be reused
     bool stop = false;
+    bool alive = false;                // a generation is inside run_loop (true even after a self-stop detach)
+    std::thread::id thread_id;         // the generation's thread while alive
     std::thread th;
     // Parameters, written by watchdog_start before the thread is created.
     double threshold_s = 0;
@@ -333,6 +386,22 @@ Control& control() {
 
 void run_loop(Control* c) {
     log_set_thread_name("watchdog");
+    {
+        std::lock_guard<std::mutex> lk(c->m);
+        c->thread_id = std::this_thread::get_id();
+        c->alive = true;
+    }
+    struct Exit {
+        Control* c;
+        ~Exit() {
+            {
+                std::lock_guard<std::mutex> lk(c->m);
+                c->alive = false;
+                c->thread_id = std::thread::id{};
+            }
+            c->exit_cv.notify_all();
+        }
+    } exit{c};
     Clock::time_point last_change = Clock::now();  // idle time counts from the start, then from the last tick
     uint64_t last_seen = g_frames.load(std::memory_order_relaxed);
     uint64_t last_progress = g_progress.load(std::memory_order_relaxed);
@@ -394,11 +463,29 @@ void run_loop(Control* c) {
 
 void watchdog_start(const WatchdogOptions& opt) {
     Control& c = control();
-    std::lock_guard<std::mutex> g(c.ctl);
+    std::unique_lock<std::mutex> g(c.ctl);
     if (c.th.joinable()) return;  // already running: ignored
     if (opt.seconds < 0) return;  // disabled
     const double secs = opt.seconds > 0 ? opt.seconds : config_get_double("diag", "watchdog_seconds", 10.0);
     if (!(secs > 0)) return;      // disabled (also for a NaN value)
+    if (c.alive && c.thread_id == std::this_thread::get_id()) return;  // cannot restart from the dying generation
+    if (c.alive) {
+        // A detached generation is still inside run_loop (or its on_fire callback). Wait without holding ctl: that callback may
+        // call watchdog_stop, which needs ctl. Re-check after the wait because another start may have won the race.
+        g.unlock();
+        {
+            std::unique_lock<std::mutex> lk(c.m);
+            c.exit_cv.wait(lk, [&c] { return !c.alive; });
+        }
+        g.lock();
+        if (c.th.joinable() || c.alive) return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(c.m);
+        c.stop = false;
+        c.alive = true;
+        c.thread_id = std::thread::id{};  // run_loop publishes it
+    }
     const std::string exe = exe_path();
     c.threshold_s = secs;
     c.poll_ms = opt.poll_ms ? opt.poll_ms : 1;
@@ -406,10 +493,6 @@ void watchdog_start(const WatchdogOptions& opt) {
     c.request_path = exe_dir(exe) + "\\dump_threads";
     c.on_fire = opt.on_fire;
     c.user = opt.user;
-    {
-        std::lock_guard<std::mutex> lk(c.m);
-        c.stop = false;
-    }
     c.th = std::thread(run_loop, &c);
     g_running.store(true);
     NXLOG_I("watchdog", "started: threshold %.1f s, poll %u ms, report file %s", secs, c.poll_ms,
@@ -418,19 +501,25 @@ void watchdog_start(const WatchdogOptions& opt) {
 
 void watchdog_stop() {
     Control& c = control();
-    std::lock_guard<std::mutex> g(c.ctl);
-    if (!c.th.joinable()) return;
+    std::thread join;
     {
-        std::lock_guard<std::mutex> lk(c.m);
-        c.stop = true;
+        std::lock_guard<std::mutex> g(c.ctl);
+        if (!c.th.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lk(c.m);
+            c.stop = true;
+        }
+        c.cv.notify_all();
+        g_running.store(false);
+        if (c.th.get_id() == std::this_thread::get_id()) {
+            c.th.detach();   // stopped from the freeze callback (end_run -> shutdown): a thread cannot join itself
+            return;
+        }
+        // Join outside ctl. A callback that is waking up in on_fire may call watchdog_stop too; it must be able to take ctl
+        // while this thread waits for it to leave run_loop, otherwise the two stops deadlock.
+        join = std::move(c.th);
     }
-    c.cv.notify_all();
-    if (c.th.get_id() == std::this_thread::get_id()) {
-        c.th.detach();   // stopped from the freeze callback (end_run -> shutdown): a thread cannot join itself
-    } else {
-        c.th.join();
-    }
-    g_running.store(false);
+    if (join.joinable()) join.join();
 }
 
 bool watchdog_running() { return g_running.load(); }
@@ -452,6 +541,7 @@ uint64_t diag_frame_count() { return g_frames.load(std::memory_order_relaxed); }
 uint32_t watchdog_fire_count() { return g_fires.load(std::memory_order_relaxed); }
 
 std::string diag_thread_dump() { return dump_text(); }
+std::string diag_thread_dump(ThreadDumpTiming* timing) { return dump_text(timing); }
 
 void diag_add_report(std::string (*fn)()) {
     std::lock_guard<std::mutex> lk(g_report_mu);

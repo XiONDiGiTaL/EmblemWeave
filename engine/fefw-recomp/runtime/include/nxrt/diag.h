@@ -116,6 +116,20 @@ uint32_t watchdog_fire_count();
 // Extra sections of the freeze dump: each function returns text (it must never block: the process may be frozen). Registered once at start-up.
 void diag_add_report(std::string (*fn)());
 std::string diag_thread_dump();        // the dump text the watchdog produces, on demand (also used by the SIGUSR-style "dump_threads" file)
+// Time spent by one thread dump. All durations are milliseconds; collect_ms is the wall-clock interruption window (snapshot through the
+// last ResumeThread), not the sum of the per-thread fields. Formatting runs after every thread is resumed.
+struct ThreadDumpTiming {
+    size_t threads = 0;
+    double snapshot_ms = 0;   // copying the registry and duplicating handles, before the first suspend
+    double suspend_ms = 0;    // SuspendThread calls
+    double context_ms = 0;    // GetThreadContext calls
+    double stack_ms = 0;      // RtlVirtualUnwind stack capture
+    double resume_ms = 0;     // ResumeThread calls
+    double collect_ms = 0;    // start of the dump through the last resume
+    double format_ms = 0;     // symbolised text generation, with every thread resumed
+    double total_ms = 0;      // collect_ms + format_ms
+};
+std::string diag_thread_dump(ThreadDumpTiming* timing);
 
 // ---- memory snapshot -------------------------------------------------------------------------------------------------------
 // Captures a comprehensive memory and resource snapshot for long-session diagnostics (Issue #37).
