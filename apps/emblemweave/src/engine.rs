@@ -2831,8 +2831,8 @@ pub fn build(
     // 3. Game code: ninja rebuilds only what changed.
     event_emitter.stage_started("recompile", "Recompile the game code", 3, 8).ok();
     ctx.start(2);
-    // NASM only adds the AV1 decoder's assembly; the engine's CMake turns that off by itself when nasm is missing, and the
-    // build stays valid, so say what the difference is instead of failing the way the requirements page does not.
+    // NASM is a required build tool now (issue #101), so the requirements page stops a normal build before this point. Keep the
+    // warning for a build started outside the launcher, where CMake still falls back to the C-only decoder.
     if !which_tool("nasm") {
         ctx.log("NASM is not installed: the AV1 decoder is built in C only, so cutscene movies play slower");
         event_emitter.warning(Some("recompile"), "NASM not installed: AV1 decoder built in C only").ok();

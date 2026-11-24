@@ -27,7 +27,7 @@ that compiles the translator from source.
 | LLVM (clang-cl and lld-link) | Build the game | 23 | `winget install --id LLVM.LLVM --exact --accept-package-agreements --accept-source-agreements` |
 | CMake | Build the game | 3.25 | `winget install --id Kitware.CMake --exact --accept-package-agreements --accept-source-agreements` |
 | Ninja | Build the game | any | `winget install --id Ninja-build.Ninja --exact --accept-package-agreements --accept-source-agreements` |
-| NASM | Build the game (optional) | 2.14 | `winget install --id NASM.NASM --exact --accept-package-agreements --accept-source-agreements` |
+| NASM | Build the game | 2.14 | `winget install --id NASM.NASM --exact --accept-package-agreements --accept-source-agreements` |
 | Git | Build the game (optional) | any | `winget install --id Git.Git --exact --accept-package-agreements --accept-source-agreements` |
 | PowerShell 7 | Build the game (optional) | 7 | `winget install --id Microsoft.PowerShell --exact --accept-package-agreements --accept-source-agreements` |
 | uv | Build the game (optional) | any | `winget install --id astral-sh.uv --exact --accept-package-agreements --accept-source-agreements` |
@@ -65,7 +65,7 @@ Installer:
 
 If Build Tools is not listed, install the standalone SDK from
 [Microsoft's Windows SDK page](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/) instead. The optional rows in
-the table (NASM, Git, PowerShell 7, uv, .NET) do not count toward the nine and do not block the build.
+the table (Git, PowerShell 7, uv, .NET) do not count toward the nine and do not block the build.
 
 ## Running straight from a `.nup`
 

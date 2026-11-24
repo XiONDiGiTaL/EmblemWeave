@@ -176,9 +176,9 @@ pub static DEPS: &[Dep] = &[
         min_parts: &[2, 14],
         detect: Detect::Nasm,
         install: Some(Install::Winget("winget install --id NASM.NASM --exact --accept-package-agreements --accept-source-agreements")),
-        need: Need::Optional,
+        need: Need::Always,
         stages: &[Stage::Build],
-        note: "Assembles the AV1 decoder's x86-64 code, which cutscene movies lean on. Without it the engine builds the decoder in C only: it still decodes, 1440p playback drops frames.",
+        note: "Assembles the AV1 decoder's x86-64 code, which every 1440p cutscene needs to keep up. Without it the engine falls back to C only, at several times the decode time and below 30 fps (issue #101).",
     },
     Dep {
         key: "git",

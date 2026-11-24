@@ -74,7 +74,7 @@ this copy uses.
 
 The one part of the install that is still the player's is the build toolchain. Today the launcher finds, versions and
 (where it can) `winget`-installs seven things: Visual Studio's C++ tools, the Windows 10/11 SDK, LLVM's `clang-cl` and
-`lld-link`, CMake, Ninja, Python with `zbic`, and optionally NASM, PowerShell 7, `uv` and the .NET SDK. That is more
+`lld-link`, CMake, Ninja, NASM, Python with `zbic`, and optionally PowerShell 7, `uv` and the .NET SDK. That is more
 than the other recompilations ask for, and the difference is not the engine: it is what each project ships.
 
 `FireEmblemEngage-EngagePCRecomp` is the clearest comparison, because it is installed here and can be measured. Its
@@ -93,7 +93,7 @@ player to install what the zip can carry:
 | CMake | about 60 MB unpacked | yes, BSD-3-Clause | removes the CMake install |
 | Ninja | under 1 MB | yes, Apache-2.0 | removes the Ninja install |
 | Python + `zbic`, `capstone`, `lz4`, `zstandard` | about 120 MB | yes, PSF licence plus wheel licences | removes the Python install and the pip step |
-| NASM, PowerShell 7, `uv`, Git, .NET SDK | 0 to 300 MB | already optional or replaced by the bundled translator | nothing to remove |
+| PowerShell 7, `uv`, Git, .NET SDK | 0 to 300 MB | already optional or replaced by the bundled translator | nothing to remove |
 | Visual Studio C++ tools and the Windows SDK | 2 to 6 GB | the headers and import libraries are Microsoft's, and redistributing them is not ours to do | stays, but the launcher's one-button `winget` install already runs it unattended |
 
 The launcher now does that itself (`apps/emblemweave/src/portable.rs`). `toolchain::tool_path` puts

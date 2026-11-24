@@ -277,7 +277,7 @@
     {
       "name": "nasm",
       "display_name": "NASM Assembler",
-      "category": "optional",
+      "category": "required",
       "version": "2.16.01",
       "min_version": "2.15.00",
       "platform": "all",

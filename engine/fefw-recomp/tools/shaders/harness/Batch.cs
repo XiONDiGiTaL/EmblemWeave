@@ -89,15 +89,15 @@ namespace SpirvHarness
             return jobs;
         }
 
-        // What the .spv files depend on besides the blocks: the translator version and the output options.
-        // The build ID is NOT included because we now have a content-addressable cache (ShaderCache) that allows
-        // reusing translations across different translator builds. Only TranslatorVersion and output options matter.
+        // What the .spv files depend on besides the blocks: the translator build, its logical version and the output options.
+        // The build ID is part of the header so a new translator retranslates every block: the output of another build cannot be
+        // reused (issue #97).
         static string JournalHeader(string[] args)
         {
             string[] keyed = ["--no-val", "--no-retry", "--debug-mode"];
             string[] valued = ["--target-env", "--host", "--texture-pool", "--sampler-pool", "--reflect"];
             string opts = string.Join(" ", keyed.Where(args.Contains).Concat(valued.Where(v => Opt(args, v, null) != null).Select(v => $"{v}={Opt(args, v, null)}")));
-            return $"# spirv_harness journal\t{TranslatorVersion}\t{opts}";
+            return $"# spirv_harness journal\t{TranslatorVersion}\t{TranslatorBuildId}\t{opts}";
         }
 
         sealed class JournalState
@@ -191,9 +191,6 @@ namespace SpirvHarness
             }
             Directory.CreateDirectory(c.OutDir);
 
-            // Initialize content-addressable shader translation cache
-            var cache = new ShaderCache(c.OutDir, c.Validate, c.SpirvVal);
-
             HashSet<string> done = ReadJournal(c.JournalPath, false).Results.Keys.ToHashSet();
             List<Job> jobs = LoadBatchJobs(c).Where(j => !done.Contains(j.Hash) && (c.Only == null || j.Hash == c.Only)).ToList();
             // Test hook (not documented for players): FEFW_HARNESS_TEST_CRASH=<hash>[,<hash>...] kills the worker on those
@@ -201,7 +198,6 @@ namespace SpirvHarness
             string[] crashOn = (Environment.GetEnvironmentVariable("FEFW_HARNESS_TEST_CRASH") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries);
             using JournalWriter journal = new(c.JournalPath);
             object console = new();
-            int cacheHits = 0, cacheMisses = 0;
             Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = c.Jobs }, job =>
             {
                 journal.Begin(job.Hash);
@@ -211,57 +207,35 @@ namespace SpirvHarness
                 byte[] code = File.ReadAllBytes(job.CodePath);
                 byte[] ctrl = File.ReadAllBytes(job.CtrlPath);
 
-                // Determine DrawParametersFromBuiltIns from translation path (matches TranslateAny logic)
-                bool drawParametersFromBuiltIns = Program.IsNvn2(ctrl);  // NVN2 uses true, Maxwell/CUDA use false
-
-                // Compute cache key
-                string keyHash = cache.ComputeKeyHash(code, ctrl, c.TargetEnv, c.Host, c.TexturePool, c.SamplerPool,
-                                                      job.GlslcPath, c.NoRetry, c.Debug, false, drawParametersFromBuiltIns);
-
                 Result r;
                 byte[] spv = null;
-
-                // Try cache first
-                if (cache.TryGet(keyHash, out var cachedResult, out var cachedSpv))
+                try
                 {
-                    r = cachedResult;
-                    spv = cachedSpv;
-                    Interlocked.Increment(ref cacheHits);
+                    // A translator bug could loop forever; run on a task so a stuck block is reported, not waited on.
+                    Task<(Result, byte[])> t = Task.Run(() =>
+                    {
+                        Result x = Translate(code, ctrl, out byte[] s, false, job.GlslcPath);
+                        return (x, s);
+                    });
+                    if (t.Wait(Timeout)) (r, spv) = t.Result;
+                    else r = new Result { Status = "timeout", Error = $"no result after {Timeout.TotalSeconds} s" };
                 }
-                else
+                catch (Exception e)
                 {
-                    Interlocked.Increment(ref cacheMisses);
-                    try
-                    {
-                        // A translator bug could loop forever; run on a task so a stuck block is reported, not waited on.
-                        Task<(Result, byte[])> t = Task.Run(() =>
-                        {
-                            Result x = Translate(code, ctrl, out byte[] s, false, job.GlslcPath);
-                            return (x, s);
-                        });
-                        if (t.Wait(Timeout)) (r, spv) = t.Result;
-                        else r = new Result { Status = "timeout", Error = $"no result after {Timeout.TotalSeconds} s" };
-                    }
-                    catch (Exception e)
-                    {
-                        r = ExceptionResult(e is AggregateException a && a.InnerExceptions.Count == 1 ? a.InnerException : e);
-                        spv = null;
-                    }
-
-                    // Store in cache (even failures, to avoid re-translating known-bad blocks)
-                    cache.Put(keyHash, r, spv);
+                    r = ExceptionResult(e is AggregateException a && a.InnerExceptions.Count == 1 ? a.InnerException : e);
+                    spv = null;
                 }
 
                 if (spv != null)
                 {
-                    cache.WriteSpv(c.OutDir, job.Hash, spv);
+                    File.WriteAllBytes(Path.Combine(c.OutDir, job.Hash + ".spv"), spv);
                     if (c.Validate)
                     {
                         r.ValError = RunSpirvVal(c.SpirvVal, c.TargetEnv, Path.Combine(c.OutDir, job.Hash + ".spv"));
                         if (r.ValError != "") r.Status = "invalid";
                     }
                 }
-                if (spv == null || !KeepsSpv(r.Status)) cache.DeleteSpv(c.OutDir, job.Hash);
+                if (spv == null || !KeepsSpv(r.Status)) DeleteSpv(c.OutDir, job.Hash);
 
                 r.Hash = job.Hash;
                 r.Group = job.Group;
@@ -270,7 +244,6 @@ namespace SpirvHarness
                 journal.Done(r);
                 lock (console) Console.WriteLine($"@done {job.Hash}");
             });
-            Console.WriteLine($"Cache: {cacheHits} hits, {cacheMisses} misses");
             return 0;
         }
 
@@ -288,9 +261,8 @@ namespace SpirvHarness
             string first = File.Exists(c.JournalPath) ? File.ReadLines(c.JournalPath).FirstOrDefault() : null;
             if (first != header)
             {
-                if (first != null) Console.WriteLine("journal.tsv options changed (translator version or output options): resetting journal, .spv files will be regenerated from cache");
-                // Reset journal only (not .spv files or cache). Workers will regenerate .spv files from cache.
-                try { File.Delete(c.JournalPath); } catch (IOException) { }
+                if (first != null) Console.WriteLine("journal.tsv is from another translator build or other output options: resetting the journal and every .spv file");
+                StartOver(c.OutDir);
                 File.WriteAllText(c.JournalPath, header + "\n");
             }
 
