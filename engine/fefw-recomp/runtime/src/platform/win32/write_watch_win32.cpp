@@ -410,52 +410,19 @@ retry:
         const int decision = final_retry(addr, kind, generation);
         if (decision == 1) return true;
         if (decision == -1) goto retry;
-        // Fallback for read faults on PAGE_NOACCESS pages in tracked regions:
-        // These can occur when a page is made no-access for Vulkan import (ImportFreeze)
-        // but the read happens before the import completes or the page is restored.
-        // The page is not tracked by any region (not armed) and not guarded.
-        if (kind != 1 && (pr == 0x01 || pr == 0)) {
-            // Check if the address is in any write-watch region (heap primary view, alias views, etc.)
-            bool in_any_region = false;
-            g_busy.fetch_add(1, std::memory_order_seq_cst);
-            for (RegionCursor cursor; Region* r = cursor.next();) {
-                if (addr >= r->base && addr < r->base + r->npages * kPage) { in_any_region = true; break; }
-            }
-            g_busy.fetch_sub(1, std::memory_order_seq_cst);
-            if (in_any_region) {
-                NXLOG_W(kTag, "fallback: making tracked page %llx readable (was protection %x, read fault kind=%d, in region)",
-                        static_cast<unsigned long long>(addr), pr, kind);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
-                    return true;
-                NXLOG_E(kTag, "fallback: protect() failed for tracked page %llx", static_cast<unsigned long long>(addr));
-                // protect failed; fall through to next fallback
-            }
-            // Also check primary heap range as a fallback for pages not yet armed
-            if (addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
-                NXLOG_W(kTag, "fallback: making heap page %llx readable (was protection %x, read fault kind=%d, in heap range)",
-                        static_cast<unsigned long long>(addr), pr, kind);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
-                    return true;
-                NXLOG_E(kTag, "fallback: protect() failed for heap page %llx", static_cast<unsigned long long>(addr));
-                // protect failed; fall through to next fallback
-            }
-            // Check if the address is in an active ImportFreeze range (NVN pool import).
-            // ImportFreeze makes pages read-only for the duration of the Vulkan import;
-            // if the Vulkan driver changes them to PAGE_NOACCESS, reads will fault here.
-            if (freeze_overlaps(addr, addr + 1)) {
-                NXLOG_W(kTag, "fallback: making ImportFreeze page %llx readable (was protection %x, read fault kind=%d, in freeze range)",
-                        static_cast<unsigned long long>(addr), pr, kind);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
-                    return true;
-                NXLOG_E(kTag, "fallback: protect() failed for ImportFreeze page %llx", static_cast<unsigned long long>(addr));
-                // protect failed; fall through to next fallback
-            }
-            // No broad fallback here: a committed PAGE_NOACCESS page can be a guard page, and
-            // unprotecting it would let the guest run past a stack guard or corrupt the write
-            // tracker's bookkeeping. The narrower cases above name the page that is restored.
+        // A read fault on a no-access page is restored only while an import freeze covers it: the freeze made the page
+        // no-access for the Vulkan import and the reader must not see a fault the guest did not cause. Every other
+        // no-access page is a real fault (a guest decommit, a stack guard, a page the guest made inaccessible) and
+        // goes to the crash handler. Rescuing any no-access page in the heap range used to hide those bugs and leave
+        // host protection disagreeing with the page table (issue 77); the write path lost the same fallbacks in
+        // e9c0ccc9, this is the read half.
+        if (kind != 1 && (pr == 0x01 || pr == 0) && freeze_overlaps(addr, addr + 1)) {
+            NXLOG_W(kTag, "read fault on freeze page %llx (was protection %x): readable again",
+                    static_cast<unsigned long long>(addr), pr);
+            if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
+                                        nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE))
+                return true;
+            NXLOG_E(kTag, "read fault: protect failed for freeze page %llx", static_cast<unsigned long long>(addr));
         }
         return false;  // not handled
     }
