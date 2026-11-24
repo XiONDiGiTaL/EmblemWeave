@@ -48,7 +48,8 @@ Requirements are listed under [System requirements](REQUIREMENTS.md); failures a
 - The engine maps the six modules, runs the console SDK's start-up, and serves the game's system calls natively: kernel
   objects, threads and synchronization, `fsp-srv` with RomFS (folder, `.nsp`, `.nx`, `.nup`, plaintext `.xci`, zstd entries) and save data,
   `aoc:u`, `hid`, `time`, `pctl`, `lm`, `csrng`, applet and audio services.
-- NVN is served on the host GPU through Vulkan. Movies decode with dav1d and libvpx on the host.
+- NVN is served on the host GPU through Vulkan. AV1 movies decode on the GPU through FFmpeg, else with dav1d; VP9 and
+  VP8 video decodes with libvpx.
 - Saves live in the launcher's profile directory and are imported from Switch emulators.
 
 ## Graphics

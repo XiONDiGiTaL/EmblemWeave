@@ -11,7 +11,7 @@ Fire Emblem: Fortune's Weave uses **WebM container with AV1 video** for cinemati
 | Container | WebM (Matroska subset) |
 | Video Codec | AV1 (AOMedia Video 1) |
 | Audio Codec | Opus (separate files) |
-| Video Decoder | dav1d (primary, CPU) / FFmpeg libavcodec (optional, D3D11VA hwaccel) |
+| Video Decoder | GPU through FFmpeg's Vulkan decoder (default, `auto`) / dav1d (built in, fallback and `software`) |
 | Audio Decoder | hwopus service (HLE of `nn::hwopus`) |
 
 ## Decoder Pipeline
@@ -57,9 +57,9 @@ Fire Emblem: Fortune's Weave uses **WebM container with AV1 video** for cinemati
 **Location**: `engine/fefw-recomp/runtime/src/media/movie_vdec.cpp`
 
 **Features**:
-- Dual backend: dav1d (default) + FFmpeg (optional)
+- Two backends: the GPU through FFmpeg (default) and dav1d (built in, and the fallback whenever the GPU cannot)
 - dav1d: 8 threads, `max_frame_delay=1`, 30 frames ahead (`g_ahead`)
-- FFmpeg: dynamic DLL loading, D3D11VA hwaccel path
+- FFmpeg (`movie_ffmpeg.cpp`): dynamic DLL loading, Vulkan video decode, NV12 copied back to host memory
 - Frame queue with clock synchronization (`movie_clock`)
 - Late frame skipping based on presentation time
 - GPU fence wait for frame release (`pending_free` + `serial_done`)
@@ -116,7 +116,7 @@ Opus packet: [TOC][frame(s)...]
 ### Synchronization
 
 **Video Clock** (`movie_clock` in `movie_vdec.cpp`):
-- Frame presentation time from dav1d `timestamp` field
+- Frame presentation time: the packet's time, carried through dav1d's `timestamp` or FFmpeg's `pts`
 - Late frame skipping: frames with `time < clock_now` are dropped
 - Frame-ahead queue hides decode latency (30 frames default)
 
@@ -132,8 +132,7 @@ Opus packet: [TOC][frame(s)...]
 ```ini
 [media]
 movies = host              # Enable host decoder
-movie_decoder = dav1d      # dav1d | ffmpeg
-movie_hwaccel = 1          # D3D11VA for FFmpeg
+movie_decoder = auto       # auto | software | <GPU's Vulkan device name>
 
 [log]
 level = debug
@@ -176,7 +175,8 @@ video_decoder_log = 1
 
 **Key log messages**:
 ```
-movie::VideoDecoder on the host: AV1 through dav1d 1.5.1 with x86-64 assembly (8 threads at above normal priority, 30 pictures ahead)
+movie::VideoDecoder on the host: AV1 on the GPU the game renders on through FFmpeg's Vulkan decoder, else through dav1d 1.5.1 with x86-64 assembly (8 threads at above normal priority); 30 pictures ahead, 24 imports routed
+movie: decoding on NVIDIA GeForce RTX 4060 Laptop GPU (FFmpeg N-123619-g44ad73031d-20260325, Vulkan; opened in 0.7 ms)
 AV1 config: parsed WebM AV1CodecConfigurationRecord, 123 bytes of OBUs
 movie: preroll: first samples decoded in 45.2 ms
 movie: frame 123 at 41000000 us, clock 40998000 us, late=false
@@ -206,5 +206,5 @@ movie: frame 123 at 41000000 us, clock 40998000 us, late=false
 
 1. **Add A/V clock synchronization** - Master clock with audio as reference
 2. **Movie asset validation** - Check for cinematic files in game data validation
-3. **Hardware decode** - Enable FFmpeg D3D11VA path for AV1
+3. **AMD and Intel GPU decode** - Ship FFmpeg 9.1 or newer, which ends the NVIDIA-only check in `movie_ffmpeg.cpp`
 4. **Shader cache distribution** - Ship pre-compiled cache

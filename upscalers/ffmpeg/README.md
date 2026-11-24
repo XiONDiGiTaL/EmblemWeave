@@ -1,9 +1,9 @@
 # FFmpeg shared libraries
 
 This folder is shipped in the release zip at `upscalers\ffmpeg`. The launcher detects it beside
-`EmblemWeave.exe` and points the engine at it, so the optional **FFmpeg (libavcodec)** movie decoder
-works without a separate download. The engine also searches the play folder's `upscalers\ffmpeg` and
-`upscalers` folders, so a player can replace these files there.
+`EmblemWeave.exe` and points the engine at it, so the cutscene movies decode on the GPU (**Video
+decoder: Auto**) without a separate download. The engine also searches the play folder's
+`upscalers\ffmpeg` and `upscalers` folders, so a player can replace these files there.
 
 ## What is here
 
@@ -15,10 +15,12 @@ works without a separate download. The engine also searches the play folder's `u
 
 The DLLs report FFmpeg build `N-123619-g44ad73031d-20260325`. They are a 64-bit Windows GPL shared
 build: it contains libx264 and libx265 even though EmblemWeave itself uses only FFmpeg's AV1 decoder
-(the software path uses its bundled libdav1d; the hardware path uses native AV1 with D3D11VA).
-FFmpeg's libavcodec major is 62 and libavutil major is 60, which is the ABI the runtime is compiled
-against. A different major pair is refused with a log line and the engine falls back to its built-in
-dav1d decoder.
+on Vulkan video and its Opus decoder. FFmpeg's libavcodec major is 62 and libavutil major is 60,
+which is the ABI the runtime is compiled against. A different major pair is refused with a log line
+and the engine decodes the movies with its built-in dav1d. This build decodes on NVIDIA GPUs only:
+on other drivers it gives the decoder's pictures a memory usage AMD's driver cannot allocate, so the
+engine sends AMD and Intel GPUs to dav1d. FFmpeg 9.1 fixes that, but it is a new ABI (libavcodec 63,
+libavutil 61): moving to it needs a runtime built against its headers.
 
 ## Licence and source
 

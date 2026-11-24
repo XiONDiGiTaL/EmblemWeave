@@ -58,30 +58,32 @@ them, and reports what is missing; a mode whose files or hardware are absent fal
 ## Video decoding (cutscene movies)
 
 Fortune's Weave plays its cutscenes as AV1, and the engine decodes them into the player's NV12 CPU frames. The **Video
-decoder** choice on the launcher's Graphics page (Advanced) and the engine's Game > Movies page select the backend; it
+decoder** choice on the launcher's Graphics page (Advanced) and the engine's Game > Movies page select who decodes; it
 applies at the next start.
 
-- **dav1d (CPU)** is the built-in default. It needs nothing and is generally the faster software decoder.
-- **FFmpeg (libavcodec)** is optional, and the release ships its three shared DLLs in `upscalers\ffmpeg` beside
-  `EmblemWeave.exe`; the launcher finds that folder and points the engine at it. It loads `avcodec-62.dll`,
-  `avutil-60.dll` and the `swresample-6.dll` that libavcodec imports. The DLLs must be from an FFmpeg 8.x shared build
-  whose libavcodec major is 62 and libavutil major is 60; anything else is refused with a log line and dav1d is used.
-  `upscalers\ffmpeg\README.md` records the build, hashes, licence and source links, and a player can replace the folder
-  with another matching FFmpeg 8.x shared build.
-- **Hardware video decode** is FFmpeg's D3D11VA path. A D3D11VA device decodes AV1 on the GPU and the engine copies each
-  NV12 frame back for the player. If the GPU or driver cannot decode AV1, FFmpeg switches to its bundled libdav1d decoder
-  for that movie; the switch is logged. With the toggle off (or with dav1d selected), decode stays on the CPU.
+- **Auto** (the default) decodes on the GPU the game renders on, through FFmpeg's Vulkan video decoder, and copies each
+  NV12 picture back for the player.
+- **Hardware: <GPU>** decodes on that GPU instead, by its Vulkan device name.
+- **Software** is the engine's built-in dav1d. It needs nothing and keeps the decode work on the CPU.
 
-FFmpeg's native `av1` decoder is hardware-only: its source returns `ENOSYS` without an active hardware decoder, so the
-software path uses FFmpeg's `libdav1d` decoder. The point of the FFmpeg option is the D3D11VA path, not a faster software
-decoder; dav1d remains the default. The headers in `runtime/third_party/ffmpeg/include` pin the ABI. The release's
-`upscalers\ffmpeg` folder contains the FFmpeg 8.1 GPL shared build pinned for this release; FFmpeg is not linked into
-`fefw.exe`.
+The release ships FFmpeg's three shared DLLs in `upscalers\ffmpeg` beside `EmblemWeave.exe`; the launcher points the
+engine at that folder. The engine loads `avcodec-62.dll`, `avutil-60.dll` and the `swresample-6.dll` that libavcodec
+imports once the renderer is up, and creates the decode device then, so the first movie does not wait for it. The DLLs
+must be from an FFmpeg 8.x shared build whose libavcodec major is 62 and libavutil major is 60; anything else is refused
+with a log line. `upscalers\ffmpeg\README.md` records the build, hashes, licence and source links. FFmpeg is not linked
+into `fefw.exe`; the headers in `runtime/third_party/ffmpeg/include` pin the ABI.
 
-What was checked: FFmpeg 8.1 (libavcodec 62, libavutil 60, swresample 6) decoded raw AV1 and movie-shaped packets (an
-av1C record plus packets with their sequence header removed) through the dynamic loader in both software and D3D11VA modes
-on an RX 7900 XT (Adrenalin 26.10.1). In-game cutscene timing on this path is not measured yet; the decoder choice exists
-because cutscenes were reported slow, so use the log's decoder line and a frame-time capture to compare on your own GPU.
+dav1d takes over whenever the GPU cannot: without the DLLs, on a GPU or driver without AV1 decoding (the GPU refuses the
+movie's first picture and dav1d decodes from that packet on), and, with FFmpeg before 9.1, on every GPU but NVIDIA's.
+Those FFmpeg builds give the decoder's pictures host-transfer usage on drivers other than NVIDIA's, and AMD's driver has
+no memory for such an image: on a Radeon 780M every picture failed with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. FFmpeg 9.1
+checks that usage before it asks for it. The log has one line per movie saying which decoder runs it.
+
+What was checked: on an RTX 4060 Laptop GPU, FFmpeg's Vulkan decoder made the same NV12 bytes as dav1d for 20 pictures
+of a 2560x1440 cutscene and for a 323x181 clip with odd dimensions (`tests/test_movie_ffmpeg.cpp`), and the opening
+cutscene played at its 30 fps with about 5 ms per picture including the copy back. On the Radeon 780M, dav1d played the
+same cutscene at full rate; with the NVIDIA-only check taken out for a test, the 780M refused the first picture, dav1d
+took over at that packet (18 ms later) and the cutscene played on.
 
 ## Evaluated, not integrated
 
@@ -172,7 +174,7 @@ redesigned and tested".
 
 - FSR 4.1.2 upscaling is validated on the RX 7900 XT (Adrenalin 26.10.1, FidelityFX SDK 2.4 Vulkan). Other Radeon generations still need a run; FSR 3.1 is the automatic fallback when the driver does not offer 4.x.
 - FSR 3 frame generation is validated only on the RX 7900 XT (Adrenalin 26.10.1, FidelityFX SDK 1.1.4). Other AMD GPUs and drivers still need a run; DLSS Frame Generation is untested on RTX 40 hardware.
-- FFmpeg movie decoding is verified on the RX 7900 XT with FFmpeg 8.1 (libavcodec 62 / libavutil 60 / swresample 6) in software and D3D11VA modes. GPUs without AV1 hardware decode should fall back to FFmpeg's libdav1d, but that fallback and in-game cutscene timing still need runs on other hardware.
+- GPU movie decoding is verified on the RTX 4060 Laptop GPU (Vulkan, FFmpeg build `N-123619`). AMD and Intel GPUs use dav1d until the shipped FFmpeg is 9.1 or newer. The macOS path (VideoToolbox) is written but untested: the runtime builds on Windows only.
 - ReShade's layer, allowlist, overlay and disable switch are verified (6.8.0 Add-on, Vulkan, this build). Individual shader packs and depth-based effects are not: they are the user's to choose, and depth-based ones may not see the buffers they expect.
 - FSR 4.1.2 upscaling is integrated through the native Vulkan FidelityFX path. The DX12 FSR 4 shader-override builds, INT8 model swaps and OptiScaler remain unusable here because they hook DirectX or replace a DX12 DLL; DLSS 4 and XeSS 3 features are not integrated.
 - vkBasalt is not integrated.

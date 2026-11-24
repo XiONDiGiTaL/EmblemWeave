@@ -138,10 +138,10 @@ builds, INT8 model swaps and **OptiScaler** still cannot drive this renderer: th
 while this engine calls its own FidelityFX, Streamline and XeSS interfaces over Vulkan. [GRAPHICS.md](GRAPHICS.md)
 records that boundary.
 
-The optional FFmpeg movie decoder is the exception: the release includes `avcodec-62.dll`, `avutil-60.dll` and
-`swresample-6.dll` in `upscalers\ffmpeg` beside the launcher, so selecting **Video decoder: FFmpeg (libavcodec)** on the
-Graphics page works without another download. The files are loaded at run time; `upscalers\ffmpeg\README.md` records
-the build, hashes, licence and source links. You can replace them with another matching FFmpeg 8.x shared build.
+The FFmpeg movie decoder is the exception: the release includes `avcodec-62.dll`, `avutil-60.dll` and
+`swresample-6.dll` in `upscalers\ffmpeg` beside the launcher, so **Video decoder: Auto** on the Graphics page decodes
+the cutscenes on the GPU without another download (on NVIDIA GPUs for now; other GPUs fall back to the built-in dav1d).
+The files are loaded at run time; `upscalers\ffmpeg\README.md` records the build, hashes, licence and source links.
 
 For **AMD Fluid Motion Frames 2.1**, add `fefw.exe` to AMD Software: Adrenalin Edition (Gaming > Add) and enable AFMF
 in the driver. AFMF works with Vulkan on RX 7000 series in borderless fullscreen, needs Adrenalin 25.3.1 or newer, and
