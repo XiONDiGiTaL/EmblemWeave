@@ -74,6 +74,14 @@ NXTEST(video_memory_snapshot_is_available_to_diagnostics) {
     CHECK(!nxrt::memguard_video(&v));
 }
 
+NXTEST(commit_bytes_falls_back_to_pagefile_when_private_zero) {
+    CHECK_EQ(nxrt::memguard_commit_bytes(123456, 654321), 123456ull);
+    CHECK_EQ(nxrt::memguard_commit_bytes(0, 654321), 654321ull);
+    CHECK_EQ(nxrt::memguard_commit_bytes(0, 0), 0ull);
+    const int ram_pct = nxrt::memguard_sysram_usage_percent();
+    CHECK(ram_pct >= 0 && ram_pct <= 100);
+}
+
 NXTEST(limit_gb_parsing) {
     CHECK_EQ(nxrt::memguard_limit_gb("12.5"), 12.5);
     CHECK_EQ(nxrt::memguard_limit_gb("abc"), 8.0);

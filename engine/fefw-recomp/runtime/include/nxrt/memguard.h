@@ -16,6 +16,13 @@ struct MemGuardOptions {
     void* user = nullptr;
 };
 
+// Private commit from PROCESS_MEMORY_COUNTERS_EX: Wine's K32GetProcessMemoryInfo populates PagefileUsage but leaves
+// the Vista+ PrivateUsage field at 0, so fall back to PagefileUsage when PrivateUsage is 0.
+inline uint64_t memguard_commit_bytes(uint64_t private_usage, uint64_t pagefile_usage) {
+    return private_usage ? private_usage : pagefile_usage;
+}
+// Host physical RAM in use as a percentage (0..100), or -1 if the OS query fails.
+int memguard_sysram_usage_percent();
 uint64_t memguard_footprint();       // bytes of private commit of this process (0 if the query fails)
 // Private commit includes the video memory a process has allocated (WDDM keeps a commit charge for it). The guard is about host memory, so it
 // subtracts what this function returns (the GPU's dedicated usage of this process; the Vulkan device sets it). Null: no subtraction.

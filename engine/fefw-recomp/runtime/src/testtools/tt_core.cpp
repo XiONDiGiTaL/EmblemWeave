@@ -721,7 +721,9 @@ void frame_boundary(::Ctx* c) {
     if (k - s.last_mem_frame >= 30 || k == 0) {
         s.last_mem_frame = k;
         PROCESS_MEMORY_COUNTERS_EX pmc{};
-        if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc)) s.mem_mb = static_cast<double>(pmc.PrivateUsage) / 1048576.0;
+        pmc.cb = sizeof pmc;
+        if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc))
+            s.mem_mb = static_cast<double>(pmc.PrivateUsage ? pmc.PrivateUsage : pmc.PagefileUsage) / 1048576.0;
         write_trace_line(s, k, h, g, valid, ms, s.mem_mb);
     } else {
         write_trace_line(s, k, h, g, valid, ms, 0);

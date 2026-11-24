@@ -66,7 +66,7 @@ void write_limit_report(uint64_t footprint, uint64_t limit) {
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     pmc.cb = sizeof pmc;
     GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc);
-    const uint64_t priv = static_cast<uint64_t>(pmc.PrivateUsage);
+    const uint64_t priv = memguard_commit_bytes(pmc.PrivateUsage, pmc.PagefileUsage);
     char b[512];
     std::string text;
     std::snprintf(b, sizeof b, "MEMORY LIMIT EXCEEDED (reason: memory limit)\n  footprint %.2f GB is over the %.1f GB limit ([memory] limit_gb)\n",
@@ -210,12 +210,20 @@ void guard_loop(Settings s) {
 
 }  // namespace
 
+int memguard_sysram_usage_percent() {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    if (!GlobalMemoryStatusEx(&ms) || !ms.ullTotalPhys) return -1;
+    const uint64_t used = ms.ullTotalPhys > ms.ullAvailPhys ? ms.ullTotalPhys - ms.ullAvailPhys : 0;
+    return static_cast<int>(used * 100 / ms.ullTotalPhys);
+}
+
 uint64_t memguard_footprint() {
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     pmc.cb = sizeof pmc;
     if (!GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc))
         return 0;
-    return static_cast<uint64_t>(pmc.PrivateUsage);
+    return memguard_commit_bytes(pmc.PrivateUsage, pmc.PagefileUsage);
 }
 
 void memguard_set_discount(uint64_t (*gpu_bytes)()) { g_discount.store(gpu_bytes); }
