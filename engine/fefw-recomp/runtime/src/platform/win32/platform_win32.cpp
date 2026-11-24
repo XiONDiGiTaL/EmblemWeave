@@ -549,7 +549,15 @@ void page_fault_handler_remove() {
 bool page_query(uint64_t addr, PageState* state, PageProtect* protect, uint64_t* region_base, uint64_t* region_size) {
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof mbi) != sizeof mbi) return false;
-    if (state) *state = static_cast<PageState>(mbi.State);
+    if (state) {
+        // MEM_RESERVE and MEM_COMMIT have the same values as PageState, but MEM_FREE is 0x10000 while PageState::Free is 0:
+        // casting it left every free page looking occupied, and svcMapPhysicalMemory (via granule_free) refused every range.
+        switch (mbi.State) {
+            case MEM_COMMIT: *state = PageState::Commit; break;
+            case MEM_RESERVE: *state = PageState::Reserve; break;
+            default: *state = PageState::Free; break;   // MEM_FREE and MEM_FREE|MEM_TOP_DOWN
+        }
+    }
     if (protect) *protect = static_cast<PageProtect>(mbi.Protect);
     if (region_base) *region_base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
     if (region_size) *region_size = mbi.RegionSize;

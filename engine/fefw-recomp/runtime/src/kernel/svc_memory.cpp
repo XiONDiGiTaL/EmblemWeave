@@ -662,6 +662,24 @@ void map_physical_memory(::Ctx* c) {
         for (uint64_t i = 0; ok && i < kGranulePages; ++i)
             if ((add & (1u << i)) && mem::vm_query(g + i * mem::kPage).state != mem::kMemFree) ok = false;
         if (!ok) {
+            // Say which page and what the host has there: "holds other memory" alone cannot tell a real overlap from a
+            // range the runtime itself reserved (the alias region is 8 GiB and only partly used).
+            uint64_t bad = g;
+            for (uint64_t i = 0; i < kGranulePages; ++i) {
+                if ((add & (1u << i)) && mem::vm_query(g + i * mem::kPage).state != mem::kMemFree) {
+                    bad = g + i * mem::kPage;
+                    break;
+                }
+            }
+            const mem::VmInfo info = mem::vm_query(bad);
+            platform::PageState ps{};
+            platform::PageProtect pp{};
+            uint64_t rb = 0, rs = 0;
+            const bool host_ok = platform::page_query(bad, &ps, &pp, &rb, &rs);
+            NXLOG_W("svc", "MapPhysicalMemory: %llx (+%llx) vm %llx size %llx state 0x%x; host ok=%d state %d region %llx+%llx",
+                    static_cast<unsigned long long>(bad), static_cast<unsigned long long>(kGranule), static_cast<unsigned long long>(info.addr),
+                    static_cast<unsigned long long>(info.size), info.state, host_ok ? 1 : 0, static_cast<int>(ps),
+                    static_cast<unsigned long long>(rb), static_cast<unsigned long long>(rs));
             fail(c, "MapPhysicalMemory (range holds other memory)", kernel::kInvalidMemoryState, addr, size, 0);
             return;
         }

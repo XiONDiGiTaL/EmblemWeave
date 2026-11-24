@@ -26,10 +26,13 @@ namespace thread_detail {
 struct ThreadExitException {};
 
 static platform::Mutex* g_list_lock = nullptr;
+static std::once_flag g_list_lock_once;
 std::vector<std::shared_ptr<KThread>> g_all;
 std::atomic<uint64_t> g_next_id{0x50};
 thread_local KThread* t_self = nullptr;
 thread_local std::shared_ptr<KThread> t_keepalive;
+
+void ensure_thread_list_lock();   // defined below; the gauge callback above it needs the lock created first
 
 // Removes its gauge when the file's statics are torn down (declared after g_all, so it goes first).
 struct GaugeHook {
@@ -40,14 +43,20 @@ struct GaugeHook {
 // Thread objects in the list: live threads plus exited ones that something still refers to (a game handle, a waiter). thread_create drops the
 // exited, unreferenced ones, and kernel_reset() drops all of them.
 GaugeHook gauge_threads("kernel.threads", [] () -> int64_t {
+    // The sampler can read this before any guest thread exists (the soak tests do): a null lock would crash in the OS call.
+    ensure_thread_list_lock();
     if (!nxrt::platform::mutex_trylock(g_list_lock)) return static_cast<int64_t>(-1);
     const int64_t n = static_cast<int64_t>(g_all.size());
     nxrt::platform::mutex_unlock(g_list_lock);
     return n;
 });
 
-void init_thread_list_lock() {
-    g_list_lock = nxrt::platform::mutex_create();
+// One lock for the thread list, created on first use. thread_create runs in tests (and in any host that adopts a main thread)
+// before the runtime's startup calls, so it cannot rely on init_thread_list_lock() having run: a null lock there is a crash
+// in AcquireSRWLockExclusive, not a failed assertion. std::call_once also keeps the runtime's startup call and kernel_reset()
+// from replacing a lock another thread may hold.
+void ensure_thread_list_lock() {
+    std::call_once(g_list_lock_once, [] { g_list_lock = nxrt::platform::mutex_create(); });
 }
 
 uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
@@ -56,7 +65,7 @@ uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 
 // Public API
 void init_thread_list_lock() {
-    thread_detail::g_list_lock = nxrt::platform::mutex_create();
+    thread_detail::ensure_thread_list_lock();
 }
 
 uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
@@ -103,6 +112,7 @@ KThread* current_thread() { return thread_detail::t_self; }
 ::Ctx* current_ctx() { return thread_detail::t_self ? &thread_detail::t_self->ctx : nullptr; }
 
 uint32_t thread_create(const ThreadParams& p) {
+    thread_detail::ensure_thread_list_lock();
     auto t = std::make_shared<KThread>();
     t->self = t;
     t->id = thread_detail::g_next_id++;
@@ -220,6 +230,7 @@ void main_thread_release() {
 }
 
 std::vector<std::shared_ptr<KThread>> threads() {
+    thread_detail::ensure_thread_list_lock();
     nxrt::platform::mutex_lock(thread_detail::g_list_lock);
     auto v = thread_detail::g_all;
     nxrt::platform::mutex_unlock(thread_detail::g_list_lock);
@@ -290,12 +301,9 @@ bool thread_set_core_mask(KThread& t, int ideal, uint64_t mask) {
 }
 
 void kernel_reset() {
-    // Lazy-initialize kernel locks if not already done
-    static std::once_flag locks_init;
-    std::call_once(locks_init, [] {
-        init_kernel_locks();
-        init_thread_list_lock();
-    });
+    // Both are idempotent; the thread-list lock is also ensured by thread_create().
+    init_kernel_locks();
+    init_thread_list_lock();
 
     std::vector<std::shared_ptr<KThread>> all = threads();
     for (auto& t : all) {
