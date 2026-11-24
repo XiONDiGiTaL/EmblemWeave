@@ -273,13 +273,6 @@ Emitted when build is explicitly cancelled.
 | `build` | 2 | Build (Ninja) | Ninja compilation |
 | `test` | 3 | Test (CTest) | Optional test execution |
 
-### Game Module Build (build_game.cmd)
-
-| Stage ID | Index | Name | Description |
-|----------|-------|------|-------------|
-| `configure` | 1 | Configure (CMake) | CMake configure for game module |
-| `build` | 2 | Build (Ninja) | Ninja compilation of lifted code |
-
 ## Consumer Examples
 
 ### jq (Command Line)
