@@ -20,6 +20,7 @@
 #include "nxrt/memguard.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "nxrt/platform.h"
 #include "vk_gauges.h"
 #include "vk_layer_filter.h"
@@ -1056,6 +1057,10 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
             NXLOG_I(kTag, "memory heap %u: %.2f GiB%s, types (index:flags) %s", i, static_cast<double>(mp.memoryHeaps[i].size) / (1024.0 * 1024.0 * 1024.0),
                     (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? " device-local" : "", types.c_str());
         }
+        uint64_t largest = 0;   // [memory] scale_limits = auto looks at the card's size
+        for (uint32_t i = 0; i < mp.memoryHeapCount; ++i)
+            if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) largest = std::max<uint64_t>(largest, mp.memoryHeaps[i].size);
+        nxrt::mem::limits_note_video_heap(largest);
     }
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     if (fg_queues) extras::ffx_fg_install(*this, fg_queues);

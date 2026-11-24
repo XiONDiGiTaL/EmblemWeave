@@ -21,6 +21,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "nvn_astc_gpu.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_texup.h"
@@ -458,7 +459,7 @@ void init_once() {
             return;
         }
         // 1024 MB (was 512): a 4K first visit registers several GB of textures; results evicted before their first use were read again
-        s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", 1024))) << 20;
+        s.budget = static_cast<uint64_t>(std::max<int64_t>(16, config_get_int("nvn", "tex_prep_mb", nxrt::mem::limit_by_ram(1024, 512, 256)))) << 20;
         s.min_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_min_kb", 8))) << 10;
         // 64 KB (was 1024): with stand-ins ([nvn] tex_async) a texture whose job has not run is drawn blurry for a moment; starting the jobs of the
         // middle-sized textures at registration (long before their first draw) leaves fewer of those. In a 1.7 h session 70% of the BC7 cache files

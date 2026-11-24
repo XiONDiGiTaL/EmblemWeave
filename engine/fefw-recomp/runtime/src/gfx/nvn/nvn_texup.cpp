@@ -20,6 +20,7 @@
 
 #include <nxrt/config.h>
 #include <nxrt/log.h>
+#include <nxrt/memory.h>
 
 namespace nxrt::nvn::be::texup {
 namespace {
@@ -105,7 +106,7 @@ void read_settings_locked(State& s) {
     // Polish nothing waits for: one thread up to 15 hardware threads, two from 16 (it was up to four, which with the first pass kept a laptop's
     // cores busy for minutes after each new area, #122)
     s.want_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("gfx", "astc_upgrade_threads", std::max(1, std::min(2, cpus / 8))), 0, 16));
-    s.budget = static_cast<uint64_t>(std::max<int64_t>(8, config_get_int("gfx", "astc_upgrade_mb", 192))) << 20;
+    s.budget = static_cast<uint64_t>(std::max<int64_t>(8, config_get_int("gfx", "astc_upgrade_mb", nxrt::mem::limit_by_ram(192, 128, 64)))) << 20;
     if (s.want_threads > 0)
         NXLOG_I(kTag, "texture cache upgrade: %d low-priority thread(s), up to %llu MB of waiting work", s.want_threads, static_cast<unsigned long long>(s.budget >> 20));
 }

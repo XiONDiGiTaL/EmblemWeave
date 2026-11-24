@@ -310,6 +310,7 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings& settings
     if (write_profile != &nxrt_no_profile_write) tt::set_exit_handler(&exit_writing_profile);
     s.base = base;
     res_install(base);
+    filecache_install(base);
     detail_install();   // before the game's file system is set up: the graphics settings files are edited as the RomFS is laid out
     crowd_install(base, settings.display.npc_distance);
     twprobe_start(base);

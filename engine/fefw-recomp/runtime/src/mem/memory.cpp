@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <functional>
 #include <cstdio>
 #include <map>
@@ -445,8 +446,14 @@ bool heap_create(uint64_t reserve_bytes) {
                 static_cast<unsigned long long>(size), static_cast<unsigned long long>(kHeapMax));
         return false;
     }
-    // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never
-    const std::string mode = nxrt::config_get_str("memory", "heap_section", "auto");
+    // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never.
+    // true / on / yes and false / off / no work too.
+    std::string mode = nxrt::config_get_str("memory", "heap_section", "auto");
+    for (char& ch : mode) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (mode == "false" || mode == "off" || mode == "no") mode = "0";
+    if (mode == "true" || mode == "on" || mode == "yes") mode = "1";
+    if (mode != "0" && mode != "1" && mode != "auto" && !mode.empty())
+        NXLOG_W(kTag, "[memory] heap_section = %s is not auto, 0 or 1: auto is used", mode.c_str());
     // Check for Wine on Linux
     bool wine = false;
 #if defined(__linux__)
@@ -635,6 +642,60 @@ int heap_rw_pages(uint64_t addr, uint64_t size) {
 }
 
 uint64_t heap_epoch() { return g_heap_epoch.load(std::memory_order_seq_cst); }
+
+uint64_t limits_ram_bytes() {
+    static const uint64_t r = [] {
+        const int64_t test_gb = config_get_int("memory", "test_ram_gb", 0);
+        if (test_gb > 0) return static_cast<uint64_t>(test_gb) << 30;
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        return GlobalMemoryStatusEx(&ms) ? static_cast<uint64_t>(ms.ullTotalPhys) : uint64_t{0};
+    }();
+    return r;
+}
+
+std::atomic<uint64_t> g_limits_video_heap{0};   // the largest device-local heap, from the graphics device (0 until it exists)
+
+void limits_note_video_heap(uint64_t bytes) { g_limits_video_heap.store(bytes, std::memory_order_relaxed); }
+uint64_t limits_video_heap_bytes() { return g_limits_video_heap.load(std::memory_order_relaxed); }
+
+// [memory] scale_limits = auto (default) | true | false. auto: on for a PC with 20 GiB of RAM or less (the 8 and 16 GB classes) or a graphics
+// card whose largest device-local heap is 8.5 GiB or less (8 GB cards report 7.8 to 8.0); off above both. Decided at the first call after the
+// device exists (the RAM alone before it), and logged once with the reason.
+bool limits_scaled() {
+    static const std::string mode = [] {
+        std::string v = config_get_str("memory", "scale_limits", "auto");
+        for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return v;
+    }();
+    if (mode != "auto" && mode != "") {
+        static const bool v = config_get_bool("memory", "scale_limits", false);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            NXLOG_I(kTag, "memory limits: %s ([memory] scale_limits = %s; RAM %.1f GiB)", v ? "scaled to this PC" : "the fixed defaults", mode.c_str(),
+                    static_cast<double>(limits_ram_bytes()) / (1024.0 * 1024.0 * 1024.0));
+        return v;
+    }
+    const uint64_t ram = limits_ram_bytes(), vram = limits_video_heap_bytes();
+    const bool small_ram = ram && ram <= (20ull << 30);
+    const bool small_card = vram && vram <= (17ull << 29);   // 8.5 GiB
+    const bool v = small_ram || small_card;
+    static std::atomic<int> logged{0};   // 1: logged before the device existed, 2: logged with it
+    const int want = vram ? 2 : 1;
+    if (logged.load(std::memory_order_relaxed) < want && logged.exchange(want) < want)
+        NXLOG_I(kTag, "memory limits: %s ([memory] scale_limits = auto; RAM %.1f GiB%s, video memory %s)", v ? "scaled to this PC" : "the fixed defaults",
+                static_cast<double>(ram) / (1024.0 * 1024.0 * 1024.0), small_ram ? " (20 GiB or less)" : "",
+                vram ? (small_card ? "8.5 GiB or less" : "over 8.5 GiB") : "not known yet");
+    return v;
+}
+
+int64_t limit_by_ram(int64_t over16, int64_t at16, int64_t at8) {
+    if (!limits_scaled()) return over16;
+    const uint64_t r = limits_ram_bytes();
+    if (r && r <= (10ull << 30)) return at8;
+    if (r && r <= (20ull << 30)) return at16;
+    return over16;
+}
 
 uint64_t heap_committed() {
     std::lock_guard lk(g_heap_mu);
