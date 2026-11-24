@@ -96,12 +96,13 @@ user-visible fix in this cycle has been demonstrated in a running game, and Issu
 The integration was committed in logical groups directly on `main`; the hashes are recorded in the final commit of
 this sequence and summarised here:
 
-| Commit | Contents |
-|---|---|
-| _engine_ | renderer profiling, memory snapshot, prewarm bounds, platform write-watch split, services |
-| _launcher_ | `process.rs` and its call sites, elapsed-time label |
-| _docs_ | the six consolidation reports, FCC report banners and path corrections, CONFIG rows, readiness-audit entries |
-| _record_ | the commit hashes and remote verification appended to this report, changelog and manifest updates |
+| Commit | Subject | Contents |
+|---|---|---|
+| `3b4d9531e380a067dd6359a6d1862145f0b9411b` | engine: integrate FCC's renderer profiling, bounded prewarm and write-watch split | renderer profiling (moved to `nxrt_gfx`), memory snapshot, prewarm bounds, platform write-watch split, services, `[gfx] frame_wait_ms`, CONFIG rows, `kernel_threads` expectations |
+| `1a827515c357bd7851453c3f2c6e463ce9799b4e` | launcher: hide build subprocess consoles and cover the cinematic warning | `process.rs` and its call sites, elapsed-time label, `launcher_game_info` fixtures |
+| `9cf691802b5c5e1b618c64074ce8dcd41287693f` | tools: add the read-only #79 save-fixture harness | `tools/issue79_fixture.py` |
+| `3e10ad47dcce41ce27cfb9b71a56420f7035ec32` | docs: reconcile the v0.1.42 notes with the integrated tree | the six reports, FCC report banners and path corrections, five-note sweep, readiness-audit entries |
+| this commit | docs: record the integration commits and the validated build | this commit table, manifest source/build/tests, `.gitignore` for build output |
 
 `Refs`-style references are used in commit messages; no `Fixes`/`Closes`/`Resolves` trailer was written, because
 nothing in this cycle was verified against a running game.

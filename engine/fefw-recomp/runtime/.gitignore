@@ -13,3 +13,4 @@ pipeline_keys.bin
 __pycache__/
 
 build_int/
+build_linux/

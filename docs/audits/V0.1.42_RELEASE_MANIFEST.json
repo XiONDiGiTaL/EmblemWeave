@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-24T02:00:00Z",
+  "generatedAt": "2026-11-24T07:20:47Z",
   "release": {
     "name": "EmblemWeave",
     "version": "0.1.42",
@@ -13,14 +13,14 @@
   "source": {
     "repository": "https://github.com/XiONDiGiTaL/EmblemWeave",
     "branch": "main",
-    "commit": "6646b5f7641ddc3b74cef49ef11a826f7b0a9504",
-    "commitSubject": "Document the v0.1.42 consolidation, readiness audit and E: deployment plan",
-    "auditBaseNote": "audit base only; documentation corrections were committed to main after this commit, and the audited code remains 113cc8fa",
-    "auditedSource": "113cc8faff98138544fbc4c6825b3590809ca491",
-    "auditedSourceSubject": "Install the bundled FFmpeg runtime from the local install script",
+    "commit": "3e10ad47dcce41ce27cfb9b71a56420f7035ec32",
+    "commitSubject": "docs: reconcile the v0.1.42 notes with the integrated tree",
+    "auditBaseNote": "audit base only; the integration commits below are the audited code, and a final record commit follows this documentation revision",
+    "auditedSource": "1a827515c357bd7851453c3f2c6e463ce9799b4e",
+    "auditedSourceSubject": "launcher: hide build subprocess consoles and cover the cinematic warning",
     "documentationOnlyOverAuditedSource": true,
-    "originMainAtAuditStart": "a40583ac",
-    "worktreeCleanForBuild": true,
+    "originMainAtAuditStart": "6ac9791f",
+    "worktreeCleanForBuild": false,
     "archiveMethod": "git archive HEAD into target/canonical-v0142/src",
     "freebuffCommits": [
       "bb2056f7",
@@ -28,7 +28,26 @@
       "827f09f4",
       "113cc8fa"
     ],
-    "excludedUncommittedWork": "FCC MAKO/Vulkan/Linux changes (25 modified/deleted and 13 untracked paths at the final check) are not part of any canonical artifact"
+    "excludedUncommittedWork": "nothing of FCC's is left uncommitted except the preserved stash@{0} (audio EQ / MAKO / overview / play UI draft) and build output; see docs/audits/FCC_WORK_INTEGRATION.md",
+    "worktreeNote": "the canonical engine build was made from the dirty tree that became 3b4d9531 + 1a827515; no release package was produced",
+    "integrationCommits": [
+      {
+        "hash": "3b4d9531e380a067dd6359a6d1862145f0b9411b",
+        "subject": "engine: integrate FCC's renderer profiling, bounded prewarm and write-watch split"
+      },
+      {
+        "hash": "1a827515c357bd7851453c3f2c6e463ce9799b4e",
+        "subject": "launcher: hide build subprocess consoles and cover the cinematic warning"
+      },
+      {
+        "hash": "9cf691802b5c5e1b618c64074ce8dcd41287693f",
+        "subject": "tools: add the read-only #79 save-fixture harness"
+      },
+      {
+        "hash": "3e10ad47dcce41ce27cfb9b71a56420f7035ec32",
+        "subject": "docs: reconcile the v0.1.42 notes with the integrated tree"
+      }
+    ]
   },
   "artifactClasses": {
     "historicalDocumented": {
@@ -135,10 +154,19 @@
       "durationSeconds": 240
     },
     "engine": {
-      "status": "not-built",
-      "reason": "FCC's 25 modified/deleted engine paths are active, including an in-progress write_watch platform split; a clean canonical C++ build would compile or contend with them.",
-      "canonicalRuntimeSha256": null,
-      "note": "No single definitive production-runtime hash is asserted while no reproducible canonical engine build exists."
+      "status": "built-working-tree-not-packaged",
+      "path": "engine/fefw-recomp/runtime/build_int",
+      "generator": "Ninja 1.13.2",
+      "compiler": "clang 23.1.5 (clang-cl, x86_64-pc-windows-msvc)",
+      "targets": 1026,
+      "exitCode": 0,
+      "sha256": {
+        "mpr_launcher.exe": "c9b0304c9f21980690a1dbeed723c01e7d206dd9e5556c38dbc627b634cf211b",
+        "nxrt_tests.exe": "8a06cd04abf488c951f465984cd3680a47b1c26344ae8560a9a3854eaf4d76b6",
+        "nxrt_gfx_tests.exe": "943cc446311c918a9e38bab4b3ef71cbf882da8ed45028eb4bb68f33139071e0",
+        "nxrt_gfx_demo.exe": "6a9ff4027e4d8e1d28809a924d27b6d8b49bb75040cd395bbcb397ff4f5669c4"
+      },
+      "note": "not release artifacts: dirty-tree build, no package, no tag; see docs/audits/ENGINE_AND_RENDERER_VALIDATION.md"
     },
     "packaging": {
       "status": "not-built",
@@ -180,18 +208,24 @@
   "tests": {
     "canonicalLauncher": {
       "status": "verified",
-      "command": "cargo test -p emblemweave --locked",
-      "source": "clean git archive of 113cc8fa",
-      "passed": 427,
+      "command": "cargo test --manifest-path apps/emblemweave/Cargo.toml",
+      "source": "working tree that became 1a827515",
+      "passed": 429,
       "failed": 0,
       "ignored": 13,
+      "total": 442,
       "exitCode": 0,
-      "durationSeconds": 20.25
+      "note": "two tests more than the 427/13 baseline: the new process module"
     },
     "canonicalEngine": {
-      "status": "not-run",
-      "reason": "no canonical engine build; FCC files active",
-      "note": "Not a pass."
+      "status": "built-with-classified-failures",
+      "command": "ctest --test-dir build_int --parallel 4 --output-on-failure --timeout 900",
+      "source": "working tree that became 3b4d9531",
+      "total": 182,
+      "passed": 169,
+      "failed": 13,
+      "exitCode": 8,
+      "note": "not a pass: 4 pre-existing crashes/failures reproduce on the pre-integration binary, 6 need the Vulkan validation layer or a specific GPU, 1 needs a gamepad, 1 is load-sensitive; two stale suites were corrected (kernel_threads 29/29, launcher_game_info 25/25). See docs/audits/ENGINE_AND_RENDERER_VALIDATION.md"
     },
     "historicalClaims": [
       {
