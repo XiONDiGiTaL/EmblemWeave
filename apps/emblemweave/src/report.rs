@@ -309,6 +309,15 @@ pub fn bundle(app: &App, note: &str) -> Result<PathBuf, String> {
 
     std::fs::write(work.join("report.txt"), &text).map_err(|e| format!("writing report: {e}"))?;
 
+    // The manifest is the part that survives a report where the save tree was
+    // not attached: every slot file, its size and hash, the profile/backup
+    // inventory and the runtime's own mount/commit lines (issue #79).
+    if let Some(save_dir) = Config::save_dir() {
+        let saves = crate::saves::save_manifest(&save_dir, title);
+        std::fs::write(work.join("saves.txt"), saves)
+            .map_err(|e| format!("writing save manifest: {e}"))?;
+    }
+
     if let Some(dir) = Config::dir() {
         copy_file(&dir.join("config.json"), &work.join("config.json"));
     }

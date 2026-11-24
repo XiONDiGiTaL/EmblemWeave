@@ -636,7 +636,10 @@ uint32_t Volume::commit() {
         std::ofstream j(s.journal_file, std::ios::binary | std::ios::trunc);
         j << body;
         j.flush();
-        if (!j) return rc::kGenericFailure;
+        if (!j) {
+            NXLOG_E("fs", "save commit %s: writing the journal failed", to_u8(s.root).c_str());
+            return rc::kGenericFailure;
+        }
     }
     {
         HANDLE h = CreateFileW(s.journal_file.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -645,17 +648,23 @@ uint32_t Volume::commit() {
             CloseHandle(h);
         }
     }
-    if (!MoveFileExW(s.journal_file.c_str(), s.marker.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return rc::kGenericFailure;
+    if (!MoveFileExW(s.journal_file.c_str(), s.marker.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        NXLOG_E("fs", "save commit %s: making the decided marker failed (error %lu)", to_u8(s.root).c_str(), GetLastError());
+        return rc::kGenericFailure;
+    }
     if (g_crash_point == 1) return rc::kGenericFailure;   // decided, nothing applied
 
     // Phase 2: apply. A crash in here is repaired by the next recover().
     const int applied = apply_marker(s.marker, g_crash_point == 2 ? 1 : 0);
     if (g_crash_point == 2) return rc::kGenericFailure;
-    if (applied < 0) return rc::kGenericFailure;
+    if (applied < 0) {
+        NXLOG_E("fs", "save commit %s: applying the decided marker failed", to_u8(s.root).c_str());
+        return rc::kGenericFailure;
+    }
     s.tomb.clear();
     stdfs::remove_all(s.work, ec);
     stdfs::create_directories(s.work, ec);
-    NXLOG_D("fs", "commit %s: %d changes", to_u8(s.root).c_str(), changes);
+    NXLOG_I("fs", "save commit %s: %d changes applied", to_u8(s.root).c_str(), changes);
     return 0;
 }
 

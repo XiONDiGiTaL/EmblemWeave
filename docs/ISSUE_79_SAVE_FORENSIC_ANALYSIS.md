@@ -1,245 +1,227 @@
-# Issue #79: Save Data Forensic Analysis
+# Issue #79: Save Data Forensic Analysis (two independent reports)
 
-## Diagnostic Archive Examined
-- **Archive**: `emblemweave-report-1795382099629.zip`
-- **Generated**: 2026-11-22 21:14:59 UTC (day 20779)
-- **EmblemWeave Version**: 0.1.41 (a56d1e2)
-- **Platform**: Windows x86_64
+Status: **open — one dangerous failure path is now guarded, but neither reporter's
+exact lost save tree is available, so a single root cause is not proven.**
 
-## Key Findings
+This document replaces the earlier single-report conclusion that the original
+reporter had accidentally deleted a profile. That event is in the bundle, but it
+does not establish where the missing save was, and the second reporter never
+mentions a profile deletion.
 
-### 1. Save Directory Configuration
-- **fefw.ini save_dir**: `G:/Games/EmblemWeave-v0.1.40/data/save`
-- **Launcher portable mode**: `G:\Games\EmblemWeave-v0.1.40\data`
-- **Config::save_dir()**: `G:\Games\EmblemWeave-v0.1.40\data\save` (matches fefw.ini in portable mode ✓)
+## 1. Reports examined
 
-### 2. Critical Event Timeline
-| Time (UTC) | Event |
-|------------|-------|
-| 21:09:37 | Launcher started |
-| 21:09:52 | **Profile "First Run 0.1.41" moved to backups** (timestamp: 1795381792) |
-| 21:10:04 | Game started |
-| 21:14:59 | Diagnostic report generated |
+| | Original report (`KalHawke`) | Second report (`msalgadob`) |
+|---|---|---|
+| Attachment | `emblemweave-report-1795382099629.zip` | `emblemweave-report-1795483280940.zip` |
+| SHA-256 | `3a3ee40cc428d842a1ed56760bf47fe06a7b2db646b2f5776daa4c2cabef7696` | `3500f822ce8f0a5f0c67e273e0dc3de9021c8f73bcef1cef81ec22867d6a0e5b` |
+| Generated | day 20779, 21:14:59 UTC | day 20781, 01:21:20 UTC |
+| Version | `0.1.41 (a56d1e2)` | `0.1.41 (a56d1e2)` |
+| Platform | Windows x86_64 | Windows x86_64 |
+| Data root | `G:\Games\EmblemWeave-v0.1.40\data` (portable) | `D:\switch\EmblemWeave-v0.1.41\data` (portable) |
+| `fefw.ini` `save_dir` | `G:/Games/EmblemWeave-v0.1.40/data/save` | `D:/switch/EmblemWeave-v0.1.41/data/save` |
+| Launcher save root | same folder | same folder |
+| Runtime log save root | same folder | same folder |
+| `[account] uid` in runtime | `(default)` → fixed `0100000000000000706d635257464546` | same |
+| Title / save owner | `04007EF01F8AE000` | `04007EF01F8AE000` |
+| Game data | extracted `131072` update; build matches | `.nup` `131072`; build matches |
+| `profiles` in launcher config | `[]` | `[]` |
+| `profile` | `""` | `""` |
+| `slot_names` | `{}` | `{"test": {}}` |
+| `profile_portraits` | `{}` | `{"test": "theodora"}` |
+| Notable launcher activity | profile `First Run 0.1.41` moved to backups at 21:09:52 | theme changes, report generation; no save/profile action |
+| Save tree in ZIP | **no** | **no** |
+| Runtime mount/commit lines | **none** | **none** |
 
-### 3. Profile State at Diagnostic Time
-- **Profile "First Run 0.1.41"**: MOVED to `G:\Games\EmblemWeave-v0.1.40\data\save\backups\1795381792-profile-First Run 0.1.41`
-- **Launcher config.json**: `"profiles": []` (mod profiles, not save profiles), `"profile": ""` (no active save profile)
-- **Saves page**: Would show no profiles (profiles folder empty after move)
+Both ZIPs contain only `report.txt`, `environment.txt` and `config.json`, plus
+the launcher's logs and run-folder files. Neither contains the save tree, so the
+contents of `account/0100000000000000706d635257464546/000` at the time of the
+report are unknown.
 
-### 4. Root Cause Analysis
+### What the evidence rules out for these two reports
 
-#### What Happened
-The profile "First Run 0.1.41" was moved to the backups folder at 21:09:52 UTC, 15 seconds after launcher startup. The only code path that produces the "Moved profile..." message is the **profile delete dialog** in `pages/saves.rs:1990-2023`, which requires explicit user interaction:
-1. User selects a profile
-2. Clicks "Manage" → "Delete"
-3. Confirms "Move to Backups"
+- **A launcher/runtime save-root mismatch.** The configured root, the
+  `fefw.ini` root and the runtime's own `fs: fsp-srv ... save data in ...` line
+  agree in both reports.
+- **A wrong user or title id.** Both runtimes resolve the built-in user
+  (`uid` empty, nickname `Player`) and title `04007EF01F8AE000`; the runtime's
+  fixed account path is the one the launcher lists as expected.
+- **A 0.1.40 → 0.1.41 save-path regression.** The 0.1.40 → 0.1.41 runtime
+  `fs.cpp` change is a one-line RomFS condition; save-path and account handling
+  are unchanged. Both reports are on 0.1.41 and both logs show the expected
+  root.
+- **An interrupted journal commit visible in the log.** The old runtime logged
+  commit only at debug level and logged successful mounts not at all, so the
+  absence of those lines is not evidence that no commit happened. It is also not
+  evidence that one did.
 
-#### Why Saves Appear "Not Read"
-After the profile move:
-1. The profile folder no longer exists in `save/profiles/`
-2. `saves::profiles(save_dir)` returns empty list
-3. `app.saves_ui.active_profile` is cleared (line 2014-2016)
-4. Game starts with empty `account/DEFAULT_USER/000/` (no save data)
-5. User sees "no saves" / prologue instead of their progression
+### What the evidence does not establish
 
-#### Why Profile Backups Cannot Be Restored
-The backups section in the Saves page shows a "Restore" button for each backup, but it calls `saves::restore_backup_verified()` → `import()`, which uses `resolve_source()`. This function expects:
-- An "account" folder at specific paths, OR
-- A title ID folder, OR
-- A flat 000 folder
+- Whether each reporter's `000` folder was populated, empty, missing, or only
+  present under a profile/backup.
+- Whether the save was written but never committed, or committed and later
+  moved/removed.
+- That the original reporter's profile move caused the loss. The move is real
+  (`backups/1795381792-profile-First Run 0.1.41`), but the account save is a
+  separate folder; the bundle does not show whether the playthrough was in that
+  profile, in `account`, or in both.
+- That the two reports share one root cause. They share the symptom and build,
+  not a demonstrated cause.
 
-A **profile backup** (from `remove_profile`) has structure:
+The earlier document's claim of a confirmed accidental profile deletion is
+therefore **downgraded to a possible event in one report**, not a proven cause.
+
+## 2. Save lifecycle and the confirmed code gap
+
+The intended path is:
+
 ```
-backups/1795381792-profile-First Run 0.1.41/
-  DEFAULT_USER/
-    000/
-    DEFAULT_USER.meta
-```
-
-This lacks an "account" folder at the root, so `resolve_source()` returns `None`, and restore fails silently.
-
-### 5. Evidence Supporting Findings
-- **environment.txt**: Shows exact "Moved profile..." message matching delete dialog format
-- **report.txt**: Shows empty profiles list, empty active profile
-- **fefw.ini**: Confirms save_dir matches launcher's portable save_dir
-- **Code audit**: Only one call to `remove_profile()` in entire codebase (pages/saves.rs:2010)
-
-### 6. Contradictions / Missing Information
-- User claims they "moved autosave file to backup and back" - this describes **slot archive** (archive_slot), not **profile delete** (remove_profile)
-- The 15-second delay between launch and profile move is suspicious but possible if user immediately opened Saves page
-- No evidence of automatic/profile cleanup code running at startup
-
-### 7. Candidate Root Causes
-1. **User accidentally deleted profile** via delete dialog (most likely given code evidence)
-2. **Profile backup restoration not implemented** - prevents recovery
-3. **No protection against accidental profile deletion** - single confirmation dialog
-
-### 8. Confirmed Root Cause
-**Primary**: User accidentally moved profile "First Run 0.1.41" to backups via the delete dialog, then couldn't restore it because profile backup restoration is not implemented.
-
-**Secondary**: The Saves page "Restore" button only works for whole-save backups (from `import`), not profile backups (from `remove_profile`).
-
-### 9. Source Files Involved
-- `apps/emblemweave/src/pages/saves.rs` - Delete dialog (line 1973-2033), backups section (line 607-624)
-- `apps/emblemweave/src/saves.rs` - `remove_profile()` (line 1704), `restore_backup()` (line 1554), `resolve_source()` (line 471)
-- `apps/emblemweave/src/config.rs` - `Config::save_dir()` (line 702)
-
-## Recommended Fix
-1. **Add `restore_profile()` function** in `saves.rs` to restore a profile from backups
-2. **Update backups section** in `pages/saves.rs` to detect profile backups and offer "Restore Profile" action
-3. **Add stronger confirmation** for profile deletion (already has confirmation dialog, but could be clearer)
-4. **Add regression test** for profile backup/restore cycle
-
-## Implementation Summary (Commit `c1e9c94a`)
-
-### 1. `restore_profile()` Function (`apps/emblemweave/src/saves.rs:1713-1746`)
-```rust
-pub fn restore_profile(save_dir: &Path, backup_name: &str) -> Result<Profile, String>
-```
-- Validates backup name contains `-profile-` pattern
-- Extracts profile name via `split_once("-profile-")`
-- Sanitizes with `clean_name()` 
-- Prevents overwriting existing profiles
-- Uses atomic `rename()` to move backup → profiles folder
-- Returns `Profile` struct with computed metadata
-
-### 2. Backups UI Update (`apps/emblemweave/src/pages/saves.rs:612-649`)
-- Detects profile backups via `b.name.contains("-profile-")`
-- Shows "Restore Profile" button for profile backups (adds to profiles list)
-- Shows "Restore" button for whole-save backups (replaces current save)
-- Correct hover text distinguishes the two actions
-- Clears `profile_cache` after restoration to refresh UI
-
-### 3. Regression Tests (7 new tests in `saves.rs`)
-| Test | Purpose |
-|------|---------|
-| `profile_backup_and_restore_cycle` | Full cycle: create → backup → restore |
-| `restore_profile_fails_on_name_collision` | Prevents overwriting existing profiles |
-| `restore_profile_rejects_invalid_backup_name` | Validates `-profile-` naming pattern |
-| `restore_profile_empty_backup_restores_empty_folder` | Handles empty backups gracefully |
-| `restore_profile_preserves_backup_on_failure` | Backup persists on failure |
-| `whole_save_backup_restoration_unaffected` | Whole-save backups still work independently |
-| `restore_profile_preserves_metadata_and_contents` | Contents verified intact after restore |
-
-**Note**: Earlier report stated "six new tests" — actually **seven** were added.
-
-**All 418 tests pass.**
-
-## Portable Installation Constraint
-
-### Save Directory Resolution
-The launcher resolves its save directory through:
-```
-Config::save_dir() → Config::dir() → platform::data_root()
+game save -> runtime commit -> <save_dir>/account/<uid>/000/<slot>
+          -> .meta beside <uid>
+          -> launcher reads the same account folder
+          -> Play reconciles fefw.ini
+          -> runtime mounts <save_dir>/account/<uid>
+          -> game enumerates slots
 ```
 
-`platform::data_root()` checks **in order**:
-1. **Portable mode**: `portable.txt` beside executable → `exe_dir/data/save`
-2. **Standard**: `%APPDATA%\EmblemWeave\save` (Windows)
+Two behaviors made a missing/renamed account folder look like data loss:
 
-### Reporter's Situation
-| Installation | Location | Portable? | Save Directory |
-|--------------|----------|-----------|----------------|
-| Original (reporter's saves) | `G:\Games\EmblemWeave-v0.1.40\` | Yes (`portable.txt` present) | `G:\Games\EmblemWeave-v0.1.40\data\save\` |
-| Updated launcher (deployed) | `E:\EmblemWeave\` | Yes (`portable.txt` present) | `E:\EmblemWeave\data\save\` |
+1. **The runtime silently created an empty account save.** When `account/<uid>`
+   was absent, `open_save()` called `ensure_account_save()` and the game started
+   from zero. The old log line existed, but no mounted root, file count or
+   namespace state was recorded in a normal report.
+2. **The launcher offered no preflight recovery.** `sync_save_dir()` carried a
+   save from another launcher data root, but if the current account folder was
+   missing while local profiles/backups held the only copies, Play still
+   proceeded and the game created a new save. The Saves page could show those
+   folders, but nothing blocked the empty launch.
 
-**Critical**: Running `E:\EmblemWeave\EmblemWeave.exe` will **only** see saves in `E:\EmblemWeave\data\save\`. It **cannot** access the reporter's profile backup at `G:\Games\EmblemWeave-v0.1.40\data\save\backups\1795381792-profile-First Run 0.1.41`.
+A related safe case was tested: a populated `000` with its `.meta` missing. The
+runtime's old code treated it as absent and logged “creating”, while preserving
+the `000` files. The new runtime repairs only the missing metadata, logs a
+warning, and mounts the same 12 files. This is not destructive, but the old
+wording was misleading and is now explicit.
 
-### Runtime Save Directory
-- Runtime reads `[fs] save_dir` from `fefw.ini` in the run directory
-- `sync_save_dir()` reconciles launcher config with `fefw.ini` before every Play
-- In portable mode, both point to `exe_dir/data/save`
+## 3. Changes implemented
 
-## Disposable-Copy Recovery Validation
+### Launcher
 
-A simulated portable installation was created at `/tmp/issue79_test/portable_test/` with:
-- Updated `EmblemWeave.exe` (commit `c1e9c94a`)
-- `portable.txt` marker
-- Reporter's profile backup copied to `data/save/backups/1795381792-profile-First Run 0.1.41/`
+- `saves::account_meta_path()` and `saves::ensure_account_meta()`:
+  write the missing `.meta` for a populated account save before Play. Existing
+  metadata is never replaced; no slot file is touched.
+- `saves::recoverable_saves()`: inventory of valid profiles, profile backups,
+  whole-save backups and orphan saves with at least one slot file.
+- `saves::empty_namespace_blocker()`: refuses Play when the account folder is
+  **completely missing** and recoverable saves exist. The message names the
+  missing folder and the recoverable saves and sends the player to Saves. An
+  existing account folder (including a meta-only one) is left to the game, so a
+  deliberate new game is still possible.
+- `saves::save_manifest()`: bounded save-tree listing for reports — filenames,
+  sizes, timestamps, SHA-256 for files ≤ 1 MiB, metadata, profiles, backups,
+  recoverable saves and the tail of the runtime's save log. Save contents are
+  not included.
+- Saves page: prominent “No current save” warning listing recoverable
+  profiles/backups before the carousel.
+- `engine::sync_save_dir()`: repairs missing metadata before reconciliation.
+- `engine::play()`: applies the empty-namespace guard after reconciliation.
+- `report::bundle()`: writes `saves.txt` with the manifest next to
+  `report.txt`.
 
-**Validation Results**:
-1. ✅ Profile backup discovered by `saves::backups()`
-2. ✅ `restore_profile()` successfully restores "First Run 0.1.41"
-3. ✅ Restored profile appears in `saves::profiles()`
-4. ✅ All contents preserved: `DEFAULT_USER/000/Auto`, `DEFAULT_USER/000/Manual`, `DEFAULT_USER/DEFAULT_USER.meta`
-5. ✅ File contents match original
-6. ✅ Backup removed after successful restore (atomic rename)
-7. ✅ Whole-save backups unaffected
+### Runtime
 
-**Limitation**: This validates the **library functions**. Full GUI integration (button clicks, UI refresh) was verified via unit tests. Actual end-to-end GUI test requires manual verification by reporter.
+- `fs.cpp`: when an account `000` has files but `.meta` is missing, writes the
+  metadata and logs
+  `... has N files in 000 but no .meta; wrote the missing metadata and kept the files`.
+- `fs.cpp`: every successful open logs
+  `save data opened: <key> at '<absolute root>' (N files in 000, meta present)`;
+  a missing/unmounted save logs the absolute root and empty-namespace warning;
+  account creation logs the absolute root and that the game starts with no
+  progress.
+- `fs_volume.cpp`: successful commits log at normal level
+  (`save commit <root>: N changes applied`); journal, marker and apply failures
+  log errors instead of returning silently.
 
-## Reporter Recovery Instructions
+No save format, profile layout, `DEFAULT_USER`, title id, `.meta` schema or
+backup/restore behavior was changed.
 
-### ⚠️ IMPORTANT: Use the Correct Installation
-Your saves are in the **G: portable installation**. The updated launcher at `E:\EmblemWeave\` has its **own separate save folder**.
+## 4. Reproduction and verification matrix
 
-**Option A (Recommended)**: Copy the updated launcher to your G: installation
-```cmd
-copy "E:\EmblemWeave\EmblemWeave.exe" "G:\Games\EmblemWeave-v0.1.40\EmblemWeave.exe"
-```
-Then run `G:\Games\EmblemWeave-v0.1.40\EmblemWeave.exe`
+| Scenario | Result | Evidence |
+|---|---|---|
+| Fresh ZIP/portable install, no saves | Play is not blocked; runtime may create the first empty account | unit test for no recoverable saves; code path inspected |
+| Portable install with a valid save | **Pass** — game showed Continue after a fresh process start | disposable fixture, 12 files, `release2` runtime |
+| ZIP install with a valid save | Not separately reproduced; same portable data-root logic | fixture used a portable layout |
+| Update from an older version | Not reproduced | 0.1.40→0.1.41 runtime save code diff reviewed; existing reconciliation tests |
+| Restart after a save | **Read path pass** — save mounted again after killing/relaunching the process | fixture logs and Continue screen |
+| Restart after days | Not simulated | no clock-dependent save logic found |
+| Multiple profiles | Pass in library tests | `profiles_store_and_load`, profile backup/restore tests |
+| Autosave moved to backup and restored | Pass in library tests | slot archive/restore tests |
+| Missing `.meta`, populated `000` | **Pass** — repaired, 12 files preserved, game mounted the save | runtime log + unit test |
+| Missing save directory / empty namespace with recoverables | Guard and warning added; library test passes | `recoverable_inventory_and_empty_namespace_guard` |
+| Launcher/runtime mismatch | Existing reconciliation tests pass; not reproduced from a reporter | `sync_save_dir`/`carry_save_across` tests |
+| Interrupted startup/shutdown | Existing journal recovery tests pass; no new corruption path | fs volume tests/build |
+| Actual new save created in gameplay, then relaunched | **Not tested** | requires driving a new playthrough; fixture was used read-only for this check |
 
-**Option B**: Run the G: installation's launcher directly (if it was updated there)
+### Commands actually run
 
-**Do NOT** run `E:\EmblemWeave\EmblemWeave.exe` expecting to see your G: saves — it uses a completely different save folder.
+- `cargo check -p emblemweave --locked` — passed.
+- `cargo test -p emblemweave --locked saves::tests` — **45 passed, 0 failed**.
+- `cmake --build game-build/fefw/build/release2 --target fefw` — passed after
+  fixing a `to_u8` compile error in the new log line.
+- GUI fixture: launched the rebuilt `release2/fefw.exe` with `--ini` pointing at
+  a disposable copy of the real save. The title screen showed **Continue**;
+  the log recorded the absolute account path and `12 files in 000, meta present`.
+- Removed the fixture `.meta`, relaunched: log recorded the 12-file repair and
+  the save files remained byte-identical.
 
-### Recovery Steps (using Option A)
-1. **Open EmblemWeave** from `G:\Games\EmblemWeave-v0.1.40\EmblemWeave.exe`
-2. **Navigate to Saves** page (left sidebar → Saves)
-3. **Scroll to Backups section**
-4. **Locate** the backup named like `1795381792-profile-First Run 0.1.41`
-   - This is your deleted profile from 2026-11-22 21:09:52 UTC
-5. **Click "Restore Profile"** (button only appears for profile backups)
-6. **Confirm** — the profile reappears in the Profiles list above
-7. **Select "First Run 0.1.41"** in the Profiles list
-8. **Click "Load Profile"**
-9. **Start the game** — your progression should load at the expected point
-10. **Exit and restart EmblemWeave** — confirm the profile remains available
+### Limits
 
-### ⚠️ Safety
-- **Do not delete** the original backup until you confirm your progression loads correctly
-- The restore operation moves the backup to profiles (it disappears from Backups)
-- If something goes wrong, the backup is your only copy
+- The reporters' exact environments (their original `G:`/`D:` folders) are not
+  on this PC.
+- The 0.1.41 diagnostic bundles have no save tree and no successful-mount line,
+  so the loss cannot be reconstructed from them.
+- The launcher GUI banner and Play guard were verified by library tests and
+  compilation; the Saves page itself was not clicked through with a fabricated
+  missing-account profile. A new gameplay save was not created and reloaded.
+- These are reported as limitations, not as complete end-to-end verification.
 
-## Validation Categories — Distinction
+## 5. Recovery instructions
 
-| Category | Status | What It Covers |
-|----------|--------|----------------|
-| **Automated Regression Tests** | ✅ 418 pass | Library functions: `restore_profile()`, `backups()`, collision handling, content preservation |
-| **Disposable-Copy Integration Test** | ✅ Pass | Simulated portable installation with reporter's backup structure |
-| **Actual Reporter Recovery** | ⏳ Awaiting confirmation | Only the reporter can verify their actual progression loads in-game |
+Use the installation that owns the save folder. A different portable copy has a
+different `data\save` and cannot see the first copy's files.
 
-**Do not** describe filename-pattern validation (`-profile-` substring) as complete structural validation of backup contents. The restore operation validates:
-- Backup folder exists and is a directory
-- Name contains `-profile-` pattern
-- Profile name extracts cleanly
-- Target profile doesn't already exist
-- Atomic rename succeeds
-- Resulting profile has computable metadata
+1. Open **Saves**. The new banner says when the current account save is empty and
+   names recoverable profiles/backups.
+2. If a profile is listed, select it and **Load Profile**. The current save is
+   moved to `backups` first; the profile is copied in; the installed tree is
+   verified.
+3. If a profile backup is listed, use **Restore Profile**. It refuses to
+   overwrite a profile with the same name.
+4. If a whole-save backup is listed, use **Restore**. The save it replaces is
+   moved to `backups` first.
+5. If the launcher says the save folder is missing while recoverable saves
+   exist, Play is refused deliberately. Restore/load one, then Play.
+6. If `.meta` is the only missing file, Play repairs it and keeps `000`.
+7. Never delete the backup folder until the game has loaded the restored
+   progression and a restart has preserved it.
 
-It does **not** validate:
-- Save file integrity (checksums, format version)
-- Progression completeness (all chapters, units, items)
-- Runtime compatibility (engine version match)
+The new `saves.txt` report manifests show the account path, `000` file list and
+hashes, profiles/backups and the runtime's last mount/commit lines. Ask a
+reporter for a new bundle after the failing launch; that is the evidence needed
+to distinguish a missing account folder from an uncommitted write or a rejected
+slot.
 
-These can only be verified by loading the profile in the game.
-
-## Remaining Limitations
-
-1. **No automatic detection** of accidental profile deletion — requires user action
-2. **Reporter must use G: installation** — E: launcher cannot access G: saves
-3. **Delete dialog confirmation** could be strengthened (future enhancement)
-4. **Full GUI integration** verified via unit tests only; end-to-end requires reporter
-
-## Git and Deployment
+## 6. Git and deployment record
 
 | Item | Value |
-|------|-------|
-| Root Cause Fix Commit | `c9121ce2` |
-| Regression Tests Commit | `c1e9c94a` |
-| Current HEAD | `c1e9c94a` |
-| Source Binary SHA256 | `05ccda4f9d8b25178e2fc3190e32b9b8766f888b20e729143d21f470730f8383` |
-| Deployed Binary (E:) SHA256 | `05ccda4f9d8b25178e2fc3190e32b9b8766f888b20e729143d21f470730f8383` |
-| Hashes Match | ✅ |
+|---|---|
+| Branch | `main` |
+| Base HEAD | `ea4a7adc` |
+| This change | pending commit (see deployment notes) |
+| Launcher tests | `cargo check` + 45 save tests pass |
+| Runtime build | `release2/fefw.exe`, build passed |
+| Deployed launcher SHA-256 | pending |
+| Deployed runtime SHA-256 | pending |
 
-**Issue #79 remains open** and classified as **awaiting reporter confirmation** until the reporter successfully restores and loads their original profile "First Run 0.1.41" and verifies their progression.
+Issue #79 remains **open**. Do not close it from this work: the reporters have
+not confirmed recovery, and the exact cause of their lost saves is still
+unproven.

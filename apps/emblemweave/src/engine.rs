@@ -3943,6 +3943,15 @@ pub fn sync_save_dir(run_dir: &Path) -> Result<(), String> {
     let Some(intended) = Config::save_dir() else {
         return Ok(()); // No data root configured; nothing to sync
     };
+    // A populated `000` with its `.meta` missing looks like an empty save to
+    // the runtime. Repair only the missing metadata here, before Play, and
+    // leave every save file untouched (issue #79).
+    crate::saves::ensure_account_meta(&intended, crate::saves::FALLBACK_TITLE_ID).map_err(|e| {
+        format!(
+            "the game's save is at {} but its metadata could not be repaired: {e}; the game was not started",
+            intended.display()
+        )
+    })?;
     let intended_str = intended.to_string_lossy().to_string();
 
     // Parse current ini to find existing save_dir
@@ -5166,6 +5175,14 @@ pub fn play(config: &crate::config::Config) -> Result<(), String> {
     // saves appear empty or missing even though they exist on disk. Refuse to launch when a save exists but
     // could not be put where the game reads it: starting anyway opens an empty game and looks like data loss.
     sync_save_dir(&dir)?;
+    // The account folder can be absent while profiles/backups still hold the
+    // playthrough. Starting then makes the game create a fresh save and look
+    // like the player's progress vanished; refuse and send them to Saves.
+    if let Some(save_dir) = Config::save_dir() {
+        if let Some(note) = crate::saves::empty_namespace_blocker(&save_dir) {
+            return Err(note);
+        }
+    }
     // A build from an earlier release can point the game at a packed .nup, which the engine cannot read in place. The launcher writes those
     // files before play, so reaching this means that write has not happened yet; say so instead of letting the game die on `main.npdm is
     // compressed in the .nup` (issue #24).

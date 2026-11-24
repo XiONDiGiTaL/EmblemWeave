@@ -424,6 +424,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(4.0);
         }
     }
+    // A missing current save beside recoverable profiles/backups is the shape
+    // that made issue #79 look like data loss. Say it before Play is pressed,
+    // and name the folders that can be loaded or restored.
+    let current_account = crate::saves::account_dir(&save_dir);
+    let recoverable = crate::saves::recoverable_saves(&save_dir);
+    if !crate::saves::has_save(&current_account) && !recoverable.is_empty() {
+        let names = recoverable
+            .iter()
+            .take(3)
+            .map(|r| format!("{} \"{}\"", r.kind.label(), r.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        widgets::status_line(
+            ui,
+            &p,
+            Tone::Warn,
+            "No current save",
+            &format!(
+                "{} recoverable save(s) are present: {}. Load or restore one below; Play will not start an empty save when the account folder is missing.",
+                recoverable.len(),
+                names
+            ),
+        );
+        ui.add_space(theme::SPACE_S);
+    }
     ui.label(
         crate::i18n::text("Independent playthroughs")
             .font(theme::display(20.0))

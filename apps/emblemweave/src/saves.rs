@@ -391,6 +391,43 @@ pub fn has_save(account: &Path) -> bool {
     is_account_save(account)
 }
 
+/// The `.meta` file beside the account save folder the game reads.
+///
+/// The engine treats the save as present only when both this file and the
+/// account folder exist, so a save tree with a populated `000` but no `.meta`
+/// looks empty to the runtime until it creates fresh metadata. Keeping the
+/// path in one place lets the launcher repair that case without guessing.
+pub fn account_meta_path(save_dir: &Path) -> PathBuf {
+    let mut meta = account_dir(save_dir).into_os_string();
+    meta.push(".meta");
+    PathBuf::from(meta)
+}
+
+/// Write the account's `.meta` when `000` holds files but the metadata is
+/// missing. Existing metadata is never replaced, and no save file is touched.
+///
+/// This is the launcher-side counterpart of the runtime's missing-meta repair:
+/// it runs before Play so the game is never told that a populated save tree is
+/// an empty one. Returns whether a file was written.
+pub fn ensure_account_meta(save_dir: &Path, title_id: u64) -> Result<bool, String> {
+    let account = account_dir(save_dir);
+    if !has_save(&account) {
+        return Ok(false);
+    }
+    let meta = account_meta_path(save_dir);
+    if meta.is_file() {
+        return Ok(false);
+    }
+    let text = meta_text(title_id, DEFAULT_USER)
+        .ok_or("the game's save user id is not a 16-byte value")?;
+    if let Some(parent) = meta.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&meta, text).map_err(|e| format!("writing {}: {e}", meta.display()))?;
+    Ok(true)
+}
+
 /// The account save in an `account` folder, preferring the engine's fixed user id.
 fn account_save(account: &Path) -> Option<PathBuf> {
     let preferred = account.join(DEFAULT_USER);
@@ -925,6 +962,23 @@ pub fn describe_save_state(title_id: u64) -> String {
                 ));
             }
         }
+        let recoverable = recoverable_saves(dir);
+        if recoverable.is_empty() {
+            s.push_str("recoverable saves in this folder: none\n");
+        } else {
+            s.push_str("recoverable saves in this folder (not the current save):\n");
+            for r in recoverable {
+                s.push_str(&format!(
+                    "  {} \"{}\": {} ({} files, {} slots, {})\n",
+                    r.kind.label(),
+                    r.name,
+                    r.path.display(),
+                    r.files,
+                    r.slots,
+                    when(r.modified)
+                ));
+            }
+        }
         let others = launcher_sources(dir);
         if !others.is_empty() {
             s.push_str("saves under another EmblemWeave data root:\n");
@@ -981,12 +1035,196 @@ fn describe_account(root: &Path, indent: &str) -> String {
         }
         None => s.push_str(&format!("{indent}save: none (000 is missing or empty)\n")),
     }
-    let meta = account.with_extension("meta");
+    let meta = account_meta_path(root);
     if meta.is_file() {
         let size = std::fs::metadata(&meta).map(|m| m.len()).unwrap_or(0);
         s.push_str(&format!("{indent}meta: {size} bytes\n"));
     } else {
         s.push_str(&format!("{indent}meta: missing\n"));
+    }
+    s
+}
+
+/// A bounded, content-free listing of the save tree for a diagnostic bundle.
+///
+/// Filenames, sizes, timestamps and hashes answer whether a slot exists and
+/// whether two reports hold the same bytes without putting save contents in an
+/// issue attachment. Hashes are skipped for files above 1 MiB, and the listing
+/// stops at 600 entries so a damaged work folder cannot make the report huge.
+pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
+    let mut s = String::new();
+    s.push_str("EmblemWeave save manifest\n");
+    s.push_str("=======================\n\n");
+    s.push_str(&format!("save dir: {}\n", save_dir.display()));
+    s.push_str(&format!("title id: {title_id:016X}\n"));
+    s.push_str(&format!("expected user: {DEFAULT_USER}\n"));
+    let account = account_dir(save_dir);
+    let meta = account_meta_path(save_dir);
+    s.push_str(&format!("account: {}\n", account.display()));
+    s.push_str(&format!("account exists: {}\n", account.exists()));
+    s.push_str(&format!("000 exists: {}\n", account.join("000").exists()));
+    s.push_str(&format!("meta: {}\n", meta.display()));
+    if meta.is_file() {
+        let size = std::fs::metadata(&meta).map(|m| m.len()).unwrap_or(0);
+        s.push_str(&format!("meta state: present ({size} bytes)\n"));
+        if let Ok(text) = std::fs::read_to_string(&meta) {
+            for line in text.lines() {
+                s.push_str(&format!("  meta: {line}\n"));
+            }
+        }
+    } else {
+        s.push_str("meta state: missing\n");
+    }
+
+    let mut entries: Vec<(String, u64, Option<SystemTime>)> = Vec::new();
+    let mut stack = vec![save_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in read.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(m) = e.metadata() else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(save_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            entries.push((rel, m.len(), m.modified().ok()));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let total = entries.len();
+    entries.truncate(600);
+    s.push_str(&format!("\nfiles: {total}\n"));
+    for (rel, size, modified) in &entries {
+        let path = save_dir.join(rel);
+        let hash = if *size <= 1 << 20 {
+            sha256_for_manifest(&path).unwrap_or_else(|| "unreadable".into())
+        } else {
+            "skipped (larger than 1 MiB)".into()
+        };
+        s.push_str(&format!(
+            "  {rel} size={size} modified={} sha256={hash}\n",
+            when(*modified)
+        ));
+    }
+    if total > entries.len() {
+        s.push_str(&format!("  ... {} more files not listed\n", total - entries.len()));
+    }
+
+    s.push_str("\nprofiles:\n");
+    let profiles = profiles(save_dir);
+    if profiles.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for p in profiles {
+        s.push_str(&format!(
+            "  \"{}\": {} ({} files, {} slots, {})\n",
+            p.name,
+            p.path.display(),
+            p.files,
+            slot_file_count(&p.path),
+            when(p.modified)
+        ));
+    }
+
+    s.push_str("\nbackups:\n");
+    let backups = backups(save_dir);
+    if backups.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for b in backups {
+        s.push_str(&format!(
+            "  {}: {} ({} files, {})\n",
+            b.name,
+            b.path.display(),
+            b.files,
+            when(b.modified)
+        ));
+    }
+
+    s.push_str("\nrecoverable (not the current save):\n");
+    let recoverable = recoverable_saves(save_dir);
+    if recoverable.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for r in recoverable {
+        s.push_str(&format!(
+            "  {} \"{}\": {} ({} files, {} slots, {})\n",
+            r.kind.label(),
+            r.name,
+            r.path.display(),
+            r.files,
+            r.slots,
+            when(r.modified)
+        ));
+    }
+
+    s.push_str("\nruntime save log (end of fefw.log):\n");
+    s.push_str(&runtime_save_witness());
+    s
+}
+
+fn sha256_for_manifest(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn runtime_save_witness() -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Some(dir) = crate::engine::run_dir() else {
+        return "  (no run folder)\n".into();
+    };
+    let path = dir.join("fefw.log");
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return format!("  (no {} yet)\n", path.display());
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > 1_000_000 && file.seek(SeekFrom::End(-1_000_000)).is_err() {
+        return "  (log could not be read)\n".into();
+    }
+    let mut text = String::new();
+    if file.read_to_string(&mut text).is_err() {
+        return "  (log is not text)\n".into();
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            l.contains("OpenSaveDataFileSystem")
+                || l.contains("save data")
+                || l.contains("save commit")
+                || l.contains("uncommitted")
+                || l.contains("save_dir")
+                || l.contains("account/")
+                || l.contains("journal")
+        })
+        .collect();
+    if lines.is_empty() {
+        return "  (no save mount/commit lines in the log)\n".into();
+    }
+    let mut s = String::new();
+    for line in lines.iter().rev().take(80).rev() {
+        s.push_str("  ");
+        s.push_str(line);
+        s.push('\n');
     }
     s
 }
@@ -1549,6 +1787,169 @@ pub fn backups(save_dir: &Path) -> Vec<Backup> {
     out
 }
 
+/// Where a save the game does not currently read came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryKind {
+    Profile,
+    ProfileBackup,
+    SaveBackup,
+    Orphan,
+}
+
+impl RecoveryKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Profile => "profile",
+            Self::ProfileBackup => "profile backup",
+            Self::SaveBackup => "save backup",
+            Self::Orphan => "unread save",
+        }
+    }
+}
+
+/// A save that is present on disk but is not in the account folder the game
+/// opens. It can be loaded or restored without touching the current save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recoverable {
+    pub kind: RecoveryKind,
+    pub name: String,
+    /// The folder an import/restore reads: it holds `000`, or is the flat
+    /// contents of a `000` folder for an old backup.
+    pub path: PathBuf,
+    pub files: usize,
+    pub modified: Option<SystemTime>,
+    pub slots: usize,
+}
+
+/// Number of slot files below a save folder. Metadata and the game's Global
+/// file do not count: a folder holding only those has no playthrough.
+fn slot_file_count(dir: &Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.is_file() && is_slot_candidate(&p) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Every profile, profile backup, whole-save backup and orphan save that holds
+/// at least one slot file, newest first. Empty profiles and metadata-only
+/// folders are deliberately left out: offering those would not recover progress.
+pub fn recoverable_saves(save_dir: &Path) -> Vec<Recoverable> {
+    let mut out = Vec::new();
+
+    for p in profiles(save_dir) {
+        if is_empty_profile(&p) || !has_save(&p.path) {
+            continue;
+        }
+        let slots = slot_file_count(&p.path);
+        if slots == 0 {
+            continue;
+        }
+        out.push(Recoverable {
+            kind: RecoveryKind::Profile,
+            name: p.name,
+            path: p.path,
+            files: p.files,
+            modified: p.modified,
+            slots,
+        });
+    }
+
+    for b in backups(save_dir) {
+        let Some(source) = resolve_source(&b.path, FALLBACK_TITLE_ID) else {
+            continue;
+        };
+        let path = match source {
+            SaveSource::Folder(path) | SaveSource::Flat(path) => path,
+        };
+        let slots = slot_file_count(&path);
+        if slots == 0 {
+            continue;
+        }
+        out.push(Recoverable {
+            kind: if b.name.contains("-profile-") {
+                RecoveryKind::ProfileBackup
+            } else {
+                RecoveryKind::SaveBackup
+            },
+            name: b.name,
+            path,
+            files: b.files,
+            modified: b.modified,
+            slots,
+        });
+    }
+
+    for o in find_orphan_saves(save_dir) {
+        if out.iter().any(|r| r.path == o.path) {
+            continue;
+        }
+        let slots = slot_file_count(&o.path);
+        if slots == 0 {
+            continue;
+        }
+        out.push(Recoverable {
+            kind: RecoveryKind::Orphan,
+            name: o.description,
+            path: o.path,
+            files: o.files,
+            modified: o.modified,
+            slots,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| b.slots.cmp(&a.slots))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out.dedup_by(|a, b| a.path == b.path);
+    out
+}
+
+/// A message that stops Play when the account folder is missing but saves that
+/// can be recovered are present. This is the dangerous shape of issue #79: the
+/// game would create an empty save and look as if the playthrough was lost.
+///
+/// An existing account folder, even one with only `.meta`, is left to the game:
+/// that is the normal state before a new playthrough and after a deliberate new
+/// game. Only a completely missing account folder is refused here.
+pub fn empty_namespace_blocker(save_dir: &Path) -> Option<String> {
+    let account = account_dir(save_dir);
+    if account.exists() || has_save(&account) {
+        return None;
+    }
+    let recoverable = recoverable_saves(save_dir);
+    if recoverable.is_empty() {
+        return None;
+    }
+    let names = recoverable
+        .iter()
+        .take(3)
+        .map(|r| format!("{} \"{}\" ({})", r.kind.label(), r.name, when(r.modified)))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "The game's save folder is missing: {}. {} recoverable save(s) were found: {}. \
+The game was not started on an empty save. Open Saves and load or restore one; nothing was deleted.",
+        account.display(),
+        recoverable.len(),
+        names
+    ))
+}
+
 /// Put a whole backup folder back as the current save. The save it replaces is
 /// moved to the backups first, so a restore can be undone.
 pub fn restore_backup(
@@ -1972,6 +2373,67 @@ mod tests {
             store_profile(&save, "Nothing", "1").is_err(),
             "an empty save cannot be kept as a profile"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_meta_is_repaired_without_touching_the_save_files() {
+        let root = temp("meta-repair");
+        let save = root.join("save");
+        let account = account_dir(&save);
+        write(&account.join("000/Auto"), "keep this playthrough");
+        let before = std::fs::read(account.join("000/Auto")).unwrap();
+        assert!(!account_meta_path(&save).exists());
+
+        assert!(ensure_account_meta(&save, FALLBACK_TITLE_ID).unwrap());
+        let meta = std::fs::read_to_string(account_meta_path(&save)).unwrap();
+        assert!(meta.contains("owner=4007ef01f8ae000"), "{meta}");
+        assert!(meta.contains("attr="), "{meta}");
+        assert_eq!(std::fs::read(account.join("000/Auto")).unwrap(), before);
+        assert!(!ensure_account_meta(&save, FALLBACK_TITLE_ID).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recoverable_inventory_and_empty_namespace_guard() {
+        let root = temp("recoverable");
+        let save = root.join("save");
+        assert!(
+            empty_namespace_blocker(&save).is_none(),
+            "a fresh install with no recoverable save is not blocked"
+        );
+        write(&save.join("profiles/Kept/000/Auto"), "profile");
+        write(&save.join("backups/100-profile-Gone/000/Auto"), "profile backup");
+        write(
+            &save.join("backups/200-import/account").join(DEFAULT_USER).join("000/Auto"),
+            "whole backup",
+        );
+
+        let found = recoverable_saves(&save);
+        assert!(found.iter().any(|r| r.kind == RecoveryKind::Profile && r.name == "Kept"));
+        assert!(found.iter().any(|r| r.kind == RecoveryKind::ProfileBackup));
+        assert!(found.iter().any(|r| r.kind == RecoveryKind::SaveBackup));
+        let note = empty_namespace_blocker(&save).expect("a missing account folder is refused");
+        assert!(note.contains("not started"), "{note}");
+
+        // Once the game's account folder exists, the guard leaves Play alone:
+        // an empty account is the normal state before a deliberate new game.
+        write(&account_dir(&save).join("000/Auto"), "current");
+        assert!(empty_namespace_blocker(&save).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_manifest_lists_files_sizes_and_hashes() {
+        let root = temp("manifest");
+        let save = root.join("save");
+        write(&account_dir(&save).join("000/Auto"), "manifest bytes");
+        ensure_account_meta(&save, FALLBACK_TITLE_ID).unwrap();
+        let text = save_manifest(&save, FALLBACK_TITLE_ID);
+        assert!(text.contains("account/"));
+        assert!(text.contains("000/Auto"));
+        assert!(text.contains("sha256="));
+        assert!(text.contains("meta state: present"));
         let _ = std::fs::remove_dir_all(root);
     }
 
