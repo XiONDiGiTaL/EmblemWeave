@@ -361,17 +361,19 @@ fn test_tool_source_serialization() {
     }
 }
 
+// The part of the build environment this manager owns. `prepare_build_env` also asks the host for a complete toolchain, which a CI
+// runner is not required to have (its clang is older than the launcher's minimum), so that half cannot be asserted here.
 #[test]
-fn test_prepare_build_env() {
+fn test_build_env_extras() {
     let temp_dir = TempDir::new().unwrap();
     let mut mgr = ToolchainManager::new(temp_dir.path().to_path_buf());
     mgr.generate_tools_lock().unwrap();
 
-    let env = mgr.prepare_build_env().unwrap();
-    // Should return a vector of (key, value) pairs
+    let env = mgr.build_env_extras();
     assert!(!env.is_empty());
-    // Should contain PATH at minimum
-    assert!(env.iter().any(|(k, _)| k == "PATH"));
+    assert!(env.iter().any(|(k, _)| k == "SCCACHE_DIR"));
+    assert!(env.iter().any(|(k, v)| k == "SCCACHE_CACHE_SIZE" && v == "4G"));
+    assert!(env.iter().any(|(k, v)| k == "SCCACHE_IDLE_TIMEOUT" && v == "600"));
 }
 
 #[test]

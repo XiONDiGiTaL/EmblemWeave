@@ -1066,8 +1066,14 @@ impl ToolchainManager {
     /// Prepare build environment with all verified tools
     pub fn prepare_build_env(&self) -> Result<Vec<(String, String)>, String> {
         let mut env = self.resolve_toolchain_env()?;
+        env.extend(self.build_env_extras());
+        Ok(env)
+    }
 
-        // Add toolchain-specific env vars from tools.lock
+    /// The variables this manager adds to the host's environment, without asking the host for a toolchain: tools.lock's variables and
+    /// sccache's. Kept apart from `prepare_build_env` so it can be tested on a machine that is not set up to build (CI).
+    pub fn build_env_extras(&self) -> Vec<(String, String)> {
+        let mut env = Vec::new();
         if let Some(lock) = &self.tools_lock {
             for tool in &lock.tools {
                 for (k, v) in &tool.env_vars {
@@ -1075,13 +1081,10 @@ impl ToolchainManager {
                 }
             }
         }
-
-        // Ensure sccache env vars
         env.push(("SCCACHE_DIR".to_string(), get_sccache_dir()));
         env.push(("SCCACHE_CACHE_SIZE".to_string(), "4G".to_string()));
         env.push(("SCCACHE_IDLE_TIMEOUT".to_string(), "600".to_string()));
-
-        Ok(env)
+        env
     }
 
     /// Calculate optimal job count for build
