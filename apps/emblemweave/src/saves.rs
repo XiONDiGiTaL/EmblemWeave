@@ -3360,4 +3360,59 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// Issue #79 row 24: the Saves page's empty-profile load keeps the current
+    /// save in backups, and its Restore button installs that backup again.
+    /// These are the same functions the page calls, not a simulation.
+    #[test]
+    fn empty_profile_load_backs_up_and_restore_returns_the_old_tree() {
+        let root = temp("empty-profile-row24");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/000.bin"), "old slot");
+        write(&user.join("000/header.bin"), "old header");
+
+        // "New empty profile" then "Load" in the Saves page.
+        let empty = create_empty_profile(&save, "Empty Run").unwrap();
+        let loaded = load_profile_verified(&save, &empty, FALLBACK_TITLE_ID, "100").unwrap();
+        assert_eq!(loaded.files, 0);
+        assert!(user.is_dir(), "the empty account folder is created");
+        assert!(!user.join("000").exists(), "the game sees no slot and starts a new game");
+
+        let backup = loaded.backup.clone().expect("the old save must be kept");
+        assert_eq!(std::fs::read_to_string(backup.join("000/000.bin")).unwrap(), "old slot");
+        assert_eq!(std::fs::read_to_string(backup.join("000/header.bin")).unwrap(), "old header");
+
+        // The page lists the backup and its "Restore" button calls this.
+        let listed = backups(&save);
+        let b = listed.iter().find(|b| b.path == backup).expect("backup is listed");
+        let restored = restore_backup_verified(&save, b, FALLBACK_TITLE_ID, "200").unwrap();
+        assert_eq!(restored.files, 2);
+        assert_eq!(std::fs::read_to_string(user.join("000/000.bin")).unwrap(), "old slot");
+        assert_eq!(std::fs::read_to_string(user.join("000/header.bin")).unwrap(), "old header");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A backup whose install cannot be verified must put the save it replaced
+    /// back and leave the bad backup on disk for inspection.
+    #[test]
+    fn restore_that_fails_verification_puts_the_current_save_back() {
+        let root = temp("restore-rollback-row24");
+        let save = root.join("save");
+        let user = save.join("account").join(DEFAULT_USER);
+        write(&user.join("000/000.bin"), "current");
+
+        // `import` accepts this folder, but verification ignores metadata, so
+        // nothing it installed can be matched: the page's restore must roll back.
+        let bad = save.join("backups").join("300");
+        write(&bad.join("000/junk.meta"), "metadata");
+
+        let listed = backups(&save);
+        let b = listed.iter().find(|b| b.name == "300").expect("backup is listed");
+        let err = restore_backup_verified(&save, b, FALLBACK_TITLE_ID, "400").unwrap_err();
+        assert!(err.contains("did not match"), "unexpected error: {err}");
+        assert_eq!(std::fs::read_to_string(user.join("000/000.bin")).unwrap(), "current");
+        assert!(bad.is_dir(), "the backup that failed verification is kept");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

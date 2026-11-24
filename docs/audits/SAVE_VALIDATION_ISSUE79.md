@@ -120,13 +120,32 @@ What this proves: the launcher's import backs up the current tree before replaci
 the old tree bit for bit. The account `.meta` is local container metadata: it stays beside the account folder and is not
 part of a backup (the engine regenerates it when missing — row 22), which is why the backup folders contain only `000`.
 
-**Not proven:** the empty-profile load and the Saves page "Restore" button were not driven. `restore_backup_verified` is
-the page's function and it wraps the same `import` path, and the `saves::` unit tests (45) pass, but the UI flow itself
-was not executed. Row 24 should stay open until it is.
+### Production-function tests (the page's own calls)
+
+`apps/emblemweave/src/saves.rs` now has two tests that drive the exact functions the Saves page calls, not a simulation:
+
+| Test | Path exercised | Asserts |
+|---|---|---|
+| `empty_profile_load_backs_up_and_restore_returns_the_old_tree` | `create_empty_profile` → `load_profile_verified` → `backups` → `restore_backup_verified` | the old slot and header are in `backups/<stamp>` byte-for-byte; the empty profile leaves `account/<uid>` with no `000`, so the game starts a new game; Restore reinstalls both files and reports 2 files |
+| `restore_that_fails_verification_puts_the_current_save_back` | `restore_backup_verified` with a metadata-only backup | the install is rejected ("did not match"), the save it replaced is back byte-for-byte, and the bad backup stays on disk |
+
+These are the page's calls: `pages/saves.rs` invokes `load_profile_verified` for **Load** and `restore_backup_verified`
+for **Restore**. Command and result:
+
+```
+cargo test --manifest-path apps/emblemweave/Cargo.toml --release --bin EmblemWeave saves::
+test result: ok. 47 passed; 0 failed; 0 ignored (397 filtered out)
+```
+
+The portable `--import-save` run above remains the launcher-level check; the two tests add the empty-profile and
+verification/rollback cases.
+
+**Not proven:** the egui click event and the rendered page were not driven; the tests invoke the handlers' production
+functions directly. Row 24's save logic is verified, the UI presentation remains unexercised.
 
 ## 6. What remains
 
-- Row 24's empty-profile/UI flow (above).
+- Row 24's rendered Saves page (its save logic is covered by the tests above).
 - A reporter's own save, loaded in the game. The fixture rows exercise discovery, reconciliation, adoption, stale paths
   and nesting; they do not prove that a save from the affected build now loads.
 - The two-hour soak. The runs here are 75–240 s boot/stability observations.
