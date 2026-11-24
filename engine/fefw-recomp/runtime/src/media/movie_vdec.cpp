@@ -102,12 +102,18 @@ constexpr size_t kMaxFrames = 64;
 // on a different thread (the log shows guest-118 feeding and main releasing), and that release calls deliver(), which wakes this thread when a
 // frame frees a slot. The worker wakes this thread after every queue pop.
 //
-// A player can still stop releasing frames altogether. A wait is therefore abandoned only after kNoProgressLimit with no queue pop and no
-// deliver() moving a picture. abort_stalled() then stops the movie: it marks the decoder failed, clears the stalled input/decoded state (the
-// only place packets are discarded), returns any safe ready/free frame as an EOS frame, and wakes both guest events. A subsequent DecodeAsync
-// returns kResultDecoderStalled instead of waiting. vd_flush() resets the failure for the next stream, and stop_worker() still joins the
-// worker on finalize.
+// A player can still stop releasing frames altogether. A wait is therefore abandoned after kNoProgressLimit with no queue pop and no
+// deliver() moving a picture, as long as the game kept presenting frames meanwhile. A game that presents (almost) nothing is stalled as a
+// whole, by a load or a hitch on its main thread, and that thread is the one that releases the frames: that wait goes on, up to
+// kGameStallLimit, because stopping the movie there cut it short for nothing. abort_stalled() then stops the movie: it marks the decoder
+// failed, clears the stalled input/decoded state (the only place packets are discarded), returns any safe ready/free frame as an EOS frame,
+// and wakes both guest events. When the player holds every frame, the EOS is owed instead and deliver() queues it on the first frame the
+// player gives back; without it the player waited for an end that never came and the movie froze on its last picture. A subsequent
+// DecodeAsync returns kResultDecoderStalled instead of waiting. vd_flush() resets the failure for the next stream, and stop_worker() still
+// joins the worker on finalize.
 constexpr auto kNoProgressLimit = std::chrono::seconds(5);
+constexpr auto kGameStallLimit = std::chrono::seconds(30);
+constexpr uint64_t kGameRunningFrames = 10;   // presented within kNoProgressLimit (2 a second): the game runs, so the stall is the player's
 constexpr uint32_t kResultDecoderStalled = 0x1000;   // nonzero decoder failure; 0x7a is the SDK's retry result and must not be used here
 
 bool g_log = false;
@@ -244,6 +250,10 @@ struct Decoder {
     uint64_t packets = 0, pictures = 0;
     uint64_t progress = 0;                   // queue pops and pictures moved into frames: the no-progress watchdog's clock
     bool failed = false;                     // a stalled decoder was stopped; calls answer failure until Flush
+    bool eos_owed = false;                   // the stop found no frame for its EOS: deliver() queues it on the first frame given back
+    // When the player last asked for a frame (with or without getting one), last got one and last gave one back: the stall line uses these
+    // to tell a player that stopped calling from one that asks while nothing is ready.
+    std::chrono::steady_clock::time_point last_ask{}, last_acquire{}, last_release{};
     // the movie's clock (skip_late): picture timestamps against the host clock; unit = seconds per timestamp tick, learned from the spacing
     bool clk_on = false;
     int64_t clk_ts0 = 0, clk_last = 0, last_time = 0;
@@ -311,6 +321,8 @@ void skip_late(Decoder& d) {   // lock held, at least one decoded picture
     }
 }
 
+bool queue_eos(Decoder& d);
+
 // Moves decoded pictures into free frames (caller holds the lock) and wakes the player when one is ready.
 void deliver(Decoder& d) {
     bool any = false;
@@ -318,6 +330,7 @@ void deliver(Decoder& d) {
         d.free_.push_back(d.pending_free.front().first);
         d.pending_free.pop_front();
     }
+    if (d.eos_owed && queue_eos(d)) d.eos_owed = false;
     while (!d.decoded.empty() && !d.free_.empty()) {
         skip_late(d);
         Picture& p = d.decoded.front();
@@ -377,12 +390,33 @@ bool queue_eos(Decoder& d) {
     return true;
 }
 
-// Stops a decoder that has made no progress for kNoProgressLimit. Called with d.mu held. The feed thread is waiting on cv; marking failed and
-// notifying makes it return without queueing the held packet. The worker sees failed after its current decode and drops that result; Flush can
-// revive the decoder, Finalize still joins the worker. True when an EOS frame could be made.
-bool abort_stalled(Decoder& d) {
+// Milliseconds since `t`, or -1 when it never happened.
+long long ms_since(std::chrono::steady_clock::time_point t, std::chrono::steady_clock::time_point now) {
+    if (t == std::chrono::steady_clock::time_point{}) return -1;
+    return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count());
+}
+
+// Stops a decoder that has made no progress for `stalled` while the game presented `presented` frames. Called with d.mu held. The feed thread
+// is waiting on cv; marking failed and notifying makes it return without queueing the held packet. The worker sees failed after its current
+// decode and drops that result; Flush can revive the decoder, Finalize still joins the worker. True when an EOS frame could be made.
+bool abort_stalled(Decoder& d, std::chrono::steady_clock::duration stalled, uint64_t presented) {
     if (d.failed) return false;
     d.failed = true;
+    // The state as the stall found it, before deliver() and the clears below change it: which side stopped is in these numbers. Frames
+    // ready but not asked for: the player stopped. Asked for while none were ready and frames wait in pending_free: the GPU serial they
+    // wait for did not complete. None ready, free or pending: the player holds every frame.
+    const auto now = std::chrono::steady_clock::now();
+    const uint64_t oldest = d.pending_free.empty() ? 0 : d.pending_free.front().second;
+    char gpu[96];
+    if (oldest)
+        std::snprintf(gpu, sizeof gpu, "oldest serial %llu %s, last reserved %llu", static_cast<unsigned long long>(oldest),
+                      nvn::be::gpu::serial_done(oldest) ? "done" : "not done", static_cast<unsigned long long>(nvn::be::gpu::last_serial()));
+    else
+        std::snprintf(gpu, sizeof gpu, "last reserved serial %llu", static_cast<unsigned long long>(nvn::be::gpu::last_serial()));
+    NXLOG_E(kTag, "movie stall state: queue %zu packets (%zu bytes), decoded %zu, ready %zu, free %zu, pending GPU %zu of %zu frames (%s); "
+                  "player asked %lld ms ago, acquired %lld ms ago, released %lld ms ago",
+            d.queue.size(), d.queued_bytes, d.decoded.size(), d.ready.size(), d.free_.size(), d.pending_free.size(), d.frames.size(), gpu,
+            ms_since(d.last_ask, now), ms_since(d.last_acquire, now), ms_since(d.last_release, now));
     deliver(d);   // harvest any frame whose GPU copy already finished, so EOS has a safe frame when possible
     d.queue.clear();
     d.queued_bytes = 0;
@@ -390,17 +424,21 @@ bool abort_stalled(Decoder& d) {
     s_queue_packets.store(0);
     s_queue_bytes.store(0);
     const bool eos = queue_eos(d);
+    d.eos_owed = !eos;
     d.cv.notify_all();
     d.in_ready.signal();
-    if (!eos) d.out_ready.signal();   // wake a player waiting for output even when no frame can carry EOS
-    NXLOG_E(kTag, "movie decoder made no progress for %lld s; stopping the movie (stalled queue and decoded pictures discarded; EOS %s)",
-            static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(kNoProgressLimit).count()), eos ? "queued" : "unavailable");
+    if (!eos) d.out_ready.signal();   // wake a player waiting for output even when no frame can carry EOS yet
+    NXLOG_E(kTag, "movie decoder made no progress for %.1f s while the game presented %llu frame%s; stopping the movie (stalled queue and "
+                  "decoded pictures discarded; EOS %s)",
+            std::chrono::duration<double>(stalled).count(), static_cast<unsigned long long>(presented), presented == 1 ? "" : "s",
+            eos ? "queued" : "follows on the first frame the player gives back");
     return eos;
 }
 
 // Waits for room in the input queue. Normal backpressure continues as long as the worker/decode/frame path makes progress. The wait ends
 // early when the held packet's generation is no longer current (Flush), the decoder is stopped, or it has been marked failed. Five seconds with
-// no queue pop and no deliver() is a stall: abort_stalled stops the movie and this returns Stalled (or StalledEos when an EOS frame could be made).
+// no queue pop and no deliver() while the game presents frames is a stall (with the game presenting none, kGameStallLimit): abort_stalled
+// stops the movie and this returns Stalled (or StalledEos when an EOS frame could be made).
 enum class FeedWait { Keep, Stopped, Flushed, Stalled, StalledEos };
 FeedWait wait_for_room(Decoder& d, std::unique_lock<std::mutex>& lk, uint64_t packet_bytes, uint64_t packet_generation) {
     const auto invalidated = [&] {
@@ -414,23 +452,36 @@ FeedWait wait_for_room(Decoder& d, std::unique_lock<std::mutex>& lk, uint64_t pa
     ++s_blocked;
     const auto t0 = std::chrono::steady_clock::now();
     uint64_t seen = d.progress;
+    auto moved = t0;                                     // the last queue pop or deliver()
+    uint64_t frames_moved = diag_frame_count();          // frames the game had presented then
+    uint64_t frames_window = frames_moved;               // and when the current window began
     auto deadline = t0 + kNoProgressLimit;
+    const auto progressed = [&](std::chrono::steady_clock::time_point now) {
+        seen = d.progress;
+        moved = now;
+        frames_moved = frames_window = diag_frame_count();
+        deadline = now + kNoProgressLimit;
+    };
     while (!has_room()) {
         if (d.cv.wait_until(lk, deadline) == std::cv_status::timeout) {
+            const auto now = std::chrono::steady_clock::now();
             if (d.progress != seen) {
-                seen = d.progress;
-                deadline = std::chrono::steady_clock::now() + kNoProgressLimit;
+                progressed(now);
                 continue;
             }
-            const bool eos = abort_stalled(d);
-            s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - t0).count());
+            // Next to no frame presented in this window either: the game itself stands still, and its main thread is the one that releases
+            // the frames. Wait on for it, up to kGameStallLimit after the last progress.
+            const uint64_t frames = diag_frame_count();
+            if (frames - frames_window < kGameRunningFrames && now - moved < kGameStallLimit) {
+                frames_window = frames;
+                deadline = std::min(now + kNoProgressLimit, moved + kGameStallLimit);
+                continue;
+            }
+            const bool eos = abort_stalled(d, now - moved, frames - frames_moved);
+            s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
             return eos ? FeedWait::StalledEos : FeedWait::Stalled;
         }
-        if (d.progress != seen) {
-            seen = d.progress;
-            deadline = std::chrono::steady_clock::now() + kNoProgressLimit;
-        }
+        if (d.progress != seen) progressed(std::chrono::steady_clock::now());
     }
     s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0).count());
@@ -599,7 +650,7 @@ void worker_main(Decoder* d) {
             if (d->pending_free.empty()) d->cv.wait(lk);
             else {   // frames wait for the GPU: look again shortly (deliver frees them and wakes the player)
                 d->cv.wait_for(lk, std::chrono::milliseconds(1));
-                if (!d->decoded.empty()) deliver(*d);
+                if (!d->decoded.empty() || d->eos_owed) deliver(*d);
             }
         }
         if (d->stop) break;
@@ -867,10 +918,13 @@ void vd_decode_async(::Ctx* c) {   // (self, const nn::movie::Buffer*)
 
 uint32_t acquire(Decoder* d, uint64_t* out, int* idx) {
     std::lock_guard<std::mutex> lk(d->mu);
+    const auto now = std::chrono::steady_clock::now();
+    d->last_ask = now;
     if (d->ready.empty()) {
         *out = 0;
         return kResultNoFrame;
     }
+    d->last_acquire = now;
     *out = d->ready.front();
     d->ready.pop_front();
     if (!d->ready.empty()) d->out_ready.signal();   // one signal per wait: the next ready frame needs its own
@@ -920,10 +974,13 @@ void vd_release(::Ctx* c) {   // (self, VideoFrame*)
         if (f && known && !already && !pending && d->free_.size() + d->pending_free.size() < kMaxFrames)
             d->pending_free.emplace_back(f, nvn::be::gpu::last_serial());
         s_released++;
+        d->last_release = std::chrono::steady_clock::now();
         if (g_log) NXLOG_I(kTag, "ReleaseVideoFrame: %llx%s; queued %zu, decoded %zu, ready %zu, free %zu", static_cast<unsigned long long>(f),
                            known ? (already ? " (already free)" : "") : " (not registered)", d->queue.size(), d->decoded.size(), d->ready.size(),
                            d->free_.size());
         deliver(*d);
+        // A frame still waiting for the GPU: the worker polls pending frames, so the owed EOS follows once the GPU passed it.
+        if (d->eos_owed) d->cv.notify_all();
     }
     RET(0);
 }
@@ -935,6 +992,7 @@ void vd_flush(::Ctx* c) {   // (self)
         std::lock_guard<std::mutex> lk(d->mu);
         ++d->generation;
         d->failed = false;   // a flush starts a new stream; the worker was left alive by abort_stalled()
+        d->eos_owed = false;
         ++d->progress;
         d->clk_on = false;
         d->last_time = 0;
