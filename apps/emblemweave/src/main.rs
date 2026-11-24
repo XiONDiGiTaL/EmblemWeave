@@ -280,9 +280,9 @@ impl App {
         std::thread::spawn(|| {
             let _ = crate::engine::brand_game();
         });
-        // The dependency report takes a second (vswhere, dotnet, one vcvars
-        // run); warm it on demand when the Requirements page opens instead of
-        // at startup to avoid blocking the UI thread on heavy detection work.
+        // The dependency report takes a second (vswhere, dotnet, vcvars) and
+        // every page reads it from the cache; nothing else fills it at start.
+        std::thread::spawn(|| crate::deps::warm());
         // A failed or interrupted update used to leave its download behind in
         // %TEMP%. It is never needed by the running launcher, so clear it at
         // startup; saves, profiles, mods and the engine build live elsewhere.
