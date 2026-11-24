@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <linux/userfaultfd.h>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <poll.h>
 #include <pthread.h>
@@ -18,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -197,8 +199,8 @@ bool retired_retry(uint64_t addr, int kind) {
     if (addr < kHeapBase || addr - kHeapBase >= kHeapMax || !test(g_retired, (addr - kHeapBase) / kPage)) return false;
     const uint32_t pr = page_protect(addr);
     const uint32_t p = pr & 0xFF;
-    if (p == 0x04 || p == 0x40 || p == (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) return true;
-    return kind == 0 && (p == 0x02 || p == 0x20 || p == nxrt::platform::PROT_READ);
+    if (p == 0x04 || p == 0x40 || p == (0x1u | 0x2u)) return true;
+    return kind == 0 && (p == 0x02 || p == 0x20 || p == 0x1u);
 }
 
 int final_retry(uint64_t addr, int kind, uint64_t generation) {
@@ -222,7 +224,7 @@ bool heap_write_landed_late(uint64_t addr) {
     if (++t_count > 8) return false;
     const uint32_t pr = page_protect(addr);
     const uint32_t p = pr & 0xFF;
-    if (p != 0x04 && p != 0x40 && p != (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) return false;
+    if (p != 0x04 && p != 0x40 && p != (0x1u | 0x2u)) return false;
     if (g_late_retries.fetch_add(1, std::memory_order_relaxed) == 0)
         NXLOG_W(kTag, "write fault at %llx on a page that is read-write again (an import freeze ended meanwhile): the write runs again",
                 static_cast<unsigned long long>(addr));
@@ -334,7 +336,7 @@ static bool uffd_region_init(UffdRegion* ur, Region* r, uint64_t first, uint64_t
     ur->base = r->base + first * kPage;
     ur->npages = count;
 
-    ur->uffd = syscall(__NR_userfaultfd, UFFD_USER_MODE_ONLY | UFFD_NONBLOCK);
+    ur->uffd = syscall(__NR_userfaultfd, UFFD_USER_MODE_ONLY | O_NONBLOCK);
     if (ur->uffd < 0) {
         NXLOG_E(kTag, "userfaultfd creation failed: %s", strerror(errno));
         return false;
@@ -492,7 +494,7 @@ void unguard_locked(Region* r, uint64_t first, uint64_t count) {
         if (!test(r->guard.get(), p)) { ++p; continue; }
         uint64_t q = p;
         while (q < first + count && test(r->guard.get(), q)) ++q;
-        nxrt::platform::protect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<std::size_t>((q - p) * kPage), nxrt::platform::PROT_READ);
+        nxrt::platform::protect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<std::size_t>((q - p) * kPage), 0x1u);
         set_bits(r->guard.get(), p, q - p, false);
         p = q;
     }
@@ -526,7 +528,7 @@ bool on_fault_handler(uint64_t addr, int kind) {
 
     if (kind != 1) {
         const uint32_t pr = page_protect(addr) & 0xff;
-        if (pr == 0x02 || pr == 0x04 || pr == 0x20 || pr == 0x40 || pr == nxrt::platform::PROT_READ || pr == (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
+        if (pr == 0x02 || pr == 0x04 || pr == 0x20 || pr == 0x40 || pr == 0x1u || pr == (0x1u | 0x2u)) {
             bool in_region = false;
             g_busy.fetch_add(1, std::memory_order_seq_cst);
             for (RegionCursor cursor; Region* r = cursor.next();) {
@@ -569,7 +571,7 @@ bool on_fault_handler(uint64_t addr, int kind) {
             r->written[w].fetch_or(b, std::memory_order_acq_rel);
             const uint64_t page_addr = r->base + pg * kPage;
             if (old & b) {
-                nxrt::platform::protect(reinterpret_cast<void*>(page_addr), kPage, nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+                nxrt::platform::protect(reinterpret_cast<void*>(page_addr), kPage, 0x1u | 0x2u);
                 fault_stat(r, addr);
                 ours = true;
             } else {
@@ -578,8 +580,8 @@ bool on_fault_handler(uint64_t addr, int kind) {
                 for (int i = 0;; ++i) {
                     const uint16_t busy = rel.load(std::memory_order_seq_cst);
                     const uint32_t pr = page_protect(page_addr) & 0xFF;
-                    if (pr == 0x04 || pr == 0x40 || pr == (nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) { ours = true; break; }
-                    if (pr != 0x02 && pr != 0x20 && pr != nxrt::platform::PROT_READ) break;
+                    if (pr == 0x04 || pr == 0x40 || pr == (0x1u | 0x2u)) { ours = true; break; }
+                    if (pr != 0x02 && pr != 0x20 && pr != 0x1u) break;
                     if (busy == 0) break;
                     g_waits.fetch_add(1, std::memory_order_relaxed);
                     if (i < 50) nxrt::platform::yield_cpu();
@@ -730,7 +732,7 @@ void region_destroy(Region* r) {
             set_bits(g_retired, (r->base - kHeapBase) / kPage + p, q - p, true);
             set_bits(r->prot.get(), p, q - p, false);
             set_bits(r->guard.get(), p, q - p, false);
-            nxrt::platform::protect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<std::size_t>((q - p) * kPage), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+            nxrt::platform::protect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<std::size_t>((q - p) * kPage), 0x1u | 0x2u);
             p = q;
         }
     }
@@ -809,7 +811,7 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     }
     set_bits(r->prot.get(), first, count, true);
     set_bits(r->valid.get(), first, count, true);
-    if (!nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_READ)) {
+    if (!nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), 0x1u)) {
         set_bits(r->valid.get(), first, count, false);
         set_bits(r->prot.get(), first, count, false);
         return false;
@@ -819,7 +821,7 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     if (!ur) {
         ur = create_uffd_region(r, first, count);
         if (!ur) {
-            nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+            nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), 0x1u | 0x2u);
             set_bits(r->valid.get(), first, count, false);
             set_bits(r->prot.get(), first, count, false);
             return false;
@@ -874,8 +876,8 @@ bool guard(Region* r, uint64_t first, uint64_t count) {
     if (ur) uffd_unregister_range(ur, a, n);
 
     set_bits(r->guard.get(), first, count, true);
-    if (!nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_NONE)) {
-        nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), nxrt::platform::PROT_READ);
+    if (!nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), 0x0u)) {
+        nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(n), 0x1u);
         set_bits(r->guard.get(), first, count, false);
         if (ur) uffd_register_range(ur, a, n);
         return false;
@@ -1038,7 +1040,7 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
                 while (q < np && !(ours[q >> 6] >> (q & 63) & 1)) ++q;
                 if (q > s) {
                     const uint64_t a = lo + s * kPage, e = lo + q * kPage;
-                    if (nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(e - a), nxrt::platform::PROT_READ)) runs_.emplace_back(a, e);
+                    if (nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(e - a), 0x1u)) runs_.emplace_back(a, e);
                 }
             }
             done = true;
@@ -1053,7 +1055,7 @@ ImportFreeze::ImportFreeze(const void* p, uint64_t n) {
         const uint64_t end = std::min<uint64_t>(hi, region_base + region_size);
         const uint32_t pr = static_cast<uint32_t>(protect) & 0xff;
         if (state == nxrt::platform::PageState::Commit && pr == 0x04 && !(pr & 0x100) &&
-            nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(end - a), nxrt::platform::PROT_READ))
+            nxrt::platform::protect(reinterpret_cast<void*>(a), static_cast<std::size_t>(end - a), 0x1u))
             runs_.emplace_back(a, end);
         a = end;
     }
@@ -1078,7 +1080,7 @@ ImportFreeze::~ImportFreeze() {
     if (slot_ < 0) return;
     nxrt::platform::rwlock_lock_exclusive(g_transitions);
     for (const auto& r : runs_) {
-        nxrt::platform::protect(reinterpret_cast<void*>(r.first), static_cast<std::size_t>(r.second - r.first), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+        nxrt::platform::protect(reinterpret_cast<void*>(r.first), static_cast<std::size_t>(r.second - r.first), 0x1u | 0x2u);
     }
     nxrt::platform::rwlock_unlock_exclusive(g_transitions);
     g_frz[slot_].hi.store(0, std::memory_order_seq_cst);
@@ -1125,7 +1127,7 @@ void before_os_write(const void* p, uint64_t n) {
                 r->written[w].fetch_or(b, std::memory_order_acq_rel);
                 if (old & b) {
                     const uint64_t addr = r->base + q * kPage;
-                    nxrt::platform::protect(reinterpret_cast<void*>(addr), kPage, nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+                    nxrt::platform::protect(reinterpret_cast<void*>(addr), kPage, 0x1u | 0x2u);
                     // Unregister from uffd
                     UffdRegion* ur = get_uffd_region(r);
                     if (ur) uffd_unregister_range(ur, addr, kPage);
@@ -1140,7 +1142,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
         if (!any_set(r->prot.get(), first, count) && !any_set(r->valid.get(), first, count)) return;
         for (uint64_t q = first; q < first + count; ++q)
             if (test(r->guard.get(), q)) {
-                nxrt::platform::protect(reinterpret_cast<void*>(r->base + q * kPage), kPage, nxrt::platform::PROT_READ);
+                nxrt::platform::protect(reinterpret_cast<void*>(r->base + q * kPage), kPage, 0x1u);
                 r->guard[q >> 6].fetch_and(~bit(q), std::memory_order_acq_rel);
             }
         for (uint64_t q = first; q < first + count; ++q)
@@ -1152,7 +1154,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
                 r->written[w].fetch_or(b, std::memory_order_acq_rel);
                 if (old & b) {
                     const uint64_t page_addr = r->base + q * kPage;
-                    nxrt::platform::protect(reinterpret_cast<void*>(page_addr), kPage, nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+                    nxrt::platform::protect(reinterpret_cast<void*>(page_addr), kPage, 0x1u | 0x2u);
                     // Unregister from uffd
                     UffdRegion* ur = get_uffd_region(r);
                     if (ur) uffd_unregister_range(ur, page_addr, kPage);
