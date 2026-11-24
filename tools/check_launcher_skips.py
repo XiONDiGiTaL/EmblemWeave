@@ -33,7 +33,7 @@ EXPECTED_SKIPS = {
 
 # The whole launcher suite. Update this together with EXPECTED_SKIPS when a case
 # is added or removed, so a lost case cannot pass as an expected skip.
-EXPECTED_CASES = 68
+EXPECTED_CASES = 69
 
 STATUS_RE = re.compile(r"^\[\s*(RUN|OK|SKIP|FAIL)\s*\]\s*(\S.*?)\s*$")
 SUMMARY_RE = re.compile(r"^SUMMARY .*?: (\d+) passed, (\d+) failed, (\d+) skipped \(of (\d+)\)\s*$")
