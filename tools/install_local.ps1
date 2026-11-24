@@ -1,6 +1,9 @@
 # Builds the launcher and installs it into a local EmblemWeave folder — the hand copy, without the EmblemWeave.exe.pre-*
 # files a hand copy leaves beside the launcher.
 #
+# It also installs the bundled FFmpeg runtime (`upscalers\ffmpeg`), so a fresh local install has the same payload the
+# release zip carries and the optional movie decoder works without a separate download.
+#
 #   pwsh -File tools/install_local.ps1                         # build, then install into E:\EmblemWeave
 #   pwsh -File tools/install_local.ps1 -InstallDir D:\EmblemWeave
 #   pwsh -File tools/install_local.ps1 -SkipBuild              # reuse target\release\EmblemWeave.exe
@@ -68,6 +71,36 @@ if ($builtHash -ne $targetHash) {
     if ($saved) { Copy-Item -LiteralPath $saved -Destination $target -Force }
     throw "the installed launcher does not match the build at $built; restored $saved"
 }
+
+# The release ships the FFmpeg 8.x shared DLLs in upscalers\ffmpeg. A hand copy of EmblemWeave.exe alone leaves that
+# folder behind, which is why a fresh local install could not decode movies; install the pinned set beside the launcher.
+$ffmpegSrc = Join-Path $repo 'upscalers\ffmpeg'
+$ffmpegDst = Join-Path $install 'upscalers\ffmpeg'
+$pinned = @{}
+foreach ($line in (Get-Content -LiteralPath (Join-Path $ffmpegSrc 'SHA256SUMS'))) {
+    if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+)$') { $pinned[$matches[2].Trim()] = $matches[1].ToLowerInvariant() }
+}
+New-Item -ItemType Directory -Force -Path $ffmpegDst | Out-Null
+foreach ($f in 'avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll') {
+    $src = Join-Path $ffmpegSrc $f
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "missing FFmpeg runtime $src" }
+    $want = $pinned[$f]
+    if (-not $want) { throw "upscalers\ffmpeg\SHA256SUMS does not pin $f" }
+    $got = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($got -ne $want) { throw "FFmpeg runtime $f has sha256 $got, expected $want" }
+    $dst = Join-Path $ffmpegDst $f
+    $current = if (Test-Path -LiteralPath $dst -PathType Leaf) { (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
+    if ($current -ne $want) {
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        $copied = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($copied -ne $want) { throw "$dst does not match the FFmpeg runtime hash" }
+    }
+}
+foreach ($f in 'README.md', 'SHA256SUMS', 'LICENSE.txt', 'COPYING.GPLv3') {
+    $src = Join-Path $ffmpegSrc $f
+    if (Test-Path -LiteralPath $src -PathType Leaf) { Copy-Item -LiteralPath $src -Destination (Join-Path $ffmpegDst $f) -Force }
+}
+Write-Host "ffmpeg runtime installed in $ffmpegDst"
 
 $mine = @(Get-ChildItem -LiteralPath $backups -File |
           Where-Object { $_.Name -match '^EmblemWeave\.exe\.pre-install-\d{8}-\d{6}$' } |
