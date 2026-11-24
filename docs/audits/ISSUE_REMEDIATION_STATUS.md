@@ -462,8 +462,9 @@ Residual findings, deliberately not changed:
   frames per 5 s marks the game as running), `eos_owed` for a stop that found no free frame, per-player timestamps in the
   stall log, and the widened stall message now live in `vdec::release`, `vdec::flush`, `abort_stalled` and
   `wait_for_room`. `release()` keeps both wake reasons (pending GPU plus decoded, or `eos_owed`), and `flush` clears it.
-  **Limitation:** the combined behaviour (owed EOS, hitch window, the ceiling, flush clearing the flag) is still not
-  covered by a test of its own; #103's harness is where that belongs. Nothing here demonstrates a real game hitch.
+  Two handoff tests were added after the merge for the owed-EOS path (`an_owed_eos_rides_the_next_released_frame`,
+  `flush_drops_an_owed_eos`). **Limitation:** the 5 s/30 s hitch window itself still has no test, and nothing here
+  demonstrates a real game hitch.
 - **#93** not merged: main already carries the #92 fix (`fb0c9f25`, captured at 200 % by `4a76488c`) with a top-down
   block that constrains the combo and its note to the control column; #93 patches the older layout and conflicts.
 - **#105** remains open and is not merged. It is stacked on #103 and changes the default to `movie_decoder = auto`; AMD and
@@ -498,7 +499,7 @@ Residual findings, deliberately not changed:
 ### Validation
 
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t.ps1 -All` from `engine/fefw-recomp/runtime`, Release,
-  clang-cl 20.1.8: `SUMMARY --all: 978 passed, 0 failed, 29 skipped (of 1007)` after #103/#99.
+  clang-cl 20.1.8: `SUMMARY --all: 980 passed, 0 failed, 29 skipped (of 1009)` after #103/#99 and the two owed-EOS tests.
 - Targeted: `watchdog` 19/19, `runtime_lifecycle` 6/6, `svc_fs_romfs` 21/21.
 - Synthetic measurements only, apart from the `cb2755cc` boot check recorded at the end of this document (a real
   package and opening movie; no gameplay, no clean shutdown). Return-to-title, scene recreation, extended-session

@@ -363,6 +363,41 @@ NXTEST(player_threads_get_every_picture_once_and_in_order) {
     CHECK(std::none_of(seen.begin(), seen.end(), [](const Seen& s) { return s.changed_while_held; }));
     CHECK_EQ(refilled_early.load(), 0);
 }
+// #99: a stop that found every frame held owes the end of stream; the first frame the player gives back carries it, instead of
+// waiting for an end that never comes.
+NXTEST(an_owed_eos_rides_the_next_released_frame) {
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frame;
+    const uint64_t list[] = {frame.addr()};
+    vd::register_frames(d, list, 1);
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.eos_owed = true;
+    }
+
+    vd::release(d, frame.addr());
+    uint64_t out = 0;
+    REQUIRE(vd::acquire(d, &out, nullptr) == 0);
+    CHECK(out == frame.addr());
+    CHECK(is_eos(out));
+    CHECK(!d.eos_owed);
+}
+
+// A new stream must not inherit the previous one's owed end of stream.
+NXTEST(flush_drops_an_owed_eos) {
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frame;
+    const uint64_t list[] = {frame.addr()};
+    vd::register_frames(d, list, 1);
+    d.eos_owed = true;
+
+    vd::flush(d);
+    CHECK(!d.eos_owed);
+}
+
 #else   // built with -DNXRT_DAV1D=OFF: one skipped case, so `nxrt_tests media_vdec` still finds a test
 NXTEST(dav1d_thread_hook_runs_on_each_task_thread) { nxtest::skip("built without dav1d (NXRT_DAV1D=OFF)"); }
 #endif
