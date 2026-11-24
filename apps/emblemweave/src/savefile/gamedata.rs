@@ -36,8 +36,9 @@ impl Texts {
             .iter()
             .map(|n| romfs.join("Msg").join(n))
             .find(|p| p.is_dir());
-        let mut out = Texts::default();
-        let Some(en_dir) = en_dir else { return out };
+        let Some(en_dir) = en_dir else {
+            return Texts::default();
+        };
         let mut stems: Vec<String> = Vec::new();
         if let Ok(dir) = std::fs::read_dir(&jp_dir) {
             for e in dir.flatten() {
@@ -49,16 +50,43 @@ impl Texts {
                 }
             }
         }
-        stems.sort_by_key(|s| match s.as_str() {
-            "Person" => 0,
-            "Job" => 1,
-            "Item" => 2,
-            "Skill" => 3,
-            _ => 4,
-        });
+        stems.sort_by_key(|s| stem_priority(s));
         stems.dedup();
+        let mut jp = Vec::new();
+        let mut en = Vec::new();
         for stem in stems {
-            let pairs = pairs(&jp_dir, &en_dir, &stem);
+            if let Some(texts) = message_file(&jp_dir, &stem).and_then(|p| read_msbt(&p).ok()) {
+                jp.push((stem.clone(), texts));
+            }
+            if let Some(texts) = message_file(&en_dir, &stem).and_then(|p| read_msbt(&p).ok()) {
+                en.push((stem, texts));
+            }
+        }
+        Texts::from_maps(jp, en)
+    }
+
+    /// Build the maps from message tables that have already been parsed.
+    /// A RomFS folder and a `.nup` package both feed this, so the label pairing
+    /// and the priority rules are the same for either source.
+    pub fn from_maps(
+        jp: Vec<(String, HashMap<String, String>)>,
+        en: Vec<(String, HashMap<String, String>)>,
+    ) -> Texts {
+        let mut en_by_stem: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for (stem, texts) in en {
+            en_by_stem.entry(stem).or_insert(texts);
+        }
+        let mut jp = jp;
+        jp.sort_by(|a, b| {
+            stem_priority(&a.0)
+                .cmp(&stem_priority(&b.0))
+                .then(a.0.cmp(&b.0))
+        });
+        jp.dedup_by(|a, b| a.0 == b.0);
+        let mut out = Texts::default();
+        for (stem, jp) in jp {
+            let Some(en) = en_by_stem.remove(&stem) else { continue };
+            let pairs = pair_maps(jp, en);
             match stem.as_str() {
                 "Person" => out.person = pairs.clone(),
                 "Job" => out.job = pairs.clone(),
@@ -294,14 +322,20 @@ fn message_file(dir: &Path, stem: &str) -> Option<PathBuf> {
     None
 }
 
-fn pairs(jp_dir: &Path, en_dir: &Path, stem: &str) -> HashMap<String, String> {
-    let (Some(jp_path), Some(en_path)) = (message_file(jp_dir, stem), message_file(en_dir, stem))
-    else {
-        return HashMap::new();
-    };
-    let (Ok(jp), Ok(en)) = (read_msbt(&jp_path), read_msbt(&en_path)) else {
-        return HashMap::new();
-    };
+fn stem_priority(stem: &str) -> u8 {
+    match stem {
+        "Person" => 0,
+        "Job" => 1,
+        "Item" => 2,
+        "Skill" => 3,
+        _ => 4,
+    }
+}
+
+fn pair_maps(
+    jp: HashMap<String, String>,
+    en: HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for (label, jp_text) in jp {
         if label.contains("_H_") {
@@ -343,7 +377,29 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn read_msbt(path: &Path) -> Result<HashMap<String, String>, String> {
-    let raw = read_bytes(path)?;
+    read_msbt_bytes(&read_bytes(path)?)
+}
+
+/// The text table of one message file, from the bytes as they sit in the game
+/// data: a plain `.msbt`, or a `.msbt.zst` frame. A `.nup` hands its entries
+/// over this way, so a package and an extracted folder share one parser.
+pub fn message_text(raw: &[u8]) -> HashMap<String, String> {
+    let owned = if raw.starts_with(&ZSTD_MAGIC) {
+        let mut out = Vec::new();
+        let Ok(mut decoder) = ruzstd::StreamingDecoder::new(std::io::Cursor::new(raw)) else {
+            return HashMap::new();
+        };
+        if decoder.read_to_end(&mut out).is_err() {
+            return HashMap::new();
+        }
+        Some(out)
+    } else {
+        None
+    };
+    read_msbt_bytes(owned.as_deref().unwrap_or(raw)).unwrap_or_default()
+}
+
+fn read_msbt_bytes(raw: &[u8]) -> Result<HashMap<String, String>, String> {
     let utf16 = raw.get(0x0C..0x0E) == Some(&[0xFF, 0xFE]);
     let (Some(lbl), Some(txt)) = (find(&raw, b"LBL1"), find(&raw, b"TXT2")) else {
         return Ok(HashMap::new());

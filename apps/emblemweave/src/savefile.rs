@@ -29,6 +29,7 @@
 
 mod gamedata;
 
+use ew_format::nup::{Nup, Package, PackageKind};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -764,6 +765,37 @@ pub struct Ids {
     pub texts_loaded: bool,
 }
 
+/// The table name of a message file below `dir`, from `.msbt` or `.msbt.zst`.
+fn message_stem(rel: &str, dir: &str) -> Option<String> {
+    let name = rel.strip_prefix(dir)?;
+    if name.contains('/') {
+        return None;
+    }
+    let stem = name.split(".msbt").next()?;
+    (!stem.is_empty() && stem != name).then(|| stem.to_string())
+}
+
+/// The package whose RomFS the runtime reads: the highest-ranked base or
+/// update package with a RomFS directory, first one wins on a tie.
+fn best_romfs_package(nup: &Nup) -> Option<&Package> {
+    let rank = |p: &Package| match p.kind {
+        PackageKind::Base => Some(0),
+        PackageKind::Update => Some(1u32.saturating_add(p.version)),
+        _ => None,
+    };
+    let mut best: Option<&Package> = None;
+    for pkg in &nup.packages {
+        if (pkg.romfs as usize) >= nup.dirs.len() {
+            continue;
+        }
+        let Some(r) = rank(pkg) else { continue };
+        if best.map_or(true, |b| rank(b).is_none_or(|br| r > br)) {
+            best = Some(pkg);
+        }
+    }
+    best
+}
+
 impl Ids {
     /// Collect `PID_`, `JID_`, `IID_` and `SID_` strings from `GameData/*.bin`,
     /// then read the game's own English names for them.
@@ -780,6 +812,44 @@ impl Ids {
         }
         let texts = gamedata::Texts::load(romfs);
         ids.localize(&texts);
+        ids
+    }
+
+    /// The same maps, read straight from a `.nup` package. The launcher's game
+    /// data is usually the package itself rather than an extracted folder, so
+    /// the editor reads the package's own `GameData` and message entries.
+    pub fn from_nup(path: &Path) -> Ids {
+        let Ok(nup) = Nup::open(path) else {
+            return Ids::default();
+        };
+        let Some(pkg) = best_romfs_package(&nup) else {
+            return Ids::default();
+        };
+        let mut ids = Ids::default();
+        let (mut jp, mut en) = (Vec::new(), Vec::new());
+        for (rel, index) in nup.walk(pkg.romfs) {
+            let game_bin = rel
+                .strip_prefix("GameData/")
+                .is_some_and(|name| !name.contains('/') && name.ends_with(".bin"));
+            if game_bin {
+                if let Ok(bytes) = nup.read(index) {
+                    ids.harvest(&bytes);
+                }
+            } else if let Some(stem) = message_stem(&rel, "Msg/JPja/") {
+                if let Ok(bytes) = nup.read(index) {
+                    jp.push((stem, gamedata::message_text(&bytes)));
+                }
+            } else if let Some(stem) =
+                message_stem(&rel, "Msg/EUen/").or_else(|| message_stem(&rel, "Msg/USen/"))
+            {
+                if let Ok(bytes) = nup.read(index) {
+                    en.push((stem, gamedata::message_text(&bytes)));
+                }
+            }
+        }
+        if !jp.is_empty() && !en.is_empty() {
+            ids.localize(&gamedata::Texts::from_maps(jp, en));
+        }
         ids
     }
 
@@ -1028,6 +1098,39 @@ mod probe {
             println!("  masteries {:?}", u.masteries.iter().map(|(_, k, v)| format!("{}={v}({})", super::MASTERY_NAMES[*k as usize], super::grade(*v))).collect::<Vec<_>>());
             println!("  items {:?}", u.items.iter().map(|(_, i)| ids.items.get(i).cloned().unwrap_or_default()).collect::<Vec<_>>());
             println!("  spells {:?}", u.spells.iter().map(|(_, i)| ids.items.get(i).cloned().unwrap_or_default()).collect::<Vec<_>>());
+        }
+    }
+
+    /// The same units, with the names read straight from a `.nup` package:
+    /// set `FEFW_NUP` to the package the launcher is configured with.
+    #[test]
+    #[ignore]
+    fn print_nup_units() {
+        let Ok(nup) = std::env::var("FEFW_NUP") else { return };
+        let ids = super::Ids::from_nup(std::path::Path::new(&nup));
+        println!(
+            "people {} classes {} items {} skills {} text {}",
+            ids.people.len(),
+            ids.classes.len(),
+            ids.items.len(),
+            ids.skills.len(),
+            ids.texts_loaded
+        );
+        let save = std::path::PathBuf::from("E:/EmblemWeave/data/save");
+        let dir = crate::saves::account_dir(&save).join("000");
+        let Ok(slot) = super::Slot::open(&dir.join("Auto")) else { return };
+        for u in slot.units(&ids) {
+            println!(
+                "{} class {} lv{} hp{}",
+                u.name,
+                ids.classes.get(&u.class).map(String::as_str).unwrap_or("?"),
+                u.level,
+                u.max_hp
+            );
+            println!(
+                "  items {:?}",
+                u.items.iter().map(|(_, i)| ids.items.get(i).cloned().unwrap_or_default()).collect::<Vec<_>>()
+            );
         }
     }
 }

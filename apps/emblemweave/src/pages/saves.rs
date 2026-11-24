@@ -236,11 +236,23 @@ pub fn romfs_dir(app: &App) -> Option<PathBuf> {
 
 fn ids_for(app: &mut App) -> Arc<Ids> {
     if app.saves_ui.ids.is_none() {
-        app.saves_ui.ids = Some(Arc::new(
-            romfs_dir(app)
-                .map(|r| Ids::from_romfs(&r))
-                .unwrap_or_default(),
-        ));
+        // Detection runs in a job, so the package the setup page records is
+        // also read directly: a slot opened before that job finishes still
+        // shows the game's English names instead of raw ids.
+        let nup = app.game.nup.clone().or_else(|| {
+            let root = PathBuf::from(&app.config.paths.game_root);
+            root.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("nup"))
+                .then_some(root)
+        });
+        let ids = match romfs_dir(app) {
+            Some(dir) => Ids::from_romfs(&dir),
+            // A `.nup` is the launcher's usual game source: the message files
+            // are inside the package, not in a folder beside it.
+            None => nup.map(|p| Ids::from_nup(&p)).unwrap_or_default(),
+        };
+        app.saves_ui.ids = Some(Arc::new(ids));
     }
     app.saves_ui.ids.clone().unwrap_or_default()
 }
