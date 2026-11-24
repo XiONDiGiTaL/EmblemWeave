@@ -2560,6 +2560,8 @@ fn editor(
         }
         if !named {
             ui.label(crate::i18n::text("Units are found by the ids in your game data; choose your game on Game Setup to list them.").color(p.muted));
+        } else if !ids.texts_loaded {
+            ui.label(crate::i18n::text("The game's message files were not found, so names are the raw ids. Point Game Setup at the RomFS folder to read the translated names.").color(p.warn));
         } else if ed.units.is_empty() {
             ui.label(crate::i18n::text("No units were found in this slot.").color(p.muted));
         } else {
@@ -2572,11 +2574,11 @@ fn editor(
                 .id_salt("units")
                 .show(ui, |ui| {
                     egui::Grid::new("units")
-                        .num_columns(13)
+                        .num_columns(14)
                         .spacing([10.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
-                            for h in ["Unit", "Lv", "Exp", "Max HP"]
+                            for h in ["Unit", "Class", "Lv", "Exp", "Max HP"]
                                 .iter()
                                 .chain(STAT_NAMES.iter())
                             {
@@ -2588,6 +2590,8 @@ fn editor(
                             for u in ed.units.iter_mut() {
                                 ui.label(crate::i18n::text(&u.name).color(p.ink))
                                     .on_hover_text(format!("record at {:#x}", u.at));
+                                ui.label(crate::i18n::text(&u.class_name).color(p.muted))
+                                    .on_hover_text(format!("class id {:#010x}", u.class));
                                 ui.add(egui::DragValue::new(&mut u.level).range(1..=99));
                                 ui.add(egui::DragValue::new(&mut u.exp).range(0..=99));
                                 ui.add(

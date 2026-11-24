@@ -27,6 +27,8 @@
 //! is needed. The first time a slot is written, the untouched original is kept
 //! beside it as `<slot>.orig`.
 
+mod gamedata;
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -444,7 +446,12 @@ impl Slot {
             if !ids.classes.is_empty() && !ids.classes.contains_key(&class) {
                 continue;
             }
-            if let Some(mut u) = parse_unit(p, o, name, class) {
+            let class_name = ids
+                .classes
+                .get(&class)
+                .cloned()
+                .unwrap_or_else(|| format!("class {class:08x}"));
+            if let Some(mut u) = parse_unit(p, o, name, class, class_name) {
                 if let Some((table, m)) = find_masteries(p, u.level_at + 5) {
                     let after = table + 1 + 3 * m.len();
                     u.masteries = m;
@@ -583,6 +590,7 @@ pub struct Unit {
     pub at: usize,
     pub name: String,
     pub class: u32,
+    pub class_name: String,
     pub stats_at: usize,
     /// What each stat has gained from level-ups (the game adds the class and
     /// personal bases on top), current HP first.
@@ -702,7 +710,7 @@ fn level_sig(p: &[u8], b: usize) -> Option<(u16, u8)> {
     (p[b + 5] >= 5 && p[b + 6] >= 5).then_some((p[b + 5] as u16, 1))
 }
 
-fn parse_unit(p: &[u8], o: usize, name: &str, class: u32) -> Option<Unit> {
+fn parse_unit(p: &[u8], o: usize, name: &str, class: u32, class_name: String) -> Option<Unit> {
     // The nine u16 stats, then up to four zero bytes, then the level byte, a
     // little past the person and class ids.
     for s in o + 16..o + 56 {
@@ -724,6 +732,7 @@ fn parse_unit(p: &[u8], o: usize, name: &str, class: u32) -> Option<Unit> {
                     at: o,
                     name: name.to_string(),
                     class,
+                    class_name,
                     stats_at: s,
                     stats: stats.try_into().ok()?,
                     level_at: b,
@@ -747,10 +756,17 @@ pub struct Ids {
     pub people: HashMap<u32, String>,
     pub classes: HashMap<u32, String>,
     pub items: HashMap<u32, String>,
+    pub skills: HashMap<u32, String>,
+    pub raw_people: HashMap<u32, String>,
+    pub raw_classes: HashMap<u32, String>,
+    pub raw_items: HashMap<u32, String>,
+    pub raw_skills: HashMap<u32, String>,
+    pub texts_loaded: bool,
 }
 
 impl Ids {
-    /// Collect `PID_`, `JID_` and `IID_` strings from `GameData/*.bin`.
+    /// Collect `PID_`, `JID_`, `IID_` and `SID_` strings from `GameData/*.bin`,
+    /// then read the game's own English names for them.
     pub fn from_romfs(romfs: &Path) -> Ids {
         let mut ids = Ids::default();
         let Ok(dir) = std::fs::read_dir(romfs.join("GameData")) else { return ids };
@@ -762,28 +778,64 @@ impl Ids {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             ids.harvest(&bytes);
         }
+        let texts = gamedata::Texts::load(romfs);
+        ids.localize(&texts);
         ids
     }
 
     pub fn harvest(&mut self, bytes: &[u8]) {
-        for (prefix, which) in [(&b"PID_"[..], 0), (b"JID_", 1), (b"IID_", 2)] {
+        for (prefix, which) in [(&b"PID_"[..], 0), (b"JID_", 1), (b"IID_", 2), (b"SID_", 3)] {
             let mut i = 0;
             while let Some(k) = bytes[i..].windows(4).position(|w| w == prefix) {
                 let start = i + k;
                 let end = bytes[start..].iter().position(|&c| c == 0 || c < 0x20).map_or(bytes.len(), |n| start + n);
                 if let Ok(s) = std::str::from_utf8(&bytes[start..end]) {
                     if s.len() > 4 && s.len() < 96 {
-                        let map = match which {
-                            0 => &mut self.people,
-                            1 => &mut self.classes,
-                            _ => &mut self.items,
+                        let h = id_hash(s);
+                        let raw = s[4..].to_string();
+                        let (map, raw_map) = match which {
+                            0 => (&mut self.people, &mut self.raw_people),
+                            1 => (&mut self.classes, &mut self.raw_classes),
+                            2 => (&mut self.items, &mut self.raw_items),
+                            _ => (&mut self.skills, &mut self.raw_skills),
                         };
-                        map.entry(id_hash(s)).or_insert_with(|| s[4..].to_string());
+                        map.entry(h).or_insert_with(|| raw.clone());
+                        raw_map.entry(h).or_insert(raw);
                     }
                 }
                 i = end.max(start + 4);
             }
         }
+    }
+
+    /// Replace the Japanese id parts with the game's own English text. When
+    /// the message files are absent (a save copied without its game), the raw
+    /// ids stay visible instead of turning into empty labels.
+    fn localize(&mut self, texts: &gamedata::Texts) {
+        if !texts.loaded() {
+            return;
+        }
+        self.people = self
+            .raw_people
+            .iter()
+            .map(|(&h, raw)| (h, gamedata::person_name(raw, texts)))
+            .collect();
+        self.classes = self
+            .raw_classes
+            .iter()
+            .map(|(&h, raw)| (h, gamedata::class_name(raw, texts)))
+            .collect();
+        self.items = self
+            .raw_items
+            .iter()
+            .map(|(&h, raw)| (h, gamedata::item_name(raw, texts)))
+            .collect();
+        self.skills = self
+            .raw_skills
+            .iter()
+            .map(|(&h, raw)| (h, gamedata::skill_name(raw, texts)))
+            .collect();
+        self.texts_loaded = true;
     }
 }
 
