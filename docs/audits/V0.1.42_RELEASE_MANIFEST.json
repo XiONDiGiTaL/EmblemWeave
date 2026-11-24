@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-24T00:45:00Z",
+  "release": {
+    "name": "EmblemWeave",
+    "version": "0.1.42",
+    "channel": "development",
+    "status": "release-candidate-not-published",
+    "published": false,
+    "tag": null,
+    "packaged": false
+  },
+  "source": {
+    "repository": "https://github.com/XiONDiGiTaL/EmblemWeave",
+    "branch": "main",
+    "commit": "113cc8faff98138544fbc4c6825b3590809ca491",
+    "commitSubject": "Install the bundled FFmpeg runtime from the local install script",
+    "originMainAtAuditStart": "a40583ac",
+    "worktreeCleanForBuild": true,
+    "archiveMethod": "git archive HEAD into target/canonical-v0142/src",
+    "freebuffCommits": [
+      "bb2056f7",
+      "a40583ac",
+      "827f09f4",
+      "113cc8fa"
+    ],
+    "excludedUncommittedWork": "FCC MAKO/Vulkan changes (24 modified, 9 untracked) are not part of this build"
+  },
+  "build": {
+    "launcher": {
+      "status": "success",
+      "path": "target/canonical-v0142/cargo-target/release/EmblemWeave.exe",
+      "size": 20082176,
+      "sha256": "14ef84960fd77837e5f01e1b7b0feb6ca2121485cfcdb8a1e7b3cd752796437a",
+      "profile": "release",
+      "fileVersion": "0.1.42",
+      "durationSeconds": 240,
+      "exitCode": 0
+    },
+    "engine": {
+      "status": "not-built",
+      "reason": "FCC's 24 uncommitted engine files are active; a clean canonical C++ build would compile or contend with them.",
+      "candidateBinaries": [
+        {
+          "path": "E:\\EmblemWeave\\data\\play\\fefw.exe",
+          "size": 169145856,
+          "sha256": "8a2d0af5392ae8aa93141c4515d5ef5e21dadf5b839286b7dc966f50e8a77ef6",
+          "builtAt": "2026-11-23T21:22:00",
+          "provenance": "non-canonical E: install runtime; not approved for release"
+        },
+        {
+          "path": "E:\\EmblemWeave\\engine\\fefw-recomp\\game-build\\fefw\\build\\release\\fefw.exe",
+          "sha256": "c9967c04219f8ec9a621cfb1c6876d76f5f763d1333a1ec039fba0cc31cf1583",
+          "builtAt": "2026-11-23T23:41:00",
+          "provenance": "newer in-tree build; not validated, not deployed"
+        }
+      ]
+    },
+    "packaging": {
+      "status": "not-built",
+      "reason": "docs/release.json and the changelog index intentionally still name 0.1.41 as the published release; tools/check_release.py rejects a 0.1.42 package until the release is cut. The working tree also contains FCC's uncommitted changes.",
+      "expectedArtifact": "target/pkg/EmblemWeave-v0.1.42-windows-x64.zip",
+      "expectedSidecars": [
+        "release-manifest.json",
+        "SHA256SUMS"
+      ]
+    }
+  },
+  "toolchain": {
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "1.98.1 (797e8a9bc 2026-08-05)",
+    "cargoLockSha256": "6bf4d590679dc6f7d5ed4902a450faea9ac9e520930909a316927642ceac2a05",
+    "engineCompiler": "not recorded - canonical engine build not performed"
+  },
+  "dependencies": {
+    "ffmpeg": {
+      "version": "8.1",
+      "license": "GPL-3.0-or-later",
+      "files": [
+        {
+          "name": "avcodec-62.dll",
+          "sha256": "c202c131bb051e2298aaf5aca2571fc65d2e781ac07568c63c925b6d4e128877"
+        },
+        {
+          "name": "avutil-60.dll",
+          "sha256": "1645ea1d5774d07304731f842e6b16507f5000c331cca3cf6d71346ebc02541b"
+        },
+        {
+          "name": "swresample-6.dll",
+          "sha256": "ce4dce3d71ea83c49cc332437fd61fe847fa055f4f25a9cf120fd4f41294f1c4"
+        }
+      ],
+      "packagingVerifiedInV0141": true
+    }
+  },
+  "installation": {
+    "path": "E:\\EmblemWeave",
+    "launcher": {
+      "size": 20082176,
+      "fileVersion": "0.1.42",
+      "sha256": "bf4a0021d967e469d313ff5a2585d7afc4bfec2293fcc79283a6dc0d25d1c27a"
+    },
+    "configSha256": "277deb47d846b9f334f742de1553c882337b2f5000e2cab63246efb70fa01d49",
+    "runtimeIniSha256": "9a261ea42f90528f393d44f8271d2be638986647da3d0f7646ab1502d53dd046",
+    "enginePointerSha256": "7019d8976d1a2edf4cb07288ee1b2cdfb6282d6e90fe4bf960ff3a498b8ac294",
+    "portableMarkerSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "saveFiles": 96,
+    "saveBytesApprox": 3670016,
+    "saveBackupDirectories": 13,
+    "logsBytesApprox": 1153434,
+    "shaderCacheBytesApprox": 2576980377,
+    "workFolderBytesApprox": 1825361101,
+    "deploymentExecuted": false
+  },
+  "backup": {
+    "path": "E:\\EmblemWeave_backups\\pre-v0.1.42-freebuff-20261124-002251",
+    "files": 325,
+    "sizeBytesApprox": 5872025,
+    "saveFiles": 96,
+    "checksumsVerified": true,
+    "containsFullInstallImage": false,
+    "excludes": [
+      "shader cache",
+      "data/work",
+      "RomFS overlay",
+      "external game data"
+    ]
+  },
+  "packageContents": [
+    "EmblemWeave.exe",
+    "portable.txt",
+    "LICENSE",
+    "README.md",
+    "docs/",
+    "tools/",
+    "upscalers/ffmpeg/ (three DLLs, GPLv3 text, SHA256SUMS, source notes)",
+    "engine/fefw-recomp/ (full GPL-3.0-or-later source, docs, game-build projects, recomp, runtime, tools)"
+  ],
+  "verification": {
+    "releaseMetadataCheck": "python tools/check_release.py -> published metadata agrees on 0.1.41; 0.1.42 unreleased development",
+    "canonicalLauncherTests": "see V0.1.42_RELEASE_READINESS.md",
+    "canonicalEngineTests": "not run; FCC uncommitted engine files",
+    "issuesClosed": 0,
+    "issuesCommented": 0,
+    "published": false
+  },
+  "knownLimitations": [
+    "FCC MAKO/Vulkan work is uncommitted and excluded from the audited build.",
+    "No clean canonical production engine build exists for this candidate.",
+    "Issue #41 has no implementation.",
+    "Issue #79 fixes are implemented but not field-confirmed by either reporter.",
+    "Fourteen documented engine test failures are not independently rerun and include real code-level failures.",
+    "Release engineering documentation contains stale hashes and contradictory test counts."
+  ]
+}
