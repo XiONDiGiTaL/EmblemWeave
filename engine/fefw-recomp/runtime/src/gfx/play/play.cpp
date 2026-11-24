@@ -36,6 +36,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/game.h"
 #include "play_display.h"
+#include "extras/display_state.h"
 #include "nxrt/kernel.h"
 #include "nxrt/svc.h"
 #include "nxrt/config.h"
@@ -485,6 +486,8 @@ void vib_sink(uint32_t slot, int hand, const hid::VibrationValue& v, void*) {
         if (!save_settings(st.path, st.settings, &err)) NXLOG_W(kTag, "cannot save %s: %s", st.path.c_str(), err.c_str());
         st.dirty = false;
     }
+    // A normal exit restores the desktop; this path skips stop(), so put the display state back here too (Issue #78).
+    extras::end_display_session(config_file_path());
     nvn::backend_flush_caches();                    // the pipeline cache; this path does not shut the back end down
     nxrt::log_flush();
     if (tt::enabled() && !tt::finished()) tt::end_run(code, verdict, message);     // writes result.json, then terminates
@@ -1504,7 +1507,15 @@ bool start(const StartOptions& opt) {
     if (st.window || st.overlay) svc_set_busy_hook(&busy_pump);
     kernel::set_blocked_hook(GetCurrentThreadId(), &keyboard_service);
     if (st.window && st.settings.display.monitor > 0) platform::move_to_display(st.settings.display.monitor);
-    if (st.window && st.settings.display.window_mode != "windowed") set_window_mode(st.settings.display.window_mode);
+    // Snapshot the desktop before the window mode below can change it (Issue #78). begin also repairs a snapshot left by a
+    // session that crashed, so a mode switched by an earlier run is put back before this one reads it.
+    extras::begin_display_session(config_file_path());
+    if (st.window && st.settings.display.window_mode != "windowed") {
+        set_window_mode(st.settings.display.window_mode);
+        // Exclusive fullscreen is the only thing here that changes the desktop mode; record it so exit and crash recovery
+        // know those settings are ours to put back.
+        if (platform::fullscreen_mode() == platform::FullscreenMode::Exclusive) extras::mark_display_session_exclusive(config_file_path());
+    }
 
     const GamePlay* gp = game_play();
     {   // display options: the internal resolution comes from the window as it is now (after the window mode change above)
@@ -1546,10 +1557,12 @@ void stop() {
         st.dirty = false;
     }
     st.limiter.set_pre_frame_hook(nullptr, nullptr);
-    // Restore windowed mode on exit to ensure Windows HDR state is restored (Issue #78)
+    // Give the desktop back the mode exclusive fullscreen changed, and its HDR state (Issue #78). The window leaves fullscreen
+    // first, so SDL is no longer holding the mode it switched to.
     if (st.window && platform::fullscreen_mode() != platform::FullscreenMode::Windowed) {
         platform::set_fullscreen(platform::FullscreenMode::Windowed);
     }
+    extras::end_display_session(config_file_path());
     st.started = false;
 }
 
