@@ -285,3 +285,13 @@ Issue #59 is **FIXED**. The launcher window movement performance problem was cau
 - Idle: **3.9% CPU** (down from 14.7%)
 - Pointer sweep: **45.3% CPU** (down from 43.6% on old build, but exercises full interactive UI)
 - All 386 launcher tests pass
+
+## 2026-11-24 Re-measurement
+
+Current `main` was measured again after the native move guard. Caption drag: 0 px sampled lag,
+1.9-4.9 % of one core; steady idle: 0 % after the first ~10 s of startup work settles. The
+remaining measured UI-thread cost was the Overview's per-frame save/mod/cheat scan: a pointer
+sweep fell from 39.8 % to 21.1-26.8 % after caching that display state for one second, and startup
+CPU through the first nine seconds fell from 1.92 s to 1.00 s. Launcher tests: 432 passed, 0 failed,
+13 ignored. The reporter's Windows 10/11 hardware is still not reproduced. See
+`docs/audits/ISSUE_REMEDIATION_STATUS.md` for the run details.

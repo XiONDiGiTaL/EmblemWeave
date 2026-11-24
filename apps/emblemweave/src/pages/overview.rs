@@ -1,5 +1,9 @@
 //! The landing page: the title, where the project stands, and the next step.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
 use crate::gamedata::{Severity, TITLE_NAME};
 use crate::jobs::JobKind;
 use crate::pages::Page;
@@ -284,14 +288,70 @@ fn card(ui: &mut egui::Ui, p: &theme::Palette, title: &str, value: &str, tone: T
     });
 }
 
+/// The Overview's save/mod/cheat summary is display-only, but reading it walks
+/// the save folder, every mod tree and the cheats file. Doing that on every
+/// hover frame was measurable, so keep the values for one second: long enough
+/// to stay current on the page, short enough that a change made elsewhere
+/// appears as soon as the player returns.
+const QUICK_TTL: Duration = Duration::from_secs(1);
+
+struct QuickState {
+    profiles: Vec<crate::saves::Profile>,
+    mods_label: String,
+    cheats_label: String,
+    running: bool,
+}
+
+thread_local! {
+    static QUICK: RefCell<Option<(Instant, Rc<QuickState>)>> = const { RefCell::new(None) };
+}
+
+fn quick_state() -> Rc<QuickState> {
+    QUICK.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let stale = cache
+            .as_ref()
+            .map_or(true, |(at, _)| at.elapsed() >= QUICK_TTL);
+        if stale {
+            let save_dir = crate::config::Config::save_dir();
+            let profiles = save_dir
+                .as_deref()
+                .map(crate::saves::profiles)
+                .unwrap_or_default();
+            let mods_on = crate::mods::dir()
+                .map(|d| crate::mods::list(&d).iter().filter(|m| m.enabled).count())
+                .unwrap_or(0);
+            let cheats_on: usize = crate::cheats::dir()
+                .map(|d| {
+                    crate::cheats::load_enabled(&d)
+                        .values()
+                        .map(|v| v.len())
+                        .sum()
+                })
+                .unwrap_or(0);
+            *cache = Some((
+                Instant::now(),
+                Rc::new(QuickState {
+                    profiles,
+                    mods_label: format!("Mods ({mods_on} on)"),
+                    cheats_label: format!("Cheats ({cheats_on} on)"),
+                    running: crate::platform::game_running(),
+                }),
+            ));
+        }
+        cache
+            .as_ref()
+            .expect("the quick-action cache was just refreshed")
+            .1
+            .clone()
+    })
+}
+
 /// One-click access to what the player changes most between sessions: which
 /// save to play, the save editor, mods and cheats.
 fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
-    let save_dir = crate::config::Config::save_dir();
-    let profiles = save_dir.as_deref().map(crate::saves::profiles).unwrap_or_default();
-    let mods_on = crate::mods::dir().map(|d| crate::mods::list(&d).iter().filter(|m| m.enabled).count()).unwrap_or(0);
-    let cheats_on: usize = crate::cheats::dir().map(|d| crate::cheats::load_enabled(&d).values().map(|v| v.len()).sum()).unwrap_or(0);
-    let running = crate::platform::game_running();
+    let quick = quick_state();
+    let profiles = &quick.profiles;
     let mut load: Option<crate::saves::Profile> = None;
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Save").color(p.muted));
@@ -302,8 +362,8 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
                 if profiles.is_empty() {
                     ui.label("No profiles yet: keep one on the Saves page.");
                 }
-                for pr in &profiles {
-                    if ui.add_enabled(!running, egui::Button::new(&pr.name)).on_disabled_hover_text("Close the game first").clicked() {
+                for pr in profiles {
+                    if ui.add_enabled(!quick.running, egui::Button::new(&pr.name)).on_disabled_hover_text("Close the game first").clicked() {
                         load = Some(pr.clone());
                     }
                 }
@@ -314,14 +374,17 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
         {
             app.page = crate::pages::Page::Saves;
         }
-        if widgets::button(ui, p, &format!("Mods ({mods_on} on)"), true).clicked() {
+        if widgets::button(ui, p, &quick.mods_label, true).clicked() {
             app.page = crate::pages::Page::Mods;
         }
-        if widgets::button(ui, p, &format!("Cheats ({cheats_on} on)"), true).clicked() {
+        if widgets::button(ui, p, &quick.cheats_label, true).clicked() {
             app.page = crate::pages::Page::Cheats;
         }
     });
-    if let (Some(pr), Some(dir)) = (load, save_dir) {
+    if let Some(pr) = load {
+        let Some(dir) = crate::config::Config::save_dir() else {
+            return;
+        };
         let title = app
             .game
             .title_id

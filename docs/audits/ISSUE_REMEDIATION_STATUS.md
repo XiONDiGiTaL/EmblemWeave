@@ -24,7 +24,7 @@ Status vocabulary is the one the readiness audit uses:
 |---|---|---|---|
 | #37 Audio/RAM growth over long sessions | Partially implemented | Renderer counters (frame time, texture/upload/pipeline/submission/GPU-sync), memory+resource snapshot, deferred-destruction drain, audio stream-registry purge, concurrent large-decode cap | A multi-hour session; scene-transition before/after numbers; any evidence that memory growth is bounded |
 | #41 Crashes past Chapter 12 | Outstanding | Memory snapshot now attached to the device-lost report; VMA pressure gauges; `[gfx] frame_wait_ms`; deferred-destroy drain; packed-cache decode cap | A reproduction, the reporter's full log, and a measured memory profile. No fix is claimed. |
-| #59 Launcher drag responsiveness | Implemented - previously measured | `IN_MOVE` suppression and frame interval (already on `main`) | Not re-measured in this pass; DWM behaviour on the reporter's machine untested |
+| #59 Launcher drag responsiveness | Implemented - re-measured 2026-11-24 | `IN_MOVE` suppression, frame interval and a one-second Overview quick-action cache | Drag 1.9-4.9 % CPU with 0 px lag; steady idle 0 % after ~10 s; Overview sweep 39.8 % -> 21.1-26.8 %; reporter hardware still untested |
 | #70 Cinematic AV1 (dav1d assembly) | Implemented - unverified | dav1d per-compiler flags build with NASM; assembly path enabled | Any cinematic played end to end; a NASM vs C-only comparison |
 | #75 Cinematic AV1 + Opus sync | Implemented - unverified | Worker-thread decoder, decode-ahead, clock-based dropping, bundled FFmpeg option | End-to-end video/audio playback and sync measurement |
 | #76 Find Units stutter | Implemented - unverified | Parallel scan, cancellation, progress | An in-battle frame-time measurement |
@@ -257,3 +257,22 @@ Validation: `cargo test -p emblemweave` -> 432 passed, 0 failed, 13 ignored;
 `powershell -File scripts/t.ps1 svc_audio_eq` -> 7 passed, 0 failed. Not verified: in-game audio
 (no game dump or long session), the retired Overview card (not integrated), and the 200% boost on
 physical speakers or headphones.
+
+## 2026-11-24 issue #59 re-measurement
+
+The reporter's caption drag did not reproduce on this host: a 3.25 s synthetic drag moved the
+window 220 px with 0 px sampled lag, 1.92 % of one core, and 0 % CPU after it settled. The native
+`WM_PAINT` guard is unchanged. The first window appeared in 392-969 ms; steady idle was 0 % once
+the first ~10 s of startup work and toasts finished.
+
+What did reproduce was per-frame work on the Overview. The page re-read save profiles, every mod
+tree (including each mod's RomFS/ExeFS) and the cheats JSON on every frame. A pointer sweep cost
+39.8 % of one core on Overview versus 23.5 % on the static Appearance page.
+
+`quick_actions` now caches that display state for one second. Three post-fix sweeps measured
+26.8 %, 25.7 % and 21.1 % (mean 24.5 %); startup CPU through the first nine seconds fell from
+1.92 s to 1.00 s; the same drag stayed at 0 px lag (4.9 % CPU in the post-fix run, inside the
+prior 1.5-6.8 % range). `cargo test -p emblemweave`: 432 passed, 0 failed, 13 ignored.
+
+Not verified: the reporter's Windows 10/11 hardware, physical mouse versus synthetic input, and
+multi-monitor/high-DPI drag. The fix targets frames that do run, not idle repaint.
