@@ -482,7 +482,10 @@ Residual findings, deliberately not changed:
   measurement was repeated on this host (NASM is not installed here) and no engine build was re-run.
 - **Launcher CI**: run 45492974436 failed `skip-baseline` because `EXPECTED_CASES` was still 68 while the suite had gained
   `launcher_game_info.summary_warns_when_cinematic_assets_are_missing` (#70/#75). Fixed in `c9cb7c9b` (69); this was a
-  stale pinned count, not a failing case.
+  stale pinned count, not a failing case. The other red job, `Launcher Rust tests`, failed in `test_prepare_build_env`:
+  it calls `toolchain::init()`, so a runner whose clang is 20.1.8 fails the launcher's 23 minimum before the assertion.
+  Fixed in `65686213` by splitting the variables the manager owns into `build_env_extras()` and testing those; the host
+  probe keeps its own path. `cargo test`: 432 passed; the workflow is green on `65686213`.
 
 ### Build dependencies (#101) and GPU decoding (#104)
 
