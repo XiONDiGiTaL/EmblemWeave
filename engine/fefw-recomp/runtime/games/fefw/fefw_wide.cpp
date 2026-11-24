@@ -24,7 +24,10 @@
 //   scissor      the scissor pane (0x5975a0) works out its rectangle in viewport pixels from the layout size, not the matrix: when the
 //                draw info's x scale is ours the left edge and width are scaled by 1/k about the viewport's centre.
 //   markers      world-to-screen into 1920x1080 UI units (x * 960 + 960) at 13 sites: x * k, as the camera is k times wider. The
-//                off-screen indicator (0x18f3760, x * 960 against its box; not in Kompas9's patch) gets the same.
+//                off-screen indicator (0x18f3760, x * 960 against its box; not in Kompas9's patch) gets the same. The world map's spots
+//                (0x156bf44) are skipped outside 0..1920 plus a margin: those bounds move out by 960 (k - 1) a side; a second test
+//                (0x156c0fc, x within -100..2020), the 13 of the route drawing (x within 0..1920) and the on-screen test it calls per
+//                segment (0x13834b0) get x moved toward the centre by 1/k for their compares.
 //   2D effects   the effect draw (0xb76680) builds its own ortho from the effect's screen size: a 16:9 one gets 1/k, and the two full-
 //                target scissors of the call are cut to the centred 16:9 part (particles off the 16:9 screen stay hidden, as on the
 //                console); the scissor is put back to the whole target at its end.
@@ -81,6 +84,25 @@ constexpr uint64_t kMarkersS1[] = {0xb81bfc, 0xd939cc, 0xd943c4, 0xd94528, 0xd94
                                    0xd94b88, 0xd94ccc, 0x1912700, 0x19131ec};   // `fmadd s1, s1, s2, s2` (s2 = 960)
 constexpr uint64_t kMarkerS2 = 0xa7f148;          // `fmadd s2, s2, s3, s3` (s3 = 960)
 constexpr uint64_t kEdgeMarker = 0x18f38c0;       // `fmul s3, s2, s1` (s2 = 960) in the off-screen indicator 0x18f3760
+// The world map. The spot drawer 0x156b8c0 draws the place icons and calls the route drawer 0x156d680 (at 0x156cb50). Every
+// position below comes from the world-to-screen helper 0xa7f080, whose x the marker hook (kMarkerS2) has already widened, so each test
+// compares a widened x with bounds made for 16:9; the hooks give the tests the output's width.
+//   spots   kSpotCull: x within -m..1920+m (m from the icon's size), else the spot is skipped (to 0x156bde0, the next spot);
+//           kSpotCull2: after the icon position is converted again, x within -100..2020, else skipped (0x156bdc0).
+//   routes  kRouteBounds: the route loop's bounds, x -50..1970 by y -50..1130, kept on the stack; a route outside is skipped.
+//           kRouteXTests, three groups with the same `fcmp s0, #0.0` / 1920 shape (s0 is overwritten with y after each):
+//             0x156df34, 0x156e674, 0x156f89c   the per-point loops that push the small route dots (skip that dot);
+//             0x156f37c ... 0x156f504, 0x156ffbc, 0x1570a98   one per route point (10): the first on screen draws the route
+//                                              (0x1570acc, the line strip); all off: the 12-point fallback below;
+//             0x1383588   in 0x13834b0, called only there (0x156f2c0 ... 0x156f370, 12 points, margin 0): x within -m..1920+m.
+constexpr uint64_t kSpotCull = 0x156bf44;         // `fcmp s1, s0`: s1 / s2 = left / right bound
+constexpr uint64_t kSpotCull2 = 0x156c0fc;        // `fcmp s0, s1`: s0 = x, against -100 then 2020
+constexpr uint64_t kRouteXTests[] = {0x156df34, 0x156e674, 0x156f89c,
+                                     0x156f37c, 0x156f3b4, 0x156f3ec, 0x156f424, 0x156f45c, 0x156f494, 0x156f4cc, 0x156f504,
+                                     0x156ffbc, 0x1570a98,
+                                     0x1383588};   // `fcmp s2, s0`, s0 = x
+// bounds at sp + 0x12c (x and y low, one slot) and sp + 0x128 (x high), both stored by `str w12, [sp, #0x124]` (y high)
+constexpr uint64_t kRouteBounds = 0x156d7fc;
 constexpr uint64_t kFxOrtho = 0xb768d4;           // in 0xb76680: x22 = the effect's screen size (s32 w, h), the ortho at sp + 0x80
 constexpr uint64_t kFxScissor1 = 0xb76bb0;        // `blr x8`: SetScissor(x0 = command wrapper, 0, 0, w, h) (vtable + 0x58)
 constexpr uint64_t kFxScissor2 = 0xb76cfc;
@@ -111,10 +133,10 @@ constexpr uint32_t kInv960 = 0x3a888889;          // 1/960: a 1920 wide ortho
 constexpr uint32_t kInv540 = 0x3af2b9d6;          // 1/540: 1080 high
 constexpr uint32_t kOne = 0x3f800000;
 
-enum Counter { kCCamera, kCUi, kCBackdrop, kCScissor, kCMarker, kCEdge, kCFxOrtho, kCFxScissor, kCMovie, kCStatGraph, kCMapRoutes, kCCount };
+enum Counter { kCCamera, kCUi, kCBackdrop, kCScissor, kCMarker, kCEdge, kCFxOrtho, kCFxScissor, kCMovie, kCStatGraph, kCMapRoutes, kCSpot, kCCount };
 constexpr const char* kCounterNames[kCCount] = {"camera",     "UI projection", "full-width pane",   "list scissor", "world marker",
                                                "off-screen marker", "2D effect", "2D effect scissor", "movie", "stat chart",
-                                               "map batch"};
+                                               "map batch", "map spot"};
 static_assert(kCCount == WideInfo::kCounters, "fefw_game.h WideInfo::kCounters");
 
 struct Wide {
@@ -228,7 +250,10 @@ void log_edge_pane(uint64_t pane, float pw, float ph, float left, float right, c
         if (seen.size() >= 32 || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
         seen.push_back(key);
     }
-    NXLOG_I(kTag, "ultrawide: edge pane (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) %s", static_cast<unsigned long long>(vt), pw, ph, left, right, what);
+    char name[25] = {};
+    std::memcpy(name, reinterpret_cast<const char*>(pane + kPaneName), 24);
+    NXLOG_I(kTag, "ultrawide: edge pane '%s' (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) %s", name, static_cast<unsigned long long>(vt), pw, ph, left, right,
+            what);
 }
 
 // The pane's name (nn::ui2d keeps it inline, at most 24 characters), compared with a C string.
@@ -285,10 +310,12 @@ void widen_pane(uint64_t pane, uint64_t info) {
     float a = w.k, b = 0.0f;
     if (!(at_left && at_right)) {
         if (std::fabs(ph * m11) < 1000.0f) return;
-        // A picture on one edge wider than half the layout is content, not a side panel's backdrop: the world map's art (about 1480 wide on
-        // the right) came out 1.22 times wider than high and no longer under the panes drawn over it (markers, the cursor). It stays at 16:9.
-        if (right - left > 960.0f) {
-            log_edge_pane(pane, pw, ph, left, right, "kept at 16:9 (content, not a side backdrop)");
+        // A picture on one edge wider than half the layout: the title screen's dark menu panel (1416 wide on the left) is a side backdrop and
+        // is stretched to the output's edge with `fill` and `stretch` (otherwise it ends at the 16:9 edge, leaving the 3D scene bare beside
+        // it). With `fit` it stays at 16:9, so it does not reach into the bars. The world map's art (Img00, 1480 wide on the right) is content
+        // and kept at 16:9 by keep_16_9 above in every mode.
+        if (right - left > 960.0f && image_mode() == ImageMode::Fit) {
+            log_edge_pane(pane, pw, ph, left, right, "kept at 16:9 (wide one-edge picture, ultrawide_images = fit)");
             return;
         }
         const float edge = 960.0f * w.k;
@@ -389,6 +416,29 @@ void hook_marker_s2(::Ctx* c, uint64_t, void*) {
 void hook_edge_marker(::Ctx* c, uint64_t, void*) {
     c->v[1].f[0] *= ws().k;
     if (first(kCEdge)) NXLOG_I(kTag, "ultrawide: off-screen indicator x scaled by %.4f", ws().k);
+}
+// The world map's spots (place icons) are skipped when their screen position, already widened by the marker hook, is outside the 1920x1080
+// layout plus the icon's margin: the bounds move out to the output's edges, 960 (k - 1) layout units on each side.
+void hook_spot_cull(::Ctx* c, uint64_t, void*) {
+    const float d = 960.0f * (ws().k - 1.0f);
+    c->v[1].f[0] -= d;
+    c->v[2].f[0] += d;
+    if (first(kCSpot)) NXLOG_I(kTag, "ultrawide: world map spots shown out to the output's edges (bounds widened by %.0f layout units a side)", d);
+}
+// The second test compares x (s0) with fixed bounds (-100 and 2020, loaded just before each compare): x is moved toward the centre by 1/k
+// for these two compares only (s0 is not read again before it is reloaded with y).
+void hook_spot_cull2(::Ctx* c, uint64_t, void*) {
+    c->v[0].f[0] = 960.0f + (c->v[0].f[0] - 960.0f) / ws().k;
+}
+void hook_route_bounds(::Ctx* c, uint64_t, void*) {
+    const uint64_t sp = c->x[31];
+    if (!mem::is_mapped(sp + 0x128, 8)) return;
+    const float d = 960.0f * (ws().k - 1.0f);
+    const float lo = rdv<float>(sp + 0x12c), hi = rdv<float>(sp + 0x128);
+    if (!(lo < 0.0f && hi > 1920.0f)) return;   // not the -50 / 1970 this build stores
+    wrv<float>(sp + 0x128, hi + d);
+    wrv<float>(sp + 0x12c, lo - d);   // also the y low bound (one slot for both): routes just above the screen are then kept too, harmless
+    if (first(kCSpot)) NXLOG_I(kTag, "ultrawide: world map route bounds x %.0f..%.0f -> %.0f..%.0f", lo, hi, lo - d, hi + d);
 }
 
 // ---- 2D effects -----------------------------------------------------------------------------------------------------------------------------
@@ -537,6 +587,10 @@ void wide_install(uint64_t base, int out_w, int out_h) {
         for (uint64_t off : kMarkersS1) add(off, &hook_marker_s1);
         add(kMarkerS2, &hook_marker_s2);
         add(kEdgeMarker, &hook_edge_marker);
+        add(kSpotCull, &hook_spot_cull);
+        add(kSpotCull2, &hook_spot_cull2);
+        for (uint64_t off : kRouteXTests) add(off, &hook_spot_cull2);   // the same squeeze of s0 for the two compares
+        add(kRouteBounds, &hook_route_bounds);
     }
     if (on("statgraph")) add(kStatGraph, &hook_stat_graph);
     if (on("maproutes")) {

@@ -50,6 +50,33 @@ inline 0x7101912700
 inline 0x71019131ec
 # off-screen indicator (0x18f3760): before `fmul s3, s2, s1` (s2 = 960) s1 is the x in NDC
 inline 0x71018f38c0
+# world map spots (runtime fefw_wide.cpp): the spot drawer (0x156b8c0 area) skips a spot whose screen position (from 0xa7f080,
+# already widened) lies outside 0..1920 x 0..1080 plus a margin, `fcmp s1, s0` with s1 = the left bound and s2 = the right one
+inline 0x710156bf44
+# ... and a second test further on, after the spot's icon position is converted again: x within -100..2020 (`fcmp s0, s1` at 0x156c0fc,
+# s0 = x, used for both bounds)
+inline 0x710156c0fc
+# ... and the on-screen tests of the world map's route drawing (0x156d680 and the code after it): `fcmp s0, #0.0` before x is
+# compared with 0 and 1920; s0 is overwritten with y right after
+inline 0x710156df34
+inline 0x710156e674
+inline 0x710156f37c
+inline 0x710156f3b4
+inline 0x710156f3ec
+inline 0x710156f424
+inline 0x710156f45c
+inline 0x710156f494
+inline 0x710156f4cc
+inline 0x710156f504
+inline 0x710156f89c
+inline 0x710156ffbc
+inline 0x7101570a98
+# ... and the on-screen test the route drawing calls per segment (0x13834b0, returns x within -m..1920+m and y within -m..1080+m):
+# `fcmp s2, s0` with s0 = x, compared again with 1920 + m before s0 is overwritten
+inline 0x7101383588
+# ... and the route loop's bounds (0x156d680): x within -50..1970, kept on the stack (sp + 0x12c / + 0x128) and stored before
+# `str w12, [sp, #0x124]`, where the hook moves them out
+inline 0x710156d7fc
 # 2D effects (0xb76680): the ortho built from the effect's screen size (x22) on the stack at sp + 0x80 before `movi d0, #0`; the two
 # full-target scissors (`blr x8`, vtable + 0x58); the epilogue
 inline 0x7100b768d4
