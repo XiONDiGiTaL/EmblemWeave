@@ -391,15 +391,11 @@ Stages with structured events:
 7. `shaders` - Shader translation
 8. `fefw_ini` - Configuration file
 
-### nx_env.cmd
+### nx_env.cmd / build_game.cmd
 
-Supports the `--structured-events` flag:
-```cmd
-scripts\nx_env.cmd --structured-events <build_id> [toolchain_lock_path]
-```
-
-Delegates to PowerShell `BuildEvents.psm1` for JSON Lines emission. `build_game.cmd` has no such mode: the launcher reports
-its build as the `recompile` stage above.
+Neither script accepts `--structured-events`. The launcher emits the game build's events
+itself as the `recompile` stage above; `build_game.cmd <id>` builds the lifted modules and
+`nx_env.cmd <command>` runs one command with the toolchain's environment.
 
 ### PowerShell BuildEvents.psm1
 

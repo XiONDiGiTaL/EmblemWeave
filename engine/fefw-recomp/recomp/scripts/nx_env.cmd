@@ -6,7 +6,6 @@ setlocal
 rem Sets up the build environment: MSVC x64 (vcvars64), LLVM clang-cl 23, CMake, Ninja, sccache.
 rem Usage from cmd:  scripts\nx_env.cmd cmake --build build\x
 rem                  scripts\nx_env.cmd            (no arguments: just prints the tool versions)
-rem                  scripts\nx_env.cmd --structured-events <build_id> [toolchain_lock_path] (emit JSON Lines events)
 rem Tools installed elsewhere: NX_VCVARS (vcvars64.bat), NX_LLVM (LLVM bin folder, also read by cmake\clang-cl.cmake),
 rem NX_TOOLCHAIN (a folder with llvm\bin, used when NX_LLVM is unset), NX_TOOLS (folders with cmake and ninja, ;-separated). Unset NX_VCVARS: the newest Visual Studio or Build Tools with the
 rem x64 C++ tools (2022 or newer).
@@ -32,15 +31,12 @@ if defined INHERITED_PATH (
 )
 set "PATH=%CLEAN_PATH%%INHERITED_PATH%"
 
-rem Check for structured events mode
+rem --structured-events was removed: it emitted one build_started event with an empty build_id, then (after three
+rem shifts) either printed the tool versions or ran the flag itself as a command. Nothing called it, and the launcher
+rem reports the game build as its recompile stage, not this script.
 if "%~1"=="--structured-events" (
-    rem Structured events mode: delegate to PowerShell module
-    set "BUILD_ID=%~2"
-    set "TOOLCHAIN_LOCK=%~3"
-    if "%BUILD_ID%"=="" set "BUILD_ID=%~dp0..\..\tools\build_events.psm1"
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Import-Module '%~dp0..\..\runtime\scripts\BuildEvents.psm1' -ArgumentList '%BUILD_ID%'; Initialize-EventWriter; Start-BuildEvent -ToolchainFingerprint '' -Config @{}"
-    shift & shift & shift
+    echo nx_env.cmd: --structured-events was removed; the launcher reports the game build as its recompile stage.
+    exit /b 2
 )
 
 if "%~1"=="" (
