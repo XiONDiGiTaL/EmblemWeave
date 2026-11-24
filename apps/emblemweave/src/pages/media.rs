@@ -503,26 +503,38 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
             "GPU",
             "Which Vulkan device the engine opens. Automatic takes the discrete GPU with the most video memory. The list below shows the Vulkan 1.3 devices this PC reports; choosing one writes its full name to [gfx] gpu.",
             |ui| {
-                let Some(devices) = crate::gpu::cached() else {
-                    gpu_combo(ui, &mut g.gpu, &[]);
-                    ui.label(crate::i18n::text("Looking for Vulkan devices...").size(10.8).color(p.muted));
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-                    return;
-                };
-                gpu_combo(ui, &mut g.gpu, devices);
-                if devices.is_empty() {
-                    ui.label(
-                        crate::i18n::text("No Vulkan 1.3 device was reported; Automatic, Discrete and Integrated still work through the engine's own rule.")
-                            .size(10.8)
-                            .color(p.muted),
-                    );
-                } else {
-                    ui.label(
-                        crate::i18n::text(format!("Detected: {}", devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(" · ")))
-                            .size(10.8)
-                            .color(p.muted),
-                    );
-                }
+                // The combo and the line about the devices share the control column: the line sits under
+                // the combo and wraps to that width. As a sibling in setting_row's right-to-left row it
+                // was laid out beside the 280 px combo in whatever width was left, which could be nothing,
+                // so it ran left over the description instead of wrapping (issue #92).
+                let width = ui.available_width();
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    if let Some(devices) = crate::gpu::cached() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            gpu_combo(ui, &mut g.gpu, devices);
+                        });
+                        if devices.is_empty() {
+                            ui.label(
+                                crate::i18n::text("No Vulkan 1.3 device was reported; Automatic, Discrete and Integrated still work through the engine's own rule.")
+                                    .size(10.8)
+                                    .color(p.muted),
+                            );
+                        } else {
+                            ui.label(
+                                crate::i18n::text(format!("Detected: {}", devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(" · ")))
+                                    .size(10.8)
+                                    .color(p.muted),
+                            );
+                        }
+                    } else {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            gpu_combo(ui, &mut g.gpu, &[]);
+                        });
+                        ui.label(crate::i18n::text("Looking for Vulkan devices...").size(10.8).color(p.muted));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                });
             },
         );
         widgets::setting_row(ui, &p, "Renderer", "", |ui| {
