@@ -21,6 +21,7 @@
 #include <unordered_set>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -1965,15 +1966,18 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
         if (pp->copies[oldest].used >= f.serial) {
             // Every copy was bound by earlier split parts of this submission, whose timeline serial has not been signalled yet:
             // drain the queue so those already-submitted parts finish before reusing their descriptor set.
+            VkResult wr;
             {
                 std::lock_guard<std::mutex> lk(device().queue_mutex());
-                vkQueueWaitIdle(device().queue());
+                wr = vkQueueWaitIdle(device().queue());
             }
+            if (wr != VK_SUCCESS) diag_vk_note(static_cast<int>(wr), "vkQueueWaitIdle (nvn pool_set)", __FILE__, __LINE__);
             const uint64_t now_done = poll_completed();
             for (PoolCopy& cp : pp->copies) {
                 if (cp.used == f.serial && cp.used_split < f.split_seq) {
-                    cp.used_split = f.split_seq;
+                    cp.used = now_done;
                     cp.used_before = now_done;
+                    cp.used_split = 0;
                 }
             }
         } else {
