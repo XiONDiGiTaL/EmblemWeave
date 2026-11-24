@@ -42,6 +42,13 @@ try {
     if (-not $pyCheck) { throw 'python is needed to check the release metadata (tools/check_release.py)' }
     & $pyCheck.Source 'tools/check_release.py' --version $Version
     if ($LASTEXITCODE -ne 0) { throw "release metadata does not agree on $Version; fix it before packing" }
+    # The build drives two cmd scripts, and cmd parses a batch file whole before running any line of it: one
+    # unbalanced parenthesis in build_game.cmd or nx_env.cmd stops every build, and a broken script cannot
+    # report that about itself. Nothing else runs these checks automatically (there is no CI), so they run here,
+    # before anything is built or packed. The check skips its Visual Studio case without the C++ tools.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File 'engine\fefw-recomp\recomp\scripts\check_cmd_scripts.ps1'
+    if ($LASTEXITCODE -ne 0) { throw 'the cmd build scripts do not parse or answer as expected; fix engine\fefw-recomp\recomp\scripts before packing' }
     $name = "EmblemWeave-v$Version"
     $pkgRoot = [System.IO.Path]::GetFullPath((Join-Path $repo 'target\pkg'))
     $pkg = Join-Path $pkgRoot $name
