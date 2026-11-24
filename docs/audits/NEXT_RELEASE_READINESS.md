@@ -182,9 +182,12 @@ round trip, an HDR-on session, a real crash, and a second monitor.
 ### 13.4 Issue #79
 
 `tools/issue79_fixture.py` refused every live root, prepared five rows from a synthetic source, and left the source
-byte-identical. Two rows were run against the real engine (ExeFS dump + read-only `H:` RomFS): row 22 regenerated a
-missing `.meta` and opened the existing tree; row 19 ignored a foreign account and created a fresh save. **Still open:**
-no reporter save loaded, rows 16/17/20/24 not run, and no two-hour session.
+byte-identical. Rows 16, 17, 19, 20 and 22 were run against the real engine (ExeFS dump + read-only `H:` RomFS): row 22
+regenerated a missing `.meta`; row 19 ignored a foreign account; rows 16/17 honoured an existing stale absolute
+`save_dir` and left the new root untouched; row 20 opened the account with a nested `000/000` and adopted nothing. Row 24
+cannot run through the engine; a throwaway portable launcher proved import → backup → restore returns the tree bit for
+bit, but the empty-profile/Saves-page flow was not driven. **Still open:** the row 24 UI flow, a reporter's own save
+loaded in the game, and the two-hour session. See `SAVE_VALIDATION_ISSUE79.md`.
 
 ### 13.5 Linux
 
