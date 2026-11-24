@@ -78,8 +78,10 @@ and the full log is still not in the repository. Without it, any "fix" would be 
 ### #70 / #75 — cinematics
 
 The dav1d flag fix is on `main` and the canonical build produces dav1d with x86-64 assembly (NASM found and used).
-That is a build fact, not a playback fact: no cinematic has been played, so AV1 decode, Opus audio, A/V sync,
-1440p smoothness and frame drops are all unmeasured. The FFmpeg/D3D11VA path is likewise unexercised.
+That is a build fact, but the opening movie has since been played on `cb2755cc` from the complete X: package (boot check
+below): 1205-1655 pictures at the movie's own 30 frames/s behind a sustained 60 fps present loop, 0 errors. It was not
+played to its end, and A/V sync, Opus output, a whole movie and a NASM-versus-C comparison are still unmeasured. The
+FFmpeg/D3D11VA path is not part of that run.
 
 ### #77 — return to title
 
@@ -495,6 +497,137 @@ Residual findings, deliberately not changed:
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t.ps1 -All` from `engine/fefw-recomp/runtime`, Release,
   clang-cl 20.1.8: `SUMMARY --all: 973 passed, 0 failed, 29 skipped (of 1002)` (was 967/996 before this pass).
 - Targeted: `watchdog` 19/19, `runtime_lifecycle` 6/6, `svc_fs_romfs` 21/21.
-- Synthetic measurements only. No game, dump, GPU or real freeze was available on this host: cinematic playback,
-  return-to-title, scene recreation and extended-session behaviour remain unverified, as do the combined #99/#103
-  semantics and the GPU decode path.
+- Synthetic measurements only, apart from the `cb2755cc` boot check recorded at the end of this document (a real
+  package and opening movie; no gameplay, no clean shutdown). Return-to-title, scene recreation, extended-session
+  behaviour, the combined #99/#103 semantics and the GPU decode path in game remain unverified.
+
+## 2026-11-24 boot check: cb2755cc built and launched on the X: package
+
+This records a binary built from `main` and launched: commit `cb2755cc4f1c557bd6e4e1c854a5d602e2cbdc59` ("fix(diag):
+serialise thread dumps and keep launcher markers out of RomFS", 2026-11-24 16:37 -05:00), `HEAD` equal to `origin/main`.
+The earlier statements that no `fefw.exe` was built from `main` and that no game was available no longer apply. The run
+is the opening movie, not gameplay; its limits are listed at the end.
+
+### Build
+
+```
+cd engine/fefw-recomp
+powershell -NoProfile -ExecutionPolicy Bypass -File game-build/scripts/build_fefw.ps1 -Config Release
+```
+
+Release, clang-cl 20.1.8. Output `game-build/fefw/build/release/fefw.exe`, 169,840,640 bytes, whose `NXRT_BUILD_COMMIT`
+string read `cb2755cc4f`. The only working-tree change was the pre-existing `runtime/tests/test_write_watch.cpp` edit,
+which is not part of the executable. The first attempt stopped at 210/220 and was resumed to a clean link; the binary
+checked is from that completed link. The exe has been rebuilt since (the uncommitted av1C parse fix), so the size and
+build string describe the artifact as it was run.
+
+### Run
+
+From the gitignored `_recovery/` directory, with the ini below and a copy of the launcher's `controls.ini`:
+
+```
+cd EmblemWeave/_recovery/boot-check
+../../engine/fefw-recomp/game-build/fefw/build/release/fefw.exe > run.out 2>&1
+```
+
+| Setting | Value |
+|---|---|
+| `[fs] exefs` | `engine/fefw-recomp/game/dump/exefs` |
+| `[fs] romfs` | `X:/FEFW/Fire Emblem꞉ Fortune's Weave + Update 1.1.1.nup` (preferred source: faster drive, file with update) |
+| `[fs] save_dir`, `[fs] mods` | `_recovery/boot-check/save`, `_recovery/boot-check/mods` |
+| `[nvn] shader_cache`, `bc7_cache` | `engine/fefw-recomp/work/shaders/spirv`, `work/bc7_cache` (warm) |
+| `[fefw]` | `output = 1080p`, `fps60 = 1` |
+| `[upscale] mode`, `[dlss] upscaler` | `off`, `auto` |
+| `[diag] watchdog_seconds` | `60` |
+| `[boot] max_seconds` | `75` |
+| `[log]` | `path = fefw.log`, `level = info` |
+
+`controls.ini`: windowed, 1280x720, vsync off, 60 fps limit, render scale 100 %, stereo audio, flat EQ. The package
+mounted as `RomFS image from X:/FEFW/Fire Emblem꞉ Fortune's Weave + Update 1.1.1.nup: 252686 files, 21466 directories,
+29037945728 bytes of data`.
+
+Two runs, no input; the game walked to the opening movie on its own. Run 1 had no `mods/` directory; run 2 (the
+cleaner one) ran after creating it. Both live in `_recovery/boot-check/`: `fefw_run1.log`, `fefw.log`, stderr in
+`run.out`.
+
+### Log counts
+
+| Run | I | W | E | Opening movie |
+|---|---:|---:|---:|---|
+| 1 (no `mods/`) | 719 | 11 | **0** | player at 20.7 s; 1752 packets, 1655 pictures released by 75.8 s; decode 7.42 ms/packet |
+| 2 (`mods/` present) | 717 | 8 | **0** | player at 34.5 s; 1302 packets, 1205 pictures released by 74.7 s; decode 12.28 ms/packet |
+
+No error line in either log. Run 1's eleven warnings: three `mods: mods folder ...` lines for the missing directory,
+one slow DSP frame (88.4 ms) and its follow-up, the `nvn.gpu` statistics-counter stub, four hitches (frame 2 at
+89.8 ms, frame 8 at 1065.0 ms, frame 251 at 188.7 ms, frame 615 at 317.5 ms) and the `max_seconds` notice. Run 2's
+eight: one recovered display snapshot, one slow DSP frame (79.0 ms) and its follow-up, the same `nvn.gpu` stub, three
+hitches (frame 2 at 61.4 ms, frame 8 at 696.9 ms, frame 143 at 101.2 ms) and `max_seconds`. Creating `mods/` removed the
+three folder warnings.
+
+Run 1's stderr also carried one vendored-dav1d `Unknown OBU type 0 of size 12` as the decoder read the codec
+configuration; playback was unaffected. The parse defect it exposed is fixed in the working tree (the av1C/OBU change),
+not in `cb2755cc`.
+
+### Movie and frame evidence
+
+- Run 2: `movie: stats` at 74.686 s reads packets 1302, pictures 1237, frames acquired 1208, released 1205, queue 64
+  (2.8 MiB, max 64), feed waits 1237 (39988.6 ms). 1205 pictures over the 40.2 s the player ran is 30.0 pictures/s, the
+  movie's own rate; `pictures - released` stays at the 32-picture pipeline (30 ahead plus two in flight), so nothing was
+  dropped.
+- Run 1: 1655 pictures over the 55.2 s from the player at 20.664 s to the last stat at 75.849 s, also 30.0/s; 1752
+  packets, decode 7.42 ms/packet.
+- `gfx: fps` (71 one-second samples) reported 60.0 on every steady second: min 60.0, mean 60.9, max 102.8 (the start-up
+  burst before the limiter settles). Present pass GPU 0.032-0.033 ms.
+- `xaudio2` ended at `underruns +0 (0), dropped +0, written 48023 frames/s (rate 48000)`. That is the audio sink's
+  health; movie A/V sync was not measured (no audio capture, no reference playback).
+- 1440p AV1 (`movie::VideoDecoder: 2560x1440`) on the production default path, the built-in dav1d: `AV1 through dav1d
+  1.5.1 with x86-64 assembly (8 threads at above normal priority, 30 pictures ahead)`, with no `[media] movie_decoder`
+  override in the ini.
+
+### Limitation: both runs were killed at the deadline
+
+Both runs ended at `[boot] max_seconds = 75`:
+
+```
+boot: max_seconds reached: the guest is still running; ending the process
+```
+
+exit code 124. The movie was still playing (queue full, packets still arriving) when the deadline hit, so this is a
+start-up and playback record only:
+
+- `runtime::shutdown()`, display/HDR restore and any post-entry teardown were not exercised;
+- the movie was not played to its end, so #70/#75's end-to-end requirement and A/V sync remain open;
+- no input was given and the game never returned to the title, so #77 is untouched;
+- no scene after the opening movie ran, and there is no gameplay memory profile (#37/#41/#76/#79).
+
+What it does establish: `main` builds, mounts the complete X: package (252,686 files), reaches the game's opening movie
+without input, decodes 1440p AV1 at the movie's 30 frames per second behind a sustained 60 fps present loop with zero log
+errors and zero audio underruns, for the ~55 s the window allowed.
+
+### Follow-up: the deadline now runs the end-of-run teardown
+
+That run ended with `TerminateProcess(124)` on the deadline thread, so `nxrt::shutdown()` was never reached. `deadline_thread`
+now starts the same teardown the returned-entry path runs (`nxrt::shutdown()`, which logs the end-of-run summary and stops
+the runtime's workers) on its own thread, waits up to 15 s for it, and only then ends the process with 124. A teardown that
+cannot finish logs `the end-of-run teardown did not return within 15 s` instead of wedging the run.
+
+Re-run on the same base (`cb2755cc` plus the uncommitted av1C and deadline changes), same build command and ini as above,
+with a fresh `_recovery/teardown-check2/` save and `mods/`:
+
+| | |
+|---|---|
+| deadline | `boot: max_seconds reached: the guest is still running; ending the run through the end-of-run teardown` at 76.512 s |
+| summary | `runtime: end-of-run summary: svc: 448745 calls, 30 distinct, 0 unknown ...` at 76.581 s |
+| stages | `timestep: end of run`, then `services: language en-US (from Windows)` |
+| workers | `boot: end-of-run teardown returned: runtime down, host threads 97 -> 92` at 76.653 s |
+| exit | 124, with no 15 s fallback line |
+| log | 708 I, 7 W, **0 E**; opening movie at 11.6 s, 1805 pictures released by 71.8 s (30.0/s), `gfx: fps` mean 61.0 |
+
+The five threads that go away are runtime-owned workers (the watchdog, guards and samplers `nxrt::shutdown()` stops); the
+game's own threads keep running - a guest `hid: SendVibrationValues2` line at 76.586 s falls inside the teardown window,
+which is the documented assumption that `services::reset_all()` runs only once guest execution has stopped. The process now
+ends through the teardown instead of bypassing it, and the deadline path shares the code the normal tail runs.
+
+Not covered: the entry function returning (the game never returns), shutdown while a guest thread holds a runtime lock (the
+15 s bound only prevents a wedge), and display/HDR restore, which `nxrt::shutdown()` does not perform. The change is in
+`game-build/fefw/src/fefw_main.cpp`, uncommitted.

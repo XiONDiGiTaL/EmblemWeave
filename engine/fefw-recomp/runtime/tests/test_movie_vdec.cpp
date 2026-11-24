@@ -35,6 +35,34 @@ NXTEST(movie_packet_queue_is_bounded) {
     CHECK(movie_packet_queue_has_room(0, 0, kMovieMaxQueuedBytes + 1));
 }
 
+// The codec configuration the movie library hands over: a bare sequence-header OBU (header 0x0A, leb128 size 15), captured from the opening
+// movie. Passed through whole it seeds dav1d with the sequence header; the old four-byte av1C skip cut off its header and left dav1d parsing
+// the reserved type 0 ("Unknown OBU type 0 of size 12") with no sequence header at all.
+NXTEST(movie_av1_config_keeps_a_bare_sequence_header_obu) {
+    using namespace nxrt::media;
+    const uint8_t config[] = {0x0a, 0x0f, 0x00, 0x00, 0x00, 0x62, 0xea, 0x7f, 0xec, 0xf8, 0x04, 0x33, 0x20, 0x20, 0x20, 0x20, 0x80};
+    CHECK_EQ(movie_av1_config_offset(config, sizeof config), size_t{0});
+    // What the old skip handed the decoder: type 0 is reserved, so that tail is not configOBUs either.
+    CHECK_EQ(movie_av1_config_offset(config + 4, sizeof config - 4), kMovieAv1ConfigInvalid);
+}
+
+// An av1C record (marker/version 0x81, profile/level, flags, no presentation delay) still loses its four header bytes; the configOBUs after
+// them are handed over whole.
+NXTEST(movie_av1_config_strips_only_an_av1c_record_header) {
+    using namespace nxrt::media;
+    const uint8_t config[] = {0x81, 0x00, 0x0c, 0x00, 0x0a, 0x0f, 0x00, 0x00, 0x00, 0x62, 0xea, 0x7f, 0xec, 0xf8, 0x04, 0x33, 0x20, 0x20, 0x20, 0x20, 0x80};
+    CHECK_EQ(movie_av1_config_offset(config, sizeof config), size_t{4});
+    CHECK_EQ(movie_av1_config_offset(config, 4), size_t{4});   // header only: no configOBUs to feed
+}
+
+// A sequence header whose size field runs past the buffer is neither shape: nothing is fed, rather than a truncated OBU.
+NXTEST(movie_av1_config_rejects_a_truncated_sequence_header) {
+    using namespace nxrt::media;
+    const uint8_t config[] = {0x0a, 0x0f, 0x00, 0x00};
+    CHECK_EQ(movie_av1_config_offset(config, sizeof config), kMovieAv1ConfigInvalid);
+    CHECK_EQ(movie_av1_config_offset(nullptr, 0), kMovieAv1ConfigInvalid);
+}
+
 #if __has_include(<dav1d/dav1d.h>)
 #include <dav1d/dav1d.h>
 extern "C" void (*dav1d_nxrt_thread_hook)(int begin);

@@ -13,6 +13,7 @@
 // are set by the build (fefw_paths.h). The ini is --ini, else NXRT_INI, else fefw.ini in the working directory when it exists, else nxrt.ini.
 // The command line and the NXRT_FS_* variables win over the ini. [boot] keys as in pkp_main.cpp (docs/CONFIG.md).
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <cstddef>
 #include <cstdio>
@@ -243,10 +244,41 @@ DWORD WINAPI shot_thread(LPVOID) {
     return 0;
 }
 
-// [boot] max_seconds: log the state and end the process with exit code 124.
+// The end-of-run teardown on its own thread: nxrt::shutdown() logs the end-of-run summary and stops the runtime's workers, exactly as it does
+// when the entry function returns. The guest loop never returns, so the deadline path has to run it from here. A guest thread that holds
+// something the teardown needs must not wedge the deadline, so deadline_thread waits for this thread with a bound and then ends the process.
+// Host threads of this process (Toolhelp). nxrt::shutdown stops the runtime's own workers while the game's threads are still running, so the
+// difference across it is the worker cleanup.
+static uint32_t process_threads() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof te;
+    uint32_t n = 0;
+    const DWORD pid = GetCurrentProcessId();
+    if (Thread32First(snap, &te))
+        do {
+            if (te.th32OwnerProcessID == pid) ++n;
+        } while (Thread32Next(snap, &te));
+    CloseHandle(snap);
+    return n;
+}
+
+DWORD WINAPI teardown_thread(LPVOID) {
+    const uint32_t before = process_threads();
+    nxrt::shutdown();
+    const uint32_t after = process_threads();
+    NXLOG_I("boot", "end-of-run teardown returned: runtime down, host threads %u -> %u (the runtime's workers stopped; the game's threads are still running)",
+            before, after);
+    nxrt::log_flush();
+    TerminateProcess(GetCurrentProcess(), 124);
+    return 0;
+}
+
+// [boot] max_seconds: log the state, run the end-of-run teardown and end the process with exit code 124.
 DWORD WINAPI deadline_thread(LPVOID p) {
     Sleep(static_cast<DWORD>(reinterpret_cast<uintptr_t>(p)));
-    NXLOG_W("boot", "max_seconds reached: the guest is still running; ending the process");
+    NXLOG_W("boot", "max_seconds reached: the guest is still running; ending the run through the end-of-run teardown");
     nxrt::log_flush();
     if (nxrt::nvn::backend_installed()) {
         const nxrt::nvn::BackendStats b = nxrt::nvn::backend_stats();
@@ -258,6 +290,13 @@ DWORD WINAPI deadline_thread(LPVOID p) {
     }
     NXLOG_I("boot", "state at the deadline:\n%s", nxrt::summary().c_str());
     nxrt::log_flush();
+    HANDLE teardown = CreateThread(nullptr, 0, teardown_thread, nullptr, 0, nullptr);
+    if (teardown) {
+        WaitForSingleObject(teardown, 15000);
+        CloseHandle(teardown);
+        NXLOG_W("boot", "the end-of-run teardown did not return within 15 s; ending the process");
+        nxrt::log_flush();
+    }
     TerminateProcess(GetCurrentProcess(), 124);
     return 0;
 }

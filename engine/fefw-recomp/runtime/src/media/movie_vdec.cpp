@@ -485,78 +485,18 @@ void decode_packet(Decoder& d, Av1& decoder, const Packet& k, std::vector<Pictur
     if (in.sz) dav1d_data_unref(&in);
 }
 
-// Parse WebM AV1CodecConfigurationRecord to extract the config OBUs.
-// Returns empty vector if parsing fails or config is not in WebM format.
-static std::vector<uint8_t> extract_webm_av1_obus(const std::vector<uint8_t>& config) {
-    if (config.size() < 7) return {};   // minimum header size
-
-    // Bit reader for the variable-length header
-    const uint8_t* data = config.data();
-    size_t bits = config.size() * 8;
-    size_t bit_pos = 0;
-
-    auto get_bits = [&](size_t n) -> uint32_t {
-        if (bit_pos + n > bits) return 0;
-        uint32_t val = 0;
-        for (size_t i = 0; i < n; ++i) {
-            size_t byte_idx = bit_pos / 8;
-            size_t bit_idx = 7 - (bit_pos % 8);
-            val = (val << 1) | ((data[byte_idx] >> bit_idx) & 1);
-            ++bit_pos;
-        }
-        return val;
-    };
-
-    // AV1CodecConfigurationRecord fields
-    const uint32_t marker = get_bits(1);
-    const uint32_t version = get_bits(7);
-    if (marker != 1 || version != 1) return {};   // not WebM AV1CodecConfigurationRecord
-
-    get_bits(3);   // seq_profile
-    get_bits(5);   // seq_level_idx_0
-    get_bits(1);   // seq_tier_0
-    get_bits(1);   // high_bitdepth
-    get_bits(1);   // twelve_bit
-    get_bits(1);   // monochrome
-    get_bits(1);   // chroma_subsampling_x
-    get_bits(1);   // chroma_subsampling_y
-    get_bits(2);   // chroma_sample_position
-    get_bits(3);   // reserved
-
-    const uint32_t initial_presentation_delay_present = get_bits(1);
-    if (initial_presentation_delay_present) {
-        get_bits(4);   // initial_presentation_delay_minus_one
-    }
-
-    // configOBUsLength (16 bits)
-    if (bit_pos + 16 > bits) return {};
-    const uint32_t config_obus_length = get_bits(16);
-
-    // Align to byte boundary
-    bit_pos = (bit_pos + 7) / 8 * 8;
-    size_t byte_pos = bit_pos / 8;
-
-    if (byte_pos + config_obus_length > config.size()) return {};
-
-    std::vector<uint8_t> obus;
-    obus.assign(config.begin() + byte_pos, config.begin() + byte_pos + config_obus_length);
-    return obus;
-}
-
-// Try to extract OBUs from config, handling both WebM AV1CodecConfigurationRecord and MP4 av1C formats.
+// The library's codec configuration is either the configOBUs themselves (this title's record is a bare sequence-header OBU) or an av1C
+// record with its four header bytes; movie_av1_config_offset() tells them apart. Feeding the OBUs to dav1d up front gives it the sequence
+// header before the first packet, so a movie whose temporal units leave it out still decodes.
 static std::vector<uint8_t> extract_av1_obus(const std::vector<uint8_t>& config) {
-    // First try WebM format (AV1CodecConfigurationRecord)
-    auto obus = extract_webm_av1_obus(config);
-    if (!obus.empty()) {
-        NXLOG_I(kTag, "AV1 config: parsed WebM AV1CodecConfigurationRecord, %zu bytes of OBUs", obus.size());
-        return obus;
+    const size_t offset = movie_av1_config_offset(config.data(), config.size());
+    if (offset == kMovieAv1ConfigInvalid) {
+        NXLOG_W(kTag, "AV1 config: %zu bytes are neither configOBUs nor an av1C record: no sequence header is fed to the decoder", config.size());
+        return {};
     }
-    // Fall back to MP4 av1C format: 4-byte header (version, profile, level, tier/flags) then OBUs
-    if (config.size() > 4) {
-        NXLOG_I(kTag, "AV1 config: using MP4 av1C fallback (skip 4 bytes), %zu bytes of OBUs", config.size() - 4);
-        return std::vector<uint8_t>(config.begin() + 4, config.end());
-    }
-    return {};
+    if (offset == 0) NXLOG_I(kTag, "AV1 config: %zu bytes of configOBUs", config.size());
+    else NXLOG_I(kTag, "AV1 config: av1C record, %zu bytes of configOBUs", config.size() - offset);
+    return std::vector<uint8_t>(config.begin() + offset, config.end());
 }
 
 Av1 open_av1(Decoder& d, const std::vector<uint8_t>& config) {
