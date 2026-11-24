@@ -54,3 +54,4 @@ shots/*.b64
 /engine/fefw-recomp/runtime/test_dav1d/
 /engine/fefw-recomp/runtime/src/nxrt_pch.h
 /engine/fefw-recomp/runtime/src/gfx/nxrt_gfx_pch.h
+_recovery/

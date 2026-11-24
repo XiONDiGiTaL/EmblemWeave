@@ -17,15 +17,15 @@ built and tested in this cycle).
 |---|---|
 | Production engine builds from a clean configure | **Yes** — 1,026 targets, Windows x64, exit 0 |
 | Launcher tests | **Yes** — 442 tests, 429 passed, 0 failed, 13 ignored |
-| Engine tests | **169/182**, 13 classified failures (6 environment, 4 pre-existing crashes, 1 hardware, 1 gamepad, 1 load-sensitive) |
+| Engine tests | **175/183**, 8 failures (6 need the Vulkan validation layer, 1 write-watch, 1 gamepad); three genuine crash defects were fixed in this pass |
 | One canonical launcher/engine build for packaging | **No** — the build exists, the package does not |
 | Gameplay verified in this cycle | **No** |
-| Save loading verified | **No** (#79 is the critical path) |
+| Save loading verified | **Partly** — fixture rows 19 and 22 ran for real; no reporter save loaded yet (#79) |
 | Cinematics verified | **No** (#70/#75) |
 | Return-to-title cycles ≥ 10 | **No** (#77) |
-| HDR restore | **No** — not implemented (#78) |
+| HDR restore | **Implemented, not end-to-end verified** — capture/restore with unit and live-API tests (#78) |
 | Long-session memory bound | **No** (#37/#41) |
-| Linux / Steam Deck | **No** — does not build for Linux yet |
+| Linux / Steam Deck | **Platform layer only** — builds and passes its test on Ubuntu; full runtime still Windows-only |
 
 ---
 
@@ -140,6 +140,63 @@ optional: the engine's default decoder is built-in dav1d and only `movie_decoder
    licence decision, install/upgrade test.
 
 ## 12. What can be published now, and what cannot
+
+*(The post-consolidation pass below updates the tables and adds the evidence gathered after this section was written.)
+
+---
+
+## 13. Post-consolidation validation (2026-11-24)
+
+Work after `9bc86030`, all on `main`: see `ENGINE_AND_RENDERER_VALIDATION.md` §8, `DISPLAY_STATE_RESTORATION.md`,
+`SAVE_VALIDATION_ISSUE79.md` and `LINUX_BUILD_STATUS.md`.
+
+### 13.1 Genuine engine defects found and fixed
+
+| Defect | Effect | Evidence |
+|---|---|---|
+| Thread-list lock was null until runtime startup | `AcquireSRWLockExclusive(nullptr)` crashed `soak`, `svc_info` and any early `thread_create` | `soak` 9/9 and `svc_info` 25/25 now pass (they segfaulted before, including on FCC's pre-integration binary) |
+| `page_query` cast `MEM_FREE` (0x10000) to `PageState::Free` (0) | `granule_free()` was never true, so `svcMapPhysicalMemory` refused every range with 0xD401 | `svc_memory` 21/21 now passes |
+| `write_watch_linux.cpp` never compiled | Linux platform layer could not build | It builds and links on Ubuntu 24.04 now |
+
+These are behaviour fixes, not test edits. Two stale suites (`kernel_threads`, `launcher_game_info`) were corrected in the
+previous pass only after the implementation behaviour was confirmed.
+
+### 13.2 Engine suite after the fixes
+
+`ctest --test-dir build_int --parallel 4`: **175/183 passed, 8 failed**. The remaining eight are classified, none of them
+crashes:
+
+- `extras_output`, `gfx_device`, `gfx_nvn_mask_clear`, `gfx_nvn_present_pass`, `gfx_nvn_subgroup`, `gfx_nvn_texgpu` —
+  every case asserts `dev->validation_enabled()`; the Vulkan validation layer is not installed on this machine.
+- `write_watch` — 12/14; two cases expect a foreign read-only page's fault to reach the caller. The identical two fail
+  on FCC's pre-integration binary, so this pass did not introduce them and has not fixed them. Genuine open defect.
+- `launcher_pad_capture` — no gamepad attached.
+
+### 13.3 Issue #78
+
+Display state is now captured (mode, HDR support/enablement, SDR white level, per monitor), written beside `fefw.ini`
+for crash recovery, and restored only for the settings the session changed. 16 tests pass, including three live ones
+that read this desktop and wrote back its current mode and HDR state. **Not verified:** a real exclusive-fullscreen
+round trip, an HDR-on session, a real crash, and a second monitor.
+
+### 13.4 Issue #79
+
+`tools/issue79_fixture.py` refused every live root, prepared five rows from a synthetic source, and left the source
+byte-identical. Two rows were run against the real engine (ExeFS dump + read-only `H:` RomFS): row 22 regenerated a
+missing `.meta` and opened the existing tree; row 19 ignored a foreign account and created a fresh save. **Still open:**
+no reporter save loaded, rows 16/17/20/24 not run, and no two-hour session.
+
+### 13.5 Linux
+
+The POSIX platform layer builds and its self-test passes on Ubuntu 24.04; the probe sees the Vulkan loader and llvmpipe.
+The full runtime is still Windows-only (`psapi`, `<windows.h>`, Win32 graphics). No Proton or Steam Deck claim is made.
+
+### 13.6 Verdict
+
+**Still not release-ready.** #79's headline claim (a user's save loads) is unproven; #78's real round trip is unproven;
+cinematics, return-to-title and the soak are unrun; the full runtime does not build for Linux. What changed is that the
+tree no longer carries three engine crashes, the display restore is real code rather than a comment, and the Linux
+platform layer is a build that can be reproduced.
 
 - **Can be published as documentation:** the audit set, including this file.
 - **Cannot be published as a release:** anything that describes #79, #70, #75, #76, #77 or the renderer instrumentation

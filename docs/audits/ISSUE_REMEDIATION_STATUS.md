@@ -28,9 +28,9 @@ Status vocabulary is the one the readiness audit uses:
 | #75 Cinematic AV1 + Opus sync | Implemented - unverified | Worker-thread decoder, decode-ahead, clock-based dropping, bundled FFmpeg option | End-to-end video/audio playback and sync measurement |
 | #76 Find Units stutter | Implemented - unverified | Parallel scan, cancellation, progress | An in-battle frame-time measurement |
 | #77 Return-to-title stability | Implemented - unverified | Fault-handler initialisation and fallbacks; write-watch platform split now builds | 10+ menu/title cycles; the write-watch race path exercised |
-| #78 HDR left enabled after exit | Partially implemented | `play::stop()` forces windowed mode; HDR output path | Capturing and restoring the original Windows HDR state, SDR white level and display mode. The runtime still never reads them. |
-| #79 Saves not read | Implemented - unverified | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, read-only fixture harness | A controlled run of `tools/issue79_fixture.py` plus game launches, and a reporter confirming a save loads |
-| #7 Linux / Steam Deck | Outstanding | `write_watch_linux.cpp` source (uncompiled) | A Linux build target at all: core still links `psapi` and includes `<windows.h>` |
+| #78 HDR left enabled after exit | Implemented - partially verified | Full display snapshot (mode, HDR, SDR white, per monitor), sidecar snapshot for crash recovery, restore of only what the session changed, `SET_HDR_STATE`, 16 tests | A real exclusive-fullscreen round trip, an HDR-on session, a real crash, and a second monitor. SDR white is read-only in Windows and is captured, not restored. |
+| #79 Saves not read | Implemented - fixture runs done, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 19 and 22 ran against the real engine: a missing `.meta` was regenerated and a foreign account ignored; rows 16/17/20/24 and a reporter's own save are still unrun (see `SAVE_VALIDATION_ISSUE79.md`) |
+| #7 Linux / Steam Deck | Outstanding - platform layer builds | POSIX platform layer, `write_watch_linux.cpp` compiles and links, platform self-test passes on Ubuntu 24.04, Vulkan probe runs | The rest of the runtime: core still links `psapi`, `diag/registry.cpp` includes `<windows.h>`, the graphics shell is Win32. `docs/LINUX.md` is missing (see `LINUX_BUILD_STATUS.md`) |
 
 ---
 

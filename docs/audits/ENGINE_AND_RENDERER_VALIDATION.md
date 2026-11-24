@@ -206,3 +206,43 @@ cargo test --manifest-path apps/emblemweave/Cargo.toml
 Expected: build exit 0; 169/182 engine tests pass with the 13 classified failures above; 429/442 launcher tests
 pass with 13 ignored. The `kernel_starvation` result depends on machine load; run it alone if it fails in the
 parallel run.
+
+---
+
+## 8. Post-consolidation pass (2026-11-24)
+
+Build and suite re-run after the fixes below: **183 tests, 175 passed, 8 failed** (`ctest --test-dir build_int
+--parallel 4`). Build stayed at exit 0.
+
+### 8.1 Crash investigation
+
+The four pre-integration crashes were reproduced on the integrated build and traced with LLDB, not accepted as
+"pre-existing":
+
+| Test | Fault | Cause | State |
+|---|---|---|---|
+| `svc_info` | `RtlAcquireSRWLockExclusive`, null `SRWLOCK` | `thread_create` locked the thread list before `init_thread_list_lock()` had run | **Fixed** — lazy `std::call_once` init; 25/25 pass |
+| `soak` | same, in the `kernel.threads` gauge | the sampler read the gauge before any thread existed | **Fixed** — gauge ensures the lock; 9/9 pass |
+| `svc_memory` | test assertion, then a null-page write | `page_query` returned `MEM_FREE` (0x10000) where `PageState::Free` is 0, so `granule_free()` always failed and `svcMapPhysicalMemory` refused every range | **Fixed** — state mapping; 21/21 pass |
+| `tt_live` | exit code 4, "no frame was presented yet" | needs a presented frame (GPU/window) | Environment; not a crash in this pass |
+
+The `svc_memory` diagnosis came from a new log line in the refusal path that names the page, its VM state and the host
+region; it is kept because "range holds other memory" alone could not distinguish a real overlap from this bug.
+
+### 8.2 Remaining failures
+
+| Test | Cases | Reason |
+|---|---|---|
+| `extras_output` | 0/7 | every case asserts `dev->validation_enabled()`; validation layer absent |
+| `gfx_nvn_mask_clear` | 0/3 | same |
+| `gfx_nvn_present_pass` | 0/3 | same |
+| `gfx_nvn_subgroup` | 0/3 | same |
+| `gfx_nvn_texgpu` | 0/3 | same |
+| `gfx_device` | 0/2 | same |
+| `write_watch` | 12/14 | two cases expect a foreign read-only page's fault at `kHeapBase+30*Pg` to reach the caller; it does not, and the protection is left `PAGE_READWRITE`. Fails identically on the pre-integration binary. **Open defect, not fixed.** |
+| `launcher_pad_capture` | 0/1 | no gamepad attached |
+
+### 8.3 New tests
+
+`display_state` (16 cases, all pass) is registered by the existing `tests/gfx` glob; see `DISPLAY_STATE_RESTORATION.md`.
+`tools/test_issue79_fixture.py` adds 8 harness tests (all pass); see `SAVE_VALIDATION_ISSUE79.md`.
