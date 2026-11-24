@@ -14,6 +14,7 @@ Status vocabulary is the one the readiness audit uses:
 | Partially implemented | Some required behaviour exists; a named part is missing or contradicted by the code. |
 | Outstanding | No adequate implementation or no adequate evidence. |
 | Verified | Observed working in a controlled run, with the run recorded. **Nothing in this table is Verified.** |
+| Implemented - automation-verified | The defect's mechanism is covered by an automated check that fails on the old code and passes on the new; the end-to-end user path was not re-run. |
 
 ---
 
@@ -30,6 +31,8 @@ Status vocabulary is the one the readiness audit uses:
 | #77 Return-to-title stability | Implemented - unverified | Fault-handler initialisation and fallbacks; write-watch platform split now builds | 10+ menu/title cycles; the write-watch race path exercised |
 | #78 HDR left enabled after exit | Implemented - verified on one display | Full display snapshot (mode, HDR, SDR white, per monitor), sidecar snapshot for crash recovery, restore of only what the session changed, `SET_HDR_STATE`, 18 tests (13 fake, 5 live) | Live on Windows 11 26100 / RX 7900 XT, one 2560x1440@180 display: marked exclusive entered and exited normally, HDR-off stayed off, HDR-on stayed on, forcing HDR off during exclusive restored it, and a hard-killed marked session was repaired from the sidecar on the next launch. Remaining: SDR white is read-only (captured, not written), no second monitor, no live differing-mode restore, no live second restore of the same snapshot. |
 | #79 Saves not read | Implemented - fixture matrix run, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 16, 17, 19, 20 and 22 ran against the real engine: stale absolute paths honoured, nested save not adopted, missing `.meta` regenerated, foreign account ignored. Row 24's launcher import/backup/restore round-trip ran in a portable copy; its empty-profile UI flow and a reporter's own save remain (see `SAVE_VALIDATION_ISSUE79.md`) |
+| #90 Long inherited PATH stops the build | Implemented - automation-verified | `engine.rs` sets `NX_ENV_READY`, so `nx_env.cmd` keeps the launcher's vcvars environment instead of running it again; a direct call runs `vcvars64.bat` with a short PATH and merges both afterwards; every long value is only named through delayed expansion. `check_cmd_scripts.ps1` covers a 7,906-character PATH in launcher and direct mode, and `package_release.ps1` runs that check before packing | A launcher build started from that PATH, to completion; nothing above cmd's own ceiling can be fixed in the script |
+| #92 Graphics GPU label overlap | Implemented - unverified | The GPU row stacks the combo and its note in a top-down block constrained to the control column, so the note wraps; "Detected", "No Vulkan 1.3 device" and "Looking for Vulkan devices..." all use it | A visual check at 200 % scaling with a long hybrid adapter list, and with no Vulkan device |
 | #7 Linux / Steam Deck | Outstanding - platform layer builds | POSIX platform layer, `write_watch_linux.cpp` compiles and links, platform self-test passes on Ubuntu 24.04, Vulkan probe runs | The rest of the runtime: core still links `psapi`, `diag/registry.cpp` includes `<windows.h>`, the graphics shell is Win32. `docs/LINUX.md` is missing (see `LINUX_BUILD_STATUS.md`) |
 
 ---
@@ -98,6 +101,29 @@ user's real installation, `E:`, `X:`, `%APPDATA%` saves or the repository's `dat
 not launch the game. The launcher side of the matrix still has to be run by hand, and no reporter has confirmed a
 save loading, so the issue stays implemented-unverified.
 
+### #90 - long inherited PATH
+
+`toolchain::resolve()` (PR #91) stopped giving the build the inherited PATH twice. This pass removes the other
+half of the failure: the launcher already runs `vcvars64.bat` once and passes its INCLUDE, LIB and PATH, so it now
+sets `NX_ENV_READY` and `nx_env.cmd` keeps that environment instead of running `vswhere`/`vcvars64.bat` again
+(about 2 s per call, and the PATH it appended was what crossed the 8191-character line). A direct `nx_env.cmd`
+still runs `vcvars64.bat`, but with a short PATH; the caller's PATH is put back and both are merged through
+delayed expansion, so no line expands past the limit.
+
+The check drives a 7,906-character PATH through both modes (`cmd /c exit 0`, so nothing else from the toolchain
+is needed), and the same check run against the previous `nx_env.cmd` fails both calls with `The input line is too`
+`long.` - the regression is covered, not assumed. A full launcher build from a PATH that long has not been re-run
+in this pass. Above roughly 8,191 characters cmd stops delivering PATH to a child at all; that ceiling is
+Windows', not the script's.
+
+### #92 - Graphics page GPU label
+
+`widgets::setting_row` lays its control out right to left, so the GPU row's "Detected" label was placed beside the
+280 px combo in whatever width was left, sometimes none, and ran left over the description. The row now puts the
+combo (still right-aligned) and the note in a top-down block constrained to the control column, where the note
+wraps; the empty-list and waiting lines use the same block. Not viewed at 200 % scaling or with a long hybrid
+adapter list, so it stays implemented-unverified.
+
 ---
 
 ## What would move each item
@@ -112,4 +138,19 @@ save loading, so the issue stays implemented-unverified.
 | #77 | 10+ return-to-title cycles in one session with no fault |
 | #78 | Start with HDR on, exit, and show Windows still has HDR on with the original SDR white level and mode |
 | #79 | A reporter's own save, listed and loaded (the fixture matrix is done; row 24's UI flow is still open) |
+| #90 | A launcher build started from a PATH near 8,191 characters, to completion |
+| #92 | The Graphics page at 200 % scaling with a long hybrid adapter list, and with no Vulkan device |
 | #7 | A native Linux build of `nxrt` + `nxrt_gfx`, then a runtime test; Proton and Gamescope as separate targets |
+
+---
+
+## 2026-11-24 integration record
+
+Landed on `main` after the FCC pass, in addition to the review and merge of PRs #81, #83, #85, #87, #89 and #91:
+
+| Commit | Change | Validation |
+|---|---|---|
+| `99034aee` | `NX_ENV_READY` handshake, short-PATH vcvars, long-PATH cases in the script check (issue #90) | `cargo test -p emblemweave`: 432 passed, 13 ignored; `check_cmd_scripts.ps1`: 5 PASS; the same check against the previous script fails as expected |
+| `fb0c9f25` | GPU row note wraps inside the control column (issue #92) | `cargo check -p emblemweave`; not viewed in the running launcher |
+| `c5d2bbf7` | Credits for mmkzer0 (PRs #81, #83, #85, #87, #89, #91) | README and About page read back |
+| `8a4e5d9d` | `package_release.ps1` runs the cmd script check before building or packing | PowerShell parser check; the added command run directly (exit 0) |
