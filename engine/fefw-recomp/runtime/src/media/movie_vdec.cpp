@@ -98,9 +98,9 @@ constexpr size_t kMaxFrames = 64;
 // few large 4K packets from taking the same room as hundreds of small ones.
 //
 // Normal backpressure never drops a packet: dropping one AV1 packet loses the decoder's reference state until the next keyframe, so every
-// frame after it can be wrong. This wait cannot deadlock. DecodeAsync runs on the guest's MovieVideoHandler thread; the player releases frames
-// on a different thread (the log shows guest-118 feeding and main releasing), and that release calls deliver(), which wakes this thread when a
-// frame frees a slot. The worker wakes this thread after every queue pop.
+// frame after it can be wrong. DecodeAsync runs on the guest's MovieVideoHandler thread, which also acquires the frames; the player releases
+// them on a different thread (the log shows guest-118 feeding and main releasing). A released frame takes the next picture once the GPU
+// passed it (the worker polls that), which lets the worker pop a packet, and the worker wakes this thread after every queue pop.
 //
 // A player can still stop releasing frames altogether. A wait is therefore abandoned only after kNoProgressLimit with no queue pop and no
 // deliver() moving a picture. abort_stalled() then stops the movie: it marks the decoder failed, clears the stalled input/decoded state (the
@@ -545,6 +545,7 @@ void worker_main(Decoder* d) {
     for (;;) {
         const auto can_work = [&] { return d->stop || (!d->queue.empty() && d->decoded.size() < g_ahead); };
         while (!can_work()) {
+            // Nothing pending: no timeout, as release() wakes it when a frame it gets back has to wait for the GPU while pictures wait.
             if (d->pending_free.empty()) d->cv.wait(lk);
             else {   // frames wait for the GPU: look again shortly (deliver frees them and wakes the player)
                 d->cv.wait_for(lk, std::chrono::milliseconds(1));
@@ -677,8 +678,8 @@ uint32_t decode_async(Decoder& d, const uint8_t* data, uint64_t size, int64_t ti
         std::unique_lock<std::mutex> lk(d.mu);
         if (d.failed) wait = FeedWait::Stalled;
         else if (size && data) {
-            // Keep the packet: see the queue comment above. This is the guest's feed thread, not the thread that releases frames, so waiting
-            // for the worker cannot close a cycle. Normal room waits reset on every queue pop or delivered picture in wait_for_room().
+            // Keep the packet: see the queue comment above. This is the guest's feed thread; the wait ends as the main thread gives frames
+            // back. Normal room waits reset on every queue pop or delivered picture in wait_for_room().
             const uint64_t generation = d.generation;
             wait = wait_for_room(d, lk, size, generation);
             if (wait == FeedWait::Flushed && g_log)
@@ -740,6 +741,10 @@ void release(Decoder& d, uint64_t frame) {
                        known ? (already ? " (already free)" : "") : " (not registered)", d.queue.size(), d.decoded.size(), d.ready.size(),
                        d.free_.size());
     deliver(d);
+    // The frame waits for its GPU serial, and only the worker polls that; a worker that went to sleep with no frame pending sleeps without a
+    // timeout. So wake it while pictures wait for a frame: otherwise, once the main thread had given back its last frame and the handler sat
+    // in DecodeAsync waiting for room, nothing called in again, and the stall guard stopped the movie after 5 s.
+    if (!d.pending_free.empty() && !d.decoded.empty()) d.cv.notify_all();
 }
 
 void flush(Decoder& d) {
