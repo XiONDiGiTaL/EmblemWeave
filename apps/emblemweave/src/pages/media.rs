@@ -503,7 +503,12 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
             "GPU",
             "Which Vulkan device the engine opens. Automatic takes the discrete GPU with the most video memory. The list below shows the Vulkan 1.3 devices this PC reports; choosing one writes its full name to [gfx] gpu.",
             |ui| {
-                let devices = crate::gpu::cached();
+                let Some(devices) = crate::gpu::cached() else {
+                    gpu_combo(ui, &mut g.gpu, &[]);
+                    ui.label(crate::i18n::text("Looking for Vulkan devices...").size(10.8).color(p.muted));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                    return;
+                };
                 gpu_combo(ui, &mut g.gpu, devices);
                 if devices.is_empty() {
                     ui.label(

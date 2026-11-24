@@ -21,11 +21,18 @@ pub fn devices() -> Vec<Device> {
     platform::devices()
 }
 
-/// The list for this launcher run. A GPU hot-plug is rare enough that scanning
-/// once is better than opening the loader on every frame.
-pub fn cached() -> &'static [Device] {
+/// The list for this launcher run, or `None` while the one scan still runs. The scan loads vulkan-1.dll and every ICD on its
+/// own thread: on the UI thread, whose OpenGL context is current, loading NVIDIA's ICD crashed AMD's OpenGL driver at the
+/// next `wglMakeCurrent` on a hybrid laptop.
+pub fn cached() -> Option<&'static [Device]> {
     static CACHE: std::sync::OnceLock<Vec<Device>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(devices)
+    static SCAN: std::sync::Once = std::sync::Once::new();
+    SCAN.call_once(|| {
+        std::thread::spawn(|| {
+            let _ = CACHE.set(devices());
+        });
+    });
+    CACHE.get().map(Vec::as_slice)
 }
 
 #[cfg(windows)]
