@@ -228,7 +228,7 @@ Already on `main`, newer than the stash:
 - **Audio EQ.** `audio_eq.h/cpp` and `test_audio_eq.cpp` are present with ten bands, preamp,
   automatic headroom, a limiter, eight presets (including Headphones Boost) and a live F1 panel;
   the launcher writes `[audio] eq*`. `svc_audio_eq`: 7 passed, 0 failed.
-- **Play UI / master boost.** The Audio page and F1 panel apply 0–200% immediately and warn inline.
+- **Play UI / master boost.** The Audio page and F1 panel apply 0–200% immediately and describe the boost as limited.
   The stash's warning gate is not used: `Confirm::AudioBoost` is never constructed, and the modal
   in `play_audio_ui.cpp` cannot open because `boost_warning` is never set. The dead modal is a
   separate cleanup, not an integration point.
