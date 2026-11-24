@@ -73,6 +73,23 @@ NXTEST(arm_then_write_releases_the_page) {
     teardown(r);
 }
 
+NXTEST(take_written_covers_ctz_boundaries) {
+    ww::Region* r = setup();
+    REQUIRE(r != nullptr);
+    REQUIRE(ww::arm(r, 0, kPages));
+    // Bit 0 (no trailing zeros), low/high bits of each 32-bit half, and the 64-bit high bit.
+    const uint64_t pages[] = {0, 1, 2, 31, 32, 63};
+    for (uint64_t p : pages) *reinterpret_cast<volatile uint8_t*>(mem::kHeapBase + p * kPg) = 0x5a;
+    std::vector<uint64_t> w;
+    ww::take_written(r, w);
+    REQUIRE(w.size() == 6);
+    for (size_t i = 0; i < 6; ++i) CHECK_EQ(w[i], pages[i]);
+    w.clear();
+    ww::take_written(r, w);   // a zero written word is skipped, not passed to the count-trailing-zeros helper
+    CHECK(w.empty());
+    teardown(r);
+}
+
 NXTEST(destroy_makes_pages_writable) {
     ww::Region* r = setup();
     REQUIRE(r != nullptr);

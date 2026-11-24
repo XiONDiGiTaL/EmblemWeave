@@ -23,6 +23,11 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#pragma intrinsic(_BitScanForward64)
+#endif
+
 #include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -30,6 +35,16 @@
 #include "nxrt/platform.h"
 
 namespace nxrt::mem::ww {
+
+static inline unsigned long ctzll_portable(uint64_t v) {
+#if defined(_MSC_VER)
+    unsigned long index = 0;
+    if (!_BitScanForward64(&index, v)) return 64;   // v == 0 (the callers never pass 0)
+    return index;
+#else
+    return v ? static_cast<unsigned long>(__builtin_ctzll(v)) : 64;   // v == 0
+#endif
+}
 
 struct Region {
     const char* owner = "unspecified"; // static lifetime name supplied by owner
@@ -483,98 +498,21 @@ retry:
     }
     if (!ours) {   // a write fault in a tracked region that no region claims: what each one holds for the page (the crash report follows)
         const uint32_t pr = page_protect(addr);
-        bool in_any_region = false;
         NXLOG_E(kTag, "FAULT DEBUG: kind=%d addr=%llx pr=%x in_heap=%d heap_base=%llx heap_max=%llx",
                 kind, static_cast<unsigned long long>(addr), pr,
                 (addr >= kHeapBase && addr < kHeapBase + kHeapMax) ? 1 : 0,
                 static_cast<unsigned long long>(kHeapBase), static_cast<unsigned long long>(kHeapMax));
         for (RegionCursor cursor; Region* r = cursor.next();) {
             if (addr < r->base || addr >= r->base + r->npages * kPage) continue;
-            in_any_region = true;
             const uint64_t pg = (addr - r->base) / kPage;
             NXLOG_E(kTag, "unclaimed write fault at %llx (protection %x): region %llx (+%llu pages) prot %d valid %d guard %d ban %d releasing %d",
                     static_cast<unsigned long long>(addr), pr, static_cast<unsigned long long>(r->base),
                     static_cast<unsigned long long>(r->npages), test(r->prot.get(), pg), test(r->valid.get(), pg), test(r->guard.get(), pg),
                     test(r->ban.get(), pg), static_cast<int>(r->releasing[pg].load()));
         }
-        // Fallback 1: if the page is in any write-watch region's host address range (i.e., it's a
-        // guest heap page) and is read-only (PAGE_READONLY=0x02 or PAGE_EXECUTE_READ=0x20) but
-        // no region claims it (prot bit not set), it may have been made read-only by ImportFreeze
-        // (which the freeze_overlaps check missed, e.g., same-thread deadlock) or by a now-destroyed
-        // region. Make it writable to allow the guest write to proceed.
-        if (kind == 1 && in_any_region) {
-            const uint32_t p = pr & 0xFF;
-            if (p == 0x02 || p == 0x20 || p == nxrt::platform::PROT_READ) {
-                NXLOG_W(kTag, "fallback: making heap page %llx writable (was protection %x, in region but no owner)",
-                        static_cast<unsigned long long>(addr), pr);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
-                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
-                    return true;
-                }
-                NXLOG_E(kTag, "fallback: protect() failed for heap page %llx (in region)", static_cast<unsigned long long>(addr));
-                // protect failed; fall through
-            }
-        }
-        // Fallback 2: the fault is on a heap page (in the heap address range) that is read-only
-        // but not tracked by any write-watch region. This can happen when ImportFreeze makes
-        // pages read-only for Vulkan import, but those pages are not armed by any region.
-        // The freeze_overlaps check at the start of on_fault_handler should catch this, but there
-        // can be a race where the freeze ends between the fault and the check. If the page is still
-        // read-only and in the heap range, make it writable.
-        if (kind == 1 && !in_any_region && addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
-            const uint32_t p = pr & 0xFF;
-            if (p == 0x02 || p == 0x20 || p == nxrt::platform::PROT_READ) {
-                NXLOG_W(kTag, "fallback: making untracked heap page %llx writable (was protection %x, no region)",
-                        static_cast<unsigned long long>(addr), pr);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
-                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
-                    return true;
-                }
-                NXLOG_E(kTag, "fallback: protect() failed for untracked heap page %llx", static_cast<unsigned long long>(addr));
-                // protect failed; fall through
-            }
-        }
-        // Fallback 3: the fault is on a heap page (in the heap address range) that is NOACCESS
-        // (PAGE_NOACCESS = 0x01, PROT_NONE = 0) but not tracked by any write-watch region.
-        // This can happen when a retired page is decommitted (heap_decommit) during scene teardown
-        // but guest code continues to write to it (race between region_destroy and heap_decommit).
-        // The retired bit was cleared by heap_decommit, so retired_retry returns false.
-        // Make it writable to allow the guest write to proceed (Issue #77).
-        if (kind == 1 && !in_any_region && addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
-            const uint32_t p = pr & 0xFF;
-            if (p == 0x01 || p == 0 || p == nxrt::platform::PROT_NONE) {
-                NXLOG_W(kTag, "fallback: making decommitted heap page %llx writable (was protection %x, no region, was retired)",
-                        static_cast<unsigned long long>(addr), pr);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
-                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
-                    return true;
-                }
-                // protect failed; fall through
-            }
-        }
-        // Fallback 4: the fault is on a heap page (in the heap address range) that is NOACCESS
-        // (PAGE_NOACCESS = 0x01, PROT_NONE = 0) and IS tracked by a write-watch region,
-        // but no region claims the write (prot bit not set). This can happen when a region's
-        // pages are decommitted to NOACCESS (e.g., during scene teardown or ImportFreeze) but
-        // the region hasn't been destroyed yet, and guest code continues to write (e.g., AVX
-        // non-temporal stores in shader compilation). The retired bit was cleared, so
-        // retired_retry returns false. Make it writable to allow the guest write to proceed.
-        if (kind == 1 && in_any_region && addr >= kHeapBase && addr < kHeapBase + kHeapMax) {
-            const uint32_t p = pr & 0xFF;
-            if (p == 0x01 || p == 0 || p == nxrt::platform::PROT_NONE) {
-                NXLOG_W(kTag, "fallback: making decommitted heap page %llx writable (was protection %x, in region but no owner, was retired)",
-                        static_cast<unsigned long long>(addr), pr);
-                if (nxrt::platform::protect(reinterpret_cast<void*>(addr & ~(kPage - 1)), kPage,
-                                            nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE)) {
-                    g_busy.fetch_sub(1, std::memory_order_seq_cst);
-                    return true;
-                }
-                // protect failed; fall through
-            }
-        }
+        // No broad fallback: a foreign read-only page, a guarded page, or a decommitted (NOACCESS) page must reach
+        // the crash handler. A page this tracker retired is retried only while its current protection permits the
+        // access (retired_retry), and an import freeze that has ended is handled by heap_write_landed_late above.
     }
     g_busy.fetch_sub(1, std::memory_order_seq_cst);
     if (!ours) return false;
@@ -889,7 +827,7 @@ void take_written(Region* r, std::vector<uint64_t>& out) {
         if (!r->written[w].load(std::memory_order_relaxed)) continue;
         uint64_t v = r->written[w].exchange(0, std::memory_order_acq_rel);
         while (v) {
-            const unsigned long b = static_cast<unsigned long>(__builtin_ctzll(v));
+            const unsigned long b = static_cast<unsigned long>(ctzll_portable(v));
             v &= v - 1;
             const uint64_t page = w * 64 + b;
             if (page < r->npages) out.push_back(page);

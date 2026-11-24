@@ -24,6 +24,22 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__GNUC__) || defined(__clang__)
+static inline unsigned long ctzll_portable(uint64_t v) {
+    return v ? static_cast<unsigned long>(__builtin_ctzll(v)) : 64;   // v == 0
+}
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#pragma intrinsic(_BitScanForward64)
+static inline unsigned long ctzll_portable(uint64_t v) {
+    unsigned long index = 0;
+    if (!_BitScanForward64(&index, v)) return 64;   // v == 0
+    return index;
+}
+#else
+#error "Unsupported compiler: no ctzll implementation"
+#endif
+
 #include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -930,7 +946,7 @@ void take_written(Region* r, std::vector<uint64_t>& out) {
         if (!r->written[w].load(std::memory_order_relaxed)) continue;
         uint64_t v = r->written[w].exchange(0, std::memory_order_acq_rel);
         while (v) {
-            const unsigned long b = static_cast<unsigned long>(__builtin_ctzll(v));
+            const unsigned long b = static_cast<unsigned long>(ctzll_portable(v));
             v &= v - 1;
             const uint64_t page = w * 64 + b;
             if (page < r->npages) out.push_back(page);
