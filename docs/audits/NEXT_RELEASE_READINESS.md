@@ -23,7 +23,7 @@ built and tested in this cycle).
 | Save loading verified | **Partly** — fixture rows 19 and 22 ran for real; no reporter save loaded yet (#79) |
 | Cinematics verified | **No** (#70/#75) |
 | Return-to-title cycles ≥ 10 | **No** (#77) |
-| HDR restore | **Implemented, not end-to-end verified** — capture/restore with unit and live-API tests (#78) |
+| HDR restore | **Verified on one display** — exclusive enter/exit, HDR-off unchanged, HDR-on restored after a forced drop, crash recovery from the sidecar; SDR white is read-only (#78) |
 | Long-session memory bound | **No** (#37/#41) |
 | Linux / Steam Deck | **Platform layer only** — builds and passes its test on Ubuntu; full runtime still Windows-only |
 
@@ -175,9 +175,13 @@ crashes:
 ### 13.3 Issue #78
 
 Display state is now captured (mode, HDR support/enablement, SDR white level, per monitor), written beside `fefw.ini`
-for crash recovery, and restored only for the settings the session changed. 16 tests pass, including three live ones
-that read this desktop and wrote back its current mode and HDR state. **Not verified:** a real exclusive-fullscreen
-round trip, an HDR-on session, a real crash, and a second monitor.
+for crash recovery, and restored only for the settings the session changed. The live round trip is verified on this
+machine (Windows 11 26100, one RX 7900 XT display at 2560x1440@180): a marked exclusive session closed normally and left
+HDR off unchanged; HDR on stayed on; forcing HDR off during exclusive made restore write it back on; and a hard-killed
+marked session was repaired by the next launch from the sidecar. 18 display tests pass (13 fake, 5 live). Limits: SDR
+white is read-only in Windows and only captured/logged; there is no second monitor; exclusive used the desktop mode, so
+the live mode write count is 0 (the fake desktop covers a differing mode); live idempotence was not repeated on the same
+snapshot.
 
 ### 13.4 Issue #79
 
@@ -196,8 +200,9 @@ The full runtime is still Windows-only (`psapi`, `<windows.h>`, Win32 graphics).
 
 ### 13.6 Verdict
 
-**Still not release-ready.** #79's headline claim (a user's save loads) is unproven; #78's real round trip is unproven;
-cinematics, return-to-title and the soak are unrun; the full runtime does not build for Linux. What changed is that the
+**Still not release-ready.** #79's headline claim (a user's save loads) is unproven; #78's round trip is verified on one
+display but SDR white cannot be restored and multi-monitor was not run live; cinematics, return-to-title and the soak
+are unrun; the full runtime does not build for Linux. What changed is that the
 tree no longer carries three engine crashes, the display restore is real code rather than a comment, and the Linux
 platform layer is a build that can be reproduced.
 

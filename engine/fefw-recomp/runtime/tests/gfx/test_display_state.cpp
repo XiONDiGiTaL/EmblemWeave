@@ -396,3 +396,70 @@ NXTEST(live_hdr_setter_accepts_the_current_state) {
     }
     std::printf("display_state: HDR write checked on %d monitor(s)\n", checked);
 }
+
+// --- live HDR control for the display harness -------------------------------------------------------------------------
+// These change the desktop, so they need NXRT_DISPLAY_LIVE_TEST=1 *and* their own variable. The setter leaves the value it
+// was asked for on purpose; the harness that calls it must set it back. The round trip restores the original value itself.
+
+NXTEST(live_hdr_setter_can_set_a_session_value) {
+    const char* want = std::getenv("NXRT_DISPLAY_SET_HDR");
+    if (!live_enabled() || !want || !*want) {
+        std::printf("display_state: HDR setter skipped (NXRT_DISPLAY_SET_HDR is not set)\n");
+        return;
+    }
+    ds::DisplayState state;
+    std::string err;
+    REQUIRE(ds::capture_display_state(&state, &err));
+    ds::DisplayBackend* backend = ds::win_display_backend();
+    REQUIRE(backend != nullptr);
+    const bool target = std::string(want) != "0";
+    for (int i = 0; i < state.count; ++i) {
+        const ds::MonitorState& m = state.monitors[i];
+        if (!m.hdr_known || !m.hdr_supported) continue;
+        bool supported = false, enabled = false;
+        std::string why;
+        REQUIRE(backend->current_hdr(m.device, &supported, &enabled, &why));
+        if (!supported) continue;
+        const bool applied = backend->apply_hdr(m.device, target, &why);
+        std::printf("display_state: %s HDR set to %d: %s%s%s\n", m.device.c_str(), target ? 1 : 0,
+                    applied ? "accepted" : "refused", applied ? "" : ": ", applied ? "" : why.c_str());
+        CHECK_MSG(applied, why);
+        bool after_supported = false, after = false;
+        REQUIRE(backend->current_hdr(m.device, &after_supported, &after, &why));
+        CHECK_EQ(after, target);
+        return;
+    }
+    std::printf("display_state: HDR setter skipped (no monitor reports HDR support)\n");
+}
+
+NXTEST(live_hdr_toggle_round_trips) {
+    if (!live_enabled() || !std::getenv("NXRT_DISPLAY_TOGGLE_HDR")) {
+        std::printf("display_state: HDR toggle skipped (NXRT_DISPLAY_TOGGLE_HDR is not set)\n");
+        return;
+    }
+    ds::DisplayState state;
+    std::string err;
+    REQUIRE(ds::capture_display_state(&state, &err));
+    ds::DisplayBackend* backend = ds::win_display_backend();
+    REQUIRE(backend != nullptr);
+    for (int i = 0; i < state.count; ++i) {
+        const ds::MonitorState& m = state.monitors[i];
+        if (!m.hdr_known || !m.hdr_supported) continue;
+        bool supported = false, original = false;
+        std::string why;
+        REQUIRE(backend->current_hdr(m.device, &supported, &original, &why));
+        if (!supported) continue;
+        REQUIRE(backend->apply_hdr(m.device, !original, &why));
+        bool s1 = false, toggled = false;
+        REQUIRE(backend->current_hdr(m.device, &s1, &toggled, &why));
+        CHECK_EQ(toggled, !original);
+        REQUIRE(backend->apply_hdr(m.device, original, &why));
+        bool s2 = false, back = false;
+        REQUIRE(backend->current_hdr(m.device, &s2, &back, &why));
+        CHECK_EQ(back, original);
+        std::printf("display_state: %s HDR toggled %d -> %d -> %d\n", m.device.c_str(), original ? 1 : 0,
+                    toggled ? 1 : 0, back ? 1 : 0);
+        return;
+    }
+    std::printf("display_state: HDR toggle skipped (no monitor reports HDR support)\n");
+}
