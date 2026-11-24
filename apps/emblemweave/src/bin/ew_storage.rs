@@ -34,6 +34,9 @@ mod pipeline_cache;
 #[path = "../object_store.rs"]
 mod object_store;
 
+#[path = "../process.rs"]
+mod process;
+
 #[path = "../romfs_store.rs"]
 mod romfs_store;
 

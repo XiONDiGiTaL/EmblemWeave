@@ -20,6 +20,7 @@
 
 use crate::config::Config;
 use crate::jobs::{Ctx, JobResult, StageStatus};
+use crate::process::hidden;
 use crate::toolchain_manager::{BuildConfig, BuildEventEmitter, BuildSummary, ToolchainManager};
 use serde_json;
 use std::io::{BufReader, Write};
@@ -603,9 +604,10 @@ pub fn launch_reshade_setup(setup: &Path) -> Result<(), String> {
     if !exe.is_file() {
         return Err("the game is not built yet: build it before setting up ReShade".into());
     }
-    Command::new(setup)
-        .arg(&exe)
-        .args(["--api", "vulkan"])
+    let mut setup_cmd = Command::new(setup);
+    setup_cmd.arg(&exe).args(["--api", "vulkan"]);
+    hidden(&mut setup_cmd);
+    setup_cmd
         .spawn()
         .map_err(|e| format!("starting {}: {e}", setup.display()))?;
     // The setup writes ReShade.ini when it finishes, with the overlay key set to
@@ -1026,11 +1028,10 @@ fn probe_python_env(python: &Path) -> PythonEnv {
     if !python.is_file() {
         return PythonEnv::Missing;
     }
-    let output = Command::new(python)
-        .args(["-I", "-c", PYTHON_PROBE])
-        .arg(python)
-        .stdin(Stdio::null())
-        .output();
+    let mut py_cmd = Command::new(python);
+    py_cmd.args(["-I", "-c", PYTHON_PROBE]).arg(python).stdin(Stdio::null());
+    hidden(&mut py_cmd);
+    let output = py_cmd.output();
     match output {
         Ok(output) => parse_python_probe(
             &String::from_utf8_lossy(&output.stdout),

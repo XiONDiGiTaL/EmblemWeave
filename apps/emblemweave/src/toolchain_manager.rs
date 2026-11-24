@@ -19,6 +19,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::process::hidden;
 use crate::toolchain::{self, Toolchain, VsInstall, Msvc, Sdk, Clang, Resolved};
 
 /// The version of the tools.lock schema
@@ -1027,6 +1028,7 @@ impl ToolchainManager {
                 if cmd.len() > 1 {
                     command.args(&cmd[1..]);
                 }
+                hidden(&mut command);
                 let output = command.output()?;
                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
                 text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -1161,8 +1163,10 @@ fn get_sccache_dir() -> String {
 
 /// Get git commit hash
 fn get_git_commit() -> Option<String> {
-    Command::new("git")
-        .args(["rev-parse", "HEAD"])
+    let mut git_cmd = Command::new("git");
+    git_cmd.args(["rev-parse", "HEAD"]);
+    hidden(&mut git_cmd);
+    git_cmd
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())

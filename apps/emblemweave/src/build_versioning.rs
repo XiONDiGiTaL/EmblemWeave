@@ -16,6 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::toolchain_manager::{BuildConfig, BuildEventEmitter, ConcurrencyInfo};
+use crate::process::hidden;
 
 /// Build versioning configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,10 +281,10 @@ impl BuildVersionManager {
             let cmd = cmd_template.replace("{build_dir}", &build_dir.display().to_string());
             output.push_str(&format!("Running validation: {}\n", cmd));
 
-            let result = std::process::Command::new("cmd")
-                .args(["/c", &cmd])
-                .current_dir(&build_dir)
-                .output();
+            let mut cmd_obj = std::process::Command::new("cmd");
+            cmd_obj.args(["/c", &cmd]).current_dir(&build_dir);
+            hidden(&mut cmd_obj);
+            let result = cmd_obj.output();
 
             match result {
                 Ok(out) => {
@@ -308,10 +309,10 @@ impl BuildVersionManager {
             if exe_path.exists() {
                 output.push_str(&format!("Found executable: {}\n", exe_path.display()));
                 // Try running with --help or similar quick test
-                let test_result = std::process::Command::new(&exe_path)
-                    .arg("--help")
-                    .current_dir(&build_dir)
-                    .output();
+                let mut test_cmd = std::process::Command::new(&exe_path);
+                test_cmd.arg("--help").current_dir(&build_dir);
+                hidden(&mut test_cmd);
+                let test_result = test_cmd.output();
 
                 match test_result {
                     Ok(out) => {

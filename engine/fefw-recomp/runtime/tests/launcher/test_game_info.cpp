@@ -196,7 +196,19 @@ NXTEST(launcher_config_invalid_utf8_is_rejected) {
 NXTEST(summary_ready_text) {
     GameStatus s;
     s.exefs = s.romfs = s.textures = s.shaders = s.setup_finished = true;
+    s.movies = s.voices = true;   // cinematic assets present: no warning is appended
     CHECK(s.ready());
+    CHECK(s.summary() == L"Ready to play.");
+}
+
+// A finished setup without cinematic assets keeps saying it is ready, but names what is missing (#70/#75).
+NXTEST(summary_warns_when_cinematic_assets_are_missing) {
+    GameStatus s;
+    s.exefs = s.romfs = s.textures = s.shaders = s.setup_finished = true;
+    CHECK(s.summary() == L"Ready to play. Warning: cinematic movie and voice assets not found.");
+    s.movies = true;
+    CHECK(s.summary() == L"Ready to play. Warning: cinematic voice assets not found.");
+    s.voices = true;
     CHECK(s.summary() == L"Ready to play.");
 }
 
@@ -267,9 +279,13 @@ NXTEST(game_dir_finished_setup_is_ready_to_play) {
     write_file(t.path / L"romfs" / L"a.bin", "data");
     write_file(t.path / L"bc7_cache" / L"tex_0001.bc7", "bc7");
     write_file(t.path / L"shader_cache" / L"spirv" / L"s_0001.spv", "spv");
+    write_file(t.path / L"romfs" / L"movie" / L"m_0001.opus", "vid");   // so no cinematic warning is appended
+    write_file(t.path / L"romfs" / L"voice" / L"v_0001.opus", "aud");
     write_file(t.path / L"setup_state.tsv", kFinishedState);
     const GameStatus s = mprl::check_game_dir(t.str());
     CHECK(s.setup_finished);
+    CHECK(s.movies);
+    CHECK(s.voices);
     CHECK(s.ready());
     CHECK(s.summary() == L"Ready to play.");
 }

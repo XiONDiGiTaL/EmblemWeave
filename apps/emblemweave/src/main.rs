@@ -35,6 +35,7 @@ mod perf;
 mod performance;
 mod platform;
 mod portable;
+mod process;
 mod portraits;
 mod report;
 mod savefile;

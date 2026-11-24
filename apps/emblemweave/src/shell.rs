@@ -652,13 +652,14 @@ pub fn activity_window(app: &mut App, ctx: &egui::Context) {
                             if !stages.is_empty() {
                                 let done = stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Done | crate::jobs::StageStatus::Skipped)).count();
                                 widgets::progress_bar(ui, &p, Some(((done as f32 + stage_fraction) / stages.len() as f32).min(1.0)));
-                                let left = eta
-                                    .map(|d| format!("{} left", crate::jobs::short_eta(d)))
-                                    .unwrap_or_else(|| "estimating the time left".to_string());
+                                let elapsed_text = crate::jobs::clock(elapsed);
+                                let text = if let Some(d) = eta {
+                                    format!("{} elapsed · {} left", elapsed_text, crate::jobs::short_eta(d))
+                                } else {
+                                    format!("{} elapsed", elapsed_text)
+                                };
                                 ui.label(
-                                    crate::i18n::text(format!("{} elapsed · {left}", crate::jobs::clock(elapsed)))
-                                        .size(10.0)
-                                        .color(p.muted),
+                                    crate::i18n::text(text).size(10.0).color(p.muted),
                                 );
                                 for s in stages.iter().filter(|s| matches!(s.status, crate::jobs::StageStatus::Active | crate::jobs::StageStatus::Failed)) {
                                     let running = s.started.map(|t| crate::jobs::clock(t.elapsed())).unwrap_or_default();
