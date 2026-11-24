@@ -116,4 +116,16 @@ uint32_t watchdog_fire_count();
 void diag_add_report(std::string (*fn)());
 std::string diag_thread_dump();        // the dump text the watchdog produces, on demand (also used by the SIGUSR-style "dump_threads" file)
 
+// ---- memory snapshot -------------------------------------------------------------------------------------------------------
+// Captures a comprehensive memory and resource snapshot for long-session diagnostics (Issue #37).
+// Includes: process memory (working set, private bytes, commit, pagefile), all gauge readings,
+// VMA video memory budget/usage, NVN deferred destruction queue depth, thread registry, recent file ring.
+// Thread-safe, non-blocking (locks held briefly). Intended for before/after scene transition comparison.
+struct MemorySnapshot {
+    std::string text;   // formatted report
+};
+MemorySnapshot diag_memory_snapshot();   // captures and formats a full snapshot
+// Convenience: returns just the formatted text.
+std::string diag_memory_snapshot_text();
+
 }  // namespace nxrt

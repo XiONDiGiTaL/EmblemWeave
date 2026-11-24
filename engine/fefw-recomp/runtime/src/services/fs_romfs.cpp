@@ -767,14 +767,22 @@ struct RomfsImage::Impl {
     std::shared_ptr<const std::vector<uint8_t>> packed_content(uint32_t idx) const {
         if (auto hit = packed_cache.get(idx)) return hit;
         packed_cache.make_room(l.files[idx].pkg.size);
+
+        // For entries that might exceed the per-entry cap (too large to cache),
+        // acquire a permit to limit concurrent large decodes.
+        bool large_decode = l.files[idx].pkg.size > (kPackedEntryCap / 2);
+        if (large_decode) packed_cache.acquire_large_decode();
+
         std::vector<uint8_t> data;
         std::string err;
         if (!nup::read_file(l.package, l.files[idx].pkg, data, &err)) {
+            if (large_decode) packed_cache.release_large_decode();
             NXLOG_E("fs", "romfs: %s", err.c_str());
             return nullptr;
         }
         auto box = std::make_shared<const std::vector<uint8_t>>(std::move(data));
         if (!packed_cache.put(idx, box)) note_unretained(idx);
+        if (large_decode) packed_cache.release_large_decode();
         return box;
     }
 

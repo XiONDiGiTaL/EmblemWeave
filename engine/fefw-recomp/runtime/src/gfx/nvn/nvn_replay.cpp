@@ -30,6 +30,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/log.h"
+#include "nxrt/renderer_profiling.h"
 #include "api_dlss.h"
 #include "nvn_astc_gpu.h"
 #include "nvn_decoded.h"
@@ -1609,6 +1610,7 @@ void prepare_textures(const ProgLayout& pl) {
         }
     }
     if (need.empty() && need_storage.empty()) return;
+    nxrt::rp::RenderPhaseTimer upload_timer(nxrt::rp::phase::kUpload);
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
     for (Texture* t : need_storage) out_texture_read(t);
     end_pass(true);     // layout changes and uploads follow: each carries the dependency for its own image
@@ -5854,6 +5856,7 @@ void replay_begin_submit(Frame& f) {
 }
 
 void replay_lists(Frame& f, const std::vector<Ref<CmdList>>& lists) {
+    nxrt::rp::RenderPhaseTimer replay_timer(nxrt::rp::phase::kReplay);
     F = &f;
     RsScope rs(kRsAll);
     for (const Ref<CmdList>& l : lists)

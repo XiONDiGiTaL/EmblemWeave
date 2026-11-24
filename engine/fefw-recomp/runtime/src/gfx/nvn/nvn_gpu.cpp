@@ -33,6 +33,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
+#include "nxrt/renderer_profiling.h"
 #include "vk_gauges.h"
 #include "nvn_cmdq.h"
 #include "nvn_astc_gpu.h"
@@ -198,7 +199,10 @@ uint64_t read_completed() {
     return g->completed.load();
 }
 
-void drain_pending_destroy() {
+// Moves destructions queued for a scene transition onto the deferred list, where retire() runs them once their
+// submission has completed. Named separately from the public drain_pending_destroy() wrapper below so that the
+// wrapper cannot resolve back to itself.
+void absorb_pending_destroy() {
     std::vector<std::function<void()>> pend;
     {
         std::lock_guard<std::mutex> lk(g->dmu);
@@ -209,7 +213,7 @@ void drain_pending_destroy() {
 }
 
 void retire() {
-    drain_pending_destroy();
+    absorb_pending_destroy();
     const uint64_t done = read_completed();
     while (!g->deferred.empty() && g->deferred.front().serial <= done) {
         auto fn = std::move(g->deferred.front().fn);
@@ -269,6 +273,7 @@ void render_loop() {
     log_set_thread_name("nvn-render");
     diag_register_thread("nvn-render", nullptr);   // so the freeze watchdog and the stall sampler can see its stack
     nxrt::hitch_set_render_thread();
+    uint64_t frame_start_ns = nxrt::ft::now_ns();
     for (;;) {
         std::function<void()> job;
         {
@@ -280,6 +285,7 @@ void render_loop() {
             }
             if (!g->stop && g->queue.empty()) {
                 nxrt::HitchTimer ht(nxrt::kHpRenderIdle);      // the hitch line: the render thread waited for the game
+                nxrt::rp::RenderPhaseTimer idle_timer(nxrt::rp::phase::kIdle);
                 g->qcv.wait(lk, [] { return g->stop || !g->queue.empty() || batch_flush_wanted(); });
                 if (g->queue.empty() && !g->stop) continue;    // woken to flush
             }
@@ -293,7 +299,11 @@ void render_loop() {
             g_gauge_render_queue.sub(1);
         }
         try {
+            const uint64_t job_start = nxrt::ft::now_ns();
             job();
+            const uint64_t job_end = nxrt::ft::now_ns();
+            nxrt::rp::render_thread_stats().frame_cpu_ns.fetch_add(job_end - job_start, std::memory_order_relaxed);
+            nxrt::rp::render_thread_stats().frames.fetch_add(1, std::memory_order_relaxed);
         } catch (const std::exception& e) {
             NXLOG_E(kTag, "render job threw: %s", e.what());
         }
@@ -344,6 +354,7 @@ VkDescriptorPool new_dpool() {
 // submission on a Legion Go S, so 11 submissions a frame took 20 of its 25 ms. Render thread.
 void flush_batch() {
     if (g->batch.empty()) return;
+    NXRP_SUBMISSION_TIMER();
     std::vector<VkCommandBufferSubmitInfo> cbi(g->batch.size(), VkCommandBufferSubmitInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO});
     for (size_t i = 0; i < g->batch.size(); i++) cbi[i].commandBuffer = g->batch[i]->cb;
     const uint64_t serial = g->batch.back()->serial;
@@ -356,6 +367,9 @@ void flush_batch() {
     si.pCommandBufferInfos = cbi.data();
     si.signalSemaphoreInfoCount = 1;
     si.pSignalSemaphoreInfos = &sig;
+    // Accumulate submission stats
+    nxrt::rp::submission_stats().cmd_buffers.fetch_add(cbi.size(), std::memory_order_relaxed);
+    nxrt::rp::submission_stats().signal_semaphores.fetch_add(1, std::memory_order_relaxed);
     VkResult r;
     {
         nxrt::HitchTimer ht(nxrt::kHpRenderSubmit);
@@ -376,6 +390,8 @@ void flush_batch() {
     g->flushed_pub.store(serial);
     g->batch.clear();
     g->ctr.submits.fetch_add(1);
+    nxrt::rp::submission_stats().submits.fetch_add(1, std::memory_order_relaxed);
+    if (cbi.size() > 1) nxrt::rp::submission_stats().batched_submits.fetch_add(cbi.size() - 1, std::memory_order_relaxed);
 }
 
 std::atomic<uint64_t> g_splits{0};
@@ -455,6 +471,7 @@ void wait_serial_blocking(uint64_t serial) {
     if (!serial || read_completed() >= serial) return;
     if (serial > g->flushed && on_render_thread()) flush_batch();     // a serial still in the batch would never signal
     NXFT("gpu.wait");
+    NXRP_GPU_SYNC_TIMER(&nxrt::rp::gpu_sync_stats().timeline_wait_ns, &nxrt::rp::gpu_sync_stats().timeline_waits);
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
     wi.semaphoreCount = 1;
     wi.pSemaphores = &g->timeline;
@@ -1526,7 +1543,7 @@ void tear_down() {
             g_gauge_deferred.sub(1);
             fn();
         }
-        drain_pending_destroy();
+        absorb_pending_destroy();
         for (auto& d : gp->deferred) { d.fn(); g_gauge_deferred.sub(1); }
         gp->deferred.clear();
         gp->present.shutdown();
@@ -1567,6 +1584,11 @@ void tear_down() {
 
 }  // namespace
 
+// Public wrapper for drain_pending_destroy (declared in nvn_gpu_internal.h)
+void drain_pending_destroy() {
+    if (g) absorb_pending_destroy();
+}
+
 bool init_for_test(gfx::Device& dev, gfx::Renderer* renderer) { return bring_up(dev, renderer, nullptr, false); }
 void shutdown_for_test() { tear_down(); }
 
@@ -1577,6 +1599,8 @@ namespace nxrt::nvn {
 bool install_backend(const BackendDesc& desc) {
     if (!desc.device) return false;
     if (!be::gpu::bring_up(*desc.device, desc.renderer, desc.limiter, desc.keep_aspect)) return false;
+    // Initialize renderer profiling (reads [prof] renderer_profiling from config)
+    nxrt::rp::renderer_profiling_init();
     if (desc.register_entry_points) {
         install();
         register_all_impls();
@@ -1585,7 +1609,10 @@ bool install_backend(const BackendDesc& desc) {
     return true;
 }
 
-void shutdown_backend() { be::gpu::tear_down(); }
+void shutdown_backend() {
+    nxrt::rp::renderer_profiling_shutdown();
+    be::gpu::tear_down();
+}
 void present_last_frame_again() {
     if (be::gpu::active()) be::gpu::present_again();
 }
@@ -1599,6 +1626,10 @@ bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r) {
 bool backend_installed() { return be::gpu::active(); }
 void backend_flush_caches() {
     if (be::gpu::active()) be::gpu::flush_caches();
+}
+
+void backend_drain_deferred_destruction() {
+    if (be::gpu::active()) be::gpu::drain_pending_destroy();
 }
 
 void backend_trace_next_frame() {

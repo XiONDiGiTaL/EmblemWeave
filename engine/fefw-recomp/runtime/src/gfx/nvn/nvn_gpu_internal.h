@@ -104,6 +104,9 @@ uint64_t split_count();   // command buffers handed over early so far
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
 void defer_destroy(std::function<void()> fn);
+// Processes any pending deferred destructions queued from other threads. Call after scene transitions
+// to ensure GPU resources from the previous scene are released before loading the next scene.
+void drain_pending_destroy();
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
 uint64_t poll_completed();
 uint64_t current_serial();        // the serial of the submission being recorded (or the last one)

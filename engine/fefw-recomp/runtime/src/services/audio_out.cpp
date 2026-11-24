@@ -298,6 +298,10 @@ void Stream::shutdown() {
     halt();
     std::lock_guard<std::mutex> lk(mu_);
     release_all_locked();
+    // Purge expired weak_ptrs from the registry to prevent accumulation of dead stream references
+    Registry& r = registry();
+    std::lock_guard<std::mutex> rl(r.mu);
+    std::erase_if(r.streams, [](const std::weak_ptr<Stream>& w) { return w.expired(); });
 }
 
 void Stream::halt() {

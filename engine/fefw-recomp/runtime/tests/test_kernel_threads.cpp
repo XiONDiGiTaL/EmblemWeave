@@ -178,23 +178,39 @@ bool has_line(const std::vector<LogLine>& v, const std::string& needle, int leve
 // Console-model helpers.
 int bit_of(uint64_t m) { return m ? __builtin_ctzll(m) : -1; }
 
-// Expected band table, written from the scheduling model (six bands).
+// Expected band table, written from the scheduling model (six bands). sched_host_priority returns the platform's
+// band enum (nxrt::platform::ThreadPriority), not a Win32 THREAD_PRIORITY_* constant: the platform layer maps the band
+// to the OsPriority when it starts or re-prioritises a thread.
 int band_active(int nn) {
-    if (nn <= 4) return THREAD_PRIORITY_TIME_CRITICAL;
-    if (nn <= 8) return THREAD_PRIORITY_HIGHEST;
-    if (nn <= 15) return THREAD_PRIORITY_ABOVE_NORMAL;
-    if (nn == 16) return THREAD_PRIORITY_NORMAL;
-    if (nn == 17) return THREAD_PRIORITY_BELOW_NORMAL;
-    return THREAD_PRIORITY_LOWEST;
+    using P = nxrt::platform::ThreadPriority;
+    if (nn <= 4) return static_cast<int>(P::TimeCritical);
+    if (nn <= 8) return static_cast<int>(P::Highest);
+    if (nn <= 15) return static_cast<int>(P::AboveNormal);
+    if (nn == 16) return static_cast<int>(P::Normal);
+    if (nn == 17) return static_cast<int>(P::BelowNormal);
+    return static_cast<int>(P::Lowest);
 }
 
 // Expected table without the model, as sched.cpp has it.
 int band_inactive(int nn) {
-    if (nn <= 4) return THREAD_PRIORITY_HIGHEST;
-    if (nn <= 15) return THREAD_PRIORITY_ABOVE_NORMAL;
-    if (nn == 16) return THREAD_PRIORITY_NORMAL;
-    if (nn <= 27) return THREAD_PRIORITY_BELOW_NORMAL;
-    return THREAD_PRIORITY_LOWEST;
+    using P = nxrt::platform::ThreadPriority;
+    if (nn <= 4) return static_cast<int>(P::Highest);
+    if (nn <= 15) return static_cast<int>(P::AboveNormal);
+    if (nn == 16) return static_cast<int>(P::Normal);
+    if (nn <= 27) return static_cast<int>(P::BelowNormal);
+    return static_cast<int>(P::Lowest);
+}
+
+// The Win32 thread priority the platform layer sets for a band (platform/win32/thread.cpp).
+int win32_of_band(int band) {
+    switch (static_cast<nxrt::platform::ThreadPriority>(band)) {
+        case nxrt::platform::ThreadPriority::TimeCritical: return THREAD_PRIORITY_TIME_CRITICAL;
+        case nxrt::platform::ThreadPriority::Highest: return THREAD_PRIORITY_HIGHEST;
+        case nxrt::platform::ThreadPriority::AboveNormal: return THREAD_PRIORITY_ABOVE_NORMAL;
+        case nxrt::platform::ThreadPriority::Normal: return THREAD_PRIORITY_NORMAL;
+        case nxrt::platform::ThreadPriority::BelowNormal: return THREAD_PRIORITY_BELOW_NORMAL;
+        default: return THREAD_PRIORITY_LOWEST;
+    }
 }
 
 // Guest function bodies.
@@ -803,14 +819,15 @@ NXTEST(started_thread_win32_priority_follows_bands) {
         auto t = thread_of(hs[i]);
         if (!t || !nxrt::platform::thread_native_handle(t->host_thread)) continue;
         const int got = GetThreadPriority(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t->host_thread)));
-        CHECK_EQ(got, static_cast<int>(k::sched_host_priority(prios[i])));
-        if (k::sched_info().active) CHECK_EQ(got, band_active(prios[i] - 28));
+        CHECK_EQ(got, win32_of_band(static_cast<int>(k::sched_host_priority(prios[i]))));
+        if (k::sched_info().active) CHECK_EQ(got, win32_of_band(band_active(prios[i] - 28)));
     }
     // A running thread changes band with thread_set_priority.
     auto t0 = thread_of(hs[0]);
     if (t0) {
         CHECK(k::thread_set_priority(*t0, 28 + 17));
-        CHECK_EQ(GetThreadPriority(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t0->host_thread))), static_cast<int>(k::sched_host_priority(28 + 17)));
+        CHECK_EQ(GetThreadPriority(static_cast<HANDLE>(nxrt::platform::thread_native_handle(t0->host_thread))),
+                 win32_of_band(static_cast<int>(k::sched_host_priority(28 + 17))));
     }
     g_release = true;
     for (int i = 0; i < 6; i++)

@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <semaphore>
 
 namespace nxrt::services::fs {
 
@@ -23,9 +24,15 @@ public:
         uint64_t peak = 0;
         uint64_t evictions = 0;
         uint64_t skipped = 0;
+        uint64_t large_decode_waits = 0;
     };
 
-    PackedCache(uint64_t budget, uint64_t entry_cap) : budget_(budget), entry_cap_(entry_cap) {}
+    // Max concurrent decodes of entries that exceed the per-entry cap (too large to cache).
+    // Limits memory pressure during scene transitions with multiple large voice banks.
+    static constexpr int kMaxConcurrentLargeDecodes = 2;
+
+    PackedCache(uint64_t budget, uint64_t entry_cap)
+        : budget_(budget), entry_cap_(entry_cap), large_decode_sem_(kMaxConcurrentLargeDecodes) {}
 
     // Returns the cached copy and marks it most recently used, or null.
     std::shared_ptr<const std::vector<uint8_t>> get(uint32_t idx) {
@@ -82,7 +89,22 @@ public:
 
     Stats stats() const {
         std::lock_guard<std::mutex> lk(mu_);
-        return Stats{entries_.size(), bytes_, peak_, evictions_, skipped_};
+        return Stats{entries_.size(), bytes_, peak_, evictions_, skipped_, large_decode_waits_};
+    }
+
+    // Acquires a permit for decoding a large entry (size > entry_cap_).
+    // Blocks if the maximum concurrent large decodes limit is reached.
+    // Returns true when the permit is acquired.
+    bool acquire_large_decode() {
+        large_decode_sem_.acquire();
+        std::lock_guard<std::mutex> lk(mu_);
+        ++large_decode_waits_;
+        return true;
+    }
+
+    // Releases a permit after a large entry decode is complete.
+    void release_large_decode() {
+        large_decode_sem_.release();
     }
 
 private:
@@ -118,6 +140,8 @@ private:
     uint64_t tick_ = 0;
     uint64_t evictions_ = 0;
     uint64_t skipped_ = 0;
+    uint64_t large_decode_waits_ = 0;
+    std::counting_semaphore<kMaxConcurrentLargeDecodes> large_decode_sem_;
 };
 
 }  // namespace nxrt::services::fs

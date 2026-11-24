@@ -382,6 +382,26 @@ void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
         vmaGetHeapBudgets(a, b);
         return static_cast<int64_t>(b[heap].budget >> 20);
     });
+    // Video memory pressure: percentage of the OS budget currently used by this process.
+    // Sampled at most every 250 ms (same as video_usage_percent). Available for [diag] soak_csv.
+    nxrt::gauge_register("vma.pressure_percent", [a, heap] {
+        VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
+        vmaGetHeapBudgets(a, b);
+        if (b[heap].budget == 0) return static_cast<int64_t>(-1);
+        return static_cast<int64_t>(b[heap].usage * 100 / b[heap].budget);
+    });
+    // Live video memory pressure: same as pressure_percent but excludes free space inside VMA blocks
+    // that will be reused by the next allocation (matching video_live_percent).
+    nxrt::gauge_register("vma.live_pressure_percent", [a, heap] {
+        VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
+        vmaGetHeapBudgets(a, b);
+        if (b[heap].budget == 0) return static_cast<int64_t>(-1);
+        const uint64_t free_in_blocks = b[heap].statistics.blockBytes > b[heap].statistics.allocationBytes
+                                            ? b[heap].statistics.blockBytes - b[heap].statistics.allocationBytes
+                                            : 0;
+        const uint64_t live = b[heap].usage > free_in_blocks ? b[heap].usage - free_in_blocks : 0;
+        return static_cast<int64_t>(live * 100 / b[heap].budget);
+    });
     nxrt::gauge_register("vma.alloc_count", [a, cache] { return static_cast<int64_t>(vma_totals(a, *cache).total.statistics.allocationCount); });
     nxrt::gauge_register("vma.alloc_mb", [a, cache] { return static_cast<int64_t>(vma_totals(a, *cache).total.statistics.allocationBytes >> 20); });
     nxrt::gauge_register("vma.block_count", [a, cache] { return static_cast<int64_t>(vma_totals(a, *cache).total.statistics.blockCount); });
@@ -397,7 +417,8 @@ void unregister_vma_gauges() {
         g_video_heap = -1;
         g_guard_heap = -1;
     }
-    const char* const names[] = {"vma.device_usage_mb", "vma.device_budget_mb", "vma.alloc_count", "vma.alloc_mb", "vma.block_count", "vma.block_mb"};
+    const char* const names[] = {"vma.device_usage_mb", "vma.device_budget_mb", "vma.pressure_percent", "vma.live_pressure_percent",
+                               "vma.alloc_count", "vma.alloc_mb", "vma.block_count", "vma.block_mb"};
     for (const char* n : names) nxrt::gauge_unregister(n);
 }
 

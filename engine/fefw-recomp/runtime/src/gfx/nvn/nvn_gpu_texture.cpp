@@ -35,6 +35,7 @@
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/write_watch.h"
+#include "nxrt/renderer_profiling.h"
 #include "vk_gauges.h"
 #include "nvn_enums.h"
 #include "nvn_format.h"
@@ -974,6 +975,8 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     }
     g_live_images.fetch_add(1);
     counters().textures_created.fetch_add(1);
+    nxrt::rp::texture_lifecycle_stats().created.fetch_add(1, std::memory_order_relaxed);
+    nxrt::rp::texture_lifecycle_stats().est_bytes.fetch_add(g->est_bytes, std::memory_order_relaxed);
     return g;
 }
 
@@ -1012,6 +1015,7 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
             t->gpu = ag;
             ++ag->refs;
             if (ag->uploaded || ag->gpu_written) t->cpu_dirty.store(false);
+            nxrt::rp::texture_lifecycle_stats().pool_hits.fetch_add(1, std::memory_order_relaxed);
             static int logged = 0;
             if (logged++ < 20) NXLOG_I(kTag, "texture %u shares the image of texture %u (the same storage)", t->id, alias->id);
             return ag;
@@ -1019,6 +1023,9 @@ TexGpu* tex_or_null(Texture* t, float want_scale = 1.0f) {
     }
     NXFT_MIN("tex.create", 30000);
     TexGpu* g = create_texture_gpu(t, want_scale);
+    if (g && !g->failed) {
+        nxrt::rp::texture_lifecycle_stats().pool_misses.fetch_add(1, std::memory_order_relaxed);
+    }
     return g->failed ? nullptr : g;
 }
 
@@ -1075,6 +1082,14 @@ void move_layout(Frame& f, TexGpu& g, VkImageLayout to) {
 
 // Copies buffer regions (already offset to the staging buffer) into every level of the image, then leaves it readable by shaders.
 void copy_regions_to_image(Frame& f, TexGpu& g, VkBuffer buf, const std::vector<VkBufferImageCopy>& regions) {
+    NXRP_UPLOAD_TIMER(nxrt::rp::resource_upload_stats().copy_ns);
+    uint64_t bytes = 0;
+    for (const auto& r : regions) bytes += r.imageExtent.width * r.imageExtent.height * r.imageExtent.depth;
+    nxrt::rp::resource_upload_stats().staging_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    nxrt::rp::resource_upload_stats().staging_allocs.fetch_add(1, std::memory_order_relaxed);
+    nxrt::rp::texture_lifecycle_stats().upload_count.fetch_add(1, std::memory_order_relaxed);
+    nxrt::rp::texture_lifecycle_stats().upload_bytes.fetch_add(bytes, std::memory_order_relaxed);
+
     move_layout(f, g, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     vkCmdCopyBufferToImage(f.cb, buf, g.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
     move_layout(f, g, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1168,6 +1183,7 @@ void sparse_update(Texture* t, TexGpu& g, Frame& f) {
         const uint8_t* data = lin.data();
         uint64_t bytes = lin.size();
         if (g.transcoded) {
+            NXRP_UPLOAD_TIMER(nxrt::rp::texture_lifecycle_stats().transcoded_ns);
             in.width = w;
             in.height = h;
             out.resize(static_cast<size_t>(a2b_output_size(&in)));
@@ -1175,6 +1191,7 @@ void sparse_update(Texture* t, TexGpu& g, Frame& f) {
             if (a2b_transcode(&in, lin.data(), lin.size(), &opt, &of, out.data(), out.size(), nullptr) != A2B_OK) return false;
             data = out.data();
             bytes = out.size();
+            nxrt::rp::texture_lifecycle_stats().transcoded.fetch_add(1, std::memory_order_relaxed);
         }
         staged += bytes;
         UploadAlloc st = f.staging(bytes);
@@ -3194,9 +3211,11 @@ void tex_destroy(TexGpu* g) {
     if (g->img) g_live_images.fetch_sub(1);
     device().destroy_image(g->img);
     if (g->sparse) {
+        nxrt::rp::texture_lifecycle_stats().sparse_binds.fetch_add(1, std::memory_order_relaxed);
         for (VkDeviceMemory m : g->sparse->chunks) vkFreeMemory(vkdev(), m, nullptr);
         delete g->sparse;
     }
+    nxrt::rp::texture_lifecycle_stats().destroyed.fetch_add(1, std::memory_order_relaxed);
     delete g;
 }
 

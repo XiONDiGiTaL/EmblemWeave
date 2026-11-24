@@ -200,8 +200,15 @@ struct PrewarmStats {
     uint64_t recorded = 0, loaded = 0, queued = 0, built = 0, taken = 0, waited = 0, claimed = 0, skipped_busy = 0;
     uint64_t failed = 0, promoted = 0, linked_meanwhile = 0;   // builds that failed; jobs moved ahead by a program set; draws linked while the whole build ran
     double wait_ms = 0;
+    uint64_t bounded_drops = 0;    // keys dropped due to queue bound
+    uint64_t metadata_lookups = 0; // metadata lookups performed
+    uint64_t metadata_hits = 0;    // metadata hits (frequency > 1)
 };
 PrewarmStats prewarm_stats();
+// Note a key request at draw time for prewarm metadata tracking (recency/frequency priority).
+void prewarm_note_key_request(const GraphicsKey& key);
+// Update prewarm frame counter and re-prioritize queue (called once per presented frame).
+void prewarm_update_frame(uint64_t frame);
 // `ints`: samplers that read integer textures (spirv_int_samplers); null when that variant cannot be made (the caller then uses the
 // translated module with float views).
 VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, const std::vector<SpvIntSampler>& ints = {});

@@ -27,6 +27,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/renderer_profiling.h"
 #include "astc2bc7.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_texdata.h"
@@ -1187,6 +1188,7 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
     if (last) {
         ++s.n_tex;
         g_transcodes.fetch_add(1, std::memory_order_relaxed);
+        nxrt::rp::texture_lifecycle_stats().transcoded.fetch_add(1, std::memory_order_relaxed);
         if (w.rb) {                       // what cache_store_encoded needs: the format, the level table, the cache file and key (not the blocks)
             store_rb = w.rb;
             w.rb = gfx::Buffer{};

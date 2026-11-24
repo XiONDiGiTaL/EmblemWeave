@@ -24,6 +24,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/renderer_profiling.h"
 #include "nvn_enums.h"
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
@@ -235,6 +236,8 @@ bool lower_f64_for_module(const std::vector<uint32_t>& words, const char* what, 
 // A module for SPIR-V words. The translator declares OpCapability Float64 in every module although no module uses a 64-bit float;
 // devices without shaderFloat64 (Intel iGPUs) reject that, so the capability is dropped when no OpTypeFloat 64 exists.
 static VkShaderModule create_module(const std::vector<uint32_t>& words, const char* what) {
+    // Shader translation timing (patching, lowering, etc.)
+    NXRP_SHADER_TIMER(nxrt::rp::shader_translation_stats().total_ns);
     std::vector<uint32_t> fixed;
     std::vector<uint32_t> lowered;
     const std::vector<uint32_t>* code = &words;
@@ -308,11 +311,17 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
     ci.codeSize = code->size() * 4;
     ci.pCode = code->data();
     VkShaderModule m = VK_NULL_HANDLE;
-    const VkResult r = vkCreateShaderModule(vkdev(), &ci, nullptr, &m);
-    if (r != VK_SUCCESS) {
-        NXLOG_E(kTag, "vkCreateShaderModule failed (%d) for %s", static_cast<int>(r), what);
-        return m;
+
+    // vkCreateShaderModule timing
+    {
+        NXRP_SHADER_TIMER(nxrt::rp::shader_translation_stats().create_module_ns);
+        const VkResult r = vkCreateShaderModule(vkdev(), &ci, nullptr, &m);
+        if (r != VK_SUCCESS) {
+            NXLOG_E(kTag, "vkCreateShaderModule failed (%d) for %s", static_cast<int>(r), what);
+            return m;
+        }
     }
+
     uint64_t id = 1469598103934665603ull ^ (static_cast<uint64_t>(code->size()) * 0x9e3779b97f4a7c15ull);
     for (uint32_t w : *code) id = (id ^ w) * 1099511628211ull;
     {
@@ -330,7 +339,12 @@ VkShaderModule shader_module(const ShaderInfo* s) {
     if (!s) return VK_NULL_HANDLE;
     std::lock_guard<std::recursive_mutex> lk(g_module_mu);
     auto it = g_modules.find(s);
-    if (it != g_modules.end()) return it->second;
+    if (it != g_modules.end()) {
+        nxrt::rp::shader_translation_stats().cache_hits.fetch_add(1, std::memory_order_relaxed);
+        return it->second;
+    }
+    nxrt::rp::shader_translation_stats().cache_misses.fetch_add(1, std::memory_order_relaxed);
+    nxrt::rp::shader_translation_stats().translations.fetch_add(1, std::memory_order_relaxed);
     VkShaderModule m = create_module(s->spirv, s->hash.c_str());
     g_modules[s] = m;
     return m;
@@ -1021,7 +1035,9 @@ void configure_guest_subgroup(VkPipelineShaderStageCreateInfo& stage,
 
 VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
-    const auto t0 = std::chrono::steady_clock::now();
+    NXRP_PIPELINE_TIMER(&nxrt::rp::pipeline_creation_stats().graphics_total_ns,
+                         &nxrt::rp::pipeline_creation_stats().graphics_max_ns,
+                         &nxrt::rp::pipeline_creation_stats().graphics_created);
 
     VkPipelineShaderStageCreateInfo stages[5] = {};
     uint32_t ns = 0;
@@ -1122,33 +1138,35 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     gi.layout = layout.layout;
     VkPipeline pipe = VK_NULL_HANDLE;
     const VkResult r = create_graphics_pipeline_tracked(vkdev(), g_cache, &gi, &pipe);
-    const double ms_taken = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (r != VK_SUCCESS) {
+        nxrt::rp::pipeline_creation_stats().graphics_failed.fetch_add(1, std::memory_order_relaxed);
         NXLOG_E(kTag, "graphics pipeline failed (%d): vs %s fs %s, %u colour targets", static_cast<int>(r), key.stage[0] ? key.stage[0]->hash.c_str() : "-",
                 key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.color_count);
         pipe = VK_NULL_HANDLE;
     } else {
         counters().pipelines_created.fetch_add(1);
         g_cache_dirty.store(true, std::memory_order_relaxed);
-    g_new_since_save.fetch_add(1, std::memory_order_relaxed);
+        g_new_since_save.fetch_add(1, std::memory_order_relaxed);
         g_pipes_created.add(1);
-        NXLOG_D(kTag, "graphics pipeline created in %.1f ms (vs %s fs %s)", ms_taken, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
-                key.stage[1] ? key.stage[1]->hash.c_str() : "-");
     }
     return pipe;
 }
 
 VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
+    nxrt::rp::RenderPhaseTimer pipeline_timer(nxrt::rp::phase::kPipeline);
     ensure_cache();
+    prewarm_note_key_request(key);  // Update metadata for priority queue
     const uint64_t h = key.hash();
     auto& bucket = g_gfx[h];
     for (auto& e : bucket)
         if (e.first == key) {
+            nxrt::rp::pipeline_creation_stats().cache_hits.fetch_add(1, std::memory_order_relaxed);
             counters().pipeline_cache_hits.fetch_add(1, std::memory_order_relaxed);
             if (e.up && e.up->state.load(std::memory_order_acquire) != 0) gpl_take_upgrade(e.second, e.alt, e.up);
             if (e.alt && gpl_ab_whole()) return e.alt;
             return e.second;
         }
+    nxrt::rp::pipeline_creation_stats().cache_misses.fetch_add(1, std::memory_order_relaxed);
     prewarm_init();
     VkPipeline pipe = VK_NULL_HANDLE;
     std::shared_ptr<PipeUpgrade> later;          // the key file's whole pipeline, still being built: it replaces the linked one
@@ -1160,6 +1178,7 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     if (prewarm_take(key, &pipe, [&] { return gpl_ready(key, layout); }, &later, (!prewarm_wait && gpl_frames_flowing()) ? &busy : nullptr)) {
         ++g_pipeline_count;
         g_gfx_keys.add(1);
+        nxrt::rp::pipeline_creation_stats().prewarm_taken.fetch_add(1, std::memory_order_relaxed);
         bucket.push_back({key, pipe, VK_NULL_HANDLE, nullptr});
         return pipe;
     }
@@ -1168,6 +1187,9 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     bool pending = false;
     pipe = gpl_link(key, layout, later ? nullptr : &up, &pending); // linked from shader parts compiled ahead (null: not eligible or a part failed)
     if (later) up = later;
+    if (pipe) {
+        nxrt::rp::pipeline_creation_stats().linked_from_parts.fetch_add(1, std::memory_order_relaxed);
+    }
     prewarm_record(key);                         // every key a draw asked for: the next run builds it from boot
     if (pending && !later) return VK_NULL_HANDLE;   // its parts are compiling in the background: the draw is skipped, the next one asks again
     g_gfx_keys.add(1);                           // every path below adds one entry to the bucket
@@ -1213,6 +1235,9 @@ static VkShaderModule int_sampler_module(const ShaderInfo* cs, const std::vector
 // One compute pipeline (any thread: the render thread at a dispatch, or a pipeline-library thread for compute_prebuild).
 static VkPipeline create_compute(const ShaderInfo* cs, VkPipelineLayout layout, VkShaderModule m) {
     ensure_cache();
+    NXRP_PIPELINE_TIMER(&nxrt::rp::pipeline_creation_stats().compute_total_ns,
+                         &nxrt::rp::pipeline_creation_stats().compute_max_ns,
+                         &nxrt::rp::pipeline_creation_stats().compute_created);
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, ubo_robustness()};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, ubo_robustness()};
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -1231,6 +1256,7 @@ static VkPipeline create_compute(const ShaderInfo* cs, VkPipelineLayout layout, 
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
     compiles_in_flight().fetch_sub(1, std::memory_order_relaxed);
     if (cr != VK_SUCCESS) {
+        nxrt::rp::pipeline_creation_stats().compute_failed.fetch_add(1, std::memory_order_relaxed);
         NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
         return VK_NULL_HANDLE;
     }
@@ -1324,7 +1350,11 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, cons
     for (const SpvIntSampler& s : ints) ikey.push_back(s.set << 17 | s.binding << 1 | (s.is_signed ? 1u : 0u));
     const auto k = std::make_tuple(cs, layout.layout, ikey);
     auto it = g_compute.find(k);
-    if (it != g_compute.end()) return it->second;
+    if (it != g_compute.end()) {
+        nxrt::rp::pipeline_creation_stats().cache_hits.fetch_add(1, std::memory_order_relaxed);
+        return it->second;
+    }
+    nxrt::rp::pipeline_creation_stats().cache_misses.fetch_add(1, std::memory_order_relaxed);
     if (ints.empty() && compute_async_mode()) {  // built ahead (compute_prebuild)?
         std::unique_lock<std::mutex> lk(g_comp_mu);
         auto jt = g_comp_jobs.find(cs);

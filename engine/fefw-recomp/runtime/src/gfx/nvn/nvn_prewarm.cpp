@@ -66,6 +66,36 @@ struct Job {
     std::shared_ptr<PipeUpgrade> up;        // a draw linked the key from parts meanwhile: the whole pipeline goes here and replaces that one
 };
 
+// Metadata for bounded prewarm queue: tracks recency and frequency for priority.
+struct KeyMetadata {
+    uint64_t digest = 0;
+    uint32_t frequency = 0;                 // how many times this key was requested
+    uint64_t last_request_frame = 0;        // last frame this key was requested (for recency)
+    uint64_t first_seen_frame = 0;          // when this key was first seen
+    float priority_score = 0.0f;            // computed priority (higher = more important)
+
+    void update_priority(uint64_t current_frame, float decay = 0.99f) {
+        // Priority = frequency * recency_weight + recency_bonus
+        // Recency: more recent = higher priority. decay is [nvn] prewarm_recency_decay (0.99: about 1% a frame).
+        const uint64_t age = (current_frame > last_request_frame) ? (current_frame - last_request_frame) : 0;
+        const float per_frame = std::clamp(1.0f - decay, 0.0f, 1.0f);
+        const float recency_weight = 1.0f / (1.0f + static_cast<float>(age) * per_frame);
+        priority_score = static_cast<float>(frequency) * recency_weight + recency_weight * 100.0f;
+    }
+};
+
+// Bounded prewarm queue configuration
+struct PrewarmQueueConfig {
+    size_t max_queue_size = 5000;           // maximum queued keys (bounded)
+    size_t max_workers = 2;                 // max worker threads
+    bool metadata_priority = true;          // use metadata for priority
+    float recency_decay = 0.99f;            // decay factor per frame
+};
+
+static PrewarmQueueConfig g_queue_config;
+static std::unordered_map<uint64_t, KeyMetadata> g_key_metadata;
+static uint64_t g_current_frame = 0;
+
 std::mutex g_mu;
 std::condition_variable g_cv;
 bool g_inited = false, g_enabled = true, g_stop = false;
@@ -314,6 +344,12 @@ void prewarm_init() {
             g_enabled = false;
             return;
         }
+        // Read bounded queue configuration
+        g_queue_config.max_queue_size = static_cast<size_t>(config_get_int("nvn", "prewarm_max_queue", 5000));
+        g_queue_config.max_workers = static_cast<size_t>(config_get_int("nvn", "prewarm_max_workers", 2));
+        g_queue_config.metadata_priority = config_get_bool("nvn", "prewarm_metadata_priority", true);
+        g_queue_config.recency_decay = static_cast<float>(config_get_double("nvn", "prewarm_recency_decay", 0.99));
+
         load_file();
         // [nvn] prewarm_boot = false: a key waits until the game sets one of its shaders (the old behaviour)
         const bool boot = config_get_bool("nvn", "prewarm_boot", true);
@@ -324,6 +360,12 @@ void prewarm_init() {
             j->digest = digest_of(j->rec.h, j->rec.rest);
             g_rec_jobs[i] = j;
             g_jobs[j->digest].push_back(j);
+            // Initialize metadata for loaded keys
+            if (g_queue_config.metadata_priority) {
+                KeyMetadata& meta = g_key_metadata[j->digest];
+                meta.digest = j->digest;
+                meta.first_seen_frame = g_current_frame;
+            }
             if (boot) {
                 j->in_queue = true;
                 g_queue.push_back(j);
@@ -334,10 +376,12 @@ void prewarm_init() {
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
         // Two workers by default: a 24-thread laptop used to start four, all at full clock, beside the game's own threads. A
         // recorded pipeline that is not prewarmed yet is built at its first draw, which is the cost this trades against (#10).
-        const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 8, 1, 2));
+        const int64_t want = std::min<int64_t>(config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 8, 1, 2)), g_queue_config.max_workers);
         for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
         g_saver = std::thread(saver_main);
-        NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; %s", g_recs.size(), g_path.c_str(), g_workers.size(),
+        NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads (max %zu), queue bound %zu, metadata priority %s; %s",
+                g_recs.size(), g_path.c_str(), g_workers.size(), g_queue_config.max_workers, g_queue_config.max_queue_size,
+                g_queue_config.metadata_priority ? "on" : "off",
                 boot ? "all queued from boot, in the order they were first used" : "each queued when the game sets one of its shaders ([nvn] prewarm_boot is false)");
     }
     for (const Rec& r : parts) queue_parts(r, false);           // outside g_mu: the pipeline-library side takes its own lock
@@ -353,11 +397,81 @@ void prewarm_record(const GraphicsKey& key) {
     if (!rec_of(key, &r)) return;                               // the record has no room for tessellation stages
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_enabled) return;
-    if (g_recs.size() >= kMaxRecords || !g_digests.insert(digest_of(r.h, r.rest)).second) return;
+    uint64_t digest = digest_of(r.h, r.rest);
+    if (g_recs.size() >= kMaxRecords || !g_digests.insert(digest).second) return;
     g_recs.push_back(r);
     g_rec_jobs.push_back(nullptr);                              // built or linked at its draw this session
+    // Initialize metadata for new key
+    if (g_queue_config.metadata_priority) {
+        KeyMetadata& meta = g_key_metadata[digest];
+        meta.digest = digest;
+        meta.first_seen_frame = g_current_frame;
+    }
     ++g_stats.recorded;
     append_record(r);
+}
+
+// Update frame counter and re-prioritize queue based on metadata
+void prewarm_update_frame(uint64_t frame) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_current_frame = frame;
+    if (!g_queue_config.metadata_priority || g_queue.empty()) return;
+
+    // Update priority scores for all queued jobs
+    std::vector<std::shared_ptr<Job>> jobs;
+    jobs.reserve(g_queue.size());
+    for (const auto& j : g_queue) {
+        if (j->state == 0) {  // only queued jobs
+            auto it = g_key_metadata.find(j->digest);
+            if (it != g_key_metadata.end()) {
+                it->second.update_priority(g_current_frame, g_queue_config.recency_decay);
+            }
+            jobs.push_back(j);
+        }
+    }
+
+    // Sort by priority (highest first) if metadata priority is enabled
+    if (jobs.size() > 1) {
+        std::sort(jobs.begin(), jobs.end(), [](const auto& a, const auto& b) {
+            auto it_a = g_key_metadata.find(a->digest);
+            auto it_b = g_key_metadata.find(b->digest);
+            float p_a = (it_a != g_key_metadata.end()) ? it_a->second.priority_score : 0.0f;
+            float p_b = (it_b != g_key_metadata.end()) ? it_b->second.priority_score : 0.0f;
+            return p_a > p_b;
+        });
+
+        // Rebuild queue with priority order
+        g_queue.clear();
+        for (const auto& j : jobs) {
+            g_queue.push_back(j);
+        }
+    }
+
+    // Enforce bounded queue size: drop lowest priority entries
+    while (g_queue.size() > g_queue_config.max_queue_size) {
+        auto it = g_queue.end();
+        --it;
+        (*it)->in_queue = false;
+        g_queue.pop_back();
+        ++g_stats.bounded_drops;
+    }
+}
+
+// Called when a draw requests a pipeline key - updates metadata for priority
+void prewarm_note_key_request(const GraphicsKey& key) {
+    Rec r;
+    if (!rec_of(key, &r)) return;
+    uint64_t digest = digest_of(r.h, r.rest);
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_enabled || g_stop) return;
+    KeyMetadata& meta = g_key_metadata[digest];
+    meta.digest = digest;
+    ++meta.frequency;
+    meta.last_request_frame = g_current_frame;
+    if (meta.first_seen_frame == 0) meta.first_seen_frame = g_current_frame;
+    meta.update_priority(g_current_frame, g_queue_config.recency_decay);
+    ++g_stats.metadata_lookups;
+    if (meta.frequency > 1) ++g_stats.metadata_hits;
 }
 
 size_t prewarm_program(const ShaderInfo* const stages[6]) {
@@ -383,6 +497,14 @@ size_t prewarm_program(const ShaderInfo* const stages[6]) {
                 ++g_stats.promoted;
                 ahead.push_back(j->rec);
             }
+        }
+        // Enforce queue bound after promotion
+        while (g_queue.size() > g_queue_config.max_queue_size) {
+            auto it = g_queue.end();
+            --it;
+            (*it)->in_queue = false;
+            g_queue.pop_back();
+            ++g_stats.bounded_drops;
         }
     }
     if (ahead.empty()) return 0;

@@ -21,6 +21,7 @@
 #include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/game.h"
+#include "nxrt/gauge.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
@@ -38,7 +39,15 @@ constexpr const char* kTag = "gfx";
 
 // begin_frame's waits for the slot's fence and for a swapchain image: bounded, so a GPU or compositor that stops answering costs skipped
 // frames (and, after kStallRecreate in a row, a new swapchain) instead of a frozen window.
-constexpr uint64_t kFrameWaitNs = 1'000'000'000ull;
+// [gfx] frame_wait_ms (default 1000): timeout in milliseconds for vkWaitForFences and vkAcquireNextImageKHR.
+// Increase if the GPU occasionally takes longer under load (e.g., during scene transitions with heavy resource loading).
+uint64_t frame_wait_ns() {
+    static const uint64_t ns = [] {
+        const int64_t ms = nxrt::config_get_int("gfx", "frame_wait_ms", 1000);
+        return static_cast<uint64_t>(std::max<int64_t>(100, ms)) * 1'000'000ull;
+    }();
+    return ns;
+}
 constexpr uint32_t kStallRecreate = 3;
 
 // What the device-lost report says about the GPU and the presentation (set with each new swapchain): reports from players of GPUs we
@@ -61,23 +70,69 @@ const char* window_mode_name() {
     if (once.exchange(true)) {
         for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));   // another thread is writing the report and ending the process
     }
-    char b[512];
-    std::snprintf(b, sizeof b,
-                  "GPU DEVICE LOST (reason: VK_ERROR_DEVICE_LOST)\n  %s returned %d after %llu presented frames: the graphics driver reset or removed the device\n"
-                  "  (a driver crash or timeout, an out-of-video-memory condition, or a GPU hang). The game was stopped.\n",
-                  where, static_cast<int>(r), static_cast<unsigned long long>(frames));
-    std::string text = b;
+
+    // Gather extended diagnostics before terminating
+    std::string text;
+    {
+        char b[512];
+        std::snprintf(b, sizeof b,
+                      "GPU DEVICE LOST (reason: VK_ERROR_DEVICE_LOST)\n  %s returned %d after %llu presented frames: the graphics driver reset or removed the device\n"
+                      "  (a driver crash or timeout, an out-of-video-memory condition, or a GPU hang). The game was stopped.\n",
+                      where, static_cast<int>(r), static_cast<unsigned long long>(frames));
+        text = b;
+    }
+
+    // Video memory pressure diagnostics
+    {
+        uint64_t budget = video_budget_bytes();
+        int usage_pct = video_usage_percent();
+        int live_pct = video_live_percent();
+        char buf[256];
+        if (budget > 0) {
+            std::snprintf(buf, sizeof buf,
+                          "  Video memory: %.2f / %.2f GiB (%.0f%% of OS budget, %.0f%% live)\n",
+                          static_cast<double>(budget * usage_pct / 100) / (1024.0 * 1024.0 * 1024.0),
+                          static_cast<double>(budget) / (1024.0 * 1024.0 * 1024.0),
+                          static_cast<double>(usage_pct),
+                          static_cast<double>(live_pct >= 0 ? live_pct : 0));
+        } else {
+            std::snprintf(buf, sizeof buf,
+                          "  Video memory: budget unknown (no device or VK_EXT_memory_budget not available)\n");
+        }
+        text += buf;
+    }
+
+    // NVN deferred destruction queue depth, Vulkan object counts, and video memory pressure
+    {
+        auto gauges = gauge_read_all();
+        for (const auto& [name, value] : gauges) {
+            if (name == "nvn.deferred_destroy" || name == "vk.memory_allocs" || name == "vk.memory_bytes" ||
+                name == "vk.images" || name == "vk.buffers" || name == "vk.pipelines" ||
+                name == "vk.descriptor_sets" || name == "vk.command_pools" || name == "vk.fences" ||
+                name == "vk.semaphores" || name == "vma.pressure_percent" || name == "vma.live_pressure_percent") {
+                char buf[128];
+                std::snprintf(buf, sizeof buf, "  %s: %lld\n", name.c_str(), static_cast<long long>(value));
+                text += buf;
+            }
+        }
+    }
+
+    // Context from the back end (GPU info, window mode, etc.)
     {
         std::lock_guard<std::mutex> lk(g_lost_ctx_mu);
         if (!g_lost_ctx.empty()) text += g_lost_ctx;
     }
+
     text += frames == 0
-                ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
-                  "(windowed, say), use another (F1 > Display) and tell us which works; [gfx] gpu in fefw.ini picks another GPU.\n"
-                : "  What to try: update the graphics driver; on a GPU that shares system memory (laptop, handheld) lower the render scale "
-                  "or the texture quality. Please attach this file and fefw.log to an issue.\n";
+            ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
+              "(windowed, say), use another (F1 > Display) and tell us which works; [gfx] gpu in fefw.ini picks another GPU.\n"
+            : "  What to try: update the graphics driver; on a GPU that shares system memory (laptop, handheld) lower the render scale "
+              "or the texture quality. Please attach this file and fefw.log to an issue.\n";
+    text += "\n";
+    text += diag_memory_snapshot_text();   // process/VMA memory, gauges, threads, recent files (Issue #37/#41 evidence)
     text += "\n";
     text += diag_thread_dump();
+
     for (size_t pos = 0; pos < text.size();) {
         size_t eol = text.find('\n', pos);
         if (eol == std::string::npos) eol = text.size();
@@ -291,7 +346,7 @@ struct Renderer::Impl {
     std::vector<Target> targets;
     bool dirty = true;
     int last_px_w = -1, last_px_h = -1;
-    uint32_t stalls = 0;    // begin_frame waits in a row that timed out (kFrameWaitNs)
+    uint32_t stalls = 0;    // begin_frame waits in a row that timed out (frame_wait_ns())
 
     struct Slot {
         VkCommandPool pool = VK_NULL_HANDLE;
@@ -746,7 +801,7 @@ struct Renderer::Impl {
     void stalled(const char* what) {
         ++st.skipped;
         if (++stalls == 1 || stalls % 10 == 0)
-            NXLOG_W(kTag, "%s not ready after %llu ms (%u in a row): frame skipped", what, static_cast<unsigned long long>(kFrameWaitNs / 1000000), stalls);
+            NXLOG_W(kTag, "%s not ready after %llu ms (%u in a row): frame skipped", what, static_cast<unsigned long long>(frame_wait_ns() / 1000000), stalls);
         if (stalls % kStallRecreate == 0) dirty = true;
     }
 
@@ -858,7 +913,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
         }
     }
     {
-        const VkResult fr = vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, kFrameWaitNs);
+        const VkResult fr = vkWaitForFences(s.vk(), 1, &slot.fence, VK_TRUE, frame_wait_ns());
         if (fr == VK_TIMEOUT) {
             s.stalled("the previous frame on this slot (GPU)");
             return false;
@@ -872,7 +927,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
     if (s.headless) {
         idx = static_cast<uint32_t>(s.frame_number % s.targets.size());
     } else {
-        VkResult r = vkAcquireNextImageKHR(s.vk(), s.swapchain, kFrameWaitNs, slot.acquire, VK_NULL_HANDLE, &idx);
+        VkResult r = vkAcquireNextImageKHR(s.vk(), s.swapchain, frame_wait_ns(), slot.acquire, VK_NULL_HANDLE, &idx);
         if (r == VK_TIMEOUT || r == VK_NOT_READY) {
             s.stalled("a swapchain image");
             return false;

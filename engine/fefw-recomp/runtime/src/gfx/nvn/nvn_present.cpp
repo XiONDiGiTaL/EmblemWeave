@@ -13,6 +13,7 @@
 #include "nxrt/extras.h"
 #include "nxrt/game.h"
 #include "nxrt/lowlat.h"
+#include "nxrt/renderer_profiling.h"
 #include "extras/output_pass.h"
 #include "extras/framegen.h"
 #include "nvn_framegen.h"
@@ -24,6 +25,7 @@
 #include "nxrt/render_status.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_shaders.h"
+#include "nvn_pipeline.h"
 
 namespace nxrt::nvn::be::gpu {
 
@@ -152,6 +154,7 @@ void present_on_render_thread(Window* w, int index, bool again) {
         // the pre-frame hook (present mode changes) always runs here; the wait runs here only when no frame boundary has paced this present (S18)
         { NXFT("present.hook"); lim->run_pre_frame_hook(); }
         if (!(extras::pace_in_main() && extras::pace_boundary_consume())) {
+            nxrt::rp::RenderPhaseTimer limiter_timer(nxrt::rp::phase::kLimiter);
             NXFT("limiter");
             nxrt::HitchTimer ht(nxrt::kHpRenderLimiter);
             lim->begin_frame_nohook();
@@ -161,6 +164,7 @@ void present_on_render_thread(Window* w, int index, bool again) {
     const uint64_t frame_start = FrameLimiter::now_ns();
     if (!again) {
         const int64_t n = static_cast<int64_t>(counters().presents.load());
+        prewarm_update_frame(static_cast<uint64_t>(n));  // Update prewarm frame counter and re-prioritize
         if (shot_wanted(n)) {
             char name[64];
             std::snprintf(name, sizeof name, "/%06lld.png", static_cast<long long>(n));
@@ -168,7 +172,8 @@ void present_on_render_thread(Window* w, int index, bool again) {
         }
     }
     gfx::FrameInfo fi;
-    { NXFT("present.acquire"); nxrt::HitchTimer ht(nxrt::kHpRenderAcquire); if (!rend->begin_frame(&fi)) return; }
+    { nxrt::rp::RenderPhaseTimer acquire_timer(nxrt::rp::phase::kAcquire);
+      NXFT("present.acquire"); nxrt::HitchTimer ht(nxrt::kHpRenderAcquire); if (!rend->begin_frame(&fi)) return; }
     ft::frame();
     {   // A frame can reach the display with nothing drawn on it: a cache with no translated SPIR-V links no program, so every draw is
         // skipped and the present pass copies a black texture at 60 fps. Name it at the first frame, with the number and where the
@@ -243,11 +248,25 @@ audio plays. The cache is %s: translate it with Build the game (the shader step 
     extras::framegen_present_begin(fi.cmd, fi.extent, VkExtent2D{e.width, e.height}, crop, keep_aspect(), again);
     render_status::set_screen(static_cast<int>(fi.extent.width), static_cast<int>(fi.extent.height));
     const uint64_t call_start = FrameLimiter::now_ns();
-    { NXFT("present.end"); nxrt::HitchTimer ht(nxrt::kHpRenderPresentEnd); rend->end_frame(merged ? &pre : nullptr); }
+    { nxrt::rp::RenderPhaseTimer present_timer(nxrt::rp::phase::kPresent);
+      NXFT("present.end"); nxrt::HitchTimer ht(nxrt::kHpRenderPresentEnd); rend->end_frame(merged ? &pre : nullptr); }
     const uint64_t call_ns = FrameLimiter::now_ns() - call_start;
     extras::framegen_present_end();
     if (merged) present_batch_done(pre);
-    if (!again) frame_csv_line(static_cast<int64_t>(counters().presents.load()), frame_start, FrameLimiter::now_ns(), frame_wait, frame_rate, call_ns, extras::framegen_take_sleep_ns());
+    if (!again) {
+        // Renderer profiling: feed the frame-time window, and about once a second refresh the GPU-memory gauges and
+        // append a row to [prof] renderer_csv. Both are no-ops when [prof] renderer_profiling is off.
+        const uint64_t rp_now = FrameLimiter::now_ns();
+        nxrt::rp::note_frame_time(static_cast<float>(rp_now - frame_start) / 1e6f);
+        static uint64_t rp_last_sample = 0;
+        if (rp_now - rp_last_sample >= 1'000'000'000ull) {
+            rp_last_sample = rp_now;
+            nxrt::rp::gpu_memory_stats_update();
+            nxrt::rp::renderer_profiling_periodic_csv();
+        }
+        frame_csv_line(static_cast<int64_t>(counters().presents.load()), frame_start, rp_now, frame_wait, frame_rate, call_ns,
+                       extras::framegen_take_sleep_ns());
+    }
 }
 
 }  // namespace nxrt::nvn::be::gpu
