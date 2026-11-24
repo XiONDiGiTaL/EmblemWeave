@@ -30,6 +30,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/log.h"
+#include "nxrt/movie_vdec.h"
 #include "nxrt/renderer_profiling.h"
 #include "api_dlss.h"
 #include "nvn_astc_gpu.h"
@@ -5696,7 +5697,9 @@ void load_census(CensusEvent ev, uint64_t present) {
 // The launcher's loading card watches for this line. It is separate from the
 // pacing config so the card still closes when `unpaced_loading` is off. Loading
 // frames draw 3 times and the early fade draws about 35; the title is the first
-// frame in the hundreds. 64 skips the fade without waiting for a menu.
+// frame in the hundreds. 64 skips the fade without waiting for a menu. Movie
+// frames draw a handful, so a playing movie counts on its own; otherwise the
+// intro movie kept the card up for over two minutes.
 void note_startup_ready() {
     static bool ready = false;
     if (ready) return;
@@ -5711,6 +5714,9 @@ void note_startup_ready() {
         ready = true;
         NXLOG_I(kTag, "startup ready: first frame with 64+ draws (present %llu, %llu draws)", static_cast<unsigned long long>(p),
                 static_cast<unsigned long long>(per));
+    } else if (nxrt::media::movie_frames_acquired() > 0) {
+        ready = true;
+        NXLOG_I(kTag, "startup ready: a movie is playing (present %llu)", static_cast<unsigned long long>(p));
     }
 }
 
