@@ -15,6 +15,7 @@
     "branch": "main",
     "commit": "6646b5f7641ddc3b74cef49ef11a826f7b0a9504",
     "commitSubject": "Document the v0.1.42 consolidation, readiness audit and E: deployment plan",
+    "auditBaseNote": "audit base only; documentation corrections were committed to main after this commit, and the audited code remains 113cc8fa",
     "auditedSource": "113cc8faff98138544fbc4c6825b3590809ca491",
     "auditedSourceSubject": "Install the bundled FFmpeg runtime from the local install script",
     "documentationOnlyOverAuditedSource": true,
