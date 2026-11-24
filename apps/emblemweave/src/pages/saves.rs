@@ -119,7 +119,8 @@ pub struct Editor {
     slot: Slot,
     player: Option<Player>,
     units: Vec<Unit>,
-    original: (Option<Player>, Vec<Unit>),
+    name: Option<String>,
+    original: (Option<Player>, Vec<Unit>, Option<String>),
 }
 
 #[derive(Clone)]
@@ -250,11 +251,13 @@ pub fn open_slot(app: &mut App, path: &std::path::Path) -> Result<(), String> {
     let slot = Slot::open(path)?;
     let ids = ids_for(app);
     let (player, units) = (slot.player(), slot.units(&ids));
+    let name = slot.character_name();
     app.saves_ui.editor = Some(Editor {
-        original: (player, units.clone()),
+        original: (player, units.clone(), name.clone()),
         slot,
         player,
         units,
+        name,
     });
     Ok(())
 }
@@ -2496,6 +2499,7 @@ fn editor(
     let mut close = false;
     let mut saved = false;
     let named = !ids.people.is_empty();
+    let name_limit = ed.slot.character_name_limit();
     let title = format!(
         "Editing {}",
         ed.slot
@@ -2528,6 +2532,31 @@ fn editor(
             ui.add_space(6.0);
         } else {
             ui.label(crate::i18n::text("This slot has no player data (gold, renown).").color(p.muted));
+        }
+        if let Some(name) = ed.name.as_mut() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    crate::i18n::text("Main character name")
+                        .font(theme::semibold(14.0))
+                        .color(p.ink),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(name)
+                        .char_limit(name_limit.unwrap_or(0))
+                        .desired_width(220.0),
+                );
+            });
+            ui.label(
+                crate::i18n::text(format!(
+                    "The game stores this name in the save. It is limited to {} bytes; the original value is kept until Save changes.",
+                    name_limit.unwrap_or(0)
+                ))
+                .size(12.0)
+                .color(p.muted),
+            );
+            ui.add_space(6.0);
+        } else {
+            ui.label(crate::i18n::text("This slot has no editable character name.").color(p.muted));
         }
         if !named {
             ui.label(crate::i18n::text("Units are found by the ids in your game data; choose your game on Game Setup to list them.").color(p.muted));
@@ -2610,38 +2639,48 @@ fn editor(
             }
         }
         ui.add_space(8.0);
-        let dirty = (ed.player, ed.units.clone()) != ed.original;
+        let dirty = (ed.player, ed.units.clone(), ed.name.clone()) != ed.original;
         ui.horizontal(|ui| {
             if widgets::primary_button(ui, p, "Save changes", dirty && !running).clicked() {
-                if let Some(pl) = ed.player {
-                    ed.slot.set_player(&pl);
-                }
-                for u in &ed.units {
-                    ed.slot.write_unit(u);
-                }
-                message = Some(match ed.slot.save() {
-                    Ok(()) => {
-                        ed.original = (ed.player, ed.units.clone());
-                        saved = true;
-                        (
-                            format!(
-                                "Saved {}; the original is kept as {}.orig",
-                                ed.slot.path.display(),
-                                ed.slot
-                                    .path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                            ),
-                            Tone::Ok,
-                        )
+                let name_result = match ed.name.clone() {
+                    Some(name) => ed.slot.set_character_name(&name),
+                    None => Ok(0),
+                };
+                message = Some(match name_result {
+                    Err(e) => (format!("Could not rename the character: {e}"), Tone::Bad),
+                    Ok(_) => {
+                        if let Some(pl) = ed.player {
+                            ed.slot.set_player(&pl);
+                        }
+                        for u in &ed.units {
+                            ed.slot.write_unit(u);
+                        }
+                        match ed.slot.save() {
+                            Ok(()) => {
+                                ed.original = (ed.player, ed.units.clone(), ed.name.clone());
+                                saved = true;
+                                (
+                                    format!(
+                                        "Saved {}; the original is kept as {}.orig",
+                                        ed.slot.path.display(),
+                                        ed.slot
+                                            .path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                    ),
+                                    Tone::Ok,
+                                )
+                            }
+                            Err(e) => (format!("Could not save: {e}"), Tone::Bad),
+                        }
                     }
-                    Err(e) => (format!("Could not save: {e}"), Tone::Bad),
                 });
             }
             if widgets::button(ui, p, "Revert", dirty).clicked() {
                 ed.player = ed.original.0;
                 ed.units = ed.original.1.clone();
+                ed.name = ed.original.2.clone();
             }
             if widgets::button(ui, p, "Close", true).clicked() {
                 close = true;

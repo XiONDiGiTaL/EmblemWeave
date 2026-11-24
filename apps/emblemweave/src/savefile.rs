@@ -306,6 +306,85 @@ impl Slot {
         route_lord_key(*self.payload.get(at + 3)?)
     }
 
+    /// The player's custom name, when the slot stores one. The game writes it
+    /// as `[0x03, 0x09, 0x00, len, name bytes, 0]` in the player data and in the
+    /// restart/unit-pool copies, so every copy is found and changed together.
+    pub fn character_name(&self) -> Option<String> {
+        let (_, len, start) = self.character_name_fields().into_iter().next()?;
+        let raw = &self.payload[start..start + len];
+        let end = raw
+            .iter()
+            .rposition(|&b| b != 0 && b != b' ')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        Some(String::from_utf8_lossy(&raw[..end]).into_owned())
+    }
+
+    /// The space the save reserves for the name. The field is fixed-length, so
+    /// a replacement must fit in the same bytes; the rest is space padding.
+    pub fn character_name_limit(&self) -> Option<usize> {
+        self.character_name_fields()
+            .into_iter()
+            .map(|(_, len, _)| len)
+            .min()
+    }
+
+    /// Rename the player in every copy of the name field. Returns how many
+    /// copies changed. The layout is not resized: a shorter name is padded with
+    /// spaces, which is what the game's fixed seven-byte field accepts; pointers
+    /// and the slot's checksummed frame keep their offsets.
+    pub fn set_character_name(&mut self, name: &str) -> Result<usize, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the character name cannot be empty".into());
+        }
+        if name.contains('\0') {
+            return Err("the character name cannot contain a NUL".into());
+        }
+        let fields = self.character_name_fields();
+        if fields.is_empty() {
+            return Err("this slot has no editable character name".into());
+        }
+        let limit = fields.iter().map(|(_, len, _)| *len).min().unwrap_or(0);
+        if name.len() > limit {
+            return Err(format!(
+                "the character name is limited to {limit} bytes by this save"
+            ));
+        }
+        let bytes = name.as_bytes();
+        for (_, len, start) in &fields {
+            self.payload[*start..*start + *len].fill(b' ');
+            self.payload[*start..*start + bytes.len()].copy_from_slice(bytes);
+        }
+        Ok(fields.len())
+    }
+
+    /// Every stored player-name field: prefix offset, reserved length, and the
+    /// first name byte.
+    fn character_name_fields(&self) -> Vec<(usize, usize, usize)> {
+        const TAG: [u8; 3] = [0x03, 0x09, 0x00];
+        let p = &self.payload;
+        let mut out = Vec::new();
+        for i in 0..p.len().saturating_sub(5) {
+            if p[i..i + 3] != TAG {
+                continue;
+            }
+            let len = p[i + 3] as usize;
+            if !(1..=64).contains(&len) || i + 4 + len >= p.len() {
+                continue;
+            }
+            let start = i + 4;
+            let raw = &p[start..start + len];
+            // A shorter replacement is padded with spaces; an older edit may
+            // still have NUL padding. Both are valid storage for the fixed field.
+            if p[start + len] != 0 || raw.first() == Some(&0) || std::str::from_utf8(raw).is_err() {
+                continue;
+            }
+            out.push((i, len, start));
+        }
+        out
+    }
+
     /// Offset of the player data (gold and the like), when the slot has it.
     fn user_data(&self) -> Option<usize> {
         let b = self.block("GameUserData")?;
@@ -761,6 +840,49 @@ mod tests {
         assert_eq!(route_lord_key(4), Some("leda"));
         assert_eq!(route_lord_key(9), Some("eshmel"));
         assert_eq!(route_lord_key(0), None);
+    }
+
+    fn payload_with_name(name: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; 8];
+        for _ in 0..4 {
+            p.extend([0x03, 0x09, 0x00, name.len() as u8]);
+            p.extend(name);
+            p.push(0);
+            p.extend([0x02, 0x03, 0x00]);
+        }
+        p
+    }
+
+    #[test]
+    fn character_name_is_found_and_renamed_in_every_copy() {
+        let mut s = super::Slot {
+            path: std::path::PathBuf::from("Auto"),
+            raw: Vec::new(),
+            zstd_at: 0,
+            payload: payload_with_name(b"ccxcxcx"),
+        };
+        assert_eq!(s.character_name().as_deref(), Some("ccxcxcx"));
+        assert_eq!(s.character_name_limit(), Some(7));
+        assert_eq!(s.set_character_name("Eshmel").unwrap(), 4);
+        assert_eq!(s.character_name().as_deref(), Some("Eshmel"));
+        let hits = s
+            .payload
+            .windows(12)
+            .filter(|w| &w[4..11] == b"Eshmel " && w[11] == 0)
+            .count();
+        assert_eq!(hits, 4);
+    }
+
+    #[test]
+    fn character_name_refuses_a_name_that_does_not_fit() {
+        let mut s = super::Slot {
+            path: std::path::PathBuf::from("Auto"),
+            raw: Vec::new(),
+            zstd_at: 0,
+            payload: payload_with_name(b"ccxcxcx"),
+        };
+        assert!(s.set_character_name("Eshmel22").is_err());
+        assert_eq!(s.character_name().as_deref(), Some("ccxcxcx"));
     }
 
     #[test]
