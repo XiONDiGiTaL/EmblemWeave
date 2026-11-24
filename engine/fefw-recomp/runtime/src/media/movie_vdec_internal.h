@@ -4,6 +4,7 @@
 // Only meaningful in a build with dav1d (NXRT_HAVE_DAV1D).
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -73,6 +74,10 @@ struct Decoder {
     uint64_t packets = 0, pictures = 0;
     uint64_t progress = 0;                   // queue pops and pictures moved into frames: the no-progress watchdog's clock
     bool failed = false;                     // a stalled decoder was stopped; calls answer failure until Flush
+    bool eos_owed = false;                   // the stop found no frame for its EOS: deliver() queues it on the first frame given back
+    // When the player last asked for a frame (with or without getting one), last got one and last gave one back: the stall line uses these
+    // to tell a player that stopped calling from one that asks while nothing is ready.
+    std::chrono::steady_clock::time_point last_ask{}, last_acquire{}, last_release{};
     // the movie's clock (skip_late): picture timestamps against the host clock; unit = seconds per timestamp tick, learned from the spacing
     bool clk_on = false;
     int64_t clk_ts0 = 0, clk_last = 0, last_time = 0;
