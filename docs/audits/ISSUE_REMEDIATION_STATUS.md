@@ -449,43 +449,46 @@ Residual findings, deliberately not changed:
    that `shutdown()` follows every attempt; `register_service` overwrites by name, so a retry would not duplicate
    factories, but the best-effort starts would run a second time.
 
-### Pending contributions reviewed (no code changed)
+### Contributions merged (2026-11-24)
 
-- **#99 and #103 (movie decoder)** are both open, both by the same author, and both rewrite `vd_release`, `vd_flush`,
-  `deliver()` and the worker loop. #103 additionally moves the handoff into `vdec::release()` /
-  `movie_vdec_internal.h`, so #99 must be rebased onto that refactor (or the refactor onto #99); the author has already
-  said they will rebase whichever lands second. They are complementary, not alternatives: #103 wakes the worker when a
-  returned frame is still waiting for its GPU serial, #99 adds `eos_owed` so an end of stream that found no free frame is
-  delivered on the first frame given back, and #99's `wait_for_room` windowing keeps a hitch on the game's main thread
-  from being mistaken for a stalled player. Combined, `release()` must notify for **both** reasons
-  (`(!pending_free.empty() && !decoded.empty()) || eos_owed`), and the worker's GPU poll branch must deliver when
-  `!decoded.empty() || eos_owed`. #99 already writes the worker condition that way; only the notify condition needs the
-  union. #99 ships no tests; #103 ships two against real dav1d and a synthetic AV1 clip. The combined behaviour (owed
-  EOS, hitch window, the 30 s game-stall ceiling, flush clearing `eos_owed`) is therefore **untested as a set** - that
-  gap should close in whichever PR lands second, using #103's frame-handoff harness.
-- **#105** is stacked on #103 and changes the default to `movie_decoder = auto`. It is not a blind enable: AMD/Intel are
-  gated on FFmpeg >= 9.1 (the shipped 8.1-dev build fails Vulkan decode on AMD with `VK_ERROR_OUT_OF_DEVICE_MEMORY`),
-  device selection is by Vulkan name, the built-in dav1d is the fallback at open and before the first picture, and the
-  removal of `movie_hwaccel` / FFmpeg's libdav1d path is stated. Recommendation: do not take the default change until
-  #99/#103 are in and the 9.1 ABI move happens in the same release; until then "Auto" means GPU on NVIDIA only, which is a
-  behaviour change for every user without the evidence of a released 9.1 build.
-- **#96** replaces the shared `SHA256` instance with `SHA256.HashData` in the harness. Correct and minimal: the worker's
-  `Parallel.ForEach` hashes concurrently and one shared instance throws.
-- **#97** is confirmed by inspection: `CacheEntry`/`Result` use fields and `SaveIndex`/`LoadIndex` serialize without
-  `IncludeFields`, so every entry is written as `{}` and dropped on load; `Put` rewrites the whole index (SPIR-V included)
-  under `_indexLock` after every block. The recommendation stands as the issue says: remove `ShaderCache` and restore the
-  translator build id in the journal header with `StartOver` on a change. `Program.cs` is owned by #96 right now, so no
-  edit was made here; `IncludeFields` alone would turn a 714 MB SPIR-V corpus into a gigabyte of JSON rewritten per block.
+- **#96** merged as `b4a0d20d`: `ComputeKeyHash` uses the static `SHA256.HashData` instead of one shared `SHA256`, which
+  threw when the worker's `Parallel.ForEach` hashed concurrently and took the worker down. This is the fix for #95.
+- **#103** merged as `28403a60`: the frame handoff moved into `vdec::start_worker/stop_worker/register_frames/
+  decode_async/acquire/release/flush` and `movie_vdec_internal.h`; `release()` wakes the worker when a frame waits for
+  its GPU serial while pictures wait. Two tests drive the handoff against a 120-picture 64x64 AV1 clip:
+  `released_frame_takes_the_waiting_picture_once_the_gpu_passed_it` and `player_threads_get_every_picture_once_and_in_order`.
+  `media_vdec` 9/9.
+- **#99** merged as `3f316bde` after resolving its conflict onto #103's refactor: the 30 s game-stall window (10 presented
+  frames per 5 s marks the game as running), `eos_owed` for a stop that found no free frame, per-player timestamps in the
+  stall log, and the widened stall message now live in `vdec::release`, `vdec::flush`, `abort_stalled` and
+  `wait_for_room`. `release()` keeps both wake reasons (pending GPU plus decoded, or `eos_owed`), and `flush` clears it.
+  **Limitation:** the combined behaviour (owed EOS, hitch window, the ceiling, flush clearing the flag) is still not
+  covered by a test of its own; #103's harness is where that belongs. Nothing here demonstrates a real game hitch.
+- **#93** not merged: main already carries the #92 fix (`fb0c9f25`, captured at 200 % by `4a76488c`) with a top-down
+  block that constrains the combo and its note to the control column; #93 patches the older layout and conflicts.
+- **#105** remains open and is not merged. It is stacked on #103 and changes the default to `movie_decoder = auto`; AMD and
+  Intel are gated on FFmpeg >= 9.1 (the shipped 8.1-dev build fails Vulkan decode on AMD with
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY`), and it removes `movie_hwaccel` / FFmpeg's libdav1d path. Wait for a released 9.1 build
+  and in-game evidence before changing the default.
+- **#97** fixed in `5e590bd4`: the content-addressable `ShaderCache` is removed rather than repaired with `IncludeFields`
+  (a working index would carry every SPIR-V byte and be rewritten after every block); the translator build ID is back in
+  the journal header and `StartOver` deletes the journal, every `.spv` and the preload pack when it changes. The harness
+  builds with 0 warnings/errors; a smoke run wrote `# spirv_harness journal  2  <build-id>`, resumed without reset, and
+  deleted a stale `.spv` when given a header naming another build. A full 3000-block corpus run was not repeated here.
+- **#101** fixed in `5e590bd4`: NASM is `Need::Always` in the launcher, so a setup without it waits for installation like
+  CMake and Ninja; the note, `docs/REQUIREMENTS.md`, `docs/TROUBLESHOOTING.md`, `docs/INSTALL.md` and `tools.lock` now say
+  required. `cargo test -p emblemweave --locked`: 432 passed, 0 failed, 13 ignored. No assembly-versus-C decode
+  measurement was repeated on this host (NASM is not installed here) and no engine build was re-run.
+- **Launcher CI**: run 45492974436 failed `skip-baseline` because `EXPECTED_CASES` was still 68 while the suite had gained
+  `launcher_game_info.summary_warns_when_cinematic_assets_are_missing` (#70/#75). Fixed in `c9cb7c9b` (69); this was a
+  stale pinned count, not a failing case.
 
 ### Build dependencies (#101) and GPU decoding (#104)
 
-- **#101**: NASM is optional in the launcher (`Need::Optional`) and auto-detected by the runtime's dav1d CMake
-  (`dav1d_asm_auto`, `NXRT_NASM`, `NXRT_NASM_DIR`), with the C-only fallback documented as several times slower. The
-  issue's own measurements (19-54 ms per 1440p packet C-only versus 5.5-14 ms with assembly, against a 33 ms frame
-  budget) agree with the existing #70/#75 records. No assembly-versus-C measurement was repeated on this host, and no
-  launcher or dependency change was made: making NASM `Need::Always` would stop existing installations from configuring,
-  which needs a clear launcher message and a cross-platform check this host cannot run. The runtime side already degrades
-  and logs which build it has; the decision belongs to the launcher's dependency policy.
+- **#101**: the launcher now requires NASM (`Need::Always`, fixed in `5e590bd4`). The issue's measurements (19-54 ms per
+  1440p packet C-only versus 5.5-14 ms with assembly, against a 33 ms frame budget) agree with the existing #70/#75
+  records. The runtime still builds C-only when configured outside the launcher and logs that, but a normal setup can no
+  longer reach that state.
 - **#104**: the production path today is the built-in dav1d by default, with `[media] movie_decoder = ffmpeg` +
   `movie_hwaccel` as opt-in D3D11VA on whichever adapter Windows picks, falling back to FFmpeg's libdav1d outside the
   engine's thread-priority policy. PR #105's design (Vulkan decode on the renderer's device, version gate, dav1d fallback,
@@ -495,7 +498,7 @@ Residual findings, deliberately not changed:
 ### Validation
 
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t.ps1 -All` from `engine/fefw-recomp/runtime`, Release,
-  clang-cl 20.1.8: `SUMMARY --all: 973 passed, 0 failed, 29 skipped (of 1002)` (was 967/996 before this pass).
+  clang-cl 20.1.8: `SUMMARY --all: 978 passed, 0 failed, 29 skipped (of 1007)` after #103/#99.
 - Targeted: `watchdog` 19/19, `runtime_lifecycle` 6/6, `svc_fs_romfs` 21/21.
 - Synthetic measurements only, apart from the `cb2755cc` boot check recorded at the end of this document (a real
   package and opening movie; no gameplay, no clean shutdown). Return-to-title, scene recreation, extended-session
@@ -565,8 +568,8 @@ hitches (frame 2 at 61.4 ms, frame 8 at 696.9 ms, frame 143 at 101.2 ms) and `ma
 three folder warnings.
 
 Run 1's stderr also carried one vendored-dav1d `Unknown OBU type 0 of size 12` as the decoder read the codec
-configuration; playback was unaffected. The parse defect it exposed is fixed in the working tree (the av1C/OBU change),
-not in `cb2755cc`.
+configuration; playback was unaffected. The parse defect it exposed is fixed on main in `b5c7d4b7` (the av1C/OBU
+change).
 
 ### Movie and frame evidence
 
@@ -630,4 +633,4 @@ ends through the teardown instead of bypassing it, and the deadline path shares 
 
 Not covered: the entry function returning (the game never returns), shutdown while a guest thread holds a runtime lock (the
 15 s bound only prevents a wedge), and display/HDR restore, which `nxrt::shutdown()` does not perform. The change is in
-`game-build/fefw/src/fefw_main.cpp`, uncommitted.
+`game-build/fefw/src/fefw_main.cpp`, committed in `b5c7d4b7`.
