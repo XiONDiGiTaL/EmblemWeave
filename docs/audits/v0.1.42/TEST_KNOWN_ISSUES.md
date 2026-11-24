@@ -68,7 +68,7 @@ remain unclassified until a clean baseline and bisect exist.
 
 ---
 
-### 4. Pre-existing Code Issues (5 test names, 4 assertions + 2 SEGFAULTs + 2 exceptions + 2 string mismatches)
+### 4. Pre-existing Code Issues (9 test names; the old "5" count and 69-assertion total were not verified)
 
 | Test | Failure Type | Details | Regression? |
 |------|--------------|---------|-------------|
