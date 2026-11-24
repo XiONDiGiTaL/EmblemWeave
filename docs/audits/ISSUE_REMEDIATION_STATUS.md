@@ -216,3 +216,44 @@ Validation: `powershell -File scripts/t.ps1 -All` -> `SUMMARY --all: 958 passed,
 (was 13/14). Not verified: the read-fault change under real gameplay (no game dump or long session was
 available). It is covered by the memory and svc_memory groups, which fault on decommitted, unmapped and
 guest-no-access pages with a live write-watch region in the same process.
+
+## 2026-11-24 stash review: audio EQ, play UI and docs
+
+`stash@{0}` (`8de48bfa`, base `d1964c64`, 45 tracked files at +1,412/−107 plus 11 untracked) was
+compared with `main` at `4a76488c`, not applied. Its base is 168 commits old; most of it has since
+landed in a newer form. The stash remains at `stash@{0}`.
+
+Already on `main`, newer than the stash:
+
+- **Audio EQ.** `audio_eq.h/cpp` and `test_audio_eq.cpp` are present with ten bands, preamp,
+  automatic headroom, a limiter, eight presets (including Headphones Boost) and a live F1 panel;
+  the launcher writes `[audio] eq*`. `svc_audio_eq`: 7 passed, 0 failed.
+- **Play UI / master boost.** The Audio page and F1 panel apply 0–200% immediately and warn inline.
+  The stash's warning gate is not used: `Confirm::AudioBoost` is never constructed, and the modal
+  in `play_audio_ui.cpp` cannot open because `boost_warning` is never set. The dead modal is a
+  separate cleanup, not an integration point.
+- **Drag handling.** `platform.rs` suppresses `WM_PAINT` during `WM_MOVING` and handles native
+  drag; the stash's `raw-window-handle` subclass adds nothing. Issue #59 still needs the reporter's
+  machine.
+- **MAKO, build jobs, release tooling.** MAKO is byte-identical; build concurrency goes through
+  `ToolchainManager::calculate_jobs` (the stash's `build_jobs` helper is an unused duplicate);
+  `check_release.py` and the workflow on `main` have the published/development split.
+- **Docs.** The MAKO, EQ, build-job and release text is present. Two stale audio statements were
+  corrected here: the above-100% boost applies immediately, and the preset list now includes
+  Headphones Boost (`STATUS.md`, `USAGE.md`, runtime `CONFIG.md`).
+
+Left out:
+
+| Piece | Why |
+|---|---|
+| Overview "At a glance" / `overview_details` card | From the retired 1,864-line landing page. Current `overview.rs` is a 495-line redesign with Next steps and Recent activity; the card duplicates both and was not visually verified. |
+| Above-100% warning gate and `Confirm::AudioBoost(u32)` | Superseded by immediate limited boost; the current variant is dead and the docs now say so. |
+| `throttle_drag_paints` and the `raw-window-handle` dependency | Superseded by `platform.rs`'s `WM_MOVING` paint suppression. |
+| Older 7-preset EQ tables and old `play_audio_ui` | Superseded by the eight-preset/preamp implementation and shared UI on `main`. |
+| `docs/RELEASE-LEDGER.md` 0.1.40 note | Stale: the ledger now points at 0.1.41 published and 0.1.42 in development. |
+| `build-runtime-111.log` | Build artifact. |
+
+Validation: `cargo test -p emblemweave` -> 432 passed, 0 failed, 13 ignored;
+`powershell -File scripts/t.ps1 svc_audio_eq` -> 7 passed, 0 failed. Not verified: in-game audio
+(no game dump or long session), the retired Overview card (not integrated), and the 200% boost on
+physical speakers or headphones.
