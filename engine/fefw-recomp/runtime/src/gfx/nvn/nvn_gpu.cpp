@@ -441,6 +441,7 @@ bool split_submission(Frame& f) {
     vkBeginCommandBuffer(next, &bi);
     s.cb = next;
     f.cb = next;
+    ++f.split_seq;
     g->ctr.submits.fetch_add(1);
     g_splits.fetch_add(1, std::memory_order_relaxed);
     return true;

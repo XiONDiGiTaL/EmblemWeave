@@ -1467,6 +1467,7 @@ struct PoolCopy {
     bool written = false;                       // every element written once
     uint64_t tex_version = 0, smp_version = 0;  // the registrations it holds
     uint64_t used = 0, used_before = 0;         // serial of the last submission that bound it, and of the one before that
+    uint32_t used_split = 0;                    // earliest Frame::split_seq in `used` that bound it (earlier splits are already on the GPU)
     std::vector<uint32_t> pending;              // texture ids holding the dummy until their texture is in its sampled layout
     std::vector<uint32_t> held;                 // the same for textures whose first upload waits for a later frame (pool_hold): looked at once a frame
 };
@@ -1904,7 +1905,7 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
     pp->last_use = f.serial;
     auto bind = [&](int i) {
         PoolCopy& c = pp->copies[static_cast<size_t>(i)];
-        if (c.used != f.serial) { c.used_before = c.used; c.used = f.serial; }
+        if (c.used != f.serial) { c.used_before = c.used; c.used = f.serial; c.used_split = f.split_seq; }
         pp->cur = i;
         return c.set;
     };
@@ -1913,9 +1914,12 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
         const PoolCopy& c = pp->copies[static_cast<size_t>(pp->cur)];
         if (c.written && c.tex_version == tv && c.smp_version == sv && !pending_ready(c, tp)) return bind(pp->cur);
     }
-    // a set no submission in flight reads: the current one when only this submission has bound it, else the most up to date idle one
+    // a set no submission in flight reads: the current one when only this unsubmitted split part has bound it, else the most up to date idle one
     const uint64_t done = poll_completed();
-    auto idle = [&](const PoolCopy& c) { return (c.used == f.serial ? c.used_before : c.used) <= done; };
+    auto idle = [&](const PoolCopy& c) {
+        if (c.used == f.serial) return c.used_split == f.split_seq && c.used_before <= done;
+        return c.used <= done;
+    };
     int pick = pp->cur >= 0 && idle(pp->copies[static_cast<size_t>(pp->cur)]) ? pp->cur : -1;
     for (size_t i = 0; pick < 0 && i < pp->copies.size(); ++i)
         if (idle(pp->copies[i]) && pp->copies[i].written) pick = static_cast<int>(i);
@@ -1949,13 +1953,32 @@ VkDescriptorSet pool_set(TexturePool* tp, SamplerPool* sp, Frame& f) {
     if (pick < 0) {
         // every set is being read by submissions in flight: wait for the one bound longest ago
         size_t oldest = 0;
-        for (size_t i = 1; i < pp->copies.size(); ++i)
-            if (pp->copies[i].used < pp->copies[oldest].used) oldest = i;
+        for (size_t i = 1; i < pp->copies.size(); ++i) {
+            const PoolCopy& a = pp->copies[i];
+            const PoolCopy& b = pp->copies[oldest];
+            if (a.used < b.used || (a.used == b.used && a.used_split < b.used_split)) oldest = i;
+        }
         static int logged = 0;
         if (logged++ < 10) NXLOG_W(kTag, "pool arrays: all %zu sets of a pool pair are in flight; waiting for submission %llu", pp->copies.size(),
                                    static_cast<unsigned long long>(pp->copies[oldest].used));
         submit_recorded();
-        while (poll_completed() < pp->copies[oldest].used) std::this_thread::yield();
+        if (pp->copies[oldest].used >= f.serial) {
+            // Every copy was bound by earlier split parts of this submission, whose timeline serial has not been signalled yet:
+            // drain the queue so those already-submitted parts finish before reusing their descriptor set.
+            {
+                std::lock_guard<std::mutex> lk(device().queue_mutex());
+                vkQueueWaitIdle(device().queue());
+            }
+            const uint64_t now_done = poll_completed();
+            for (PoolCopy& cp : pp->copies) {
+                if (cp.used == f.serial && cp.used_split < f.split_seq) {
+                    cp.used_split = f.split_seq;
+                    cp.used_before = now_done;
+                }
+            }
+        } else {
+            while (poll_completed() < pp->copies[oldest].used) std::this_thread::yield();
+        }
         pick = static_cast<int>(oldest);
     }
     update_copy(pp->copies[static_cast<size_t>(pick)], tp, sp);

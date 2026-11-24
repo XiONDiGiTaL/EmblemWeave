@@ -79,6 +79,7 @@ struct Frame {
     VkCommandBuffer cb = VK_NULL_HANDLE;
     uint64_t serial = 0;          // the timeline value this submission signals when the GPU has run it
     void* slot = nullptr;         // nvn_gpu.cpp: the submission slot (command pool, descriptor pools, upload memory)
+    uint32_t split_seq = 0;       // incremented each time split_submission hands the previous cb to the GPU
     bool split_ok = false;        // split_submission may hand the commands recorded so far to the GPU (a normal, signalled submission)
     // Host-visible memory valid until the submission has completed: small per-draw data (support buffer, driver constants,
     // inline uniform data). align is a power of two.
