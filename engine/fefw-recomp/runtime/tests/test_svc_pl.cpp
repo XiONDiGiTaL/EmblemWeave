@@ -257,7 +257,21 @@ NXTEST(pl_bfttf_dump_replaces_its_slot) {
 NXTEST(pl_no_font_found_still_answers) {
     nxsvc::Env env;
     // An empty folder, and no DejaVu next to the test binary: every slot is an 8-byte header with size 0.
+    // The lookup also searches assets/fonts under the working directory, so running the suite from the runtime
+    // folder would find the repository DejaVu and this case could never be exercised there. Run it from the empty
+    // folder instead (the build folder beside the exe has no fonts), which also makes it independent of where the
+    // suite was started. The old directory is put back before TempDir removes the folder.
     TempDir dir("nxrt_pl_empty_test");
+    struct WorkingDir {
+        std::filesystem::path was;
+        explicit WorkingDir(const std::filesystem::path& to) : was(std::filesystem::current_path()) {
+            std::filesystem::current_path(to);
+        }
+        ~WorkingDir() {
+            std::error_code ec;
+            std::filesystem::current_path(was, ec);
+        }
+    } cwd(dir.p);
     use_fonts(dir.p.string().c_str());
     nxsvc::Session s = nxsvc::connect("pl:u");
     REQUIRE(s.valid());
