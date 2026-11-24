@@ -181,9 +181,12 @@ backup/restore behavior was changed.
   on this PC.
 - The 0.1.41 diagnostic bundles have no save tree and no successful-mount line,
   so the loss cannot be reconstructed from them.
-- The launcher GUI banner and Play guard were verified by library tests and
-  compilation; the Saves page itself was not clicked through with a fabricated
-  missing-account profile. A new gameplay save was not created and reloaded.
+- The launcher Saves page and recovery banner were opened in an isolated
+  portable fixture and visually verified. Its Play button was disabled because
+  the fixture has no complete game build, so the new “Start with an empty save?”
+  dialog was not visually exercised; its blocking condition and one-shot
+  confirmation are covered by the library guard test and compilation. A new
+  gameplay save was not created and reloaded.
 - These are reported as limitations, not as complete end-to-end verification.
 
 ## 5. Recovery instructions
@@ -219,13 +222,14 @@ slot.
 |---|---|
 | Branch | `main` |
 | Base HEAD | `ea4a7adc` |
-| This change | `42d9a612` |
+| This change | `42d9a612`; follow-up confirmation `b33564ec` |
 | Launcher tests | `cargo test -p emblemweave --locked`: 424 passed, 0 failed; `saves::tests`: 45 passed |
 | Runtime build | `release2/fefw.exe` (working) and clean `target/issue79/clean-runtime/fefw.exe` (deployment), both built |
-| Deployed launcher SHA-256 | `b6162725a5450a874a046f4da790e73fe3e27eca979693bac628f034533a43f7` |
+| Deployed launcher SHA-256 | `b9bb3fa17f6cfec462532c439e5917a020d48b02a9e8686f3851f0b1f050bc0b` |
 | Deployed runtime SHA-256 | `8a2d0af5392ae8aa93141c4515d5ef5e21dadf5b839286b7dc966f50e8a77ef6` |
 | X: backup | `X:\EmblemWeave-backup-20261123-2130` (8.707 GB; robocopy 104,598 files, 0 failed) |
-| X: version after deploy | launcher `0.1.42 (42d9a612)`, Saves page opened |
+| X: version after deploy | launcher `0.1.42 (b33564ec)`, Saves page opened |
+| Prior launcher kept for rollback | `target/issue79/deploy/EmblemWeave-before-confirm.exe` (`b6162725…`) |
 
 Issue #79 remains **open**. Do not close it from this work: the reporters have
 not confirmed recovery, and the exact cause of their lost saves is still
