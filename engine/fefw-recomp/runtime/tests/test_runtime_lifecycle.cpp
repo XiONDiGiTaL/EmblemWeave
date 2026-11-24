@@ -124,12 +124,20 @@ NXTEST(reinitializes_after_shutdown) {
     CHECK_EQ(count_host_threads(), baseline);
 
     // Repeated init/shutdown cycles must not leave a thread or a stale work handle behind.
+    DWORD baseline_handles = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &baseline_handles);
     for (int cycle = 0; cycle < 2; cycle++) {
         CHECK(nxrt::init(io));
         CHECK(running());
         nxrt::shutdown();
         CHECK(stopped());
         CHECK_EQ(count_host_threads(), baseline);
+        // Resources, not just threads: a log file, a profile handle or a duplicated thread handle that survives a cycle shows here.
+        DWORD handles = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &handles);
+        CHECK_MSG(handles <= baseline_handles, "a lifecycle cycle leaked handles (" + std::to_string(baseline_handles) + " -> " +
+                                                   std::to_string(handles) + ")");
+        baseline_handles = handles;
     }
     nxrt::audio::set_sink(nullptr);
 

@@ -508,6 +508,14 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
             NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.path.c_str(), omsg.c_str());
             continue;
         }
+        // The launcher keeps its own bookkeeping in the root of the package overlay it writes: ".source" (the package the folder came from)
+        // and ".written" (the id it was built from), OVERLAY_SOURCE / OVERLAY_WRITTEN in apps/emblemweave/src/gamedata.rs. They are not game
+        // files, but the overlay is served whole, so a complete install counted two files more than the complete RomFS and warned that the
+        // game data was incomplete on every start (#94). Only a package overlay is filtered: a mod may ship a file of that name on purpose.
+        if (!o.installed_mod) {
+            const auto marker = [](const Node& k) { return !k.is_dir && (k.name == ".source" || k.name == ".written"); };
+            ov.kids.erase(std::remove_if(ov.kids.begin(), ov.kids.end(), marker), ov.kids.end());
+        }
         // merge into a copy, so an overlay that fails halfway (a path too long) leaves the tree as it was
         Node merged = root;
         uint32_t n = 0, added = 0;

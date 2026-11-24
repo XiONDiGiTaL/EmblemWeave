@@ -356,3 +356,145 @@ unchanged; the existing `thread_dump_lists_registered_threads_not_caller`, `susp
   unverified on this host.
 - The uncommitted `test_write_watch.cpp` additions were preserved and their 17-case group passed; they are not
   part of this audit's commit.
+
+## 2026-11-24 dump-suspension safety, overlay markers and pending-contribution review
+
+Baseline `cbfac50c` on `main` (equal to `origin/main`). The only working-tree change at the start was the pre-existing
+`runtime/tests/test_write_watch.cpp` edit, which is preserved and not part of this pass's commit; `stash@{0}`, `_recovery/`
+and the detached `target/issue79/clean` checkout are untouched.
+
+### Two freeze dumps could deadlock each other (fixed)
+
+`collect_threads()` suspends every registered thread before it reads any context. Nothing serialised dumpers, and
+`diag_thread_dump()` has four independent callers: the freeze watchdog, the `[prof] stall_ms` sampler
+(`src/diag/ftrace.cpp`), the Vulkan device-lost report (`src/gfx/vk_renderer.cpp`) and the fault report
+(`src/services/logfault.cpp`). Two **registered** threads that dump at the same time each suspend the other, and each
+resume loop lives in the thread the other one suspended, so neither ever runs again. The watchdog and the stall sampler
+both react to the same "no frame tick" event, so this is a live race, not a theoretical one.
+
+- One `std::recursive_mutex` now serialises the collection phase (recursive so an `on_fire` callback can dump again from
+  the watchdog thread). The suspended window needs nothing another thread owns - `GetThreadContext`,
+  `RtlVirtualUnwind`, `ResumeThread` and `CloseHandle` take no user lock and allocate nothing - so serialising cannot
+  deadlock against the threads it suspends.
+- `ResumeSuspended` releases every suspension on scope exit, including an early return or an exception. Previously the
+  resume loop was straight-line code with no structural guarantee.
+- `ThreadDumpTiming` gained `suspended` and `resumed` counters, so a dump can be checked for "every suspension undone"
+  instead of inferred from thread behaviour.
+
+Evidence: `watchdog.concurrent_dumps_do_not_deadlock` runs a child process with 6 registered busy workers and 4
+registered dumper threads, 25 dumps each, and fails by timeout if the child does not exit. With the lock line removed
+the child never exits (`finished concurrent thread dumps deadlocked (child did not exit)`); with the lock it passes. The
+defect was reproduced, not inferred.
+
+New coverage in `watchdog` (19 cases, all passing): `every_suspension_is_released_and_accounted` (5 dumps over 4 busy
+workers, `resumed == suspended`), `dump_preserves_a_threads_own_suspend_count` (a thread that suspended itself once must
+still be suspended exactly once after a dump; `ResumeThread` must return 1), `dump_survives_threads_leaving_the_registry_mid_dump`
+(25 dumps while threads register and unregister continuously), `concurrent_dumps_do_not_deadlock`, and
+`a_thread_that_cannot_be_suspended_is_reported` (a registered thread that exited without unregistering: its duplicated
+handle stays valid, `SuspendThread` fails, the dump reports `(could not suspend)` and resumes nothing).
+
+The 32-busy-thread synthetic benchmark (a worst case, not a game) measured 27.95 ms and 35.00 ms total in two full-suite
+runs, of which `ResumeThread` wake-up was 26.6 ms and 33.8 ms; context retrieval stayed at 0.74-0.83 ms and formatting at
+0.19 ms. The earlier 18.6-33.7 ms range still holds; the lock adds no measurable cost.
+
+Not verified: a real freeze on game hardware. Threads that hold locks the dump path needs, allocation while suspended, and
+suspend-count behaviour under a debugger remain reasoned about (the window allocates nothing and takes no user lock) but
+are exercised only by these synthetic cases.
+
+### Package overlay markers are no longer game files (#94, fixed)
+
+The launcher writes `.source` and `.written` into the root of the package overlay (`OVERLAY_SOURCE` / `OVERLAY_WRITTEN`
+in `apps/emblemweave/src/gamedata.rs`), and the runtime served the overlay whole, so a complete install counted two files
+more than `[fs] romfs_files` and warned about incomplete game data on every start.
+
+`make_layout()` now drops those two names from the root of a **package** overlay only (an installed mod may ship a file of
+that name on purpose). Nothing is rewritten on disk, so existing 2 GB overlays are not rebuilt and user data is untouched.
+New case `svc_fs_romfs.romfs_package_overlay_markers_are_not_game_files` checks the file count, the image contents, that
+neither marker is resolvable in the image, and that a mod's `.source` is kept.
+
+### Partial-initialization audit
+
+| Stage | Can fail? | Cleanup on shutdown | Finding |
+|---|---|---|---|
+| `config_load_file` | no (missing file is fine) | none needed (static map) | repeated init reloads over the same map |
+| `log_init` | no; falls back to stderr | `log_flush` only | `apply()` closes the previous file first, so cycles do not leak a handle; `log_shutdown()` is not called and the file stays open by design |
+| `symbols_load_map` | no | none | static map, refilled per init |
+| `crash_install` | no | none | installed once per process |
+| `mem::init` | **yes** | `mem::shutdown()` is *not* called by `runtime::shutdown()` | the failed path is covered; the reservation deliberately survives so a later init reuses it |
+| `svc_init`, kernel locks, spin hint, starvation guard | no | guard stopped | static state |
+| `services::register_all` | only on `bad_alloc` | `reset_all()` + `ipc::registry_reset()` behind `g_services_registered` | see residual 1 |
+| media/HLE installs, trace sites | no | not undone | hooks are process-wide; re-registering overwrites by name |
+| `memguard_start`, `watchdog_start` | no | stopped | both refuse a second start while running |
+| `hitch_start`, `soak_start`, `prof_sampler_start`, `ft::start_from_config` | no (no-op unless configured) | stopped | `ft::stop()` is restartable and waits for active `event()` writers |
+| `tt::init`, `timestep::init` | no | shut down | |
+
+Resource accounting: `reinitializes_after_shutdown` now also compares `GetProcessHandleCount` across repeated
+init/shutdown cycles, not just the host thread count. Both return to the pre-cycle value, so no thread handle, log file or
+profile handle survives a cycle.
+
+Residual findings, deliberately not changed:
+
+1. `g_services_registered` is set *after* `services::register_all()`. A throw from the registration loop (`bad_alloc`
+   only) would skip the service reset. Moving the flag before the call would make cleanup unconditional; it was left as
+   is because a failed allocation leaves the process unable to continue anyway, and because every `*_reset()` would then
+   run against services that were never registered.
+2. `services::reset_all()` assumes guest execution has stopped. That holds at the only production call site:
+   `fefw_main` calls `nxrt::shutdown()` after the lifted entry function returns, and the process exits immediately after.
+   It is **not** enforced for threads the game created, which can outlive the entry point. Do not add joins or termination
+   there: guest threads may hold the heap, log or GPU locks, and the process is about to exit. `reset_all()` is really a
+   re-init facility, and the callback-driven `on_fire` path (`tt_core`) is only used by scripted runs.
+3. `init()` retried after a failed `init()` without an intervening `shutdown()` is not supported or tested. The contract is
+   that `shutdown()` follows every attempt; `register_service` overwrites by name, so a retry would not duplicate
+   factories, but the best-effort starts would run a second time.
+
+### Pending contributions reviewed (no code changed)
+
+- **#99 and #103 (movie decoder)** are both open, both by the same author, and both rewrite `vd_release`, `vd_flush`,
+  `deliver()` and the worker loop. #103 additionally moves the handoff into `vdec::release()` /
+  `movie_vdec_internal.h`, so #99 must be rebased onto that refactor (or the refactor onto #99); the author has already
+  said they will rebase whichever lands second. They are complementary, not alternatives: #103 wakes the worker when a
+  returned frame is still waiting for its GPU serial, #99 adds `eos_owed` so an end of stream that found no free frame is
+  delivered on the first frame given back, and #99's `wait_for_room` windowing keeps a hitch on the game's main thread
+  from being mistaken for a stalled player. Combined, `release()` must notify for **both** reasons
+  (`(!pending_free.empty() && !decoded.empty()) || eos_owed`), and the worker's GPU poll branch must deliver when
+  `!decoded.empty() || eos_owed`. #99 already writes the worker condition that way; only the notify condition needs the
+  union. #99 ships no tests; #103 ships two against real dav1d and a synthetic AV1 clip. The combined behaviour (owed
+  EOS, hitch window, the 30 s game-stall ceiling, flush clearing `eos_owed`) is therefore **untested as a set** - that
+  gap should close in whichever PR lands second, using #103's frame-handoff harness.
+- **#105** is stacked on #103 and changes the default to `movie_decoder = auto`. It is not a blind enable: AMD/Intel are
+  gated on FFmpeg >= 9.1 (the shipped 8.1-dev build fails Vulkan decode on AMD with `VK_ERROR_OUT_OF_DEVICE_MEMORY`),
+  device selection is by Vulkan name, the built-in dav1d is the fallback at open and before the first picture, and the
+  removal of `movie_hwaccel` / FFmpeg's libdav1d path is stated. Recommendation: do not take the default change until
+  #99/#103 are in and the 9.1 ABI move happens in the same release; until then "Auto" means GPU on NVIDIA only, which is a
+  behaviour change for every user without the evidence of a released 9.1 build.
+- **#96** replaces the shared `SHA256` instance with `SHA256.HashData` in the harness. Correct and minimal: the worker's
+  `Parallel.ForEach` hashes concurrently and one shared instance throws.
+- **#97** is confirmed by inspection: `CacheEntry`/`Result` use fields and `SaveIndex`/`LoadIndex` serialize without
+  `IncludeFields`, so every entry is written as `{}` and dropped on load; `Put` rewrites the whole index (SPIR-V included)
+  under `_indexLock` after every block. The recommendation stands as the issue says: remove `ShaderCache` and restore the
+  translator build id in the journal header with `StartOver` on a change. `Program.cs` is owned by #96 right now, so no
+  edit was made here; `IncludeFields` alone would turn a 714 MB SPIR-V corpus into a gigabyte of JSON rewritten per block.
+
+### Build dependencies (#101) and GPU decoding (#104)
+
+- **#101**: NASM is optional in the launcher (`Need::Optional`) and auto-detected by the runtime's dav1d CMake
+  (`dav1d_asm_auto`, `NXRT_NASM`, `NXRT_NASM_DIR`), with the C-only fallback documented as several times slower. The
+  issue's own measurements (19-54 ms per 1440p packet C-only versus 5.5-14 ms with assembly, against a 33 ms frame
+  budget) agree with the existing #70/#75 records. No assembly-versus-C measurement was repeated on this host, and no
+  launcher or dependency change was made: making NASM `Need::Always` would stop existing installations from configuring,
+  which needs a clear launcher message and a cross-platform check this host cannot run. The runtime side already degrades
+  and logs which build it has; the decision belongs to the launcher's dependency policy.
+- **#104**: the production path today is the built-in dav1d by default, with `[media] movie_decoder = ffmpeg` +
+  `movie_hwaccel` as opt-in D3D11VA on whichever adapter Windows picks, falling back to FFmpeg's libdav1d outside the
+  engine's thread-priority policy. PR #105's design (Vulkan decode on the renderer's device, version gate, dav1d fallback,
+  parity evidence over all 35,511 frames) addresses device selection, fallback and compatibility, but not distribution
+  (the 9.1 ABI change) or the untested macOS path. Defaults stay with software here.
+
+### Validation
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/t.ps1 -All` from `engine/fefw-recomp/runtime`, Release,
+  clang-cl 20.1.8: `SUMMARY --all: 973 passed, 0 failed, 29 skipped (of 1002)` (was 967/996 before this pass).
+- Targeted: `watchdog` 19/19, `runtime_lifecycle` 6/6, `svc_fs_romfs` 21/21.
+- Synthetic measurements only. No game, dump, GPU or real freeze was available on this host: cinematic playback,
+  return-to-title, scene recreation and extended-session behaviour remain unverified, as do the combined #99/#103
+  semantics and the GPU decode path.

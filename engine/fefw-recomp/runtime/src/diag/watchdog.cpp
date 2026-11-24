@@ -70,9 +70,37 @@ double since_ms(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
+// One dump at a time. Two dumpers that each suspend the other never run their resume loops again, because each resume loop is inside the
+// thread the other one suspended: the freeze watchdog and the [prof] stall_ms sampler both dump on the same event, so this is a live race,
+// not a theoretical one. Nothing the dump needs while threads are suspended belongs to another thread, so one lock removes the cycle.
+// Recursive: an on_fire callback may dump again from the watchdog thread itself.
+std::recursive_mutex g_dump_mu;
+
+// Releases every suspension on scope exit, including an early return or an exception: a thread left suspended never runs again. The normal
+// path calls resume() once, after the context loop.
+struct ResumeSuspended {
+    std::vector<ThreadDump>& v;
+    ThreadDumpTiming* timing;
+    bool done = false;
+    ~ResumeSuspended() { resume(); }
+    void resume() {
+        if (done) return;
+        done = true;
+        for (ThreadDump& d : v) {
+            if (!d.suspended) continue;
+            const Clock::time_point t = Clock::now();
+            ResumeThread(static_cast<HANDLE>(d.rec.host_handle));
+            if (timing) timing->resume_ms += since_ms(t);
+            d.suspended = false;
+            if (timing) timing->resumed++;
+        }
+    }
+};
+
 // Phase one. The registry snapshot and every allocation happen before the first thread is suspended. While a thread is
 // suspended nothing allocates and nothing logs, because the suspended thread may hold the heap or the log lock.
 void collect_threads(std::vector<ThreadDump>& out, ThreadDumpTiming* timing = nullptr) {
+    std::lock_guard<std::recursive_mutex> one_dump(g_dump_mu);
     const Clock::time_point dump_start = Clock::now();
     // Private handle duplicates (made under the registry lock): a thread unregistering mid-dump cannot close or recycle ours.
     std::vector<ThreadRecord> recs = diag_threads_dup();
@@ -115,10 +143,13 @@ void collect_threads(std::vector<ThreadDump>& out, ThreadDumpTiming* timing = nu
         if (timing) timing->suspend_ms += since_ms(suspend_start);
         if (h == nullptr || previous == static_cast<DWORD>(-1)) {
             d.status = Status::NoSuspend;
-            continue;  // not suspended, nothing to resume
+            continue;  // not suspended, nothing to resume (also a thread that exited after the snapshot: its duplicated handle still works)
         }
         d.suspended = true;
+        if (timing) timing->suspended++;
     }
+    // From here on, every path - including an exception - resumes what was suspended.
+    ResumeSuspended resume_all{out, timing};
     for (ThreadDump& d : out) {
         if (!d.suspended) continue;
         HANDLE h = static_cast<HANDLE>(d.rec.host_handle);
@@ -156,14 +187,7 @@ void collect_threads(std::vector<ThreadDump>& out, ThreadDumpTiming* timing = nu
         d.guest_sp = gsp;
         d.guest_fp = gfp;
     }
-    for (ThreadDump& d : out) {
-        if (!d.suspended) continue;
-        HANDLE h = static_cast<HANDLE>(d.rec.host_handle);
-        const Clock::time_point resume_start = Clock::now();
-        ResumeThread(h);
-        if (timing) timing->resume_ms += since_ms(resume_start);
-        d.suspended = false;
-    }
+    resume_all.resume();
     for (ThreadDump& d : out) d.rec.host_handle = nullptr;   // the copies are about to dangle; phase two never needs them
     if (timing) {
         timing->collect_ms = since_ms(dump_start);

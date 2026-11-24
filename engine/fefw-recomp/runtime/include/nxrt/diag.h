@@ -119,13 +119,15 @@ std::string diag_thread_dump();        // the dump text the watchdog produces, o
 // Time spent by one thread dump. All durations are milliseconds; collect_ms is the wall-clock interruption window (snapshot through the
 // last ResumeThread), not the sum of the per-thread fields. Formatting runs after every thread is resumed.
 struct ThreadDumpTiming {
-    size_t threads = 0;
+    size_t threads = 0;       // threads in the dump (the caller is not one of them)
+    size_t suspended = 0;     // SuspendThread calls that succeeded
+    size_t resumed = 0;       // ResumeThread calls made to undo them; equal to `suspended` when the dump leaves nothing suspended
     double snapshot_ms = 0;   // copying the registry and duplicating handles, before the first suspend
     double suspend_ms = 0;    // SuspendThread calls
     double context_ms = 0;    // GetThreadContext calls
     double stack_ms = 0;      // RtlVirtualUnwind stack capture
     double resume_ms = 0;     // ResumeThread calls
-    double collect_ms = 0;    // start of the dump through the last resume
+    double collect_ms = 0;    // start of the dump through the last resume (and through the wait for another dump to finish)
     double format_ms = 0;     // symbolised text generation, with every thread resumed
     double total_ms = 0;      // collect_ms + format_ms
 };

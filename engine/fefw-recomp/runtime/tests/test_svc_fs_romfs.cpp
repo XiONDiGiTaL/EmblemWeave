@@ -972,6 +972,31 @@ NXTEST(romfs_mod_added_files_exclude_replacements) {
     CHECK_EQ(img.stats().mod_added_files, 1u);      // only /new.bin was a new path
 }
 
+// #94: the launcher writes its own markers into the root of the package overlay (.source / .written). They are not game files: serving them
+// made a complete install count two files more than the complete RomFS and warn about incomplete game data on every start.
+NXTEST(romfs_package_overlay_markers_are_not_game_files) {
+    TempTree base, package, mod;
+    write_host(base.root, {{"/GameData/Item.bin", false, pattern(20, 1)}});
+    write_host(package.root, {{"/GameData/Item.bin", false, pattern(20, 2)}, {"/.source", false, pattern(40, 9)}, {"/.written", false, pattern(40, 8)}});
+    RomfsImage img;
+    std::string err;
+    const std::vector<RomfsOverlay> overlays{{utf8(package.root), "", false}};
+    REQUIRE(img.build(utf8(base.root), &err, overlays));
+    CHECK_EQ(img.stats().files, 1u);
+    CHECK_EQ(img.stats().package_overlay_files, 1u);
+    check_tree(img, {{"/GameData/Item.bin", false, pattern(20, 2)}});
+    uint64_t off = 0, sz = 0;
+    CHECK_MSG(!img.file_extent("/.source", &off, &sz), "the launcher's .source marker is served as a game file");
+    CHECK_MSG(!img.file_extent("/.written", &off, &sz), "the launcher's .written marker is served as a game file");
+
+    // An installed mod that ships a file of that name keeps it: the filter is about the launcher's package overlay only.
+    write_host(mod.root, {{"/.source", false, pattern(5, 3)}});
+    RomfsImage modded;
+    const std::vector<RomfsOverlay> with_mod{{utf8(package.root), "", false}, {utf8(mod.root), "Keeps Dotfiles", true}};
+    REQUIRE(modded.build(utf8(base.root), &err, with_mod));
+    CHECK_MSG(modded.file_extent("/.source", &off, &sz), "a mod's .source file was dropped from the image");
+}
+
 namespace {
 
 struct LogCapture {
