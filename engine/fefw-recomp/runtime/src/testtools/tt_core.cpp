@@ -52,6 +52,7 @@ struct State {
     uint64_t max_frames = 0;
     double wall_timeout_s = 0;
     bool freeze_exit = false, require_shots = false, replay_exit = false;
+    bool started_watchdog = false;            // this run started the freeze watchdog: shutdown stops it
     std::string shot_dir;
 
     std::atomic<uint64_t> frames{0};
@@ -444,6 +445,7 @@ bool init() {
             WatchdogOptions wo;
             wo.on_fire = on_freeze;
             watchdog_start(wo);
+            s.started_watchdog = true;
         }
     }
     diag_set_frame_listener(tick_listener);
@@ -476,6 +478,10 @@ void shutdown() {
     }
     flush_files(s);
     if (s.trace) { std::fclose(s.trace); s.trace = nullptr; }
+    if (s.started_watchdog) {
+        watchdog_stop();   // the run is over: the freeze watchdog must not outlive it (it fired on idle processes)
+        s.started_watchdog = false;
+    }
     s.on = false;
 }
 

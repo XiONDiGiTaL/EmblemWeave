@@ -425,7 +425,11 @@ void watchdog_stop() {
         c.stop = true;
     }
     c.cv.notify_all();
-    c.th.join();
+    if (c.th.get_id() == std::this_thread::get_id()) {
+        c.th.detach();   // stopped from the freeze callback (end_run -> shutdown): a thread cannot join itself
+    } else {
+        c.th.join();
+    }
     g_running.store(false);
 }
 
