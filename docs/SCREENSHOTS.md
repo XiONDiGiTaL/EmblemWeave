@@ -7,6 +7,12 @@ the AMD preset and the display/rendering controls sit below the visible area. Th
 Low Memory card and the ExeFS patch support on the Mods page are also in this tree.
 The screenshots were captured from this tree.
 
+A layout check can pin the conditions a row has to survive: `--size 1280x720
+--scale 2` renders at 200 % scaling, `--scroll 900` opens the page further down,
+and `--gpu-list "Name|Integrated|512;Name|Discrete|20464"` supplies the adapter
+list (`none` is the no-Vulkan-device case). These flags change that run only and
+are never saved.
+
 | | |
 | --- | --- |
 | ![Overview](screenshots/overview.png) | ![Saves](screenshots/saves.png) |

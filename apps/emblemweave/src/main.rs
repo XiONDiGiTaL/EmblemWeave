@@ -187,6 +187,8 @@ pub struct App {
     allow_empty_play: bool,
     /// `--screenshot PATH`: save the window's own rendered frame and close.
     screenshot: Option<(std::path::PathBuf, u32)>,
+    /// `--scroll`: the page's vertical offset in a screenshot run, so a row below the fold can be captured.
+    capture_scroll: f32,
     applied: theme::Scheme,
     pub saves_ui: pages::saves::Ui,
     pub trouble_ui: pages::troubleshoot::Ui,
@@ -338,6 +340,7 @@ impl App {
             play_after_repair: false,
             allow_empty_play: false,
             screenshot: None,
+            capture_scroll: 0.0,
             saves_ui: Default::default(),
             trouble_ui: Default::default(),
             mods_ui: Default::default(),
@@ -374,6 +377,12 @@ impl App {
         // Command line: `--page <name>` opens a page, `--boot-test` runs the
         // boot test as soon as the game data is detected.
         let args: Vec<String> = std::env::args().collect();
+        // A screenshot/layout run can pin the UI scale and the page's scroll
+        // position, so the same row is captured at 100 % and 200 %.
+        if let Some(scale) = capture_scale(&args) {
+            cc.egui_ctx.set_zoom_factor(scale);
+        }
+        app.capture_scroll = capture_scroll(&args);
         for (i, a) in args.iter().enumerate() {
             match a.as_str() {
                 "--boot-test" => app.boot_on_start = true,
@@ -386,6 +395,18 @@ impl App {
                 }
                 "--screenshot" => {
                     app.screenshot = args.get(i + 1).map(|p| (std::path::PathBuf::from(p), 0))
+                }
+                "--gpu-list" => {
+                    if let Some(spec) = args.get(i + 1) {
+                        match parse_capture_devices(spec) {
+                            Ok(devices) => {
+                                if !crate::gpu::set_for_capture(devices) {
+                                    eprintln!("--gpu-list: the Vulkan device scan already started");
+                                }
+                            }
+                            Err(e) => eprintln!("--gpu-list: {e}"),
+                        }
+                    }
                 }
                 "--page" => {
                     if let Some(name) = args.get(i + 1) {
@@ -1261,6 +1282,9 @@ impl eframe::App for App {
                 if fresh_page {
                     page_area = page_area.vertical_scroll_offset(0.0);
                 }
+                if self.screenshot.is_some() && self.capture_scroll > 0.0 {
+                    page_area = page_area.vertical_scroll_offset(self.capture_scroll);
+                }
                 page_area.show(ui, |ui| {
                     // The page column stops growing at CONTENT_MAX and is
                     // centred in whatever is left, so a wide window gives the
@@ -1630,6 +1654,66 @@ problem: {e}"
     }
 }
 
+/// `--scale FACTOR` for a screenshot/layout run: 2 is 200 %. Values outside
+/// the range a display would report are ignored instead of making a bad image.
+fn capture_scale(args: &[String]) -> Option<f32> {
+    args.iter()
+        .position(|a| a == "--scale")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|s| (0.5..=4.0).contains(s))
+}
+
+/// `--scroll POINTS` for a screenshot run: the page offset to capture, so a
+/// row below the first screenful can be checked without a window taller than
+/// the display.
+fn capture_scroll(args: &[String]) -> f32 {
+    args.iter()
+        .position(|a| a == "--scroll")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// `--gpu-list NAME|KIND|VRAM_MB;...` for a screenshot of the GPU row with a
+/// chosen adapter list. `none` (or an empty value) is the no-Vulkan-device
+/// case. Nothing here touches the real Vulkan enumeration or the saved
+/// settings; it only supplies the list this run draws.
+fn parse_capture_devices(spec: &str) -> Result<Vec<crate::gpu::Device>, String> {
+    if spec.trim().is_empty() || spec.trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+    spec.split(';')
+        .filter(|entry| !entry.trim().is_empty())
+        .map(|entry| {
+            let mut fields = entry.split('|');
+            let name = fields.next().unwrap_or_default().trim();
+            let kind = fields.next().unwrap_or_default().trim();
+            let vram = fields.next().unwrap_or("0").trim();
+            if name.is_empty() {
+                return Err(format!("the device in {entry:?} has no name"));
+            }
+            let kind = match kind.to_ascii_lowercase().as_str() {
+                "integrated" => "Integrated",
+                "discrete" => "Discrete",
+                "virtual" => "Virtual",
+                "cpu" => "CPU",
+                "other" | "" => "Other",
+                _ => return Err(format!("{kind:?} is not Integrated, Discrete, Virtual, CPU or Other")),
+            };
+            let vram_mb = vram
+                .parse::<u64>()
+                .map_err(|_| format!("{vram:?} is not a VRAM size in MiB"))?;
+            Ok(crate::gpu::Device {
+                name: name.to_string(),
+                kind,
+                vram_mb,
+            })
+        })
+        .collect()
+}
+
 fn main() -> eframe::Result<()> {
     crash::install();
     let args: Vec<String> = std::env::args().collect();
@@ -1815,7 +1899,10 @@ fn main() -> eframe::Result<()> {
         std::process::exit(verify_log_cli(path));
     }
     // Screenshot and layout checks need a repeatable window size; it changes
-    // this run only and never touches the saved preferences.
+    // this run only and never touches the saved preferences. `--scale 2`
+    // doubles the physical window while egui's points stay the same, which is
+    // what a 200 % display does.
+    let scale = capture_scale(&args).unwrap_or(1.0);
     let window_size = args
         .iter()
         .position(|a| a == "--size")
@@ -1827,8 +1914,8 @@ fn main() -> eframe::Result<()> {
     // The launcher draws its own top bar and window buttons. Keeping the
     // native title bar would put a stock Windows strip above that design.
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size(window_size)
-        .with_min_inner_size([1120.0, 720.0])
+        .with_inner_size([window_size[0] * scale, window_size[1] * scale])
+        .with_min_inner_size([1120.0 * scale, 720.0 * scale])
         .with_decorations(false)
         .with_resizable(true)
         .with_title("EmblemWeave");

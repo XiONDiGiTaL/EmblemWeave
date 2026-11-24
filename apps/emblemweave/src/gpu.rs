@@ -21,18 +21,29 @@ pub fn devices() -> Vec<Device> {
     platform::devices()
 }
 
+static CACHE: std::sync::OnceLock<Vec<Device>> = std::sync::OnceLock::new();
+static SCAN: std::sync::Once = std::sync::Once::new();
+
 /// The list for this launcher run, or `None` while the one scan still runs. The scan loads vulkan-1.dll and every ICD on its
 /// own thread: on the UI thread, whose OpenGL context is current, loading NVIDIA's ICD crashed AMD's OpenGL driver at the
 /// next `wglMakeCurrent` on a hybrid laptop.
 pub fn cached() -> Option<&'static [Device]> {
-    static CACHE: std::sync::OnceLock<Vec<Device>> = std::sync::OnceLock::new();
-    static SCAN: std::sync::Once = std::sync::Once::new();
+    if let Some(list) = CACHE.get() {
+        return Some(list.as_slice());
+    }
     SCAN.call_once(|| {
         std::thread::spawn(|| {
             let _ = CACHE.set(devices());
         });
     });
     CACHE.get().map(Vec::as_slice)
+}
+
+/// For `--gpu-list`: render this list instead of scanning, so the Graphics page can be checked with a hybrid machine's two
+/// adapters on a PC that has one, or with no Vulkan device at all. Must run before the first `cached()`; `false` means the
+/// scan already owns the answer.
+pub fn set_for_capture(devices: Vec<Device>) -> bool {
+    CACHE.set(devices).is_ok()
 }
 
 #[cfg(windows)]

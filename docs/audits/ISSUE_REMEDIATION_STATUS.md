@@ -13,7 +13,7 @@ Status vocabulary is the one the readiness audit uses:
 | Implemented - unverified | Code exists and compiles or has unit coverage; the user-visible behaviour has not been demonstrated. |
 | Partially implemented | Some required behaviour exists; a named part is missing or contradicted by the code. |
 | Outstanding | No adequate implementation or no adequate evidence. |
-| Verified | Observed working in a controlled run, with the run recorded. **Nothing in this table is Verified.** |
+| Verified | Observed working in a controlled run, with the run recorded. Only #92 is Verified, by the captures recorded below. |
 | Implemented - automation-verified | The defect's mechanism is covered by an automated check that fails on the old code and passes on the new; the end-to-end user path was not re-run. |
 
 ---
@@ -32,7 +32,7 @@ Status vocabulary is the one the readiness audit uses:
 | #78 HDR left enabled after exit | Implemented - verified on one display | Full display snapshot (mode, HDR, SDR white, per monitor), sidecar snapshot for crash recovery, restore of only what the session changed, `SET_HDR_STATE`, 18 tests (13 fake, 5 live) | Live on Windows 11 26100 / RX 7900 XT, one 2560x1440@180 display: marked exclusive entered and exited normally, HDR-off stayed off, HDR-on stayed on, forcing HDR off during exclusive restored it, and a hard-killed marked session was repaired from the sidecar on the next launch. Remaining: SDR white is read-only (captured, not written), no second monitor, no live differing-mode restore, no live second restore of the same snapshot. |
 | #79 Saves not read | Implemented - fixture matrix run, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 16, 17, 19, 20 and 22 ran against the real engine: stale absolute paths honoured, nested save not adopted, missing `.meta` regenerated, foreign account ignored. Row 24's launcher import/backup/restore round-trip ran in a portable copy; its empty-profile UI flow and a reporter's own save remain (see `SAVE_VALIDATION_ISSUE79.md`) |
 | #90 Long inherited PATH stops the build | Implemented - automation-verified | `engine.rs` sets `NX_ENV_READY`, so `nx_env.cmd` keeps the launcher's vcvars environment instead of running it again; a direct call runs `vcvars64.bat` with a short PATH and merges both afterwards; every long value is only named through delayed expansion. `check_cmd_scripts.ps1` covers a 7,906-character PATH in launcher and direct mode, and `package_release.ps1` runs that check before packing | A launcher build started from that PATH, to completion; nothing above cmd's own ceiling can be fixed in the script |
-| #92 Graphics GPU label overlap | Implemented - unverified | The GPU row stacks the combo and its note in a top-down block constrained to the control column, so the note wraps; "Detected", "No Vulkan 1.3 device" and "Looking for Vulkan devices..." all use it | A visual check at 200 % scaling with a long hybrid adapter list, and with no Vulkan device |
+| #92 Graphics GPU label overlap | Verified | The GPU row stacks the combo and its note in a top-down block constrained to the control column, so the note wraps; "Detected", "No Vulkan 1.3 device" and "Looking for Vulkan devices..." all use it | None for the row. Viewed at 200 % scaling with a three-adapter hybrid list, with no Vulkan device, and with a long selected adapter name (2026-11-24 captures below) |
 | #7 Linux / Steam Deck | Outstanding - platform layer builds | POSIX platform layer, `write_watch_linux.cpp` compiles and links, platform self-test passes on Ubuntu 24.04, Vulkan probe runs | The rest of the runtime: core still links `psapi`, `diag/registry.cpp` includes `<windows.h>`, the graphics shell is Win32. `docs/LINUX.md` is missing (see `LINUX_BUILD_STATUS.md`) |
 
 ---
@@ -121,8 +121,23 @@ Windows', not the script's.
 `widgets::setting_row` lays its control out right to left, so the GPU row's "Detected" label was placed beside the
 280 px combo in whatever width was left, sometimes none, and ran left over the description. The row now puts the
 combo (still right-aligned) and the note in a top-down block constrained to the control column, where the note
-wraps; the empty-list and waiting lines use the same block. Not viewed at 200 % scaling or with a long hybrid
-adapter list, so it stays implemented-unverified.
+wraps; the empty-list and waiting lines use the same block.
+
+Verified on 2026-11-24 with the launcher's own capture path at `--size 1280x720 --scale 2` (a 2560x1440 frame,
+the logical layout of a 200 % display) and `--scroll 2050`:
+
+- the three-adapter list `AMD Radeon(TM) 890M Graphics` / `NVIDIA GeForce RTX 4090 Laptop GPU` / `MuMuPlayer
+  Virtual Display Adapter` wrapped "Detected: ..." to two lines under the combo, inside the control column, with
+  no overlap on the description and no clipping at the right or bottom edge;
+- `--gpu-list none` wrapped the no-Vulkan-device line to two lines in the same place, also without overlap or
+  clipping;
+- with `graphics.gpu` set to the long adapter name, the combo widened to show the whole name and the note stayed
+  below it.
+
+The same rows were captured at `--size 1120x720 --scale 2` (the minimum logical width) with the same result. The
+`--scale` option sets egui's pixels-per-point for the capture; it does not change the Win32 DPI the custom title
+bar's hit test reads, which the GPU row does not use. The full images are in the ignored `target/capture/`
+directory and are not committed.
 
 ---
 
@@ -139,7 +154,7 @@ adapter list, so it stays implemented-unverified.
 | #78 | Start with HDR on, exit, and show Windows still has HDR on with the original SDR white level and mode |
 | #79 | A reporter's own save, listed and loaded (the fixture matrix is done; row 24's UI flow is still open) |
 | #90 | A launcher build started from a PATH near 8,191 characters, to completion |
-| #92 | The Graphics page at 200 % scaling with a long hybrid adapter list, and with no Vulkan device |
+| #92 | **Met 2026-11-24**: Graphics page at 200 % scaling with a three-adapter hybrid list, with no Vulkan device, and with a long selected adapter; note wrapped without overlap or clipping |
 | #7 | A native Linux build of `nxrt` + `nxrt_gfx`, then a runtime test; Proton and Gamescope as separate targets |
 
 ---
@@ -154,6 +169,23 @@ Landed on `main` after the FCC pass, in addition to the review and merge of PRs 
 | `fb0c9f25` | GPU row note wraps inside the control column (issue #92) | `cargo check -p emblemweave`; not viewed in the running launcher |
 | `c5d2bbf7` | Credits for mmkzer0 (PRs #81, #83, #85, #87, #89, #91) | README and About page read back |
 | `8a4e5d9d` | `package_release.ps1` runs the cmd script check before building or packing | PowerShell parser check; the added command run directly (exit 0) |
+
+## 2026-11-24 GPU-row capture pass
+
+The launcher's `--screenshot` path now takes three capture-only options, so the #92 conditions can be reproduced
+without a second machine or a real 200 % display:
+
+- `--scale FACTOR` sets egui's zoom for the run and sizes the window by the same factor, which is the logical
+  layout a display at that scale produces (`--size 1280x720 --scale 2` is a 2560x1440 frame at 200 %).
+- `--scroll POINTS` opens the page at that offset, so a row below the first screenful is captured without a
+  window taller than the display.
+- `--gpu-list "NAME|KIND|VRAM_MB;..."` supplies the device list the row draws (`none` for an empty list). It is
+  set before the first `cached()` call and never changes the real Vulkan scan or the saved settings.
+
+Validation: `cargo build -p emblemweave --release` succeeded; `cargo test -p emblemweave` -> 432 passed, 0
+failed, 13 ignored. The captures are `target/capture/gpu200-hybrid-2050.png`, `gpu200-none-2050.png` and
+`gpu200-hybrid-selected.png` (2560x1440). Not checked: a physical display switched to 200 %, and the
+"Looking for Vulkan devices..." frame (the waiting line shares the same block).
 
 ## 2026-11-24 engine pass: unclaimed read faults and the freeze watchdog
 
