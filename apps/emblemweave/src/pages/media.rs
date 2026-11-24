@@ -19,9 +19,6 @@ const BASIC_UPSCALERS: &[&str] = &["Off", "FSR 1.0", "MAKO (spatial)"];
 /// The engine's `[upscale] sharpness` steps: Off, Low, its own 0.8, and 1.0.
 const SHARPENING: &[&str] = &["Off", "Low", "Default", "High"];
 
-/// The engine's two AV1 decoders for cutscene movies.
-const VIDEO_DECODERS: &[&str] = &["dav1d (CPU)", "FFmpeg (libavcodec)"];
-
 /// The visible warning when FSR 4.1.2 is selected but cannot run: the launcher
 /// downgrades the value it writes, so say which mode will actually start.
 fn fsr4_fallback_note(current: &str, sdk: &crate::engine::Sdk) -> Option<&'static str> {
@@ -267,6 +264,41 @@ fn gpu_combo(ui: &mut egui::Ui, value: &mut String, devices: &[crate::gpu::Devic
         });
 }
 
+/// How a stored video decoder is shown: Auto and Software by name, a GPU as hardware.
+fn video_decoder_display(value: &str) -> String {
+    match value.trim() {
+        "" | "Auto" => "Auto (recommended)".into(),
+        "Software" => "Software (built-in dav1d)".into(),
+        name => format!("Hardware: {name}"),
+    }
+}
+
+/// The video decoder picker: Auto, Software, then every Vulkan device the GPU picker lists. A GPU stores its
+/// full name, as `[gfx] gpu` does; the engine hands it to FFmpeg's Vulkan device selection.
+fn video_decoder_combo(ui: &mut egui::Ui, value: &mut String, devices: &[crate::gpu::Device]) {
+    egui::ComboBox::from_id_salt("vdec")
+        .selected_text(crate::i18n::tr(&video_decoder_display(value)))
+        .width(280.0)
+        .show_ui(ui, |ui| {
+            for choice in ["Auto", "Software"] {
+                ui.selectable_value(value, choice.to_string(), video_decoder_display(choice));
+            }
+            if !devices.is_empty() {
+                ui.separator();
+                for d in devices {
+                    ui.selectable_value(value, d.name.clone(), video_decoder_display(&d.name));
+                }
+            }
+            if !matches!(value.as_str(), "" | "Auto" | "Software") && !devices.iter().any(|d| d.name == *value) {
+                // A hand-written name or a GPU that is no longer installed: the engine falls back to dav1d,
+                // and the entry stays visible so choosing another one is deliberate.
+                let current = value.clone();
+                ui.separator();
+                ui.selectable_value(value, current.clone(), format!("{} (not detected)", video_decoder_display(&current)));
+            }
+        });
+}
+
 /// The Standard graphics presets: labels, hover text and values in one place.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Preset {
@@ -399,25 +431,18 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
                 }
             },
         );
-        let decoder_help = match &sdk.ffmpeg {
-            Some(dir) => format!("AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder. FFmpeg loads the libavcodec DLLs found in {} and uses D3D11VA when hardware acceleration is on; its software path is FFmpeg's libdav1d. Applies at the next start.", dir.display()),
-            None => "AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder and needs nothing. FFmpeg uses the avcodec-62.dll, avutil-60.dll and swresample-6.dll shipped in upscalers\\ffmpeg; if that folder is missing, the game uses dav1d. Applies at the next start.".into(),
-        };
-        widgets::setting_row(ui, &p, "Video decoder", &decoder_help, |ui| {
-            combo(ui, "vdec", &mut g.video_decoder, VIDEO_DECODERS);
-        });
-        if g.video_decoder == "FFmpeg (libavcodec)" && sdk.ffmpeg.is_none() {
-            widgets::pending_note(ui, &p, "FFmpeg is selected, but avcodec-62.dll, avutil-60.dll and swresample-6.dll were not found in upscalers\\ffmpeg, so the game will use its built-in dav1d instead. Restore the shipped folder or put a matching FFmpeg 8.x shared build there to use it.");
-        }
         widgets::setting_row(
             ui,
             &p,
-            "Hardware video decode",
-            "FFmpeg only. D3D11VA decodes AV1 on the GPU and copies NV12 frames back to the engine; if the GPU or driver cannot, FFmpeg's libdav1d runs. With dav1d selected, the engine always decodes on the CPU.",
+            "Video decoder",
+            "Who decodes the cutscene movies. Auto uses the GPU the game renders on, through FFmpeg's Vulkan video decoder, and the built-in dav1d on the CPU where that GPU or its driver cannot decode AV1. The shipped FFmpeg decodes on NVIDIA GPUs only; AMD and Intel GPUs use dav1d until it is 9.1 or newer. Software always uses dav1d. A Hardware entry picks one GPU. Applies at the next start.",
             |ui| {
-                widgets::toggle(ui, &p, &mut g.video_hwaccel);
+                video_decoder_combo(ui, &mut g.video_decoder, crate::gpu::cached().unwrap_or(&[]));
             },
         );
+        if g.video_decoder != "Software" && sdk.ffmpeg.is_none() {
+            widgets::pending_note(ui, &p, "avcodec-62.dll, avutil-60.dll and swresample-6.dll were not found in upscalers\\ffmpeg, so the movies will decode on the CPU with dav1d. Restore the shipped folder or put a matching FFmpeg 8.x shared build there to decode them on the GPU.");
+        }
         let fsr4 = sdk.fsr4();
         let framegen = sdk.fsr_framegen();
         let preset_ready = sdk.fsr3.is_some();

@@ -102,11 +102,9 @@ pub struct Graphics {
     /// `[gfx] present_guard`: whether the engine replaces the immediate present path that can reset Intel's Windows
     /// driver (#72). "Automatic" (its own rule: Intel GPUs that are not discrete), "Always on" or "Off".
     pub present_guard: String,
-    /// `[media] movie_decoder`: the engine's AV1 decoder for cutscene movies. "dav1d (CPU)" is built in;
-    /// "FFmpeg (libavcodec)" loads the shipped avcodec/avutil/swresample DLLs and can use D3D11VA.
+    /// `[media] movie_decoder`: who decodes the cutscene movies. "Auto" (the GPU the game renders on, through
+    /// FFmpeg's Vulkan video decoder, else the built-in dav1d), "Software" (dav1d) or a GPU's full Vulkan name.
     pub video_decoder: String,
-    /// `[media] movie_hwaccel`: ask FFmpeg for D3D11VA instead of its software decoder. Ignored by dav1d.
-    pub video_hwaccel: bool,
     /// Threads the engine may use to compile shader parts while playing; 0 leaves the engine's own
     /// `min(4, cpus / 6)`.
     pub compile_threads: u32,
@@ -137,8 +135,7 @@ impl Default for Graphics {
             astc_quality: "High".into(),
             gpu: "Automatic".into(),
             present_guard: "Automatic".into(),
-            video_decoder: "dav1d (CPU)".into(),
-            video_hwaccel: true,
+            video_decoder: "Auto".into(),
             // Two workers, below idle and in efficiency mode: a laptop stays a laptop. Players who want the
             // fastest first draw can raise this on Graphics.
             compile_threads: 2,
@@ -639,6 +636,18 @@ fn apply_saved_mode(text: &str, cfg: &mut Config) {
     }
 }
 
+/// The two decoders before GPU decoding became the default ("dav1d (CPU)", the old default, and "FFmpeg
+/// (libavcodec)" with its D3D11VA switch) both become Auto, once: the new values never match them. The Low
+/// Memory snapshots hold a copy of the field too, so a restore cannot bring an old value back.
+fn migrate_video_decoder(cfg: &mut Config) {
+    let preset = &mut cfg.graphics_preset;
+    for g in std::iter::once(&mut cfg.graphics).chain(preset.previous.as_mut()).chain(preset.applied.as_mut()) {
+        if matches!(g.video_decoder.as_str(), "dav1d (CPU)" | "FFmpeg (libavcodec)") {
+            g.video_decoder = "Auto".into();
+        }
+    }
+}
+
 impl Config {
     pub fn dir() -> Option<PathBuf> {
         // %APPDATA%\EmblemWeave on Windows, $XDG_CONFIG_HOME/EmblemWeave (else ~/.config/EmblemWeave)
@@ -672,6 +681,7 @@ impl Config {
                         if cfg.graphics.dlss_upscaler == "FSR 3" {
                             cfg.graphics.dlss_upscaler = "FSR 4 / 3 (FidelityFX)".into();
                         }
+                        migrate_video_decoder(&mut cfg);
                         (cfg, None)
                     }
                     Err(e) => {
@@ -756,6 +766,24 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_video_decoders_become_auto_in_every_snapshot() {
+        let mut cfg = Config::default();
+        cfg.graphics.video_decoder = "FFmpeg (libavcodec)".into();
+        let mut previous = cfg.graphics.clone();
+        previous.video_decoder = "dav1d (CPU)".into();
+        let mut applied = cfg.graphics.clone();
+        applied.video_decoder = "NVIDIA GeForce RTX 4060 Laptop GPU".into();
+        cfg.graphics_preset.previous = Some(previous);
+        cfg.graphics_preset.applied = Some(applied);
+        migrate_video_decoder(&mut cfg);
+        assert_eq!(cfg.graphics.video_decoder, "Auto");
+        let preset = &cfg.graphics_preset;
+        assert_eq!(preset.previous.as_ref().unwrap().video_decoder, "Auto");
+        // A value of the new field is the user's choice and stays.
+        assert_eq!(preset.applied.as_ref().unwrap().video_decoder, "NVIDIA GeForce RTX 4060 Laptop GPU");
+    }
 
     #[test]
     fn an_old_config_without_new_sections_still_loads() {

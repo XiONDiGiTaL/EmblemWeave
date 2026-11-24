@@ -4301,11 +4301,7 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
         other => other,
     };
     d.insert("upscale.mode".into(), mode.into());
-    d.insert("media.movie_decoder".into(), video_decoder_word(&g.video_decoder).into());
-    d.insert(
-        "media.movie_hwaccel".into(),
-        if g.video_hwaccel { "1" } else { "0" }.into(),
-    );
+    d.insert("media.movie_decoder".into(), video_decoder_word(&g.video_decoder));
     d.insert(
         "upscale.sharpness".into(),
         sharpen_value(&g.sharpening).into(),
@@ -4457,20 +4453,23 @@ fn frame_gen_label(word: &str) -> Option<&'static str> {
     })
 }
 
-/// The page's label for the engine's `[media] movie_decoder`.
-fn video_decoder_word(label: &str) -> &'static str {
-    match label {
-        "FFmpeg (libavcodec)" => "ffmpeg",
-        _ => "dav1d",
+/// The engine's `[media] movie_decoder` for the page's value: `auto`, `software`, or the GPU's full Vulkan
+/// name, which FFmpeg matches as part of the device name.
+fn video_decoder_word(label: &str) -> String {
+    match label.trim() {
+        "" | "Auto" => "auto".into(),
+        "Software" => "software".into(),
+        name => name.to_string(),
     }
 }
 
-fn video_decoder_label(word: &str) -> Option<&'static str> {
-    Some(match word.trim().to_ascii_lowercase().as_str() {
-        "ffmpeg" => "FFmpeg (libavcodec)",
-        "dav1d" | "dav1d_cpu" | "cpu" => "dav1d (CPU)",
-        _ => return None,
-    })
+fn video_decoder_label(word: &str) -> String {
+    let word = word.trim();
+    match word.to_ascii_lowercase().as_str() {
+        "" | "auto" => "Auto".into(),
+        "software" => "Software".into(),
+        _ => word.to_string(),
+    }
 }
 
 fn dlss_upscaler_word(label: &str) -> &'static str {
@@ -4691,12 +4690,7 @@ fn adopt_from(
         }
     }
     if let Some(v) = take_back(desired, applied, on_file, "media.movie_decoder") {
-        if let Some(label) = video_decoder_label(v) {
-            changed |= put(&mut g.video_decoder, label.to_string());
-        }
-    }
-    if let Some(v) = take_back(desired, applied, on_file, "media.movie_hwaccel") {
-        changed |= put(&mut g.video_hwaccel, matches!(v, "1" | "true" | "on" | "yes"));
+        changed |= put(&mut g.video_decoder, video_decoder_label(v));
     }
     if let Some(v) = take_back(desired, applied, on_file, "display.vsync") {
         changed |= put(&mut g.vsync, matches!(v, "1" | "true" | "on" | "yes"));
@@ -5296,6 +5290,16 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_video_decoder_round_trips_through_the_ini() {
+        for label in ["Auto", "Software", "NVIDIA GeForce RTX 4060 Laptop GPU"] {
+            assert_eq!(video_decoder_label(&video_decoder_word(label)), label);
+        }
+        // The engine reads the words in any case; a hand-edited ini comes back as the page's value.
+        assert_eq!(video_decoder_label(" SOFTWARE "), "Software");
+        assert_eq!(video_decoder_word(""), "auto");
+    }
 
     #[test]
     fn the_last_error_is_the_newest_failure_line() {
