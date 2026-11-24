@@ -601,7 +601,9 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
         }
         if (chosen.empty() && wants_cjk) {
             static const char* const kSystem[] = {
-                "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
+                "C:\\Windows\\Fonts\\msyh.ttc",
+                "C:\\Windows\\Fonts\\msyh.ttf",   // Wine/Proton use the standalone font
+                "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
             };
             for (const char* c : kSystem)
                 if (exists(c)) { chosen = c; break; }
