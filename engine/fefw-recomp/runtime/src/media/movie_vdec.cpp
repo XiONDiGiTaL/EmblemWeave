@@ -60,6 +60,7 @@
 #include "nxrt/services.h"
 
 #include "movie_ffmpeg.h"
+#include "movie_vdec_internal.h"
 
 #if NXRT_HAVE_DAV1D
 #include <dav1d/dav1d.h>
@@ -80,16 +81,15 @@ std::atomic<bool> g_enabled{false};
 #if NXRT_HAVE_DAV1D
 namespace {
 
+using namespace vdec;
+
 #define A(i) (c->x[i])
 #define RET(v) (c->x[0] = static_cast<uint64_t>(v))
 
 constexpr const char* kTag = "movie";
 constexpr uint64_t kMarker = 0x4e5852434d564443ull;   // "NXRCMVDC" at +8 of the guest object
-constexpr uint64_t kVfBuf = 0x08, kVfFilled = 0x28, kVfSize = 0x48, kVfTime = 0x78, kVfEos = 0x88;
 constexpr uint64_t kBufData = 0x00, kBufFilled = 0x10, kBufTime = 0x18, kBufFlags = 0x20;
 constexpr uint32_t kBufFlagEos = 8;
-constexpr int kMimeAv1 = 3;                // nn::movie::MediaMimeType of an AV1 track
-constexpr uint32_t kResultNoFrame = 0x7b;  // AcquireVideoFrame with no picture ready, as the library answers
 constexpr uint32_t kAutoClear = 1;         // nn::os::EventClearMode_AutoClear
 constexpr size_t kMaxFrames = 64;
 // The player must not hand the decoder an unbounded stream: the old queue took every packet as fast as the demuxer produced it (3301 packets
@@ -98,9 +98,9 @@ constexpr size_t kMaxFrames = 64;
 // few large 4K packets from taking the same room as hundreds of small ones.
 //
 // Normal backpressure never drops a packet: dropping one AV1 packet loses the decoder's reference state until the next keyframe, so every
-// frame after it can be wrong. This wait cannot deadlock. DecodeAsync runs on the guest's MovieVideoHandler thread; the player releases frames
-// on a different thread (the log shows guest-118 feeding and main releasing), and that release calls deliver(), which wakes this thread when a
-// frame frees a slot. The worker wakes this thread after every queue pop.
+// frame after it can be wrong. DecodeAsync runs on the guest's MovieVideoHandler thread, which also acquires the frames; the player releases
+// them on a different thread (the log shows guest-118 feeding and main releasing). A released frame takes the next picture once the GPU
+// passed it (the worker polls that), which lets the worker pop a packet, and the worker wakes this thread after every queue pop.
 //
 // A player can still stop releasing frames altogether. A wait is therefore abandoned only after kNoProgressLimit with no queue pop and no
 // deliver() moving a picture. abort_stalled() then stops the movie: it marks the decoder failed, clears the stalled input/decoded state (the
@@ -108,7 +108,6 @@ constexpr size_t kMaxFrames = 64;
 // returns kResultDecoderStalled instead of waiting. vd_flush() resets the failure for the next stream, and stop_worker() still joins the
 // worker on finalize.
 constexpr auto kNoProgressLimit = std::chrono::seconds(5);
-constexpr uint32_t kResultDecoderStalled = 0x1000;   // nonzero decoder failure; 0x7a is the SDK's retry result and must not be used here
 
 bool g_log = false;
 int g_threads = 4;
@@ -205,56 +204,6 @@ const Fns& fns() {
     return f;
 }
 
-struct Packet {
-    std::vector<uint8_t> data;
-    int64_t time = 0;
-    bool eos = false;
-};
-
-struct Picture {   // a decoded picture in host memory (NV12 at its width), or the end of the stream
-    std::vector<uint8_t> nv12;
-    uint32_t w = 0, h = 0;
-    int64_t time = 0;
-    bool eos = false;
-};
-
-struct Av1 {   // the worker's decoder: dav1d, or FFmpeg's libavcodec when selected and available
-    Dav1dContext* dav1d = nullptr;
-    ffmpeg::Decoder* ff = nullptr;
-};
-
-struct Decoder {
-    std::mutex mu;
-    std::condition_variable cv;              // the worker waits here for packets and for room in `decoded`
-    std::thread worker;
-    bool stop = false;
-    uint64_t generation = 0;                 // stream/queue generation: Flush bumps it, invalidating queued and held packets
-    int mime = 0;
-    std::vector<uint8_t> config;             // the track's av1C record (Configure): its OBUs go to dav1d ahead of the first packet
-    int w = 1920, h = 1080, color[3] = {0, 0, 0};
-    std::vector<uint64_t> frames, free_;     // registered VideoFrames; free_ is used as a stack
-    std::deque<uint64_t> ready;              // frames with a picture, not acquired yet
-    std::deque<Packet> queue;                // packets not decoded yet
-    size_t queued_bytes = 0;                 // payload bytes in `queue`
-    std::deque<Picture> decoded;             // pictures waiting for a free frame
-    // Frames the player gave back, with the GPU serial at that moment: free once the GPU passed it. Fortune's Weave's CPU-frame path
-    // polls one fence (sync[0], main 0x1902870) for every buffer, so it released buffers whose NV12 copy to the textures had not run
-    // yet; the next picture written into them showed 3 of 4 pictures early or torn (the choppy cutscenes).
-    std::deque<std::pair<uint64_t, uint64_t>> pending_free;
-    uint64_t packets = 0, pictures = 0;
-    uint64_t progress = 0;                   // queue pops and pictures moved into frames: the no-progress watchdog's clock
-    bool failed = false;                     // a stalled decoder was stopped; calls answer failure until Flush
-    // the movie's clock (skip_late): picture timestamps against the host clock; unit = seconds per timestamp tick, learned from the spacing
-    bool clk_on = false;
-    int64_t clk_ts0 = 0, clk_last = 0, last_time = 0;
-    double clk_t0 = 0, unit = 0;
-    uint64_t skipped = 0;
-    bool warned_size = false, warned_format = false, warned_mime = false, warned_error = false;
-    services::ServiceEvent in_ready, out_ready;   // attached to in_ev / out_ev: any thread can signal them
-    alignas(16) uint8_t in_ev[0x100]{}, out_ev[0x100]{}, fmt_ev[0x100]{};
-    alignas(16) int32_t scratch[4]{};        // guest-visible out value for MediaProperty::GetInt32
-};
-
 Decoder* dec_of(uint64_t self) {
     if (!self || rd64(self + 8) != kMarker) return nullptr;
     return reinterpret_cast<Decoder*>(rd64(self));
@@ -314,7 +263,7 @@ void skip_late(Decoder& d) {   // lock held, at least one decoded picture
 // Moves decoded pictures into free frames (caller holds the lock) and wakes the player when one is ready.
 void deliver(Decoder& d) {
     bool any = false;
-    while (!d.pending_free.empty() && nvn::be::gpu::serial_done(d.pending_free.front().second)) {
+    while (!d.pending_free.empty() && g_gpu.serial_done(d.pending_free.front().second)) {
         d.free_.push_back(d.pending_free.front().first);
         d.pending_free.pop_front();
     }
@@ -536,6 +485,7 @@ void worker_main(Decoder* d) {
     for (;;) {
         const auto can_work = [&] { return d->stop || (!d->queue.empty() && d->decoded.size() < g_ahead); };
         while (!can_work()) {
+            // Nothing pending: no timeout, as release() wakes it when a frame it gets back has to wait for the GPU while pictures wait.
             if (d->pending_free.empty()) d->cv.wait(lk);
             else {   // frames wait for the GPU: look again shortly (deliver frees them and wakes the player)
                 d->cv.wait_for(lk, std::chrono::milliseconds(1));
@@ -603,15 +553,6 @@ void worker_main(Decoder* d) {
     diag_unregister_thread();
 }
 
-void stop_worker(Decoder& d) {
-    {
-        std::lock_guard<std::mutex> lk(d.mu);
-        d.stop = true;
-    }
-    d.cv.notify_all();
-    if (d.worker.joinable()) d.worker.join();
-}
-
 // Attaches a host event to the guest's SystemEventType (managed handle, auto clear: each wait takes one signal), as vi's vsync event.
 void attach_event(::Ctx* c, uint8_t* guest_ev, services::ServiceEvent& host) {
     const uint32_t h = host.new_handle();
@@ -641,6 +582,136 @@ void write_props(::Ctx* c, const Decoder& d, uint64_t prop) {
     gcall(c, f.set_int32, prop, reinterpret_cast<uint64_t>("color-range"), static_cast<uint64_t>(d.color[1]));
     gcall(c, f.set_int32, prop, reinterpret_cast<uint64_t>("color-transfer"), static_cast<uint64_t>(d.color[2]));
 }
+
+}  // namespace
+
+// ---- the frame handoff (movie_vdec_internal.h) -----------------------------------------------------------------------------------------
+
+namespace vdec {
+
+GpuFence g_gpu{nvn::be::gpu::last_serial, nvn::be::gpu::serial_done};
+
+void start_worker(Decoder& d) { d.worker = std::thread(worker_main, &d); }
+
+void stop_worker(Decoder& d) {
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.stop = true;
+    }
+    d.cv.notify_all();
+    if (d.worker.joinable()) d.worker.join();
+}
+
+void register_frames(Decoder& d, const uint64_t* frames, size_t count) {
+    std::lock_guard<std::mutex> lk(d.mu);
+    d.frames.assign(frames, frames + count);
+    d.free_.assign(d.frames.rbegin(), d.frames.rend());
+    d.pending_free.clear();
+    d.ready.clear();
+    deliver(d);
+    if (g_log) NXLOG_I(kTag, "VideoDecoder: %zu frames registered", count);
+}
+
+uint32_t decode_async(Decoder& d, const uint8_t* data, uint64_t size, int64_t time, bool eos) {
+    FeedWait wait = FeedWait::Keep;
+    {
+        std::unique_lock<std::mutex> lk(d.mu);
+        if (d.failed) wait = FeedWait::Stalled;
+        else if (size && data) {
+            // Keep the packet: see the queue comment above. This is the guest's feed thread; the wait ends as the main thread gives frames
+            // back. Normal room waits reset on every queue pop or delivered picture in wait_for_room().
+            const uint64_t generation = d.generation;
+            wait = wait_for_room(d, lk, size, generation);
+            if (wait == FeedWait::Flushed && g_log)
+                NXLOG_I(kTag, "DecodeAsync: stream flush invalidated the held packet at %lld", static_cast<long long>(time));
+            if (wait == FeedWait::Keep) {
+                Packet k;
+                k.data.assign(data, data + size);
+                k.time = time;
+                d.queued_bytes += k.data.size();
+                d.queue.push_back(std::move(k));
+                ++d.packets;
+                ++s_packets;
+            }
+        }
+        if (wait == FeedWait::Keep && !d.stop && eos) {
+            Packet k;
+            k.eos = true;
+            d.queue.push_back(std::move(k));
+        }
+        uint64_t maxq = s_max_queue_packets.load();
+        if (d.queue.size() > maxq && !s_max_queue_packets.compare_exchange_weak(maxq, d.queue.size())) {}
+        s_queue_packets.store(d.queue.size());
+        s_queue_bytes.store(d.queued_bytes);
+        if (g_log && wait == FeedWait::Keep)
+            NXLOG_I(kTag, "DecodeAsync: %llu bytes at %lld%s; queued %zu, decoded %zu, ready %zu, free %zu", static_cast<unsigned long long>(size),
+                    static_cast<long long>(time), eos ? " (end of stream)" : "", d.queue.size(), d.decoded.size(), d.ready.size(),
+                    d.free_.size());
+    }
+    d.cv.notify_all();
+    return wait == FeedWait::Stalled ? kResultDecoderStalled : 0;
+}
+
+uint32_t acquire(Decoder& d, uint64_t* frame, int* index) {
+    std::lock_guard<std::mutex> lk(d.mu);
+    if (d.ready.empty()) {
+        *frame = 0;
+        return kResultNoFrame;
+    }
+    *frame = d.ready.front();
+    d.ready.pop_front();
+    if (!d.ready.empty()) d.out_ready.signal();   // one signal per wait: the next ready frame needs its own
+    if (index) {
+        *index = -1;
+        for (size_t i = 0; i < d.frames.size(); ++i)
+            if (d.frames[i] == *frame) *index = static_cast<int>(i);
+    }
+    return 0;
+}
+
+void release(Decoder& d, uint64_t frame) {
+    std::lock_guard<std::mutex> lk(d.mu);
+    const bool known = std::find(d.frames.begin(), d.frames.end(), frame) != d.frames.end();
+    const bool already = std::find(d.free_.begin(), d.free_.end(), frame) != d.free_.end();
+    const bool pending = std::any_of(d.pending_free.begin(), d.pending_free.end(), [frame](const auto& p) { return p.first == frame; });
+    if (frame && known && !already && !pending && d.free_.size() + d.pending_free.size() < kMaxFrames)
+        d.pending_free.emplace_back(frame, g_gpu.last_serial());
+    s_released++;
+    if (g_log) NXLOG_I(kTag, "ReleaseVideoFrame: %llx%s; queued %zu, decoded %zu, ready %zu, free %zu", static_cast<unsigned long long>(frame),
+                       known ? (already ? " (already free)" : "") : " (not registered)", d.queue.size(), d.decoded.size(), d.ready.size(),
+                       d.free_.size());
+    deliver(d);
+    // The frame waits for its GPU serial, and only the worker polls that; a worker that went to sleep with no frame pending sleeps without a
+    // timeout. So wake it while pictures wait for a frame: otherwise, once the main thread had given back its last frame and the handler sat
+    // in DecodeAsync waiting for room, nothing called in again, and the stall guard stopped the movie after 5 s.
+    if (!d.pending_free.empty() && !d.decoded.empty()) d.cv.notify_all();
+}
+
+void flush(Decoder& d) {
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        ++d.generation;
+        d.failed = false;   // a flush starts a new stream; the worker was left alive by abort_stalled()
+        ++d.progress;
+        d.clk_on = false;
+        d.last_time = 0;
+        d.queue.clear();
+        d.queued_bytes = 0;
+        s_queue_packets.store(0);
+        s_queue_bytes.store(0);
+        d.decoded.clear();
+        d.ready.clear();
+        d.pending_free.clear();
+        d.free_.assign(d.frames.rbegin(), d.frames.rend());
+    }
+    d.cv.notify_all();
+    if (g_log) NXLOG_I(kTag, "VideoDecoder flushed");
+    d.in_ready.signal();
+}
+
+}  // namespace vdec
+
+namespace {
 
 // ---- movie::VideoDecoder ---------------------------------------------------------------------------------------------------------------
 
@@ -679,7 +750,7 @@ void vd_initialize(::Ctx* c) {   // (self, void* mem, size_t size, MediaMimeType
     attach_event(c, d->in_ev, d->in_ready);
     attach_event(c, d->out_ev, d->out_ready);
     gcall(c, fns().create_event, reinterpret_cast<uint64_t>(d->fmt_ev), kAutoClear, 0);   // the format never changes
-    d->worker = std::thread(worker_main, d);
+    start_worker(*d);
     NXLOG_I(kTag, "VideoDecoder: MIME type %d%s, output format %d, mode %d", mime, mime == kMimeAv1 ? " (AV1)" : "", fmt, mode);
     RET(0);
 }
@@ -723,15 +794,9 @@ void vd_register_frames(::Ctx* c) {   // (self, VideoFrame** frames, int n)
         NXLOG_W(kTag, "%d frames registered, %zu used", n, kMaxFrames);
         n = static_cast<int>(kMaxFrames);
     }
-    std::lock_guard<std::mutex> lk(d->mu);
-    d->frames.clear();
-    d->free_.clear();
-    d->pending_free.clear();
-    d->ready.clear();
-    for (int i = 0; i < n; ++i) d->frames.push_back(rd64(list + 8ull * i));
-    for (int i = n - 1; i >= 0; --i) d->free_.push_back(d->frames[i]);
-    deliver(*d);
-    if (g_log) NXLOG_I(kTag, "VideoDecoder: %d frames registered", n);
+    uint64_t frames[kMaxFrames];
+    for (int i = 0; i < n; ++i) frames[i] = rd64(list + 8ull * i);
+    register_frames(*d, frames, static_cast<size_t>(n));
     RET(0);
 }
 
@@ -762,70 +827,15 @@ void vd_decode_async(::Ctx* c) {   // (self, const nn::movie::Buffer*)
     Decoder* d = dec_of(A(0));
     const uint64_t buf = A(1);
     if (!d || !buf) { RET(0); return; }
-    const uint64_t data = rd64(buf + kBufData), n = rd64(buf + kBufFilled);
-    const int64_t time = static_cast<int64_t>(rd64(buf + kBufTime));
-    const uint32_t flags = rd32(buf + kBufFlags);
-    FeedWait wait = FeedWait::Keep;
-    {
-        std::unique_lock<std::mutex> lk(d->mu);
-        if (d->failed) wait = FeedWait::Stalled;
-        else if (n && data) {
-            // Keep the packet: see the queue comment above. This is the guest's feed thread, not the thread that releases frames, so waiting
-            // for the worker cannot close a cycle. Normal room waits reset on every queue pop or delivered picture in wait_for_room().
-            const uint64_t generation = d->generation;
-            wait = wait_for_room(*d, lk, n, generation);
-            if (wait == FeedWait::Flushed && g_log)
-                NXLOG_I(kTag, "DecodeAsync: stream flush invalidated the held packet at %lld", static_cast<long long>(time));
-            if (wait == FeedWait::Keep) {
-                Packet k;
-                k.data.assign(reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + n);
-                k.time = time;
-                d->queued_bytes += k.data.size();
-                d->queue.push_back(std::move(k));
-                ++d->packets;
-                ++s_packets;
-            }
-        }
-        if (wait == FeedWait::Keep && !d->stop && (flags & kBufFlagEos)) {
-            Packet k;
-            k.eos = true;
-            d->queue.push_back(std::move(k));
-        }
-        uint64_t maxq = s_max_queue_packets.load();
-        if (d->queue.size() > maxq && !s_max_queue_packets.compare_exchange_weak(maxq, d->queue.size())) {}
-        s_queue_packets.store(d->queue.size());
-        s_queue_bytes.store(d->queued_bytes);
-        if (g_log && wait == FeedWait::Keep)
-            NXLOG_I(kTag, "DecodeAsync: %llu bytes at %lld%s; queued %zu, decoded %zu, ready %zu, free %zu", static_cast<unsigned long long>(n),
-                    static_cast<long long>(time), (flags & kBufFlagEos) ? " (end of stream)" : "", d->queue.size(), d->decoded.size(),
-                    d->ready.size(), d->free_.size());
-    }
-    d->cv.notify_all();
-    if (wait == FeedWait::Stalled) { RET(kResultDecoderStalled); return; }
-    RET(0);
-}
-
-uint32_t acquire(Decoder* d, uint64_t* out, int* idx) {
-    std::lock_guard<std::mutex> lk(d->mu);
-    if (d->ready.empty()) {
-        *out = 0;
-        return kResultNoFrame;
-    }
-    *out = d->ready.front();
-    d->ready.pop_front();
-    if (!d->ready.empty()) d->out_ready.signal();   // one signal per wait: the next ready frame needs its own
-    if (idx) {
-        *idx = -1;
-        for (size_t i = 0; i < d->frames.size(); ++i)
-            if (d->frames[i] == *out) *idx = static_cast<int>(i);
-    }
-    return 0;
+    const auto* data = reinterpret_cast<const uint8_t*>(rd64(buf + kBufData));
+    const bool eos = (rd32(buf + kBufFlags) & kBufFlagEos) != 0;
+    RET(decode_async(*d, data, rd64(buf + kBufFilled), static_cast<int64_t>(rd64(buf + kBufTime)), eos));
 }
 
 void vd_acquire(::Ctx* c) {   // (self, VideoFrame** out)
     Decoder* d = dec_of(A(0));
     uint64_t f = 0;
-    const uint32_t r = d ? acquire(d, &f, nullptr) : kResultNoFrame;
+    const uint32_t r = d ? acquire(*d, &f, nullptr) : kResultNoFrame;
     if (A(1)) wr64(A(1), f);
     if (f) {
         s_acquired++;
@@ -841,7 +851,7 @@ void vd_acquire_index(::Ctx* c) {   // (self, VideoFrame** out, int* index)
     Decoder* d = dec_of(A(0));
     uint64_t f = 0;
     int idx = -1;
-    const uint32_t r = d ? acquire(d, &f, &idx) : kResultNoFrame;
+    const uint32_t r = d ? acquire(*d, &f, &idx) : kResultNoFrame;
     if (A(1)) wr64(A(1), f);
     if (A(2)) std::memcpy(reinterpret_cast<void*>(A(2)), &idx, 4);
     if (f) s_acquired++;
@@ -849,48 +859,12 @@ void vd_acquire_index(::Ctx* c) {   // (self, VideoFrame** out, int* index)
 }
 
 void vd_release(::Ctx* c) {   // (self, VideoFrame*)
-    Decoder* d = dec_of(A(0));
-    const uint64_t f = A(1);
-    if (!d) { RET(0); return; }
-    {
-        std::lock_guard<std::mutex> lk(d->mu);
-        const bool known = std::find(d->frames.begin(), d->frames.end(), f) != d->frames.end();
-        const bool already = std::find(d->free_.begin(), d->free_.end(), f) != d->free_.end();
-        const bool pending = std::any_of(d->pending_free.begin(), d->pending_free.end(), [f](const auto& p) { return p.first == f; });
-        if (f && known && !already && !pending && d->free_.size() + d->pending_free.size() < kMaxFrames)
-            d->pending_free.emplace_back(f, nvn::be::gpu::last_serial());
-        s_released++;
-        if (g_log) NXLOG_I(kTag, "ReleaseVideoFrame: %llx%s; queued %zu, decoded %zu, ready %zu, free %zu", static_cast<unsigned long long>(f),
-                           known ? (already ? " (already free)" : "") : " (not registered)", d->queue.size(), d->decoded.size(), d->ready.size(),
-                           d->free_.size());
-        deliver(*d);
-    }
+    if (Decoder* d = dec_of(A(0))) release(*d, A(1));
     RET(0);
 }
 
 void vd_flush(::Ctx* c) {   // (self)
-    Decoder* d = dec_of(A(0));
-    if (!d) { RET(0); return; }
-    {
-        std::lock_guard<std::mutex> lk(d->mu);
-        ++d->generation;
-        d->failed = false;   // a flush starts a new stream; the worker was left alive by abort_stalled()
-        ++d->progress;
-        d->clk_on = false;
-        d->last_time = 0;
-        d->queue.clear();
-        d->queued_bytes = 0;
-        s_queue_packets.store(0);
-        s_queue_bytes.store(0);
-        d->decoded.clear();
-        d->ready.clear();
-        d->pending_free.clear();
-        d->free_.clear();
-        for (auto it = d->frames.rbegin(); it != d->frames.rend(); ++it) d->free_.push_back(*it);
-    }
-    d->cv.notify_all();
-    if (g_log) NXLOG_I(kTag, "VideoDecoder flushed");
-    d->in_ready.signal();
+    if (Decoder* d = dec_of(A(0))) flush(*d);
     RET(0);
 }
 
