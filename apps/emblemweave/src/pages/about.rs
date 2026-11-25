@@ -56,7 +56,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             "https://buymeacoffee.com/xiondigital",
         )
         .on_hover_text(crate::i18n::tr(
-            "Voluntary support for XiØN Digital's independent software and creative work. \
+            "Voluntary support for XiØN's independent software and creative work. \
              Not a purchase of EmblemWeave, the game, or any Nintendo content.",
         ));
     });

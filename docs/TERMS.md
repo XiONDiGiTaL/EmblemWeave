@@ -45,11 +45,11 @@ subscription, no early access, and no feature, save, mod, or priority access for
 sale. The project does not sell game content, keys, saves, mods, or access to
 the game.
 
-XiØN Digital is independently operated. Its creator may accept voluntary
-contributions through a general creator-support page (Buy Me a Coffee). Those
-contributions support the creator's broader independent software and creative
-work. They are not payment for EmblemWeave, for the game, for Nintendo content,
-or for any feature or access; they do not create a contract for a deliverable,
+XiØN is an independent creator and may accept voluntary contributions through a
+general creator-support page (Buy Me a Coffee). Those contributions support
+XiØN's broader independent software and creative work. They are not payment
+for EmblemWeave, for the game, for Nintendo content, or for any feature or
+access; they do not create a contract for a deliverable,
 and they grant no licence to any third-party intellectual property. They are
 not charitable donations and are not tax-deductible.
 

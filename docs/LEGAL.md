@@ -6,7 +6,7 @@ EmblemWeave is an independent [XiØN](https://github.com/XiONDiGiTaL) project. I
 
 ## Funding and independence
 
-EmblemWeave is independently developed and is not sold. No payment is required to use it, to receive support, or to obtain a release. XiØN Digital may accept voluntary contributions through a general creator-support page; those contributions support the creator's broader independent software and creative work. They are not payment for EmblemWeave, for access to the game, or for Nintendo content, and they grant no licence to any third-party intellectual property. The GPL-3.0 rights in the source are unaffected.
+EmblemWeave is independently developed and is not sold. No payment is required to use it, to receive support, or to obtain a release. XiØN may accept voluntary contributions through a general creator-support page; those contributions support XiØN's broader independent software and creative work. They are not payment for EmblemWeave, for access to the game, or for Nintendo content, and they grant no licence to any third-party intellectual property. The GPL-3.0 rights in the source are unaffected.
 
 ## Bring your own game data
 

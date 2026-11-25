@@ -129,7 +129,7 @@ Not changed:
    documented, so this audit does not claim that every line is a clean-room
    work.
 2. **Original assets.** `assets/branding/logo-*.png` and the launcher's UI art
-   are XiØN Digital's own branding. The repository's GPL notice covers its
+   are XiØN's own branding. The repository's GPL notice covers its
    code; it does not make Nintendo's material part of the project.
 3. **Third-party assets.** The launcher uses third-party Rust crates under
    their own licences; credits are in `README.md`. The project does not
