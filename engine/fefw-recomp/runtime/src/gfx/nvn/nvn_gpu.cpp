@@ -1360,11 +1360,7 @@ void release_texture_gpu(Texture* t) {
         if (g->stop) return;
         g->queue.push_back([keep] {
             Texture* x = keep.get();
-            if (!x->destroyed.load() || !x->gpu) return;   // initialized again meanwhile, or never got an image
-            TexGpu* img = x->gpu;
-            x->gpu = nullptr;
-            pool_texture_remade(x);
-            destroy_texture_gpu(img);
+            if (x->destroyed.load()) tex_release(x);
         });
         g_gauge_render_queue.add(1);
     }
