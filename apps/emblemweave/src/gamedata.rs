@@ -34,6 +34,19 @@ pub const MAIN_MODULE: &str = "main";
 /// The title this launcher is built for.
 pub const TITLE_NAME: &str = "Fire Emblem: Fortune's Weave";
 
+/// The title as the container stores it, with typographic punctuation folded
+/// to the ASCII form used by `TITLE_NAME`. The shipped `.nup` spells the colon
+/// as U+A789, which is the same title to a reader but not to `str::eq`.
+fn canonical_title(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| match c {
+            '\u{A789}' | '\u{FF1A}' | '\u{2236}' => ':',
+            c => c,
+        })
+        .collect()
+}
+
 /// The marker in a managed add-on folder. Its stamp records the package and
 /// the selected packs, so a later detection can reuse the files, and a changed
 /// package is unpacked again.
@@ -999,10 +1012,13 @@ fn use_nup(
     if !packed.is_empty() {
         let bytes: u64 = packed.iter().map(|f| f.size).sum();
         g.checks.push(Check::new(
-            Severity::Warn,
+            // The build does this automatically. It is useful context, not a
+            // problem the player has to resolve, so it must not turn the Game
+            // data card into "Needs attention" after a successful build.
+            Severity::Info,
             "Game file",
             format!(
-                "{} of {} files are zstd-compressed: the engine reads packages in place and cannot read into a zstd frame, so the game's files are unpacked into your work folder once, on the next build (about {:.1} GB of disk, and the package itself is never rewritten)",
+                "{} of {} files are zstd-compressed: the engine reads packages in place and cannot read into a zstd frame, so the game's files are unpacked into your work folder once, during the build (about {:.1} GB of disk, and the package itself is never rewritten)",
                 packed.len(),
                 listed.len(),
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)
@@ -1372,7 +1388,9 @@ fn use_package(
     };
     if romfs_files > 0 {
         g.checks.push(Check::new(
-            Severity::Warn,
+            // A completed unpack is normal build state; the note explains the
+            // disk copy and how to reclaim it, and is not an open problem.
+            Severity::Info,
             "Game file",
             format!(
                 "unpacked below {}: {exefs_files} ExeFS files and {romfs_files} RomFS files ({:.1} GB), so the package is read once and the copy is what the game and the recompiler use; delete that folder to reclaim the space",
@@ -1737,6 +1755,7 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
     };
     match nacp_title {
         Some((name, version)) => {
+            let name = canonical_title(&name);
             let sev = if name == TITLE_NAME { Severity::Ok } else { Severity::Warn };
             g.checks.push(Check::new(sev, "Title", format!("{name}, version {version}")));
             g.title = Some((name, version));
@@ -2066,6 +2085,13 @@ mod tests {
             .push(Check::new(Severity::Ok, "ExeFS", "seven modules"));
         assert_eq!(g.attention_line(), None);
         assert_eq!(g.attention_text(), None);
+    }
+
+    #[test]
+    fn a_typographic_colon_in_the_title_is_the_same_game() {
+        assert_eq!(canonical_title("Fire Emblem꞉ Fortune's Weave"), TITLE_NAME);
+        assert_eq!(canonical_title("  Fire Emblem: Fortune's Weave  "), TITLE_NAME);
+        assert_ne!(canonical_title("Fire Emblem: Three Houses"), TITLE_NAME);
     }
 
     #[test]
