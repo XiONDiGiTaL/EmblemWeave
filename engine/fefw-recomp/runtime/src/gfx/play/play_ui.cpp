@@ -662,6 +662,7 @@ void hdr_group(Page& p) {
         ImGui::EndCombo();
     }
     restart_badge();
+    if (h.mode == extras::HdrMode::Off) return;   // HDR off: only the switch itself; the rest shows again once it is picked
 
     const int format = static_cast<int>(h.format);
     const bool format_open = ImGui::BeginCombo("Format##hdr_format", kHdrFormatNames[format]);

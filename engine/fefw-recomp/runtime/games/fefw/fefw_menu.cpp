@@ -929,6 +929,10 @@ void hdr_group(UiHost& host, Menu& m) {
             apply(host, m);
         }
         pending_note(h.mode != m.boot.extras.hdr.mode, kHdrModeNames[static_cast<int>(m.boot.extras.hdr.mode)]);
+        if (h.mode == extras::HdrMode::Off) {   // HDR off: only the switch itself; the rest shows again once it is picked
+            end_rows();
+            return;
+        }
         row(m, "Signal", When::Restart, "HDR10 or scRGB; Auto picks HDR10 when the display offers it.");
         int fmt = static_cast<int>(h.format);
         if (combo(m, "##hf", &fmt, kHdrFormatNames, 3)) {
@@ -964,10 +968,9 @@ void hdr_group(UiHost& host, Menu& m) {
 
 void grading_group(UiHost& host, Menu& m) {
     extras::HdrSettings& h = m.edit.extras.hdr;
-    section("Scene grading");
-    if (!extras::hdr_scene_active()) {   // the grade runs in the replacement HDR tone map only
-        ImGui::TextDisabled(tr("Needs the HDR scene (HDR on): the grading runs in the HDR tone map. In SDR use Picture below."));
-    } else if (begin_rows("grade")) {
+    // The grade runs in the replacement HDR tone map only, so it shows with the HDR scene; in SDR Picture takes its place.
+    if (extras::hdr_scene_active()) section("Scene grading");
+    if (extras::hdr_scene_active() && begin_rows("grade")) {
         row(m, "Exposure", When::Live, "Brightness of the 3D scene before the tone map, in stops. 0 = the game's.");
         if (slider(m, "##ge", &h.grade_exposure, -2.0, 2.0, 0.1, "%+.1f")) apply(host, m);
         row(m, "Contrast", When::Live, "Scene contrast around mid grey, before the tone map. 1 = the game's.");
