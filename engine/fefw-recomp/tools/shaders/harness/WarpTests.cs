@@ -18,8 +18,19 @@ namespace SpirvHarness
         static O U(int n) => new(OperandKind.UReg, Reg:n);
         static O I(uint n) => new(OperandKind.Imm, ImmBits:n);
         static O SR(string n) => new(OperandKind.Special, Text:n);
+        // The SASS expansion has to stay bit-exact against the hardware abs, including the boundaries (INT_MIN abs stays INT_MIN).
+        static void CheckIntegerAbsFormula()
+        {
+            foreach (int x in new[]{0,1,-1,2,-2,int.MaxValue,int.MinValue})
+            {
+                int expected = x < 0 ? unchecked(-x) : x;
+                int got = unchecked(x * ((x >> 31) | 1));
+                if (got != expected) throw new Exception($"integer abs formula: {x} -> {got}, expected {expected}");
+            }
+        }
         public static int Run(string output)
         {
+            CheckIntegerAbsFormula();
             Directory.CreateDirectory(output);
             int count=0;
             void Test(string name, Action<Action<string,string,O[]>> emit)
@@ -41,16 +52,34 @@ namespace SpirvHarness
                 if(program.Unsupported.Count!=0 || sp.BinaryCode==null) throw new Exception(name+": "+string.Join(";",program.Unsupported));
                 // Verify that the exercised operation survived optimisation into the module.
                 var ops = new HashSet<uint>();
+                var ext = new HashSet<uint>();
                 uint[] words = new uint[sp.BinaryCode.Length/4];
                 Buffer.BlockCopy(sp.BinaryCode,0,words,0,sp.BinaryCode.Length);
                 for(int i=5;i<words.Length;i+=(int)(words[i]>>16)) {
-                    if((words[i]>>16)==0) throw new Exception(name+": malformed SPIR-V");
-                    ops.Add(words[i]&65535);
+                    int wc=(int)(words[i]>>16);
+                    if(wc==0) throw new Exception(name+": malformed SPIR-V");
+                    uint opcode=words[i]&65535;
+                    ops.Add(opcode);
+                    if(opcode==12 && wc>=5) ext.Add(words[i+4]);   // OpExtInst: the instruction literal is the first operand
                 }
                 if ((name.StartsWith("shfl_") || name.StartsWith("redux_") || name.StartsWith("match")) && !ops.Contains(345))
                     throw new Exception(name+": missing subgroup shuffle");
                 if ((name.StartsWith("vote_") || name.StartsWith("redux_") || name.StartsWith("match")) && !ops.Contains(339))
                     throw new Exception(name+": missing subgroup ballot");
+                if (name.StartsWith("iabs") || name=="i2f_abs")
+                {
+                    if (AmpereTranslator.NativeIAbs)
+                    {
+                        if (!ext.Contains(5)) throw new Exception(name+": --native-iabs did not emit SAbs");
+                        if (ops.Contains(132)) throw new Exception(name+": --native-iabs still emitted the multiply expansion");
+                    }
+                    else
+                    {
+                        if (ext.Contains(5)) throw new Exception(name+": default mode emitted SAbs");
+                        if (!ops.Contains(132) || !ops.Contains(195) || !ops.Contains(197))
+                            throw new Exception(name+": integer abs was not emitted as x * ((x >> 31) | 1)");
+                    }
+                }
                 File.WriteAllBytes(Path.Combine(output,name+".spv"),sp.BinaryCode);
                 count++;
             }
@@ -73,6 +102,9 @@ namespace SpirvHarness
             Test("match64",a=>{a("MOV","",new[]{R(5),R(4)});a("MATCH","ALL.U64",new[]{P(1),R(0),R(4)});a("SEL","",new[]{R(1),I(1),I(0),P(1)});});
             Test("matchany",a=>a("MATCH","ANY",new[]{R(0),R(4)}));
             Test("matchany64",a=>{a("MOV","",new[]{R(5),R(4)});a("MATCH","ANY.U64",new[]{R(0),R(4)});});
+            Test("iabs",a=>a("IABS","",new[]{R(0),R(4)}));
+            Test("iabs_src_abs",a=>a("IABS","",new[]{R(0),new O(OperandKind.Reg, Reg:4, Abs:true)}));
+            Test("i2f_abs",a=>a("I2F","",new[]{R(0),new O(OperandKind.Reg, Reg:4, Abs:true)}));
             Console.WriteLine($"PASS: {count} synthetic Ampere warp programs translated to {output}");
             return 0;
         }

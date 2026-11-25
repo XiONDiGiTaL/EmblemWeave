@@ -140,7 +140,11 @@ def tree_hash(root, rels):
     return h.hexdigest()
 
 
-# EmblemWeave keeps the same shader translator version in its setup: keep the two equal.
+# EmblemWeave keeps the same shader translator version in its setup and in the harness journal
+# (tools/shaders/harness/Batch.cs TranslatorVersion): keep them equal. The setup's shader_cache/setup.json
+# records this value outside the repository, so a translator-only output change must bump both this value
+# and the harness version, or an existing install can keep the old shaders. A release that changes the
+# runtime library rebuilds fefw.exe regardless (tool_stamp above).
 SHADER_TRANSLATOR_VERSION = 3
 
 

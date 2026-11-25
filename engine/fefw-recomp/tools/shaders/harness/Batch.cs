@@ -39,7 +39,7 @@ namespace SpirvHarness
     static partial class Program
     {
         // Bump when the output of the translation changes in a way the build id below would not catch.
-        const int TranslatorVersion = 2;   // 2: derivative pattern fix (#29)
+        const int TranslatorVersion = 3;   // 3: integer abs without SAbs; 2: derivative pattern fix (#29)
         const string JournalName = "journal.tsv";
         static readonly JsonSerializerOptions JournalJson = new() { IncludeFields = true };
 
@@ -94,7 +94,7 @@ namespace SpirvHarness
         // reused (issue #97).
         static string JournalHeader(string[] args)
         {
-            string[] keyed = ["--no-val", "--no-retry", "--debug-mode"];
+            string[] keyed = ["--no-val", "--no-retry", "--debug-mode", "--native-iabs"];
             string[] valued = ["--target-env", "--host", "--texture-pool", "--sampler-pool", "--reflect"];
             string opts = string.Join(" ", keyed.Where(args.Contains).Concat(valued.Where(v => Opt(args, v, null) != null).Select(v => $"{v}={Opt(args, v, null)}")));
             return $"# spirv_harness journal\t{TranslatorVersion}\t{TranslatorBuildId}\t{opts}";

@@ -67,6 +67,7 @@ namespace SpirvHarness
             StaticGpuAccessor.TexturePoolLength = int.Parse(Opt(args, "--texture-pool", "65536"));
             StaticGpuAccessor.SamplerPoolLength = int.Parse(Opt(args, "--sampler-pool", "4096"));
             Debug = args.Contains("--debug-mode");
+            AmpereTranslator.NativeIAbs = args.Contains("--native-iabs");
             try
             {
                 if (args.Length >= 2 && args[0] == "--warp-tests") return WarpTests.Run(args[1]);
@@ -79,7 +80,7 @@ namespace SpirvHarness
                 Console.Error.WriteLine(e.Message);
             }
             Console.Error.WriteLine("usage: spirv_harness <code.bin> <ctrl.bin> [-o out.spv] [--glsl] [--glslc <GLSLC output, NVN2>]\n" +
-                                    "       spirv_harness --batch <extracted dir> --out <dir> [--jobs N] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--target-env E] [--host desktop|moltenvk] [--spirv-val PATH] [--reflect <Ampere corpus>] [--crash-budget N]");
+                                    "       spirv_harness --batch <extracted dir> --out <dir> [--jobs N] [--limit N] [--no-val] [--no-retry] [--debug-mode] [--native-iabs] [--target-env E] [--host desktop|moltenvk] [--spirv-val PATH] [--reflect <Ampere corpus>] [--crash-budget N]");
             return 2;
         }
 

@@ -57,7 +57,7 @@ Stand-in corpus to translator input: `scripts\dksh_to_corpus.py <dksh dir> --out
 - Host profile `--host desktop` (default): full precision, geometry shaders, float64. `--host moltenvk` reproduces Wonder's answers.
 - Stage comes from the SPH (vertex, tessellation, geometry, pixel); compute also from control +0x714 = 5, so DKSH-derived blocks work.
 - `spirv-val` target defaults to `vulkan1.3`; the executable is found through `VULKAN_SDK` or `PATH`.
-- Extra post-pass: `OpCapability MultiViewport` when a module decorates `ViewportIndex` without a capability (`docs/debug/001.md`).
+- Integer abs (`IABS` and `|x|` operands) is emitted as `x * ((x >> 31) | 1)`, not `SAbs`: an NVIDIA compatibility mitigation for integer IABS, where NVIDIA's shader compiler can hang the GPU on an integer abs of a small select (technique from Mario Kart World Recomp). It is bit-exact for every 32-bit input and is not a universal GPU stability fix. `--native-iabs` emits `SAbs` again for comparison.
 - Sources are staged into `third_party\` so `refs\` stays read-only.
 
 ## Stand-in corpus
