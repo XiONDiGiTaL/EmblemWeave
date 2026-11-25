@@ -1,0 +1,63 @@
+{
+  "schema": "trinity-prefix/1",
+  "version": "0.1.0",
+  "neutral": [
+    {
+      "prefix": "trinity.",
+      "owner": "Trinity",
+      "meaning": "Portable services and standard interfaces owned by the shared layer."
+    },
+    {
+      "prefix": "nxp.",
+      "owner": "NXP",
+      "meaning": "The compatibility ABI itself: nxp.ui, nxp.settings, nxp.files and nxp.frame."
+    }
+  ],
+  "hosts": [
+    {
+      "id": "emblemweave",
+      "prefix": "emblemweave.",
+      "aliases": ["ew."],
+      "api": "nxmod-api-4",
+      "accent": "#3f80ff",
+      "meaning": "Host-only interfaces and game integrations owned by EmblemWeave."
+    },
+    {
+      "id": "fefw-recomp",
+      "prefix": "fefw-recomp.",
+      "aliases": ["fefw."],
+      "api": "nxmod-api-3",
+      "accent": "#a78bfa",
+      "meaning": "Host-only interfaces and game integrations owned by fefw-recomp."
+    },
+    {
+      "id": "obelisk-chamber",
+      "prefix": "obeliskchamber.",
+      "aliases": ["oc."],
+      "api": "nxmod-api-5",
+      "accent": "#6fcf97",
+      "meaning": "Host-only interfaces and game integrations owned by ObeliskChamber."
+    }
+  ],
+  "reserved": [
+    "core",
+    "hub",
+    "ui",
+    "settings",
+    "files",
+    "frame",
+    "diagnostics",
+    "compat",
+    "prefixes"
+  ],
+  "rules": [
+    "A prefix is a lowercase dotted namespace: [a-z0-9-]+ followed by a dot.",
+    "A host answers for its own prefix and for no other host's prefix.",
+    "trinity. is always portable. nxp. is always the compatibility ABI.",
+    "A host interface name must carry exactly one owner prefix. The loader rejects unknown and doubled prefixes.",
+    "Short aliases are accepted for input and diagnostics but canonical names are written to disk.",
+    "Reserved first segments are systemic and cannot be claimed by a plugin.",
+    "The full name, not the short name, is the identity. Two hosts may both expose ui.settings without colliding.",
+    "Existing NxModApi entry points remain valid. Prefixes are added at the interface registry, not forced onto old symbols."
+  ]
+}

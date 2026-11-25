@@ -24,6 +24,9 @@ __pycache__/
 # The site reads these at runtime; they are release data, not local reports.
 !docs/release.json
 !docs/mirrors.json
+# The native Trinity page embeds canonical snapshots at compile time.
+!apps/emblemweave/src/pages/trinity_catalog.json
+!apps/emblemweave/src/pages/trinity_prefixes.json
 
 # Launch videos made with /brag (they contain game footage: keep them local)
 brag-output*/

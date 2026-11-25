@@ -1,0 +1,128 @@
+{
+  "schema": "trinity-catalog/1",
+  "id": "trinity",
+  "name": "Trinity",
+  "tagline": "The Three Houses Of Innovation",
+  "version": "0.1.0",
+  "revision": "2026-11-25",
+  "repo": "https://github.com/XiONDiGiTaL/Trinity",
+  "summary": "One compatibility surface for EmblemWeave, fefw-recomp and ObeliskChamber, without erasing the character of any house.",
+  "houses": [
+    {
+      "id": "emblemweave",
+      "name": "EmblemWeave",
+      "monogram": "EW",
+      "host_api": "nxmod-api-4",
+      "launcher": "egui / Rust",
+      "prefix": "emblemweave.",
+      "accent": "#3f80ff",
+      "status": "Runtime verified",
+      "tone": "ok",
+      "evidence": "The development build loaded an NXP panel, persisted settings and rendered it under F1 > Advanced > Mods.",
+      "adapter": "Native egui page and NXP host adapter",
+      "listings": 5
+    },
+    {
+      "id": "fefw-recomp",
+      "name": "fefw-recomp",
+      "monogram": "FR",
+      "host_api": "nxmod-api-3, nxmod-api-4 proposed",
+      "launcher": "Tauri 2 / Vite",
+      "prefix": "fefw-recomp.",
+      "accent": "#a78bfa",
+      "status": "Launcher verified",
+      "tone": "ok",
+      "evidence": "The actual fefw-recomp 0.2.13 launcher window loaded the Trinity page, built from the v0.2.13 tag. The 0.2.13 game runtime was not exercised.",
+      "adapter": "Host-styled Trinity page plus a future NXP loader",
+      "listings": 5
+    },
+    {
+      "id": "obelisk-chamber",
+      "name": "ObeliskChamber",
+      "monogram": "OC",
+      "host_api": "nxmod-api-5",
+      "launcher": "Tauri 2 / Vite",
+      "prefix": "obeliskchamber.",
+      "accent": "#6fcf97",
+      "status": "Launcher verified",
+      "tone": "ok",
+      "evidence": "The actual ObeliskChamber 0.3.2 launcher window loaded the Trinity page. The game runtime was not exercised.",
+      "adapter": "Panel-styled Trinity screen plus a future NXP loader",
+      "listings": 5
+    }
+  ],
+  "listings": [
+    {
+      "id": "trinity.core",
+      "name": "Trinity Core",
+      "kind": "runtime",
+      "version": "0.1.0",
+      "status": "Prototype",
+      "tone": "warn",
+      "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
+      "summary": "The shared capability registry and NXP bridge. It discovers the host, negotiates interfaces and exposes one panel model."
+    },
+    {
+      "id": "trinity.hub",
+      "name": "Trinity Hub",
+      "kind": "launcher",
+      "version": "0.1.0",
+      "status": "Source ready",
+      "tone": "ok",
+      "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
+      "summary": "The section you are looking at: one catalog, three native presentations, and no replacement of the host's navigation."
+    },
+    {
+      "id": "trinity.prefixes",
+      "name": "Prefix Registry",
+      "kind": "standard",
+      "version": "0.1.0",
+      "status": "Proposed",
+      "tone": "warn",
+      "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
+      "summary": "Host-owned namespaces such as emblemweave. and neutral namespaces such as trinity. and nxp., with collision checks at load time."
+    },
+    {
+      "id": "trinity.demo",
+      "name": "NXP Demo Panel",
+      "kind": "runtime",
+      "version": "0.1.0",
+      "status": "Verified in EmblemWeave",
+      "tone": "ok",
+      "hosts": ["emblemweave"],
+      "summary": "The first proof: a native panel, two persisted settings and a frame counter loaded by the EmblemWeave development build."
+    },
+    {
+      "id": "trinity.compat",
+      "name": "Compatibility Bridge",
+      "kind": "bridge",
+      "version": "0.1.0",
+      "status": "Prototype",
+      "tone": "warn",
+      "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
+      "summary": "Maps the existing NxModApi 3, 4 and 5 entry points onto NXP without forcing a host API version bump."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "host",
+      "name": "Host discovery",
+      "detail": "Host id, name, version and plugin directory cross the ABI once."
+    },
+    {
+      "id": "ui",
+      "name": "Native panel",
+      "detail": "The host draws the widgets, so each launcher keeps its own controls and input model."
+    },
+    {
+      "id": "settings",
+      "name": "Persisted settings",
+      "detail": "Namespaced keys survive a restart and stay owned by the host."
+    },
+    {
+      "id": "frame",
+      "name": "Frame hook",
+      "detail": "Optional per-frame work runs on the game's presenting thread."
+    }
+  ]
+}
