@@ -50,8 +50,9 @@ FrameTimeWindow::Percentiles FrameTimeWindow::snapshot() const {
     std::vector<float> sorted;
     sorted.reserve(n);
     const uint64_t h = head.load(std::memory_order_relaxed);
+    const uint64_t start = h - n;   // oldest sample in the window (head is the next write index)
     for (uint64_t i = 0; i < n; ++i) {
-        const uint64_t idx = (h + i) % kCapacity;
+        const uint64_t idx = (start + i) % kCapacity;
         sorted.push_back(samples[idx]);
     }
     std::sort(sorted.begin(), sorted.end());
