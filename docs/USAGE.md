@@ -46,7 +46,7 @@ takes the chosen scheme's accent, glow and rim.
 | **About** | Version, build revision, what each runtime is, credits and legal information. |
 
 Press <kbd>Ctrl</kbd> + <kbd>1</kbd> to <kbd>9</kbd> to jump between pages. From the command line,
-`EmblemWeave.exe --page Diagnostics` opens a page, `--build-engine` builds the game as soon as your game data is detected,
+`EmblemWeave.exe --page Diagnostics` opens a page, `--game <path>` uses that dump (a package or an extracted folder) as if it had been chosen on Game Setup, `--build-engine` builds the game as soon as your game data is detected,
 `--boot-test` runs the boot test, `--screenshot <file.png>` saves the launcher's own frame and closes, and `--tour` walks through the features by itself (for recording showcase footage; it never saves settings).
 
 The game runs from the launcher's `play` folder (`data\play` in a portable install, `%APPDATA%\EmblemWeave\play` otherwise),

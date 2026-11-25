@@ -247,6 +247,11 @@ fn clock() -> String {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
         let (mut config, warning) = Config::load();
+        // `--game <path>`: the dump to use, as if it had been chosen on Game Setup (a launcher, script or shortcut
+        // passes it). Without it the saved choice stands.
+        if let Some(game) = game_arg(&std::env::args().collect::<Vec<_>>()) {
+            config.paths.game_root = game;
+        }
         config.lab.normalize();
         i18n::set_language(config.ui_language);
         theme::configure_fonts(&cc.egui_ctx, config.ui_language);
@@ -1084,7 +1089,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_boost_master, parse_capture_devices};
+    use super::{audio_boost_master, game_arg, parse_capture_devices};
+
+    #[test]
+    fn game_takes_the_path_after_it_and_nothing_else() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            game_arg(&args(&["EmblemWeave.exe", "--game", r"D:\Games\FEFW.nup"])),
+            Some(r"D:\Games\FEFW.nup".to_string())
+        );
+        assert_eq!(game_arg(&args(&["EmblemWeave.exe"])), None);
+        assert_eq!(game_arg(&args(&["EmblemWeave.exe", "--game"])), None);
+        assert_eq!(game_arg(&args(&["EmblemWeave.exe", "--game", "--page", "Overview"])), None);
+    }
 
     #[test]
     fn cancelling_the_above_100_warning_restores_the_previous_master_volume() {
@@ -1698,6 +1715,16 @@ fn capture_scale(args: &[String]) -> Option<f32> {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|s| (0.5..=4.0).contains(s))
+}
+
+/// `--game PATH`: the dump this run uses, a package file or an extracted folder. A missing path, or another
+/// option in its place, is no choice.
+fn game_arg(args: &[String]) -> Option<String> {
+    args.iter()
+        .position(|a| a == "--game")
+        .and_then(|i| args.get(i + 1))
+        .filter(|p| !p.trim().is_empty() && !p.starts_with("--"))
+        .cloned()
 }
 
 /// `--scroll POINTS` for a screenshot run: the page offset to capture, so a
