@@ -502,9 +502,13 @@ namespace {
 void set_window_mode(const std::string& mode) {
     G& st = g();
     if (!st.window) return;
-    const platform::FullscreenMode want = mode == "borderless" ? platform::FullscreenMode::Borderless
+    platform::FullscreenMode want = mode == "borderless" ? platform::FullscreenMode::Borderless
                                          : mode == "exclusive" ? platform::FullscreenMode::Exclusive
                                                                : platform::FullscreenMode::Windowed;
+    if (platform::allowed_mode(want) != want) {
+        NXLOG_W(kTag, "windowed mode is not used on this GPU ([gfx] borderless_only): borderless instead");
+        want = platform::allowed_mode(want);
+    }
     if (platform::fullscreen_mode() == want) return;
     if (!platform::set_fullscreen(want)) {
         NXLOG_W(kTag, "window mode '%s' was refused", mode.c_str());
@@ -1516,7 +1520,9 @@ bool start(const StartOptions& opt) {
     // Snapshot the desktop before the window mode below can change it (Issue #78). begin also repairs a snapshot left by a
     // session that crashed, so a mode switched by an earlier run is put back before this one reads it.
     extras::begin_display_session(config_file_path());
-    if (st.window && st.settings.display.window_mode != "windowed") {
+    // The window starts windowed: also call this for "windowed" where that is not allowed (fefw-recomp #81). The saved setting is left as it is.
+    const bool no_windowed = platform::allowed_mode(platform::FullscreenMode::Windowed) != platform::FullscreenMode::Windowed;
+    if (st.window && (st.settings.display.window_mode != "windowed" || no_windowed)) {
         set_window_mode(st.settings.display.window_mode);
         // Exclusive fullscreen is the only thing here that changes the desktop mode; record it so exit and crash recovery
         // know those settings are ours to put back.
