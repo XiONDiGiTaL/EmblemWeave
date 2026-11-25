@@ -109,6 +109,10 @@ jobs:
             target/pkg/manifest.json
             target/pkg/release-manifest.json
 
+  runtime-gate:
+    needs: prepare
+    uses: ./.github/workflows/launcher-tests.yml
+
   linux-translator:
     needs: prepare
     runs-on: ubuntu-latest
@@ -159,7 +163,7 @@ jobs:
           path: dist/*.tar.gz
 
   publish:
-    needs: [prepare, windows, linux-translator]
+    needs: [prepare, windows, linux-translator, runtime-gate]
     runs-on: ubuntu-latest
     outputs:
       dry_run: ${{ needs.prepare.outputs.dry_run }}
