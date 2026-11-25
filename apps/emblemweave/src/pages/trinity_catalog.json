@@ -2,11 +2,10 @@
   "schema": "trinity-catalog/1",
   "id": "trinity",
   "name": "Trinity",
-  "tagline": "The Three Houses Of Innovation",
   "version": "0.1.0",
   "revision": "2026-11-25",
   "repo": "https://github.com/XiONDiGiTaL/Trinity",
-  "summary": "One compatibility surface for EmblemWeave, fefw-recomp and ObeliskChamber, without erasing the character of any house.",
+  "summary": "One compatibility surface for EmblemWeave, fefw-recomp and ObeliskChamber, without erasing the character of any launcher.",
   "houses": [
     {
       "id": "emblemweave",

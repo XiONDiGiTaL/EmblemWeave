@@ -17,7 +17,6 @@ const LOGO: &[u8] = include_bytes!("../../assets/trinity.png");
 #[serde(default)]
 struct Catalog {
     name: String,
-    tagline: String,
     version: String,
     houses: Vec<House>,
     listings: Vec<Listing>,
@@ -150,23 +149,17 @@ fn hero(ui: &mut egui::Ui, p: &Palette, catalog: &Catalog, prefix_count: usize) 
         });
         ui.add_space(4.0);
         widgets::eyebrow(ui, p, &format!("NXP LAYER {}", catalog.version));
-        ui.add_space(2.0);
-        ui.label(
-            RichText::new(&catalog.tagline)
-                .font(theme::semibold(13.0))
-                .color(p.ink),
-        );
         ui.add_space(6.0);
         ui.label(
             RichText::new(
-                "A common NXP contract, a compatibility bridge for the existing loaders, and a catalog that keeps each house's own character.",
+                "A common NXP contract, a compatibility bridge for the existing loaders, and a catalog that keeps each launcher's own character.",
             )
             .size(13.5)
             .color(p.body),
         );
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            widgets::pill(ui, p, &format!("{} houses", catalog.houses.len()), Tone::Neutral);
+            widgets::pill(ui, p, &format!("{} launchers", catalog.houses.len()), Tone::Neutral);
             widgets::pill(ui, p, &format!("{} listings", catalog.listings.len()), Tone::Neutral);
             widgets::pill(ui, p, &format!("{} prefixes", prefix_count), Tone::Neutral);
             widgets::pill(ui, p, &format!("NXP {}", catalog.version), Tone::Accent);
@@ -182,7 +175,7 @@ fn metrics(ui: &mut egui::Ui, p: &Palette, catalog: &Catalog, prefixes: &Prefixe
                 &mut cols[0],
                 p,
                 &catalog.houses.len().to_string(),
-                "Houses connected",
+                "Launchers connected",
                 "one shared contract",
             );
             metric(
@@ -225,7 +218,7 @@ fn metric(ui: &mut egui::Ui, p: &Palette, value: &str, label: &str, note: &str) 
 }
 
 fn houses(ui: &mut egui::Ui, p: &Palette, catalog: &Catalog) {
-    widgets::section(ui, p, "Browse by house", |ui| {
+    widgets::section(ui, p, "Browse launchers", |ui| {
         ui.columns(3, |cols| {
             for (i, house) in catalog.houses.iter().take(3).enumerate() {
                 house_card(&mut cols[i], p, house);
