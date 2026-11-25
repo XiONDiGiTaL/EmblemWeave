@@ -15,6 +15,7 @@
 //   prompts          the game's button icon textures (play/prompt_resolve.h, PromptGame)                      games/mpr/mpr_prompts.cpp
 // The registry is header-only, so programs that do not link the runtime library (the launcher) use it too.
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 namespace nxrt {
@@ -69,6 +70,13 @@ struct Info {
     const play::GameDefaults* play_defaults = nullptr;
     const play::GamePlay* play = nullptr;
     const play::PromptGame* prompts = nullptr;
+
+    // ---- save data guard ----
+    // When a read-capable open of this path in an account save is about to reach the guest, read the file and call the
+    // validator first. false makes OpenFile answer "not found" instead: the game already handles an absent autosave,
+    // while it does not handle a decoder error from a damaged one (#77). Null path or validator turns the guard off.
+    const char* save_guard_path = nullptr;
+    bool (*save_file_readable)(const char* save_label, const char* path, const unsigned char* data, size_t size) = nullptr;
 };
 
 // The registered game, or nullptr. One slot per program (the function-local static is shared by every translation unit that inlines it).

@@ -8,8 +8,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <vector>
+
+#include <zstd.h>
 
 #include "nxrt/config.h"
+#include "nxrt/game.h"
 #include "nxrt/services_api.h"
 #include "svc_test_util.h"
 
@@ -98,6 +102,48 @@ Reply fs_call_path(Session& fsys, uint32_t cmd, const char* path, Args extra = {
     auto pb = std::make_unique<PathBuf>(path);   // heap: the X descriptor holds 39-bit addresses
     extra.buf_x(pb->b, 0x301);
     return fsys.call(cmd, extra);
+}
+
+constexpr uint32_t kSlotMagic = 0xCDEFBCDD;
+
+uint32_t fnv1a32(const uint8_t* p, size_t n) {
+    uint32_t h = 0x811C9DC5u;
+    for (size_t i = 0; i < n; ++i) h = (h ^ p[i]) * 0x01000193u;
+    return h;
+}
+
+uint32_t fnv1_32(const uint8_t* p, size_t n) {
+    uint32_t h = 0x811C9DC5u;
+    for (size_t i = 0; i < n; ++i) h = h * 0x01000193u ^ p[i];
+    return h;
+}
+
+void put_u32(std::vector<uint8_t>& b, size_t at, uint32_t v) { std::memcpy(b.data() + at, &v, sizeof v); }
+
+// One valid FEFW account save slot: the 0x124-byte container and the zstd frame the game will read from 0x108.
+std::vector<uint8_t> slot_with_payload(const std::string& payload) {
+    std::vector<uint8_t> frame(ZSTD_compressBound(payload.size()));
+    const size_t n = ZSTD_compress(frame.data(), frame.size(), payload.data(), payload.size(), 3);
+    if (ZSTD_isError(n)) return {};
+    frame.resize(n);
+    std::vector<uint8_t> raw(0x124);
+    put_u32(raw, 0, kSlotMagic);
+    put_u32(raw, 4, 0xE0);
+    raw.insert(raw.end(), frame.begin(), frame.end());
+    put_u32(raw, 0x100, static_cast<uint32_t>(raw.size() - 0x104));
+    put_u32(raw, 0x104, kSlotMagic);
+    put_u32(raw, 0x108, static_cast<uint32_t>(n));
+    put_u32(raw, 0x10C, fnv1_32(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+    put_u32(raw, 0x110, 3);
+    put_u32(raw, 8, fnv1a32(raw.data() + 0x1F, 0xE0));
+    return raw;
+}
+
+void write_bytes(const stdfs::path& p, const std::vector<uint8_t>& data) {
+    std::error_code ec;
+    stdfs::create_directories(p.parent_path(), ec);
+    std::ofstream o(p, std::ios::binary | std::ios::trunc);
+    o.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
 }
 
 }  // namespace
@@ -408,6 +454,94 @@ NXTEST(save_disk_layout_is_a_folder_under_save_dir) {
     CHECK(stdfs::is_directory(f.save / "device"));
     CHECK(create_save(s, attr(5, 0, 0, 2), 1 << 20, 1 << 18).ok());    // cache storage index 2
     CHECK(stdfs::is_directory(f.save / "cache" / "2"));
+}
+
+// #77: the game's zstd wrapper turns a decoder error into an absurd copy size. The account Auto slot must therefore reach
+// the guest only after its container and frame decode; an absent slot is a state the game already handles. The guard is a
+// read gate: writing the slot (to replace or repair it) and unrelated save files stay open.
+NXTEST(save_guard_slot_validator_accepts_only_a_decodable_slot) {
+    const auto cb = nxrt::game::info().save_file_readable;
+    REQUIRE(cb != nullptr);
+    const std::vector<uint8_t> good = slot_with_payload(std::string(0x4000, 'A'));
+    REQUIRE(!good.empty());
+    CHECK(cb("save:account/11110000000000002222000000000000", "/000/Auto", good.data(), good.size()));
+    std::vector<uint8_t> damaged = good;
+    for (size_t i = 0; i < 48 && 0x124 + i < damaged.size(); ++i) damaged[0x124 + i] ^= 0xFF;
+    CHECK(!cb("save:account/11110000000000002222000000000000", "/000/Auto", damaged.data(), damaged.size()));
+    std::vector<uint8_t> bad_fnv = good;
+    uint32_t payload_fnv = 0;
+    std::memcpy(&payload_fnv, good.data() + 0x10C, sizeof payload_fnv);
+    put_u32(bad_fnv, 0x10C, payload_fnv ^ 1u);
+    CHECK(!cb("save:account/11110000000000002222000000000000", "/000/Auto", bad_fnv.data(), bad_fnv.size()));
+    std::vector<uint8_t> bad_header = good;
+    bad_header[8] ^= 0xFF;
+    CHECK(!cb("save:account/11110000000000002222000000000000", "/000/Auto", bad_header.data(), bad_header.size()));
+}
+
+NXTEST(save_guard_rejects_a_damaged_autosave_but_not_other_save_files) {
+    Fixture f;
+    Session s = open_fsp();
+    const auto a = attr(1, 0x1111, 0x2222);
+    REQUIRE(create_save(s, a, 4 << 20, 1 << 20).ok());
+    const stdfs::path dir = f.save / "account" / "11110000000000002222000000000000" / "000";
+    const stdfs::path auto_path = dir / "Auto";
+    const std::vector<uint8_t> good = slot_with_payload(std::string(0x4000, 'A'));
+    REQUIRE(!good.empty());
+    write_bytes(auto_path, good);
+
+    Reply r = open_save(s, a);
+    REQUIRE(r.ok());
+    Session fsys = s.sub(r);
+    REQUIRE(fsys.valid());
+    r = fs_call_path(fsys, 8, "/000/Auto", Args().u32(1));
+    REQUIRE(r.ok());
+    {
+        Session file = fsys.sub(r);
+        CHECK_EQ(file.call(4).get<int64_t>(0), static_cast<int64_t>(good.size()));
+    }
+
+    // The reported failure: a frame that native zstd rejects. The game sees the same "no autosave" path as a moved file.
+    std::vector<uint8_t> damaged = good;
+    for (size_t i = 0; i < 48 && 0x124 + i < damaged.size(); ++i) damaged[0x124 + i] ^= 0xFF;
+    write_bytes(auto_path, damaged);
+    Reply damaged_open = fs_call_path(fsys, 8, "/000/Auto", Args().u32(1));
+    CHECK_EQ(damaged_open.result, kPathNotFound);
+    Reply damaged_read_write = fs_call_path(fsys, 8, "/000/Auto", Args().u32(3));
+    CHECK_EQ(damaged_read_write.result, kPathNotFound);
+
+    // The guard is only for reads: replacing the damaged slot by opening it for write is still allowed.
+    {
+        Reply wr = fs_call_path(fsys, 8, "/000/Auto", Args().u32(2));
+        CHECK(wr.ok());
+        Session w = fsys.sub(wr);
+    }
+
+    // Another save file with the same bytes is not the Auto slot and must not be hidden.
+    write_bytes(dir / "Global", damaged);
+    {
+        Reply global_open = fs_call_path(fsys, 8, "/000/Global", Args().u32(1));
+        CHECK(global_open.ok());
+        Session global_file = fsys.sub(global_open);
+    }
+
+    // A declared frame length that does not match the frame is rejected too.
+    std::vector<uint8_t> bad_length = good;
+    put_u32(bad_length, 0x108, static_cast<uint32_t>(bad_length.size() - 0x124 - 1));
+    write_bytes(auto_path, bad_length);
+    Reply bad_length_open = fs_call_path(fsys, 8, "/000/Auto", Args().u32(1));
+    CHECK_EQ(bad_length_open.result, kPathNotFound);
+
+    // Restoring the original bytes restores the open once the uncommitted write session is gone, so the guard did not
+    // alter or consume the file.
+    fsys.close();
+    write_bytes(auto_path, good);
+    r = open_save(s, a);
+    REQUIRE(r.ok());
+    Session reopened = s.sub(r);
+    REQUIRE(reopened.valid());
+    Reply restored_open = fs_call_path(reopened, 8, "/000/Auto", Args().u32(1));
+    CHECK(restored_open.ok());
+    Session restored_file = reopened.sub(restored_open);
 }
 
 NXTEST(save_info_reader_lists_saves) {

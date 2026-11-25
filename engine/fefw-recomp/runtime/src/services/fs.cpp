@@ -27,6 +27,7 @@
 #include "fs_volume.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
+#include "nxrt/game.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/services_api.h"
@@ -45,6 +46,7 @@ using fs::Volume;
 
 constexpr size_t kPathBuf = 0x301;
 constexpr uint32_t kUnsupportedWrite = fs::rc::kReadOnlyFileSystem;
+constexpr int64_t kMaxGuardedSaveBytes = 64ll << 20;
 
 // ---- process-wide state ---------------------------------------------------------------------------------------------------------
 
@@ -355,12 +357,31 @@ std::shared_ptr<Service> make_filesystem(std::shared_ptr<Volume> v, std::string 
         });
         s.add_cmd(8, "OpenFile", [v, label](Request& req, Response& rsp) -> uint32_t {
             PATH_OR_FAIL(p, 0);
+            const uint32_t mode = req.arg<uint32_t>(0);
             std::shared_ptr<fs::VFile> f;
-            const uint32_t r = v->open_file(p, req.arg<uint32_t>(0), &f);
+            const uint32_t r = v->open_file(p, mode, &f);
             diag_note_file("open", (label + p).c_str());
             if (r) {
-                NXLOG_D("fs", "OpenFile %s%s (mode %u) -> 0x%x", label.c_str(), p.c_str(), req.arg<uint32_t>(0), r);
+                NXLOG_D("fs", "OpenFile %s%s (mode %u) -> 0x%x", label.c_str(), p.c_str(), mode, r);
                 return r;
+            }
+            const nxrt::game::Info& game_info = nxrt::game::info();
+            if ((mode & fs::kModeRead) && label.rfind("save:", 0) == 0 && game_info.save_guard_path &&
+                game_info.save_file_readable && p == game_info.save_guard_path) {
+                int64_t size = 0;
+                bool readable = f->get_size(&size) == 0 && size > 0 && size <= kMaxGuardedSaveBytes;
+                std::vector<uint8_t> bytes;
+                if (readable) {
+                    bytes.resize(static_cast<size_t>(size));
+                    uint64_t got = 0;
+                    readable = f->read(0, bytes.data(), bytes.size(), &got) == 0 && got == bytes.size();
+                }
+                if (readable) readable = game_info.save_file_readable(label.c_str(), p.c_str(), bytes.data(), bytes.size());
+                if (!readable) {
+                    NXLOG_W("fs", "OpenFile %s%s (mode %u): the save file guard rejected it; the game sees it as missing",
+                            label.c_str(), p.c_str(), mode);
+                    return fs::rc::kPathNotFound;
+                }
             }
             rsp.push_object(make_file(f, p));
             return 0;
