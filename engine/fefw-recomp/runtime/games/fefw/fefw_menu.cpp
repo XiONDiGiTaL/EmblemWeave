@@ -369,7 +369,15 @@ int step_dir() {
     return d;
 }
 
+// Called after each row's control.
 void after_item(Menu& m) {
+    // The first control of a tab switched to with L / R takes the gamepad cursor. FocusItem only moves the cursor there:
+    // SetKeyboardFocusHere would also activate it, which turns a slider into a text box, and L / R wait while a control is active.
+    if (m.focus_first && m.tab == m.focus_tab && !(ImGui::GetItemFlags() & ImGuiItemFlags_Disabled)) {
+        ImGui::FocusItem();
+        ImGui::SetNavCursorVisible(true);   // A acts on the focused row only while the cursor shows
+        m.focus_first = false;
+    }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemFocused()) m.help = m.row_help;
 }
 
@@ -404,11 +412,6 @@ void row(Menu& m, const char* label, When when, const char* help) {
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(-FLT_MIN);
     m.row_help = help ? help : "";
-    if (m.focus_first && m.tab == m.focus_tab) {
-        ImGui::SetKeyboardFocusHere();
-        ImGui::SetNavCursorVisible(true);   // A acts on the focused row only while the cursor shows
-        m.focus_first = false;
-    }
 }
 
 // Under a restart-only control: what runs until the restart.
