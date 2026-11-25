@@ -18,15 +18,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .size(15.0)
                 .color(p.body),
         );
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::text("by").color(p.muted));
-            ui.hyperlink_to(
-                crate::i18n::text("XiØN")
-                    .font(theme::semibold(15.0))
-                    .color(p.accent_hi),
-                "https://github.com/XiONDiGiTaL",
-            );
-        });
+        // Center the attribution as one row. A plain `ui.horizontal` inside
+        // `vertical_centered` fills the width and leaves the content on the
+        // left; this layout centres the row under the subtitle.
+        ui.with_layout(
+            egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
+            |ui| {
+                ui.label(crate::i18n::text("by").color(p.muted));
+                ui.hyperlink_to(
+                    crate::i18n::text("XiØN")
+                        .font(theme::semibold(15.0))
+                        .color(p.accent_hi),
+                    "https://github.com/XiONDiGiTaL",
+                );
+            },
+        );
         // A plain text link, beside the attribution. Nothing is asked for on
         // start-up, and there is no dialog or badge: it opens the creator's
         // general support page only when the player chooses it.
@@ -69,9 +75,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .color(p.body),
             );
             ui.add_space(theme::SPACE_S);
-            widgets::kv(ui, &p, "Site", "xiondigital.net/EmblemWeave");
-            widgets::kv(ui, &p, "Mirrors", "GitHub, GitLab, GitGud");
-            widgets::kv(ui, &p, "Fallback", "emblemweave.xiondigital.workers.dev");
+            project_link_row(
+                ui,
+                &p,
+                "Site",
+                &[("xiondigital.net/EmblemWeave", "https://xiondigital.net/EmblemWeave/")],
+            );
+            project_link_row(
+                ui,
+                &p,
+                "Mirrors",
+                &[
+                    ("GitHub", "https://github.com/XiONDiGiTaL/EmblemWeave"),
+                    ("GitLab", "https://gitlab.com/XiONDiGiTaL/emblemweave"),
+                    ("GitGud", "https://gitgud.io/xiondigital/EmblemWeave"),
+                ],
+            );
+            project_link_row(
+                ui,
+                &p,
+                "Fallback",
+                &[(
+                    "emblemweave.xiondigital.workers.dev",
+                    "https://emblemweave.xiondigital.workers.dev",
+                )],
+            );
             ui.add_space(theme::SPACE_S);
             ui.label(
                 crate::i18n::text("The tiles at the top of this page open each one in your browser. No account is needed to read the mirror or the fallback.")
@@ -92,6 +120,34 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .size(13.0)
             .color(p.body),
         );
+    });
+}
+
+/// A Project row whose values are real links. The key column matches
+/// `widgets::kv`, so the Project section keeps one text grid while every value
+/// opens in the player's browser.
+fn project_link_row(ui: &mut egui::Ui, p: &theme::Palette, key: &str, links: &[(&str, &str)]) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::Vec2::new(170.0, 18.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(170.0);
+                ui.label(crate::i18n::text(key).size(13.0).color(p.muted));
+            },
+        );
+        for (i, (label, url)) in links.iter().enumerate() {
+            if i > 0 {
+                ui.label(egui::RichText::new(",").font(theme::mono(12.5)).color(p.muted));
+            }
+            ui.hyperlink_to(
+                egui::RichText::new(*label)
+                    .font(theme::mono(12.5))
+                    .color(p.accent_hi),
+                *url,
+            )
+            .on_hover_text(*url);
+        }
     });
 }
 
