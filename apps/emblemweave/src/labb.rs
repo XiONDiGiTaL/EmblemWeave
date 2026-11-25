@@ -407,29 +407,30 @@ fn pressure_for(config: &Config, gpus: &[crate::gpu::Profile], active: Option<us
     let t = Thresholds::from(&config.lab);
     let mut out = Pressure::default();
     let mut budget = None;
-    if let Some(p) = active.and_then(|i| gpus.get(i)) {
-        if let Some(h) = p.largest_device_local_heap() {
-            if let (Some(used), Some(budget_mb)) = (h.usage_mb, h.budget_mb) {
-                let (level, note) = classify_gpu(used, budget_mb, &t);
-                out.gpu = Some((level, note.clone()));
-                if level >= Level::Elevated {
-                    out.reasons.push(format!("GPU heap pressure is {}: {note}", level.label()));
-                }
-                budget = Some((used, budget_mb, "VK_EXT_memory_budget heap".to_string()));
+    // The engine log is the game's own accounting. Prefer it whenever present;
+    // VK_EXT_memory_budget in the launcher describes the launcher process, not
+    // the running game, and must not be substituted for it.
+    if let Some(g) = &snap.gpu {
+        if let (Some(used), Some(limit)) = (g.used_mb, g.budget_mb) {
+            let (level, note) = classify_gpu(used, limit, &t);
+            out.gpu = Some((level, note.clone()));
+            if level >= Level::Elevated {
+                out.reasons.push(format!("GPU budget pressure is {}: {note}", level.label()));
             }
+            budget = Some((used, limit, "engine log (OS budget)".to_string()));
         }
     }
-    // The engine log is a fallback only. It is never added to the Vulkan
-    // figure: both describe the same video memory.
     if budget.is_none() {
-        if let Some(g) = &snap.gpu {
-            if let (Some(used), Some(limit)) = (g.used_mb, g.budget_mb) {
-                let (level, note) = classify_gpu(used, limit, &t);
-                out.gpu = Some((level, note.clone()));
-                if level >= Level::Elevated {
-                    out.reasons.push(format!("GPU budget pressure is {}: {note}", level.label()));
+        if let Some(p) = active.and_then(|i| gpus.get(i)) {
+            if let Some(h) = p.largest_device_local_heap() {
+                if let (Some(used), Some(budget_mb)) = (h.usage_mb, h.budget_mb) {
+                    let (level, note) = classify_gpu(used, budget_mb, &t);
+                    out.gpu = Some((level, note.clone()));
+                    if level >= Level::Elevated {
+                        out.reasons.push(format!("Launcher-process GPU heap pressure is {}: {note}", level.label()));
+                    }
+                    budget = Some((used, budget_mb, "VK_EXT_memory_budget (launcher process)".to_string()));
                 }
-                budget = Some((used, limit, "engine log (OS budget)".to_string()));
             }
         }
     }
@@ -1626,11 +1627,12 @@ pub fn tick(ui: &mut Ui, config: &Config) {
 
     if let Some(status) = crate::performance::runtime_status() {
         let host = memory::snapshot();
-        let gpu = ui
-            .profile
+        // Only the engine's ledger belongs to this sample. The lab profile's
+        // VK_EXT_MEMORY_BUDGET figure is the launcher's own process, not the game.
+        let gpu = host
+            .gpu
             .as_ref()
-            .and_then(|p| p.gpu_budget.as_ref().map(|(u, b, _)| (*u, *b)))
-            .or_else(|| host.gpu.as_ref().and_then(|g| g.used_mb.zip(g.budget_mb)));
+            .and_then(|g| g.used_mb.zip(g.budget_mb));
         let ws = session
             .soak_path
             .as_deref()
@@ -1739,6 +1741,31 @@ mod tests {
         assert_eq!(classify_host(&host(16384, 6000, 32768, 3000), &t).unwrap().0, Level::High);
         assert_eq!(classify_host(&host(16384, 6000, 32768, 900), &t).unwrap().0, Level::Critical);
         assert!(classify_host(&memory::Snapshot::default(), &t).is_none());
+    }
+
+    #[test]
+    fn the_running_games_ledger_wins_over_the_launchers_own_vulkan_usage() {
+        let mut snap = host(32768, 16000, 65536, 32000);
+        snap.gpu = Some(memory::Gpu {
+            name: "GPU".into(),
+            shared: Some(false),
+            heap_mb: Some(20480),
+            budget_mb: Some(8000),
+            used_mb: Some(7000),
+        });
+        let p = crate::gpu::Profile {
+            device: crate::gpu::Device { name: "GPU".into(), kind: "Discrete", vram_mb: 20480, av1_decode: false },
+            vendor: "Test".into(),
+            vendor_id: 0x1234,
+            device_id: 1,
+            api_version: "Vulkan 1.3.0".into(),
+            driver: "0x00000001".into(),
+            extensions: vec!["VK_EXT_memory_budget".into()],
+            heaps: vec![crate::gpu::Heap { size_mb: 20480, device_local: true, budget_mb: Some(20000), usage_mb: Some(0) }],
+        };
+        let (pressure, source) = pressure_for(&Config::default(), &[p], Some(0), &snap);
+        assert_eq!(pressure.gpu.unwrap().0, Level::High);
+        assert!(source.unwrap().2.contains("engine log"));
     }
 
     #[test]

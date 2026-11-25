@@ -167,8 +167,9 @@ fn profile_tab(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             }
         }
         if let Some((_, _, source)) = &profile.gpu_budget {
-            ui.label(crate::i18n::text(format!("Budget source: {source}. The lab never adds Vulkan and DXGI figures together.")).size(11.5).color(p.muted));
+            ui.label(crate::i18n::text(format!("Budget source: {source}. The game's own budget comes from its engine log when present. The Lab never adds Vulkan and DXGI figures together.")).size(11.5).color(p.muted));
         }
+        ui.label(crate::i18n::text("VK_EXT heap usage is this launcher process; the running game reports its own use in the engine log.").size(11.5).color(p.muted));
     });
 
     widgets::section(ui, p, "Display, OS and active configuration", |ui| {
@@ -610,11 +611,15 @@ fn recommend_tab(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
 
     if let Some(s) = &app.lab.summary {
         widgets::section(ui, p, "Evidence behind the suggestions", |ui| {
-            widgets::kv(ui, p, "Measured average", &format!("{:.1} fps", s.avg_fps));
-            widgets::kv(ui, p, "Measured 1% low", &format!("{:.1} fps", s.low1_fps));
+            if s.samples == 0 {
+                widgets::status_line(ui, p, Tone::Warn, "No measured frame evidence", "The last run produced no engine snapshots, so no frame rate is shown.");
+            } else {
+                widgets::kv(ui, p, "Measured average", &format!("{:.1} fps", s.avg_fps));
+                widgets::kv(ui, p, "Measured 1% low", &format!("{:.1} fps", s.low1_fps));
+            }
             widgets::kv(ui, p, "GPU budget peak", &s.gpu_peak_pct().map(|v| format!("{v}%")).unwrap_or_else(|| "unavailable".into()));
             widgets::kv(ui, p, "Host available minimum", &s.host_available_min_mb.map(crate::memory::gb).unwrap_or_else(|| "unavailable".into()));
-            widgets::kv(ui, p, "Shader backlog peak", &s.max_shader_backlog.to_string());
+            widgets::kv(ui, p, "Shader backlog peak", &if s.samples > 0 { s.max_shader_backlog.to_string() } else { "unavailable".into() });
             ui.label(crate::i18n::text("A short run is evidence for that scene, not a promise for every area of the game.").size(11.5).color(p.muted));
         });
     }
