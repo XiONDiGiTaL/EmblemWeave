@@ -16,12 +16,15 @@
 #include "imgui.h"
 #include "nxrt/config.h"
 #include "nxrt/game.h"
+#include "nxrt/menu_i18n.h"
 #include "nxrt/services.h"
 #include "play_ui.h"
 
 namespace nxrt::play {
 
 namespace {
+
+using gfx::tr;
 
 namespace fs = std::filesystem;
 
@@ -54,7 +57,7 @@ std::string shader_cache_dir() {
     if (exists(cwd + "/results.tsv")) return absolute(cwd);
     const std::string exe = exe_folder();
     if (!exe.empty() && exists(exe + "/shader_cache/spirv/results.tsv")) return absolute(exe + "/shader_cache/spirv");
-    return "not found";
+    return tr("not found");
 }
 
 // The ExeFS folder: [fs] exefs (the game's main() stores the folder it loaded there; the player may also set it in the game ini), else
@@ -72,12 +75,12 @@ std::string exefs_dir() {
 // One labelled, copyable path. `note` (may be empty) follows the field in grey.
 void path_row(const char* label, const std::string& value, const char* note = "") {
     ImGui::PushID(label);
-    ImGui::TextUnformatted(label);
+    ImGui::TextUnformatted(tr(label));
     ImGui::SetNextItemWidth(-FLT_MIN);
     char buf[1024];
     std::snprintf(buf, sizeof buf, "%s", value.c_str());
     ImGui::InputText("##path", buf, sizeof buf, ImGuiInputTextFlags_ReadOnly);
-    if (note && *note) ImGui::TextDisabled("%s", note);
+    if (note && *note) ImGui::TextDisabled("%s", tr(note));
     ImGui::PopID();
 }
 
@@ -85,19 +88,19 @@ void path_row(const char* label, const std::string& value, const char* note = ""
 
 void draw_about_page(const std::string& settings_path) {
     const game::Info& info = game::info();
-    ImGui::SeparatorText("Build");
+    ImGui::SeparatorText(tr("Build"));
     ImGui::Text("%s", info.product && *info.product ? info.product : (info.title ? info.title : "nxrt"));
-    ImGui::Text("Game version %s", info.version ? info.version : "?");
+    ImGui::Text(tr("Game version %s"), info.version ? info.version : "?");
 #ifdef NXRT_BUILD_COMMIT
-    ImGui::Text("Runtime commit %s", NXRT_BUILD_COMMIT);
+    ImGui::Text(tr("Runtime commit %s"), NXRT_BUILD_COMMIT);
 #else
-    ImGui::TextDisabled("Runtime commit: not recorded in this build");
+    ImGui::TextDisabled("%s", tr("Runtime commit: not recorded in this build"));
 #endif
-    ImGui::Text("Built %s %s", __DATE__, __TIME__);
+    ImGui::Text(tr("Built %s %s"), __DATE__, __TIME__);
 
-    ImGui::SeparatorText("Folders and files in use");
+    ImGui::SeparatorText(tr("Folders and files in use"));
     path_row("Working folder", absolute("."));
-    path_row("Settings (controls)", absolute(settings_path), "Written by Apply and save.");
+    path_row("Settings (controls)", absolute(settings_path), "The settings from this menu are saved here.");
     if (info.game_ini && *info.game_ini) path_row("Game ini", absolute(info.game_ini), "Runtime options ([fs], [nvn], [audio] ...); docs/CONFIG.md lists the keys.");
     path_row("Log", absolute(config_get_str("log", "path", "nxrt.log")));
     path_row("RomFS", absolute(services::romfs_dir()), "[fs] romfs");

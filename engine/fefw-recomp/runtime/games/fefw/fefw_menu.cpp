@@ -119,7 +119,7 @@ constexpr IniKey kIni[] = {
     {"fefw", "render_ratio", "0", Norm::Number, true, "render scale"},
     {"fefw", "render", "", Norm::Text, true, "fixed render size"},
     {"fefw", "shadow_size", "0", Norm::Number, true, "shadow resolution"},
-    {"fefw", "quality", "console", Norm::Text, true, "quality"},
+    {"fefw", "quality", "console", Norm::Text, true, "graphics quality"},
     {"fefw", "reflections", "full", Norm::Text, true, "reflections"},
     {"fefw", "ambient_occlusion", "1", Norm::Bool, true, "ambient occlusion"},
     {"fefw", "crowd_detail", "full", Norm::Text, true, "crowd detail"},
@@ -321,7 +321,7 @@ void draw_header(const play::LiveStatus& live) {
 }
 
 void notify(Menu& m, const std::string& text, bool err = false) {
-    m.notice = text;
+    m.notice = tr(text.c_str());
     m.notice_err = err;
     m.notice_until = ImGui::GetTime() + (err ? 8.0 : 4.0);
 }
@@ -343,10 +343,11 @@ void ini_put(Menu& m, const IniKey& k, const std::string& value) {
         NXLOG_I(kTag, "[%s] %s = %s written to %s%s", k.sec, k.key, value.c_str(), config_file_path().c_str(),
                 k.restart ? " (applies on restart)" : "");
         if (!std::strcmp(k.sec, "perf")) nxrt::perf::reload();   // the controller adopts a changed policy at once
-        notify(m, std::string("Saved [") + k.sec + "] " + k.key + " = " + value + (k.restart ? "  (applies on restart)" : ""));
+        notify(m, std::string(tr("Saved")) + " [" + k.sec + "] " + k.key + " = " + value +
+                      (k.restart ? std::string("  ") + tr("(applies on restart)") : std::string()));
     } else {
         NXLOG_W(kTag, "cannot write [%s] %s: %s", k.sec, k.key, err.c_str());
-        notify(m, "Could not save [" + std::string(k.sec) + "] " + k.key + ": " + err, true);
+        notify(m, std::string(tr("Could not save")) + " [" + k.sec + "] " + k.key + ": " + err, true);
     }
 }
 
@@ -417,7 +418,7 @@ void row(Menu& m, const char* label, When when, const char* help) {
 // Under a restart-only control: what runs until the restart.
 void pending_note(bool pending, const std::string& running) {
     if (!pending) return;
-    ImGui::TextColored(kOrange, tr("Applies on restart (running: %s)"), running.empty() ? tr("default") : running.c_str());
+    ImGui::TextColored(kOrange, tr("Applies on restart (running: %s)"), running.empty() ? tr("default") : tr(running.c_str()));
 }
 
 // A value row that is set by an environment variable: shown, locked.
@@ -490,7 +491,7 @@ bool slider(Menu& m, const char* id, double* v, double lo, double hi, double ste
 // from lo or above (a step left from the minimum), which goes to 0, so 0 is reachable with a gamepad or the keyboard too.
 bool zero_or_min_slider(Menu& m, const char* id, double* v, double lo, double hi, double step, const char* zero_label) {
     const double before = *v;
-    if (!slider(m, id, v, 0, hi, step, *v <= 0 ? zero_label : "%.0f nits")) return false;
+    if (!slider(m, id, v, 0, hi, step, *v <= 0 ? tr(zero_label) : tr("%.0f nits"))) return false;
     if (*v > 0 && *v < lo) *v = before >= lo && *v < before ? 0 : lo;
     return true;
 }
@@ -624,7 +625,7 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
         if (check(m, "##ka", &d.keep_aspect)) apply(host, m);
         end_rows();
     }
-    ImGui::TextDisabled(tr("Now: %s, %d x %d, %.2f Hz display, present mode %s"), live.window_mode, live.width, live.height,
+    ImGui::TextDisabled(tr("Now: %s, %d x %d, %.2f Hz display, present mode %s"), tr(live.window_mode), live.width, live.height,
                         static_cast<double>(live.refresh_hz), live.present_mode);
 
     {
@@ -805,9 +806,9 @@ void resolution_group(Menu& m) {
         const bool capped34 = w34 != rw || h34 != rh;
         rw = w34, rh = h34;
         ImGui::TextDisabled(tr("Next start: %d x %d rendered into %d x %d%s%s"), rw, rh, ow, oh,
-                            capped ? " (above 1440p the game's render-target pool holds half per side at most)"
-                                   : capped34 ? " (held down to fit the room past the render-target pool)" : "",
-                            wide_next && wide_aspect(ow, oh) ? (ow > 3840 ? ", ultrawide at its own size" : ", ultrawide") : "");
+                            capped ? (std::string(" ") + tr("(above 1440p the game's render-target pool holds half per side at most)")).c_str()
+                            : capped34 ? (std::string(" ") + tr("(held down to fit the room past the render-target pool)")).c_str() : "",
+                            wide_next && wide_aspect(ow, oh) ? (ow > 3840 ? tr(", ultrawide at its own size") : tr(", ultrawide")) : "");
     }
     const WideInfo wi = wide_info();
     if (wi.active)
@@ -894,18 +895,18 @@ void upscaler_group(Menu& m) {
                 int idx = -1;
                 for (int i = 0; i < 3; ++i)
                     if (v == kFgVals[i]) idx = i;
-                if (combo(m, "##fg", &idx, kFgNames, 3, ("Other: " + ini_now(fg)).c_str())) ini_put(m, fg, kFgVals[idx]);
+                if (combo(m, "##fg", &idx, kFgNames, 3, (std::string(tr("Other")) + ": " + ini_now(fg)).c_str(), true)) ini_put(m, fg, kFgVals[idx]);
                 pending_note(ini_pending(m, fg), ini_boot(m, fg));
             }
         }
         end_rows();
     }
     const char* in_use = nvn::be::dlss_upscaler_in_use();
-    ImGui::TextDisabled(tr("Running: %s; frame generation %s."), in_use ? in_use : "no DLSS call yet",
-                        extras::framegen_vsync_paused() ? "paused: vsync is on and the display is under twice the game's frame rate"
-                        : extras::framegen_running()    ? "on"
-                        : extras::framegen_requested()  ? "asked for, not running (see the log)"
-                                                        : "off");
+    ImGui::TextDisabled(tr("Running: %s; frame generation %s."), in_use ? in_use : tr("no DLSS call yet"),
+                        extras::framegen_vsync_paused() ? tr("paused: vsync is on and the display is under twice the game's frame rate")
+                        : extras::framegen_running()    ? tr("on")
+                        : extras::framegen_requested()  ? tr("asked for, not running (see the log)")
+                                                        : tr("off"));
     // "found" only when every file the feature needs is there (the log names a missing one)
     ImGui::Spacing();
     ImGui::TextDisabled("%s", tr("Files found"));
@@ -979,9 +980,9 @@ void hdr_group(UiHost& host, Menu& m) {
         end_rows();
     }
     const extras::HdrState hs = extras::hdr_state();
-    ImGui::TextDisabled(tr("Now: HDR scene %s, swapchain %s, paper white %.0f, peak %.0f nits; the display reports HDR: %s"), hs.scene_hdr ? "on" : "off",
+    ImGui::TextDisabled(tr("Now: HDR scene %s, swapchain %s, paper white %.0f, peak %.0f nits; the display reports HDR: %s"), hs.scene_hdr ? tr("on") : tr("off"),
                         extras::output_kind_name(hs.output), static_cast<double>(hs.paper_white_nits), static_cast<double>(hs.peak_nits),
-                        hs.display_hdr ? "yes" : "no");
+                        hs.display_hdr ? tr("yes") : tr("no"));
 }
 
 void grading_group(UiHost& host, Menu& m) {
@@ -1104,7 +1105,7 @@ void live_status_group() {
             ImGui::Text(tr("Screen %d x %d"), s.screen_w, s.screen_h);
     }
     // Frame generation: the backend, its lifecycle, and the presents it counted in the last window.
-    const char* backend = s.fg_dlss ? "DLSS Frame Generation" : s.fg_ffx ? "FSR 3 frame generation" : tr("none");
+    const char* backend = s.fg_dlss ? "DLSS Frame Generation" : s.fg_ffx ? tr("FSR 3 frame generation") : tr("none");
     ImGui::Text(tr("Frame generation: %s (%s)"), tr(render_status::framegen_name(s.fg)), backend);
     if (s.fg == render_status::FrameGen::Paused && s.pause != render_status::Pause::None)
         ImGui::TextWrapped(tr("Why it is paused: %s"), tr(render_status::pause_name(s.pause)));
@@ -1490,7 +1491,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
                 ImGui::TextColored(kOrange, tr("%d fps gameplay raises this limit to %d fps while it is on (the setting itself stays %d)."), want, want, d.fps_cap);
             else if (want > 0 && l && l->target_fps() > 0 && l->target_fps() < want - 1)
                 ImGui::TextColored(kOrange, tr("%d fps gameplay is held to %.0f fps by %s: use a faster display, or turn vsync off and set a limit of %d or more."),
-                                   want, l->target_fps(), d.vsync ? "vsync and the display's refresh rate" : "the display's refresh rate (limit: Refresh rate)", want);
+                                   want, l->target_fps(), d.vsync ? tr("vsync and the display's refresh rate") : tr("the display's refresh rate (limit: Refresh rate)"), want);
         }
         row(m, "Low latency", When::Restart, "NVIDIA Reflex or AMD Anti-Lag 2, whichever the GPU has. Keep it off with frame generation.");
         int lat = static_cast<int>(m.edit.extras.latency.mode);
@@ -1633,9 +1634,9 @@ void keyboard_section(Menu& m) {
 // set what the PC mouse sends it.
 void mouse_section(UiHost& host, Menu& m) {
     section("Mouse");
-    ImGui::TextWrapped("The mouse works as the game's Joy-Con 2 mouse: move it and the game switches to its mouse controls (camera in "
-                       "bases and dungeons, map cursor in battle, selection in menus); press a key or use the controller and it switches back. "
-                       "The game's own speeds are the (Mouse) rows of its System > Settings; System > Mouse Controls lists every button.");
+    ImGui::TextWrapped("%s", tr("The mouse works as the game's Joy-Con 2 mouse: move it and the game switches to its mouse controls (camera in "
+                                "bases and dungeons, map cursor in battle, selection in menus); press a key or use the controller and it switches back. "
+                                "The game's own speeds are the (Mouse) rows of its System > Settings; System > Mouse Controls lists every button."));
     play::MouseSettings& ms = m.edit.mouse;
     if (begin_rows("mouse")) {
         constexpr const char* kNames[] = {"Automatic (the last device used)", "Always the mouse", "Off"};
@@ -1658,8 +1659,8 @@ void mouse_section(UiHost& host, Menu& m) {
         const hid::Jc2Stats js = hid::jc2_mouse_stats();
         row(m, "Now", When::Info, nullptr);
         ImGui::AlignTextToFramePadding();
-        if (!mi.valid) ImGui::TextDisabled("the game has not set up its mouse yet");
-        else ImGui::Text("%s (mouse used %llu times)", mi.mode ? "mouse controls" : "buttons", static_cast<unsigned long long>(js.engages));
+        if (!mi.valid) ImGui::TextDisabled("%s", tr("the game has not set up its mouse yet"));
+        else ImGui::Text(tr("%s (mouse used %llu times)"), mi.mode ? tr("mouse controls") : tr("buttons"), static_cast<unsigned long long>(js.engages));
         end_rows();
     }
 }
@@ -1744,7 +1745,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
         end_rows();
     }
     if (live.pads == 0) ImGui::TextDisabled("%s", tr("No controller connected."));
-    else ImGui::TextDisabled(tr("%d connected: %s (rumble %s)"), live.pads, live.pad_name.c_str(), live.pad_rumble ? "yes" : "no");
+    else ImGui::TextDisabled(tr("%d connected: %s (rumble %s)"), live.pads, live.pad_name.c_str(), live.pad_rumble ? tr("yes") : tr("no"));
     haptic_group(host, m);
     mouse_section(host, m);
 
@@ -1777,7 +1778,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
 
 // ---- Game -------------------------------------------------------------------------------------------------------------------------------
 // The languages the game ships (games/fefw/fefw_data.cpp), by the names the settings service reads (services/common.cpp). "" is Automatic.
-// ImGui's font has no CJK glyphs, so the names are English.
+// The names are keys of the menu's translation tables.
 constexpr const char* kLangNames[] = {"Automatic (Windows language)", "English (US)",   "English (UK)",           "Japanese",
                                       "French",                       "French (Canada)", "German",                 "Italian",
                                       "Spanish (Spain)",              "Spanish (Latin America)", "Korean",         "Chinese (Simplified)",
@@ -1873,7 +1874,7 @@ void system_page(UiHost& host, gfx::Overlay& ov) {
     else ImGui::TextDisabled(tr("Video memory budget %.0f MB; this process' use is not known"), budget / 1048576.0);
 
     section("Files");
-    ImGui::TextDisabled(tr("Game settings: %s"), config_file_path().empty() ? "(none)" : config_file_path().c_str());
+    ImGui::TextDisabled(tr("Game settings: %s"), config_file_path().empty() ? tr("(none)") : config_file_path().c_str());
     ImGui::TextDisabled(tr("Controls and display: %s"), host.settings_path().c_str());
     ImGui::TextDisabled("%s", tr("Every key: runtime/docs/CONFIG.md"));
 
@@ -1957,8 +1958,10 @@ void cpu_group(Menu& m) {
     }
     ImGui::TextUnformatted(c.brand.empty() ? tr("Unknown processor") : c.brand.c_str());
     char split[96] = "";
-    if (c.perf_cores || c.eff_cores)
-        std::snprintf(split, sizeof split, tr(" (%d performance with %d threads, %d efficiency)"), c.perf_cores, c.perf_threads, c.eff_cores);
+    if (c.perf_cores || c.eff_cores) {
+        split[0] = ' ';
+        std::snprintf(split + 1, sizeof split - 1, tr("(%d performance with %d threads, %d efficiency)"), c.perf_cores, c.perf_threads, c.eff_cores);
+    }
     ImGui::TextDisabled(tr("%d cores%s, %d threads; base clock %.2f GHz; L2 %.1f MB, L3 %.1f MB; %.1f GB of memory"), c.cores, split, c.logical,
                         c.base_mhz / 1000.0, c.l2_kb / 1024.0, c.l3_kb / 1024.0, static_cast<double>(c.ram_total) / 1073741824.0);
     const char* build = cpu::game_build();
@@ -2022,7 +2025,7 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
         const float p99 = n ? sorted[std::min(n - 1, static_cast<size_t>(static_cast<double>(n) * 0.99))] : 0.f;
         const float avg = n ? sum / static_cast<float>(n) : 0.f;
         char overlay[128];
-        std::snprintf(overlay, sizeof overlay, "avg %.2f ms (%.1f fps)  99%% %.1f ms  worst %.1f ms", avg, avg > 0 ? 1000.0 / avg : 0.0, p99, mx);
+        std::snprintf(overlay, sizeof overlay, tr("avg %.2f ms (%.1f fps)  99%% %.1f ms  worst %.1f ms"), avg, avg > 0 ? 1000.0 / avg : 0.0, p99, mx);
         const float top = std::max(34.f, std::ceil(mx / 8.33f) * 8.33f);
         ImGui::PlotLines("##ft", ft, static_cast<int>(n), 0, overlay, 0.f, top, ImVec2(-FLT_MIN, px(110)));
         ImGui::TextDisabled(tr("The last %d presented frames; the scale tops out at %.0f ms (16.7 ms = 60 fps, 33.3 ms = 30 fps)."), static_cast<int>(n),
@@ -2032,15 +2035,15 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
     section("Where the frame goes (ms per presented frame, last half second)");
     sample_timings(m, r);
     if (ImGui::BeginTable("phases", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
-        ImGui::TableSetupColumn("Phase", ImGuiTableColumnFlags_WidthStretch, 0.62f);
-        ImGui::TableSetupColumn("ms / frame", ImGuiTableColumnFlags_WidthStretch, 0.19f);
-        ImGui::TableSetupColumn("share of the frame", ImGuiTableColumnFlags_WidthStretch, 0.19f);
+        ImGui::TableSetupColumn(tr("Phase"), ImGuiTableColumnFlags_WidthStretch, 0.62f);
+        ImGui::TableSetupColumn(tr("ms / frame"), ImGuiTableColumnFlags_WidthStretch, 0.19f);
+        ImGui::TableSetupColumn(tr("share of the frame"), ImGuiTableColumnFlags_WidthStretch, 0.19f);
         ImGui::TableHeadersRow();
         for (const PhaseRow& p : kPhases) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             if (p.depth) ImGui::Indent(px(18));
-            ImGui::TextUnformatted(p.name);
+            ImGui::TextUnformatted(tr(p.name));
             if (p.depth) ImGui::Unindent(px(18));
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%.2f", m.phase_ms[p.phase]);
@@ -2078,7 +2081,7 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
                     ck.display, static_cast<double>(ck.step));
     else
         ImGui::TextDisabled("%s", tr("Not running yet (title or loading)."));
-    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off", ck.smooth ? "on" : "off");
+    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, smooth step %s"), ck.fps60 ? tr("on") : tr("off"), ck.fps120 ? tr("on") : tr("off"), ck.smooth ? tr("on") : tr("off"));
 
     section("Ultrawide");
     const WideInfo wi = wide_info();
@@ -2098,7 +2101,7 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
         row(m, "Game clock log", When::Live, "A log line with the game clock's speed every this many seconds ([fefw] clock_log); 0 is off.");
         if (!env_locked(clk)) {
             int period = ck.period_s;
-            if (islider(m, "##clk", &period, 0, 60, 5, period ? "every %d s" : "off")) {
+            if (islider(m, "##clk", &period, 0, 60, 5, period ? tr("every %d s") : tr("off"))) {
                 set_clock_log(period);
                 ini_put(m, clk, std::to_string(period));
             }
@@ -2188,7 +2191,7 @@ void overview_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ove
 // ---- what waits for a restart -----------------------------------------------------------------------------------------------------------
 std::string pending_list(Menu& m) {
     std::string s;
-    auto add = [&](const char* what) { s += (s.empty() ? "" : ", ") + std::string(what); };
+    auto add = [&](const char* what) { s += (s.empty() ? "" : ", ") + std::string(tr(what)); };
     for (const IniKey& k : kIni)
         if (ini_pending(m, k)) add(k.label);
     const play::Settings& e = m.edit;
@@ -2207,8 +2210,6 @@ std::string pending_list(Menu& m) {
 
 // ---- the window -------------------------------------------------------------------------------------------------------------------------
 void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
-    static bool i18n_once = [] { nxrt::gfx::menu_i18n_init(); return true; }();
-    (void)i18n_once;
     Menu& m = menu();
     if (!m.loaded) {
         m.boot = host.settings();

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The F1 menu's translation table (declarations in include/nxrt/menu_i18n.h).
 //
-// [gfx] ui_language names a file next to fefw_rt.dll: locales\<name>.ini. "auto" or empty: English (no table).
+// [gfx] ui_language names a file next to fefw_rt.dll: locales\<name>.ini. "auto" or empty: the table for the Windows display
+// language if it is there, else English. "en": English (no table).
 // The file holds one "key = value" pair per line (UTF-8, no BOM; '#' or ';' starts a comment). The key is the
 // English string as the source code shows it; the value is what the menu displays. A missing key or file falls
 // back to the English string, so a partial or broken table only means some lines stay English.
@@ -58,7 +59,8 @@ bool is_conversion(char c) { return c != '\0' && std::strchr("diouxXeEfFgGaAcsp"
 // and never reach printf, so they must not be dropped for it.
 // A conversion that is not in the list above (notably "%n") sets *unsafe and adds a token no other string can
 // produce, so the entry reads as a mismatch and is dropped.
-std::string conversions(const std::string& s, bool* unsafe = nullptr) {
+// To printf a space is a flag too ("99% de" reads an int); `space_flag` reads it that way (menu_translation_problem).
+std::string conversions(const std::string& s, bool* unsafe = nullptr, bool space_flag = false) {
     std::string out;
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] != '%') continue;
@@ -66,10 +68,11 @@ std::string conversions(const std::string& s, bool* unsafe = nullptr) {
         ++i;
         if (i >= s.size() || s[i] == '%') continue;
         const unsigned char next = static_cast<unsigned char>(s[i]);
-        if (next >= 0x80 || next == ' ') continue;   // prose, not a conversion
+        if (next >= 0x80 || (next == ' ' && !space_flag)) continue;   // prose, not a conversion
         std::string tok;   // kept aside until the conversion proves real, so a false start adds nothing
         size_t j = i;
-        while (j < s.size() && s[j] != '\0' && std::strchr("-+#0", s[j]) != nullptr) ++j;
+        const char* const flags = space_flag ? "-+#0 " : "-+#0";
+        while (j < s.size() && s[j] != '\0' && std::strchr(flags, s[j]) != nullptr) ++j;
         if (j < s.size() && s[j] == '*') {
             tok += "*;";
             ++j;
@@ -106,6 +109,25 @@ std::string conversions(const std::string& s, bool* unsafe = nullptr) {
     return out;
 }
 
+} // namespace
+
+// A translation is used as the printf format string, so its conversions have to match the English key. One that does not is
+// dropped: the line stays English instead of reading the wrong arguments. A "%n" in the value is dropped whatever the key
+// says, because nothing the menu prints has one.
+const char* menu_translation_problem(const std::string& key, const std::string& value) {
+    bool unsafe = false;
+    const std::string value_list = conversions(value, &unsafe);
+    const std::string value_spaced = conversions(value, &unsafe, true);
+    if (unsafe) return "it uses %n, which writes to memory";
+    // Prose keys hold percents of their own ("% of one thread"), so the reading with the space flag only has to agree where
+    // it finds something in the value that the plain one does not.
+    if (value_list != conversions(key) || (value_spaced != value_list && value_spaced != conversions(key, nullptr, true)))
+        return "its format specifiers differ from the key";
+    return nullptr;
+}
+
+namespace {
+
 // "key = value" lines; the value keeps inner spaces, the key is trimmed. UTF-8 in, UTF-8 out (ImGui is UTF-8 aware).
 void load_file(const std::string& path) {
     std::ifstream f(path.c_str(), std::ios::binary);
@@ -132,21 +154,9 @@ void load_file(const std::string& path) {
         const std::string key = trim(t.substr(0, eq));
         std::string value = trim(t.substr(eq + skip));
         if (key.empty() || value.empty()) continue;
-        // A translation is used as the printf format string, so its conversions have to match the English key.
-        // One that does not is dropped: the line stays English instead of reading the wrong arguments. A "%n" in
-        // the value is dropped whatever the key says, because nothing the menu prints has one.
-        bool unsafe = false;
-        const std::string key_list = conversions(key);
-        const std::string value_list = conversions(value, &unsafe);
-        if (unsafe) {
+        if (const char* problem = menu_translation_problem(key, value)) {
             ++dropped;
-            NXLOG_W(kTag, "dropping the translation of \"%s\": it uses %%n, which writes to memory", key.c_str());
-            continue;
-        }
-        if (key_list != value_list) {
-            ++dropped;
-            NXLOG_W(kTag, "dropping the translation of \"%s\": its format specifiers differ from the key",
-                    key.c_str());
+            NXLOG_W(kTag, "dropping the translation of \"%s\": %s", key.c_str(), problem);
             continue;
         }
         table()[key] = value;
@@ -156,13 +166,32 @@ void load_file(const std::string& path) {
     if (dropped > 0) NXLOG_W(kTag, "dropped %zu translations whose format specifiers did not match", dropped);
 }
 
+// The Windows display language as a locale name ("zh-CN"), "" when Windows does not say.
+std::string windows_locale() {
+    wchar_t wide[LOCALE_NAME_MAX_LENGTH] = {};
+    if (LCIDToLocaleName(GetUserDefaultUILanguage(), wide, LOCALE_NAME_MAX_LENGTH, 0) <= 1) return {};
+    std::string out;
+    for (const wchar_t* c = wide; *c; ++c) out.push_back(static_cast<char>(*c));   // locale names are ASCII
+    return out;
+}
+
 } // namespace
+
+std::string menu_language() {
+    const std::string lang = trim(config_get_str("gfx", "ui_language", "auto"));
+    if (lang == "en" || lang == "en-US") return {};   // English: the source strings
+    if (!lang.empty() && lang != "auto") return lang;
+    const std::string dir = exe_dir();
+    if (dir.empty()) return {};
+    for (const std::string& name : menu_language_candidates(windows_locale()))
+        if (GetFileAttributesA((dir + "\\locales\\" + name + ".ini").c_str()) != INVALID_FILE_ATTRIBUTES) return name;
+    return {};
+}
 
 void menu_i18n_init() {
     table().clear();
-    std::string lang = config_get_str("gfx", "ui_language", "auto");
-    lang = trim(lang);
-    if (lang.empty() || lang == "auto" || lang == "en" || lang == "en-US") return;   // English: the source strings
+    const std::string lang = menu_language();
+    if (lang.empty()) return;
     const std::string dir = exe_dir();
     if (dir.empty()) return;
     load_file(dir + "\\locales\\" + lang + ".ini");

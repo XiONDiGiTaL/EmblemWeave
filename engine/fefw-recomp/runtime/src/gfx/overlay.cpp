@@ -575,9 +575,8 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     // UI shows, so a system CJK font costs nothing until it is drawn.
     {
         std::string font = config_get_str("gfx", "ui_font", "");
-        std::string lang = config_get_str("gfx", "ui_language", "auto");
-        const bool cjk_language = !(lang.empty() || lang == "auto" || lang == "en" || lang == "en-US");
-        const bool wants_cjk = cjk_language || !font.empty();
+        const std::string lang = menu_language();   // empty: English (no translation loaded)
+        const bool wants_cjk = !lang.empty() || !font.empty();
         const auto exists = [](const std::string& p) {
             WIN32_FILE_ATTRIBUTE_DATA a;
             return p.size() < MAX_PATH && GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &a) &&
@@ -605,7 +604,9 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
         }
         if (chosen.empty() && wants_cjk) {
             static const char* const kSystem[] = {
-                "C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
+                "C:\\Windows\\Fonts\\msyh.ttc",
+                "C:\\Windows\\Fonts\\msyh.ttf",   // Wine/Proton use the standalone font
+                "C:\\Windows\\Fonts\\simhei.ttf", "C:\\Windows\\Fonts\\Deng.ttf",
             };
             for (const char* c : kSystem)
                 if (exists(c)) { chosen = c; break; }
@@ -616,12 +617,13 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
                 if (exists(c)) { chosen = c; break; }
         }
         if (!chosen.empty() && io.Fonts->AddFontFromFileTTF(chosen.c_str(), 0.0f))
-            NXLOG_I(kTag, "UI font: %s ([gfx] ui_language %s)", chosen.c_str(), lang.c_str());
+            NXLOG_I(kTag, "UI font: %s (menu language %s)", chosen.c_str(), lang.empty() ? "en" : lang.c_str());
         else {
             if (wants_cjk) NXLOG_W(kTag, "no CJK font found ([gfx] ui_font '%s'): using the built-in default", font.c_str());
             io.Fonts->AddFontDefaultVector();   // the scalable default font: stays sharp at every UI scale (update_scale)
         }
     }
+    menu_i18n_init();   // before anything is drawn: the keyboard can open before the F1 menu ever has
     ImGui::GetStyle().FontSizeBase = 16.0f;
     s.base_style = ImGui::GetStyle();
     const VkExtent2D e = ctx.renderer->extent();
@@ -981,9 +983,9 @@ void Overlay::Impl::draw_keyboard(double now_s) {
             // where a Switch pad has them
             const bool lab = kb_by_label.load(std::memory_order_relaxed);
             ImGui::PushTextWrapPos(0.f);
-            ImGui::TextDisabled("Pad: %s type, %s delete, %s space, %s shift, L/R move, + OK, - cancel", lab ? "A" : "A (right)", lab ? "B" : "B (bottom)",
-                                lab ? "Y" : "Y (left)", lab ? "X" : "X (top)");
-            ImGui::TextDisabled("Keyboard: type, Enter OK, Esc cancel, Ctrl+V paste");
+            ImGui::TextDisabled(tr("Pad: %s type, %s delete, %s space, %s shift, L/R move, + OK, - cancel"), lab ? "A" : tr("A (right)"),
+                                lab ? "B" : tr("B (bottom)"), lab ? "Y" : tr("Y (left)"), lab ? "X" : tr("X (top)"));
+            ImGui::TextDisabled("%s", tr("Keyboard: type, Enter OK, Esc cancel, Ctrl+V paste"));
             ImGui::PopTextWrapPos();
         }
     }

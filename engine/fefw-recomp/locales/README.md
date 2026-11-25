@@ -5,9 +5,15 @@ next to `fefw_rt.dll` (or `fefw.exe`, wherever the binary lives).
 
 ## Enabling a language
 
-Set `[gfx] ui_language` in `fefw.ini` to the table name without `.ini`
-(`zh` loads `locales/zh.ini`). `auto`, `en`, or an empty value keeps the
-built-in English strings.
+By default (`[gfx] ui_language = auto` in `fefw.ini`, or no entry) the menu uses
+the table for the Windows display language when there is one: `zh.ini` for
+Simplified Chinese, and for any other language a table named after it
+(`pt-BR.ini`, then `pt.ini`). Otherwise it is in English.
+
+A language picked in the launcher (the button at the foot of its sidebar) is
+written to `ui_language` and covers the menu as well. Setting the key by hand to
+a table name without `.ini` also works; the launcher keeps a name it does not
+know about. `en` forces English. The menu reads the setting when the game starts.
 
 ## Table format
 
@@ -33,6 +39,9 @@ English source string = Translated string
   become `%.2f`. Both sides are compared as a list of arguments
   (`%*d` is `*` then `d`, `%ls` is `ls`), so moving an argument from the width
   to the value, or reordering two conversions, is caught as well.
+- A space is a printf flag, so `99% de` reads as the conversion `% d`: such a
+  translation is dropped. Write the percent as `%%` in a string that has format
+  specifiers.
 - `%n` is refused outright: it writes through a pointer the caller never
   passed, and no menu string uses one, so any entry that contains it is dropped
   whatever the English key says.
@@ -49,9 +58,12 @@ added wins over the shipped one.
 
 ## Keeping the shipped table up to date
 
-Because an existing file is never replaced, a new release cannot push fixes
-into `zh.ini` on its own. To pick up the translations from a newer build, copy
-the table out of the package over the one in the run folder:
+`zh.ini` is the exception: the launcher carries the current one inside itself and
+replaces a copy the player never edited. It knows an untouched copy from the
+hash it records in `zh.ini.shipped` beside it, or, for releases before that
+record existed, from a built-in list. An edited `zh.ini` is kept as it is; to
+take the new translations instead, delete it and open the launcher, or merge
+the two by hand.
 
 ```
 <package>/locales/zh.ini   ->   <game folder>/locales/zh.ini
