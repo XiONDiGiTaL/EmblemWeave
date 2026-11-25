@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "org.xion.trinity.core",
+  "name": "Trinity Core",
+  "version": "0.2.0",
+  "description": "The reference plugin for the Trinity cross-host framework: host discovery, a native panel, settings, a frame hook and the project prefix registry.",
+  "authors": ["XiONDiGiTaL"],
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://github.com/XiONDiGiTaL/Trinity",
+  "abi": { "min": 1, "max": 1 },
+  "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
+  "entry": {
+    "windows": "Trinity.dll",
+    "linux": "libTrinity.so"
+  },
+  "capabilities": ["nxp.ui", "nxp.settings", "nxp.files", "nxp.frame"],
+  "dependencies": []
+}

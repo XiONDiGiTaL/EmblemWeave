@@ -1,0 +1,7 @@
+{
+  "title": "Trinity Core",
+  "author": "XiONDiGiTaL",
+  "version": "0.2.0",
+  "description": "Shared NXP services for EmblemWeave, fefw-recomp and ObeliskChamber: host discovery, settings, a native panel and a frame hook.",
+  "source": "https://github.com/XiONDiGiTaL/Trinity"
+}
