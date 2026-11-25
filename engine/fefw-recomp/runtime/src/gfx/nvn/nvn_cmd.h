@@ -222,6 +222,9 @@ struct CommandBuffer : Obj {
     // NVN2 nvnCommandBufferSetRecordingMode (the sdk keeps it at cmdbuf+0x18). It picks how the driver encodes the commands (a per-mode
     // header word ahead of each packet; a mode-2 buffer drops Barrier), not what they do, so the replay only keeps the value.
     int32_t recording_mode = 0;
+    // The colour target (else the depth target) last bound while recording, when it was made wider than the game asked
+    // (nxrt/display_override.h): its real size and the game's. All zero otherwise.
+    int wide_tw = 0, wide_th = 0, wide_gw = 0, wide_gh = 0;
     TexturePool* tpool = nullptr;     // the texture pool set in the list being recorded (the list holds it); background texture preparation resolves handles with it
     int64_t copy_row_stride = 0, copy_image_stride = 0;
     uint64_t callback = 0, callback_data = 0;       // guest function pointer and its data

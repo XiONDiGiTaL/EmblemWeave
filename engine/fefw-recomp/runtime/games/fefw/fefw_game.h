@@ -99,6 +99,11 @@ struct WideInfo {
     const char* names[kCounters] = {};
 };
 WideInfo wide_info();
+// fefw_res.cpp: [fefw] wide_textures = auto | off. An ultrawide output wider than the game's 3840x2160 display (up to 7680 wide and 2160
+// high, wider than 16:9, with h * 3840 / w a whole number: 5120x1440, 5120x2160, 7680x2160, 5760x1080, ...) is drawn at its own size
+// instead of scaled into 3840 wide, when the game gets the 2160p display (docked, [vi] buffer_max_resolution unset or 3).
+std::string wide_textures_mode();                    // "auto" or "off"
+bool wide_native(int w, int h);                      // with [fefw] ultrawide and wide_textures on: (w, h) is drawn at its own size
 
 // fefw_mouse.cpp: the game's own Joy-Con 2 mouse controls, read for the log, the tests and the F1 menu
 struct MouseInfo {
