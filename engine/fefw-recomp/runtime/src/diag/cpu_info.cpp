@@ -187,6 +187,7 @@ Load sample() {
         busy = ft64(sk) + ft64(su);   // kernel time includes the idle time
     }
     PROCESS_MEMORY_COUNTERS_EX pm{};
+    pm.cb = sizeof pm;   // required by the API: a zero cb makes the query fail
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof pm)) {
         l.working_set = pm.WorkingSetSize;
         l.committed = pm.PrivateUsage;

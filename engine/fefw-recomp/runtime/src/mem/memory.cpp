@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <functional>
 #include <cstdio>
 #include <map>
@@ -429,6 +430,17 @@ bool is_mapped(uint64_t addr, uint64_t size) {
 // ---------------------------------------------------------------------------------------------------------------------
 // heap section
 
+int heap_section_parse(const std::string& text, bool* recognised) {
+    std::string v = text;
+    for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (recognised) *recognised = true;
+    if (v.empty() || v == "auto") return -1;
+    if (v == "1" || v == "true" || v == "on" || v == "yes") return 1;
+    if (v == "0" || v == "false" || v == "off" || v == "no") return 0;
+    if (recognised) *recognised = false;
+    return -1;
+}
+
 bool heap_create(uint64_t reserve_bytes) {
     if (!initialised() && !init()) return false;
     std::lock_guard lk(g_heap_mu);
@@ -445,8 +457,13 @@ bool heap_create(uint64_t reserve_bytes) {
                 static_cast<unsigned long long>(size), static_cast<unsigned long long>(kHeapMax));
         return false;
     }
-    // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never
-    const std::string mode = nxrt::config_get_str("memory", "heap_section", "auto");
+    // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never.
+    // true / on / yes and false / off / no work too (heap_section_parse).
+    const std::string mode_text = nxrt::config_get_str("memory", "heap_section", "auto");
+    bool mode_known = true;
+    const int mode = heap_section_parse(mode_text, &mode_known);
+    if (!mode_known)
+        NXLOG_W(kTag, "[memory] heap_section = %s is not auto, 1/true/on/yes or 0/false/off/no: auto is used", mode_text.c_str());
     // Check for Wine on Linux
     bool wine = false;
 #if defined(__linux__)
@@ -455,7 +472,7 @@ bool heap_create(uint64_t reserve_bytes) {
     const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     wine = ntdll && GetProcAddress(ntdll, "wine_get_version");
 #endif
-    if (mode == "0" || (mode != "1" && wine)) {
+    if (mode == 0 || (mode != 1 && wine)) {
         void* p = nxrt::platform::reserve_fixed(reinterpret_cast<void*>(kHeapBase), static_cast<std::size_t>(size));
         if (!p || reinterpret_cast<uint64_t>(p) != kHeapBase) {
             NXLOG_E(kTag, "heap_create: platform::reserve_fixed(%llu MiB) at %llx failed", static_cast<unsigned long long>(size >> 20),
@@ -468,7 +485,8 @@ bool heap_create(uint64_t reserve_bytes) {
         g_heap_cls.assign(static_cast<size_t>(size / kPage), 0);
         g_committed = 0;
         NXLOG_I(kTag, "heap: private memory of %llu MiB at %llx, no section (%s): no alias views, pools import at their own address",
-                static_cast<unsigned long long>(size >> 20), static_cast<unsigned long long>(kHeapBase), wine ? "Wine" : "[memory] heap_section = 0");
+                static_cast<unsigned long long>(size >> 20), static_cast<unsigned long long>(kHeapBase),
+                wine ? "Wine" : (mode_text.empty() ? "[memory] heap_section" : mode_text.c_str()));
         return true;
     }
     nxrt::platform::Section* sec = nxrt::platform::section_create(size);

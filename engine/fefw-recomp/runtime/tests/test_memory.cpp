@@ -582,6 +582,28 @@ NXTEST(heap_is_mapped_agrees_with_virtualquery_on_random_ranges) {
     mem::shutdown();
 }
 
+NXTEST(heap_section_parses_booleans_case_insensitively) {
+    bool known = false;
+    CHECK_EQ(mem::heap_section_parse("auto", &known), -1);
+    CHECK(known);
+    CHECK_EQ(mem::heap_section_parse("AUTO", &known), -1);
+    CHECK(known);
+    CHECK_EQ(mem::heap_section_parse("", &known), -1);   // an empty value means the default
+    CHECK(known);
+    for (const char* on : {"1", "true", "TRUE", "True", "on", "ON", "yes", "YeS"}) {
+        CHECK_EQ(mem::heap_section_parse(on, &known), 1);
+        CHECK_MSG(known, on);
+    }
+    for (const char* off : {"0", "false", "FALSE", "False", "off", "OFF", "no", "No"}) {
+        CHECK_EQ(mem::heap_section_parse(off, &known), 0);
+        CHECK_MSG(known, off);
+    }
+    CHECK_EQ(mem::heap_section_parse("banana", &known), -1);   // invalid: auto, and the caller warns
+    CHECK(!known);
+    CHECK_EQ(mem::heap_section_parse("2", &known), -1);
+    CHECK(!known);
+}
+
 NXTEST(heap_protect_cycle_is_fast_with_full_heap) {
     mem::shutdown();
     CHECK(mem::init());

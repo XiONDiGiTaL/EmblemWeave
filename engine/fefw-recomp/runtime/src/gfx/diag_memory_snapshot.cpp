@@ -50,6 +50,7 @@ MemorySnapshot diag_memory_snapshot() {
     // 1. Process memory.
     out << "--- Process Memory ---\n";
     PROCESS_MEMORY_COUNTERS_EX pmc{};
+    pmc.cb = sizeof pmc;   // required by the API: a zero cb made every snapshot report a failed query
     if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc))) {
         out << "  Working Set:          " << format_bytes(pmc.WorkingSetSize) << " (peak " << format_bytes(pmc.PeakWorkingSetSize) << ")\n";
         out << "  Private Bytes:        " << format_bytes(pmc.PrivateUsage) << "\n";

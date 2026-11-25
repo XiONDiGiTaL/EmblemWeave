@@ -66,6 +66,9 @@ uint64_t heap_reserved();                       // section size
 bool heap_commit(uint64_t offset, uint64_t size);     // commit [kHeapBase+offset, +size) (page granularity)
 bool heap_decommit(uint64_t offset, uint64_t size);
 uint64_t heap_committed();                      // bytes committed through heap_commit minus heap_decommit
+// [memory] heap_section parsing: -1 auto, 1 always a section, 0 always private memory. Case-insensitive; `true`, `on` and `yes`
+// mean 1, `false`, `off` and `no` mean 0. `recognised` is false for any other non-empty value: the caller warns and uses auto.
+int heap_section_parse(const std::string& text, bool* recognised);
 // The heap's own page table, without VirtualQuery (which walks every page of the run of identical pages after the address: up to 85 ms
 // on a 10 GiB heap): 1 when every page of [addr, addr + size) is in the primary view and this module left it committed read-write, 0 when
 // one is not, -1 when the table cannot say (outside the primary view, [memory] fast_query = false). heap_epoch() changes with every
