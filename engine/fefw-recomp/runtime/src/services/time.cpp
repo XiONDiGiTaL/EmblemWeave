@@ -248,7 +248,11 @@ const std::vector<uint8_t>* rule_for_name(State& s, const std::string& name) {
 }
 
 // ---- shared memory ------------------------------------------------------------------------------------------------------------
-uint8_t* shm_base(State& s) { return (s.shm && s.shm->ok()) ? reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(s.shm->host())) : nullptr; }
+// Runs fn on the shared memory, which the guest can neither map nor unmap meanwhile; nothing when there is none. Caller holds mu().
+template <class F>
+void with_shm(State& s, F fn) {
+    if (s.shm) s.shm->with_host([&](uint64_t host) { fn(reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(host))); });
+}
 
 // Ryujinx TimeSharedMemory.WriteObjectToSharedMemory: write the free slot, then publish the new index.
 void lifo_write(uint8_t* base, uint32_t off, uint32_t pad, const void* obj, uint32_t size) {
@@ -260,20 +264,22 @@ void lifo_write(uint8_t* base, uint32_t off, uint32_t pad, const void* obj, uint
     std::memcpy(base + off, &n, 4);
 }
 
-// The local and network clock contexts from the clocks now. Caller holds mu().
+// The local and network clock contexts from one reading of the clocks. An offset is the host clock's lead over the steady clock rounded
+// down. A difference of two whole-second readings would depend on where in the second the write lands, and a rewrite could then step the
+// guest's date back although the host clock moved forward.
 void write_clock_contexts(State& s, uint8_t* b) {
-    s.shm_lead_ns = host_lead_ns(s);   // read first: a clock change between the two reads then shows at the next check
-    const Now n = now_of(s);
+    const int64_t steady_ns = steady_total_ns(s);
+    s.shm_lead_ns = host_unix_ns() - steady_ns;
+    Now n{};
+    n.steady = steady_ns / 1000000000;
+    n.host = n.steady + s.shm_lead_ns / 1000000000;   // sys_ctx() then gives offset = lead in whole seconds + delta
     const SysCtx lc = sys_ctx(n, s.local_delta);
     lifo_write(b, kOffLocal, kPadLocal, &lc, sizeof lc);
     const SysCtx nc = sys_ctx(n, s.network_delta);
     lifo_write(b, kOffNetwork, kPadNetwork, &nc, sizeof nc);
 }
 
-void write_shm(State& s) {
-    uint8_t* b = shm_base(s);
-    if (!b) return;
-
+void write_blocks(State& s, uint8_t* b) {
     SteadyCtx sc{};
     sc.internal_offset = static_cast<uint64_t>(static_cast<int64_t>(kSteadyEpochNs) + s.internal_ns + s.test_ns);
     std::memcpy(sc.source, kSourceId, 16);
@@ -296,15 +302,21 @@ void write_shm(State& s) {
     lifo_write(b, kOffAdjust, kPadAdjust, &adj, sizeof adj);
 }
 
+void write_shm(State& s) {
+    with_shm(s, [&](uint8_t* b) { write_blocks(s, b); });
+}
+
 // Rewrites the clock contexts when the host clock has moved against the steady clock since they were written. Caller holds mu().
 void refresh_shm(State& s) {
     if (tt::deterministic()) return;   // both are the virtual clock there, and reading it would move it
-    uint8_t* b = shm_base(s);
-    if (!b || !mem::is_mapped(s.shm->host(), kShmSize)) return;
     const int64_t moved = host_lead_ns(s) - s.shm_lead_ns;
     if (moved > -kShmMaxDriftNs && moved < kShmMaxDriftNs) return;
-    write_clock_contexts(s, b);
-    NXLOG_I("time", "the host clock moved %+.3f s against the steady clock: shared memory clock contexts rewritten", static_cast<double>(moved) * 1e-9);
+    with_shm(s, [&](uint8_t* b) {
+        if (!mem::is_mapped(reinterpret_cast<uint64_t>(b), kShmSize)) return;   // the memory map was torn down (tests)
+        write_clock_contexts(s, b);
+        NXLOG_I("time", "the host clock moved %+.3f s against the steady clock: shared memory clock contexts rewritten",
+                static_cast<double>(moved) * 1e-9);
+    });
 }
 
 void refresh_main() {
@@ -343,10 +355,10 @@ void init_locked(State& s) {
     s.utc_rule.clear();
     if (!s.shm) s.shm = std::make_unique<ServiceSharedMemory>(kShmSize, "time");
     s.location_updated = steady_secs(s);
-    if (uint8_t* b = shm_base(s)) {
+    with_shm(s, [&](uint8_t* b) {
         std::memset(b, 0, kShmSize);
-        write_shm(s);
-    }
+        write_blocks(s, b);
+    });
 }
 
 // Lazily brings the state up (the shared memory needs the kernel region, so nothing is allocated before the first service use).
@@ -638,7 +650,8 @@ std::shared_ptr<ipc::Service> make_static(const char* name, uint32_t perm) {
             std::lock_guard<std::mutex> lk(mu());
             State& st = state_locked();
             rsp.out_copy.push_back(st.shm->new_handle());
-            if (!st.refresher.joinable()) st.refresher = std::thread(refresh_main);
+            // Not while time_reset() is stopping one: a thread started then would end at once and never be replaced.
+            if (!st.refresher.joinable() && !st.refresher_stop) st.refresher = std::thread(refresh_main);
             return 0;
         });
         s.add_cmd(50, "SetStandardSteadyClockInternalOffset", [perm](ipc::Request& req, ipc::Response&) -> uint32_t {
