@@ -19,6 +19,9 @@
 // never drawn with data that is not ready and never with older data than the synchronous path would have used. Jobs never run on a texture the game
 // finalized, and are guarded against a page that disappears.
 //
+// Format. A job for an ASTC texture whose image exists makes its data in the image's format (Texture::image_format): the format was chosen from
+// the storage's content when the image was made, and a later content that would choose another one still goes into that image.
+//
 // Transcodes. An ASTC texture without a cache entry (the GPU has no ASTC) is transcoded by the job itself, on one thread at below-normal priority, and
 // the result is written to the cache. A job in that state is not waited for: the render thread uploads a quick stand-in (preset 0, all threads, not
 // cached; TexCaps::provisional) and calls provisional_uploaded; when the job's result is ready for the same content the texture is marked dirty, and

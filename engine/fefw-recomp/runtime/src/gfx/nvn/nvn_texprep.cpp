@@ -319,6 +319,9 @@ void worker_main() {
             // [gfx] astc_gpu (nvn_astc_gpu.h): a texture without a cache entry leaves the job as its ASTC blocks (ok, PreparedTexture::gpu_astc) for the
             // GPU to transcode at the upload, so the slow pass below is not entered
             TexCaps jc = s.caps;
+            // The image's format was fixed by what the storage held when it was made. Data in another one (BC1 for content that is opaque now,
+            // the format of a cache entry) cannot be uploaded into it: the stand-in stayed and the job was queued again at every use (#146).
+            if (t->fmt->astc) jc.image_format = static_cast<VkFormat>(t->image_format.load(std::memory_order_acquire));
             if (!gpu::astc_gpu_ready()) {   // its pipelines are still being built (seconds at a first start): a take does not wait for this job
                 {
                     std::lock_guard<std::mutex> sl(s.mu);
@@ -342,6 +345,7 @@ void worker_main() {
                 // without this it slept through the whole transcode (1.5-2 s render-thread stalls choosing body types at character creation).
                 s.cv_done.notify_all();
                 TexCaps full = s.caps;
+                full.image_format = jc.image_format;
                 full.cache_only = false;
                 full.encode_threads = 1;
                 const int prio = GetThreadPriority(GetCurrentThread());
@@ -693,7 +697,9 @@ bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged, uint64_t* src_h
             }
             if (s.verify && !out.gpu_astc) {   // (ASTC blocks for the GPU transcode: nothing made here to compare)
                 PreparedTexture fresh;
-                const bool ok = prepare_texture(*t, s.caps, fresh);
+                TexCaps vc = s.caps;
+                if (t->fmt->astc) vc.image_format = static_cast<VkFormat>(t->image_format.load(std::memory_order_acquire));
+                const bool ok = prepare_texture(*t, vc, fresh);
                 uint64_t after = 0;
                 const bool still = hash_guarded(*t, after) && after == want;     // the game may be writing the storage right now: then there is nothing to compare
                 lk.lock();

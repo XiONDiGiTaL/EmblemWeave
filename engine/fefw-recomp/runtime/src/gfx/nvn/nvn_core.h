@@ -181,6 +181,7 @@ struct Texture : Obj {
     std::atomic<uint32_t> prep_sched{0};    // 0x80000000 | prep_gen when a background job was requested for that generation
     std::atomic<uint32_t> prep_prov{0};     // 0x80000000 | prep_gen when the image holds a quick stand-in for that generation (texprep::provisional_uploaded)
     std::atomic<uint32_t> prep_final{0xFFFFFFFFu};  // prep_gen whose final upload data the image holds (texprep::final_uploaded); never a real generation before the first final upload
+    std::atomic<uint32_t> image_format{0};  // VkFormat of the GPU image once it is made (0: none yet): a background job makes its data in it
     TexGpu* gpu = nullptr;                  // render thread only
     bool released = false;                  // render thread only: the game finalized it and its release has run (tex_release)
     // Sparse textures kept as a Vulkan sparse-residency image (too big to back fully): the storage ranges [first, second) written or remapped
