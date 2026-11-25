@@ -23,6 +23,7 @@ mod gamedata;
 mod i18n;
 mod ingame;
 mod jobs;
+mod labb;
 mod logo;
 mod manifest;
 mod memory;
@@ -178,6 +179,8 @@ pub struct App {
     pub diag_tab: pages::diagnostics::Tab,
     pub diag_filter: String,
     pub lift_limit: usize,
+    /// The Performance Lab's local page state, live run and saved history.
+    pub lab: labb::Ui,
     /// `--boot-test`: start a boot test once game detection finishes.
     pub boot_on_start: bool,
     /// `--build-engine`: build the game with the engine once detection finishes.
@@ -244,6 +247,7 @@ fn clock() -> String {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
         let (mut config, warning) = Config::load();
+        config.lab.normalize();
         i18n::set_language(config.ui_language);
         theme::configure_fonts(&cc.egui_ctx, config.ui_language);
         // An older release carried the upstream Tauri launcher beside the engine.
@@ -314,6 +318,7 @@ impl App {
         std::thread::spawn(|| {
             let _ = crate::engine::refresh_build_stamp();
         });
+        let lab = labb::Ui::load(&config);
         let mut app = App {
             stale_build_cache: None,
             stale_build_cached_at: None,
@@ -336,6 +341,7 @@ impl App {
             diag_tab: pages::diagnostics::Tab::Runtime,
             diag_filter: String::new(),
             lift_limit: 4000,
+            lab,
             boot_on_start: false,
             build_on_start: false,
             play_after_repair: false,
@@ -417,6 +423,17 @@ impl App {
                         }) {
                             app.open(*p);
                         }
+                    }
+                }
+                // Capture runs can show each Lab tab without driving the
+                // window; it has no effect on saved settings.
+                "--lab-tab" => {
+                    if let Some(name) = args.get(i + 1) {
+                        app.lab.tab = match name.to_ascii_lowercase().as_str() {
+                            "benchmark" => labb::Tab::Benchmark,
+                            "optimization" | "optimize" => labb::Tab::Optimize,
+                            _ => labb::Tab::Profile,
+                        };
                     }
                 }
                 _ => {}
@@ -1267,6 +1284,7 @@ impl eframe::App for App {
             return;
         }
         self.shortcuts(ctx);
+        labb::tick(&mut self.lab, &self.config);
         shell::top_bar(self, ctx);
         shell::status_bar(self, ctx);
         shell::nav(self, ctx);

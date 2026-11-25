@@ -576,6 +576,68 @@ impl Default for Onboarding {
     }
 }
 
+/// Thresholds for the Performance Lab's read-only pressure indicator. GPU
+/// thresholds are percentage of the driver budget in use; host thresholds are
+/// percentage of installed RAM still available. They are deliberately
+/// configurable because the right values differ by GPU and workload; the
+/// defaults are conservative starting points, not experimentally universal
+/// limits. The Lab never changes these values by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lab {
+    pub gpu_elevated: u32,
+    pub gpu_high: u32,
+    pub gpu_critical: u32,
+    pub host_elevated: u32,
+    pub host_high: u32,
+    pub host_critical: u32,
+}
+
+impl Default for Lab {
+    fn default() -> Self {
+        Lab {
+            gpu_elevated: 70,
+            gpu_high: 85,
+            gpu_critical: 95,
+            host_elevated: 20,
+            host_high: 10,
+            host_critical: 5,
+        }
+    }
+}
+
+impl Lab {
+    /// Keep the thresholds ordered and inside 1..=100, so a hand-edited
+    /// config cannot make "critical" easier than "elevated".
+    pub fn normalize(&mut self) {
+        let mut gpu = [self.gpu_elevated, self.gpu_high, self.gpu_critical];
+        gpu.sort_unstable();
+        for v in &mut gpu {
+            *v = (*v).clamp(1, 100);
+        }
+        if gpu[0] == gpu[1] || gpu[1] == gpu[2] {
+            let d = Lab::default();
+            gpu = [d.gpu_elevated, d.gpu_high, d.gpu_critical];
+        }
+        self.gpu_elevated = gpu[0];
+        self.gpu_high = gpu[1];
+        self.gpu_critical = gpu[2];
+
+        let mut host = [self.host_elevated, self.host_high, self.host_critical];
+        host.sort_unstable_by(|a, b| b.cmp(a));
+        for v in &mut host {
+            *v = (*v).clamp(1, 100);
+        }
+        if host[0] == host[1] || host[1] == host[2] {
+            let d = Lab::default();
+            host = [d.host_elevated, d.host_high, d.host_critical];
+        }
+        self.host_elevated = host[0];
+        self.host_high = host[1];
+        self.host_critical = host[2];
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -584,6 +646,7 @@ pub struct Config {
     pub runtime: Runtime,
     pub graphics: Graphics,
     pub performance: Performance,
+    pub lab: Lab,
     pub audio: Audio,
     pub input: Input,
     pub theme: Scheme,

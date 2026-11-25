@@ -6,6 +6,7 @@ pub mod appearance;
 pub mod cheats;
 pub mod controls;
 pub mod diagnostics;
+pub mod labb;
 pub mod log;
 pub mod media;
 pub mod mods;
@@ -31,6 +32,7 @@ pub enum Page {
     Recompile,
     Graphics,
     Performance,
+    Lab,
     Audio,
     Controls,
     Appearance,
@@ -44,7 +46,7 @@ pub enum Page {
 impl Page {
     /// Shortcut order. Kept stable so Ctrl+1..9 keep opening the same pages
     /// even though the sidebar now groups them differently.
-    pub const ALL: [Page; 16] = [
+    pub const ALL: [Page; 17] = [
         Page::Overview,
         Page::Setup,
         Page::Saves,
@@ -53,6 +55,7 @@ impl Page {
         Page::Recompile,
         Page::Graphics,
         Page::Performance,
+        Page::Lab,
         Page::Audio,
         Page::Controls,
         Page::Appearance,
@@ -73,6 +76,7 @@ impl Page {
             Page::Recompile => "Recompilation",
             Page::Graphics => "Graphics",
             Page::Performance => "Performance",
+            Page::Lab => "Performance Lab",
             Page::Audio => "Audio",
             Page::Controls => "Controls",
             Page::Appearance => "Appearance",
@@ -155,6 +159,10 @@ impl Page {
                 painter.line_segment([p(0.0, 1.0), p(3.4, -2.4)], Stroke::new(1.6_f32, colour));
                 painter.circle_filled(p(0.0, 1.0), 1.2, colour);
                 painter.line_segment([p(-4.2, 5.0), p(4.2, 5.0)], s);
+            }
+            Page::Lab => {
+                painter.add(egui::Shape::line(vec![p(-6.0, 3.5), p(-6.0, -3.0), p(-2.5, -3.0), p(-2.5, 5.5), p(1.5, 5.5), p(1.5, -5.0), p(5.6, -5.0)], s));
+                painter.circle_filled(p(3.7, 1.3), 1.1, colour);
             }
             Page::Audio => {
                 painter.add(egui::Shape::line(vec![p(-5.5, -2.0), p(-2.5, -2.0), p(1.5, -5.0), p(1.5, 5.0), p(-2.5, 2.0), p(-5.5, 2.0), p(-5.5, -2.0)], s));
@@ -251,6 +259,7 @@ impl NavGroup {
                 Page::Recompile,
                 Page::Graphics,
                 Page::Performance,
+                Page::Lab,
                 Page::Audio,
                 Page::Controls,
             ],
@@ -277,6 +286,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::Recompile => recompile::show(app, ui),
         Page::Graphics => media::graphics(app, ui),
         Page::Performance => performance::show(app, ui),
+        Page::Lab => labb::show(app, ui),
         Page::Audio => media::audio(app, ui),
         Page::Controls => controls::show(app, ui),
         Page::Appearance => appearance::show(app, ui),
