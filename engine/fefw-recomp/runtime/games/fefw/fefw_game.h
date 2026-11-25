@@ -48,6 +48,9 @@ struct FrameFixInfo {
     uint64_t quake_held = 0;               // quake blocks held to 30 Hz
 };
 FrameFixInfo frame_info();
+
+// fefw_filecache.cpp: explicit [fefw] file_cache_mb and optional [fefw] file_cache_log reporting
+void filecache_install(uint64_t base);
 const char* frame_group_name(int g);
 // The game's clock against real time over the last few seconds (sampled once a second) and the frame-rate options read at start.
 struct ClockInfo {

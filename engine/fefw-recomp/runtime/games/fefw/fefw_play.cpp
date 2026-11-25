@@ -336,6 +336,7 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings& settings
     // always installed: frame_step (fefw_frame.cpp) runs from it, and the F1 menu switches frame_fixes while the game runs
     s.step_hook = hook_add_inline(base + kStepChoice, &hook_step_choice);
     frame_install(base);   // fefw_frame.cpp: after the gameplay target hook, both see the same store
+    filecache_install(base);   // fefw_filecache.cpp: explicit budget and optional reporting, installed before nnMain's set-up
     if (config_get_bool("fefw", "cursor_real_time", true)) {
         s.cursor_x = hook_add_inline(base + kCursorStepX, &hook_cursor_step);
         s.cursor_y = hook_add_inline(base + kCursorStepY, &hook_cursor_step);
