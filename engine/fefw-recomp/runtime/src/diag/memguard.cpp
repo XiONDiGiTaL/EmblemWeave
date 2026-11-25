@@ -236,6 +236,14 @@ void guard_loop(Settings s) {
 
 }  // namespace
 
+int memguard_sysram_usage_percent() {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    if (!GlobalMemoryStatusEx(&ms) || !ms.ullTotalPhys) return -1;
+    const uint64_t used = ms.ullTotalPhys > ms.ullAvailPhys ? ms.ullTotalPhys - ms.ullAvailPhys : 0;
+    return static_cast<int>(used * 100 / ms.ullTotalPhys);
+}
+
 uint64_t memguard_footprint() { return query_commit().bytes; }
 
 void memguard_set_discount(uint64_t (*gpu_bytes)()) { g_discount.store(gpu_bytes); }

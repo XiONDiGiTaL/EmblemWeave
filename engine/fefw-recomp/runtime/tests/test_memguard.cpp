@@ -129,6 +129,11 @@ NXTEST(start_stop_start_again) {
     CHECK(!nxrt::memguard_running());
 }
 
+NXTEST(sysram_usage_percent_in_range) {
+    const int ram_pct = nxrt::memguard_sysram_usage_percent();
+    CHECK(ram_pct >= 0 && ram_pct <= 100);
+}
+
 NXTEST(stop_is_prompt_with_long_poll) {
     nxrt::MemGuardOptions opt;
     opt.limit_bytes = 1ull << 60;
