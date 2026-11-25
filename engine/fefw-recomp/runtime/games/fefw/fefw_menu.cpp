@@ -1180,7 +1180,7 @@ void graphics_page(UiHost& host, Menu& m) {
     detail_group(host, m);
     hdr_group(host, m);
     grading_group(host, m);
-    picture_group(host, m);
+    if (!extras::hdr_scene_active()) picture_group(host, m);   // SDR only: with HDR on, Scene grading takes its place
 }
 
 void upscaling_page(UiHost& host, Menu& m) {

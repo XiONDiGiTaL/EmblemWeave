@@ -155,7 +155,8 @@ void set_picture_live(const PictureSettings& in) {
 PictureLive picture_live() {
     upscale_mode();      // reads the settings once
     PictureLive l;
-    l.active = g_pic_active.load(std::memory_order_acquire);
+    // SDR only: with the HDR scene on the menus hide these controls, so saved values must not keep changing the picture unseen.
+    l.active = g_pic_active.load(std::memory_order_acquire) && !hdr_scene_active();
     if (!l.active) return l;
     l.contrast = g_pic_contrast.load(std::memory_order_relaxed);
     l.saturation = g_pic_saturation.load(std::memory_order_relaxed);

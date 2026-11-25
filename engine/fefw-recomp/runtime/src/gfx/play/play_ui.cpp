@@ -1107,7 +1107,7 @@ void color_group(Page& p) {
 void graphics_page(Page& p) {
     hdr_group(p);
     picture_group(p);
-    color_group(p);
+    if (!extras::hdr_scene_active()) color_group(p);   // SDR only: the picture controls are not applied with HDR on
     gpu_group(p);
 }
 
