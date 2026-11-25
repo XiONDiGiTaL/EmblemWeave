@@ -44,6 +44,14 @@ void teardown(ww::Region* r) {
     mem::shutdown();
 }
 
+// The same heap pages as setup(), but the region covers only the first 16 pages:
+// pages 16..63 are inside the heap and outside every region.
+ww::Region* setup_partial() {
+    mem::shutdown();
+    if (!mem::init() || !mem::heap_create(kHeap) || !mem::heap_commit(0, kPages * kPg)) return nullptr;
+    return ww::region_create(mem::kHeapBase, 16 * kPg, "partial owner");
+}
+
 }  // namespace
 
 NXTEST(arm_then_write_releases_the_page) {
@@ -219,6 +227,43 @@ NXTEST(foreign_fault_passes_on_at_once) {
     CHECK_EQ(ww::faults(), faults0 + 1);
     // after a release has finished, a second fault on the same page (a late writer) finds it writable and goes on without waiting
     CHECK(!write_passes_or_faults(mem::kHeapBase + 31 * kPg + 4));
+    teardown(r);
+}
+
+// The removed untracked-heap fallbacks made any heap page writable. A read-only page outside every region must instead reach the
+// caller's own handler, without a claimed fault, without a wait, and with its protection unchanged.
+NXTEST(unowned_readonly_outside_every_region_is_not_claimed) {
+    ww::Region* r = setup_partial();
+    REQUIRE(r != nullptr);
+    REQUIRE(ww::arm(r, 0, 1));
+    CHECK(!write_passes_or_faults(mem::kHeapBase + 4));                    // positive control: the tracker is installed and claims its own page
+    const uint64_t page = mem::kHeapBase + 40 * kPg;
+    DWORD was = 0;
+    REQUIRE(VirtualProtect(reinterpret_cast<void*>(page), kPg, PAGE_READONLY, &was));
+    const uint64_t faults0 = ww::faults(), waits0 = ww::fault_waits();
+    CHECK(write_passes_or_faults(page + 16));                              // not ours: the caller's handler sees it
+    CHECK_EQ(ww::faults(), faults0);
+    CHECK_EQ(ww::fault_waits(), waits0);
+    CHECK_EQ(prot_of(page), static_cast<DWORD>(PAGE_READONLY));
+    CHECK(ww::describe_page(page).find("owner=none") != std::string::npos);
+    teardown(r);
+}
+
+// The same for a committed NOACCESS page: retirement history cannot authorize it, and the handler must not claim it.
+NXTEST(unowned_noaccess_outside_every_region_is_not_claimed) {
+    ww::Region* r = setup_partial();
+    REQUIRE(r != nullptr);
+    REQUIRE(ww::arm(r, 0, 1));
+    CHECK(!write_passes_or_faults(mem::kHeapBase + 4));                    // positive control: the tracker is installed and claims its own page
+    const uint64_t page = mem::kHeapBase + 41 * kPg;
+    DWORD was = 0;
+    REQUIRE(VirtualProtect(reinterpret_cast<void*>(page), kPg, PAGE_NOACCESS, &was));
+    const uint64_t faults0 = ww::faults(), waits0 = ww::fault_waits();
+    CHECK(write_passes_or_faults(page + 16));                              // not ours: the caller's handler sees it
+    CHECK_EQ(ww::faults(), faults0);
+    CHECK_EQ(ww::fault_waits(), waits0);
+    CHECK_EQ(prot_of(page), static_cast<DWORD>(PAGE_NOACCESS));
+    CHECK(ww::describe_page(page).find("owner=none") != std::string::npos);
     teardown(r);
 }
 

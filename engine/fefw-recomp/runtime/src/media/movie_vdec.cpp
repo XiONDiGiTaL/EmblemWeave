@@ -148,15 +148,34 @@ void dav1d_thread_hook(int begin) {
     snprintf(name, sizeof name, "movie-av1-%d", g_dav1d_threads.fetch_add(1, std::memory_order_relaxed));
     decoder_thread_begin(name);
 }
-std::atomic<uint64_t> s_packets{0}, s_pictures{0}, s_acquired{0}, s_released{0};
+std::atomic<uint64_t> s_packets{0}, s_pictures{0}, s_acquired{0}, s_released{0}, s_skipped{0};
 // Decode time of the packets since the last stats line (worker threads): total and the slowest, in microseconds.
 std::atomic<uint64_t> s_dec_us{0}, s_dec_n{0}, s_dec_max_us{0};
 // The input queue as the player sees it (packets and bytes waiting for the worker), and the times the feed thread waited for room. Read
 // without the decoder lock by stats_tick.
 std::atomic<uint64_t> s_queue_packets{0}, s_queue_bytes{0}, s_max_queue_packets{0}, s_blocked{0}, s_blocked_us{0};
+// Pacing of the pictures the player takes: host time between successful AcquireVideoFrame calls, kept in a coarse histogram so the 5 s
+// stats line can report p95/p99 without holding every gap. The edges are the upper bounds of the buckets, in milliseconds.
+constexpr double kGapEdgesMs[] = {16.0, 20.0, 25.0, 30.0, 33.4, 40.0, 50.0, 66.7, 100.0, 150.0, 250.0, 1000.0};
+constexpr int kGapBuckets = static_cast<int>(sizeof(kGapEdgesMs) / sizeof(kGapEdgesMs[0]));
+std::atomic<uint64_t> s_gap_n{0}, s_gap_us{0}, s_gap_max_us{0};
+std::atomic<uint64_t> s_gap_hist[kGapBuckets]{};
 
-// A stats line at most every 5 s while a movie plays: packets in, pictures decoded, frames acquired and released by the player, and the
-// input queue. The queue line is what shows backpressure working: it stays at kMovieMaxQueuedPackets instead of growing without bound.
+double gap_percentile(double p) {
+    const uint64_t total = s_gap_n.load(std::memory_order_relaxed);
+    if (!total) return 0.0;
+    const uint64_t want = static_cast<uint64_t>(total * p);
+    uint64_t cum = 0;
+    for (int i = 0; i < kGapBuckets; ++i) {
+        cum += s_gap_hist[i].load(std::memory_order_relaxed);
+        if (cum > want) return kGapEdgesMs[i];
+    }
+    return kGapEdgesMs[kGapBuckets - 1];
+}
+
+// A stats line at most every 5 s while a movie plays: packets in, pictures decoded, frames acquired and released by the player, the
+// input queue, and how evenly the acquired frames were spaced. The queue line is what shows backpressure working: it stays at
+// kMovieMaxQueuedPackets instead of growing without bound.
 void stats_tick() {
     static std::atomic<int64_t> last_ns{0};
     const int64_t now = static_cast<int64_t>(GetTickCount64()) * 1000000;
@@ -164,12 +183,17 @@ void stats_tick() {
     if (prev && now - prev < 5'000'000'000ll) return;
     if (!last_ns.compare_exchange_strong(prev, now)) return;
     const uint64_t n = s_dec_n.exchange(0), us = s_dec_us.exchange(0), mx = s_dec_max_us.exchange(0);
-    NXLOG_I(kTag, "stats: packets %llu, pictures %llu, frames acquired %llu, released %llu, queue %llu packets (%.1f MiB, max %llu), feed waits %llu (%.1f ms); decode %.2f ms per packet (slowest %.1f) over %llu",
+    uint64_t over50 = 0;   // 50 ms is 1.5 frames at 30 fps: a visible gap in the movie's cadence
+    for (int i = 7; i < kGapBuckets; ++i) over50 += s_gap_hist[i].load(std::memory_order_relaxed);
+    NXLOG_I(kTag, "stats: packets %llu, pictures %llu, frames acquired %llu, released %llu, queue %llu packets (%.1f MiB, max %llu), feed waits %llu (%.1f ms); decode %.2f ms per packet (slowest %.1f) over %llu, %llu late pictures skipped; frame gaps %.1f ms mean (p95 <= %.1f, p99 <= %.1f, max %.1f), %llu over 50 ms",
             static_cast<unsigned long long>(s_packets.load()), static_cast<unsigned long long>(s_pictures.load()),
             static_cast<unsigned long long>(s_acquired.load()), static_cast<unsigned long long>(s_released.load()),
             static_cast<unsigned long long>(s_queue_packets.load()), s_queue_bytes.load() / 1048576.0,
             static_cast<unsigned long long>(s_max_queue_packets.load()), static_cast<unsigned long long>(s_blocked.load()),
-            s_blocked_us.load() / 1000.0, n ? us / 1000.0 / n : 0.0, mx / 1000.0, static_cast<unsigned long long>(n));
+            s_blocked_us.load() / 1000.0, n ? us / 1000.0 / n : 0.0, mx / 1000.0, static_cast<unsigned long long>(n),
+            static_cast<unsigned long long>(s_skipped.load()),
+            s_gap_n.load() ? s_gap_us.load() / 1000.0 / s_gap_n.load() : 0.0, gap_percentile(0.95), gap_percentile(0.99),
+            s_gap_max_us.load() / 1000.0, static_cast<unsigned long long>(over50));
 }
 
 inline uint64_t rd64(uint64_t a) { uint64_t v; std::memcpy(&v, reinterpret_cast<const void*>(a), 8); return v; }
@@ -262,6 +286,7 @@ void skip_late(Decoder& d) {   // lock held, at least one decoded picture
     }
     while (d.decoded.size() > 1 && !d.decoded[1].eos && d.clk_t0 + static_cast<double>(d.decoded[1].time - d.clk_ts0) * d.unit <= now - 0.05) {
         d.decoded.pop_front();
+        ++s_skipped;
         if (!d.skipped++) NXLOG_I(kTag, "movie clock: late pictures skipped to keep the movie in time (the game shows fewer pictures a second than the movie has)");
     }
 }
@@ -706,6 +731,17 @@ uint32_t acquire(Decoder& d, uint64_t* frame, int* index) {
     if (d.ready.empty()) {
         *frame = 0;
         return kResultNoFrame;
+    }
+    if (d.last_acquire != std::chrono::steady_clock::time_point{}) {
+        const double ms = std::chrono::duration<double, std::milli>(now - d.last_acquire).count();
+        s_gap_n.fetch_add(1, std::memory_order_relaxed);
+        s_gap_us.fetch_add(static_cast<uint64_t>(ms * 1000.0), std::memory_order_relaxed);
+        const uint64_t us = static_cast<uint64_t>(ms * 1000.0);
+        uint64_t old = s_gap_max_us.load(std::memory_order_relaxed);
+        while (us > old && !s_gap_max_us.compare_exchange_weak(old, us, std::memory_order_relaxed)) {}
+        int b = 0;
+        while (b < kGapBuckets - 1 && ms >= kGapEdgesMs[b]) ++b;
+        s_gap_hist[b].fetch_add(1, std::memory_order_relaxed);
     }
     d.last_acquire = now;
     *frame = d.ready.front();
