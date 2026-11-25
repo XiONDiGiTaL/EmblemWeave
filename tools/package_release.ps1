@@ -301,7 +301,9 @@ try {
         'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-LICENSE.txt',
         'engine/fefw-recomp/tools/shaders/prebuilt/win-x64/DOTNET-THIRD-PARTY-NOTICES.txt'
     )
-    $unpacked = Join-Path $repo 'target\pkg\verify-unpacked'
+    # Keep the temporary extraction outside the checkout. A deep repository path plus the release folder can exceed
+    # Windows' 260-character limit in CMake's object directory before the configure check starts.
+    $unpacked = Join-Path ([System.IO.Path]::GetTempPath()) ("emblemweave-pkg-$Version-" + [guid]::NewGuid().ToString('N'))
     if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked }
     $verify = @('tools/verify_archive.py', $zip, '--extract', $unpacked)
     foreach ($r in $required) { $verify += @('--require', "$name/$r") }
@@ -352,6 +354,7 @@ try {
             }
             Write-Host "configure check: the extracted zip configures (engine CMake, log: $checkLog)"
             Remove-Item -Recurse -Force $bd -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force $unpacked -ErrorAction SilentlyContinue
         }
     }
 
