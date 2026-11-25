@@ -21,6 +21,8 @@ __pycache__/
 !apps/emblemweave/data/dump_hashes.json
 # Launcher translation catalogs are shipped data, not local reports.
 !apps/emblemweave/assets/i18n/*.json
+# RecompLauncher's setup file, shipped at the top of the release zip.
+!/recomplauncher.json
 # The site reads these at runtime; they are release data, not local reports.
 !docs/release.json
 !docs/mirrors.json
