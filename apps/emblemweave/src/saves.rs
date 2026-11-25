@@ -1231,7 +1231,8 @@ fn runtime_save_witness() -> String {
 
 fn when(t: Option<SystemTime>) -> String {
     t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| format!("{}s since epoch", d.as_secs()))
+        .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
+        .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| "time unknown".into())
 }
 
@@ -1754,6 +1755,29 @@ pub struct Backup {
     pub modified: Option<std::time::SystemTime>,
 }
 
+/// When a backup folder was made. Its name starts with the epoch second the
+/// launcher created it (`<stamp>-...`); the files inside keep the modification
+/// time of the save they were copied from, so they cannot date the backup.
+/// Older or renamed folders fall back to the folder's own modification time.
+fn backup_created(path: &Path) -> Option<SystemTime> {
+    if let Some(stamp) = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .and_then(|n| n.split('-').next().map(str::to_owned))
+    {
+        if stamp.len() >= 9 && stamp.bytes().all(|b| b.is_ascii_digit()) {
+            if let Some(t) = stamp
+                .parse::<u64>()
+                .ok()
+                .and_then(|s| std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(s)))
+            {
+                return Some(t);
+            }
+        }
+    }
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// Save folders under `backups`, newest first. Slot files moved aside by the
 /// Saves page live there too, but a slot is restored by copying it back into
 /// the save folder; only whole folders are listed here.
@@ -1764,7 +1788,8 @@ pub fn backups(save_dir: &Path) -> Vec<Backup> {
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())
                 .map(|path| {
-                    let (files, modified) = summary(&path);
+                    let (files, _) = summary(&path);
+                    let modified = backup_created(&path);
                     Backup {
                         name: path
                             .file_name()
@@ -1941,12 +1966,15 @@ pub fn empty_namespace_blocker(save_dir: &Path) -> Option<String> {
         .map(|r| format!("{} \"{}\" ({})", r.kind.label(), r.name, when(r.modified)))
         .collect::<Vec<_>>()
         .join("; ");
-    Some(format!(
-        "The current save is empty: {}. {} recoverable save(s) were found: {}. \
-The game was not started on an empty save. Open Saves and load or restore one, or confirm a new game; nothing was deleted.",
-        account.display(),
+    let found = format!(
+        "{} recoverable save{}",
         recoverable.len(),
-        names
+        if recoverable.len() == 1 { "" } else { "s" }
+    );
+    Some(format!(
+        "The current save is empty: {}. Found {found}: {names}. \
+The game was not started on an empty save. Open Saves and load or restore one, or confirm a new game; nothing was deleted.",
+        account.display()
     ))
 }
 
@@ -2470,6 +2498,38 @@ mod tests {
         assert!(empty_namespace_blocker(&save).is_some());
         write(&account_dir(&save).join("000/Auto"), "current");
         assert!(empty_namespace_blocker(&save).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_times_read_as_dates_instead_of_epoch_seconds() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_795_525_256);
+        assert_eq!(when(Some(t)), "2026-11-24 13:00 UTC");
+        assert_eq!(when(None), "time unknown");
+    }
+
+    #[test]
+    fn a_backup_is_dated_by_its_name_not_the_files_inside() {
+        let root = temp("backup-stamp");
+        let save = root.join("save");
+        let backup = save.join("backups").join("1795525256-import");
+        let slot = backup.join("account").join(DEFAULT_USER).join("000/Auto");
+        write(&slot, "a save copied from an older session");
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&slot)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let listed = backups(&save);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].modified,
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_795_525_256)),
+            "the backup's age is when it was made, not the copied slot's mtime"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

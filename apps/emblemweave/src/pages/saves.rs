@@ -159,6 +159,11 @@ fn megabytes(bytes: u64) -> String {
     }
 }
 
+/// A count and its noun, with the plural only when there is more than one.
+fn plural(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
 pub(crate) fn ago(t: Option<std::time::SystemTime>) -> String {
     let Some(secs) = t
         .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
@@ -521,8 +526,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Tone::Warn,
             "No current save",
             &format!(
-                "{} recoverable save(s) are present: {}. Load or restore one below; Play asks before starting a new empty save.",
-                recoverable.len(),
+                "Found {}: {}. Load or restore one below; Play asks before starting a new empty save.",
+                plural(recoverable.len(), "recoverable save"),
                 names
             ),
         );
@@ -717,7 +722,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let is_profile_backup = b.name.contains("-profile-");
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::text(&b.name).font(theme::mono(12.5)).color(p.ink));
-                ui.label(crate::i18n::text(format!("{} files, {}", b.files, ago(b.modified))).size(12.0).color(p.muted));
+                ui.label(crate::i18n::text(format!("{}, {}", plural(b.files, "file"), ago(b.modified))).size(12.0).color(p.muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if is_profile_backup {
                         // Profile backup: restore as a profile (not the current save)
@@ -920,7 +925,7 @@ fn current_save(
             widgets::pill(
                 ui,
                 p,
-                &format!("{} slots", current.len()),
+                &plural(current.len(), "slot"),
                 if current.is_empty() {
                     Tone::Neutral
                 } else {
