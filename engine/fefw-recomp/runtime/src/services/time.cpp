@@ -20,7 +20,9 @@
 //   0x080 Network SystemClockContext x2 (pad 4; slots 0x088, 0x0A8)
 //   0x0C8 automatic correction flag x2 (pad 0; slots 0x0CC, 0x0CD; 1 byte each)
 //   0x0D0 ContinuousAdjustmentTimePoint x2 (pad 4; slots 0x0D8, 0x110; 0x38 each): u64 clock_offset (= start tick in ns),
-//         i64 diff_scale (0), i64 shift_amount (0), i64 lower, i64 upper (= epoch + internal + test - tick0, ns), uuid source
+//         i64 diff_scale (0), i64 shift_amount (0), i64 base, i64 limit (both = epoch + internal + test - tick0, ns), uuid source
+//         The SDK reads steady ns = now + correction (now = raw tick in ns), with v = (((now - clock_offset) * diff_scale)
+//         >> shift_amount) + base and correction = max(v, limit) if diff_scale < 0, else min(v, limit).
 // The user clock has no slot of its own (the layout of the console has none): it is the local context.
 #include <array>
 #include <atomic>
@@ -94,8 +96,8 @@ struct Adjust {
     uint64_t clock_offset;
     int64_t diff_scale;
     int64_t shift_amount;
-    int64_t lower;
-    int64_t upper;
+    int64_t base;       // added to the scaled elapsed time
+    int64_t limit;      // one-sided bound of that sum: a floor when diff_scale < 0, else a ceiling
     uint8_t source[16];
 };
 static_assert(sizeof(SteadyCtx) == 0x18);
@@ -257,14 +259,14 @@ void write_shm(State& s) {
     const uint8_t ac = s.auto_correction ? 1 : 0;
     lifo_write(b, kOffAutoCorr, kPadAutoCorr, &ac, 1);
 
-    // Publish a constant correction so the SDK's shared-memory reader (raw_ticks_ns + clamped adjustment) matches steady_total_ns().
+    // Publish a constant correction (scale 0, base == limit) so the SDK's shared-memory reader matches steady_total_ns().
     const int64_t adj_ns = static_cast<int64_t>(kSteadyEpochNs) + s.internal_ns + s.test_ns - static_cast<int64_t>(s.tick0_ns);
     Adjust adj{};
     adj.clock_offset = s.tick0_ns;
     adj.diff_scale = 0;
     adj.shift_amount = 0;
-    adj.lower = adj_ns;
-    adj.upper = adj_ns;
+    adj.base = adj_ns;
+    adj.limit = adj_ns;
     std::memcpy(adj.source, kSourceId, 16);
     lifo_write(b, kOffAdjust, kPadAdjust, &adj, sizeof adj);
 }
