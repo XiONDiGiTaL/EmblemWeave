@@ -196,7 +196,11 @@ try {
     New-Item -ItemType Directory -Force $engineDst | Out-Null
     $engineList = @(& $pyCheck.Source 'tools/verify_engine_tree.py' 'list' '--source' $repo)
     if ($LASTEXITCODE -ne 0) { throw 'could not enumerate the tracked engine tree (tools/verify_engine_tree.py list)' }
-    $engineFiles = @($engineList | ConvertFrom-Json)
+    $parsedEngine = $engineList | ConvertFrom-Json
+    # Windows PowerShell can keep the JSON array as one nested object. Unwrap it before iterating, or every file is
+    # treated as one path and the packager reports the whole tree as missing.
+    if ($parsedEngine.Count -eq 1 -and $parsedEngine[0] -is [System.Array]) { $parsedEngine = $parsedEngine[0] }
+    $engineFiles = @($parsedEngine)
     if ($engineFiles.Count -eq 0) { throw 'the tracked engine file list is empty' }
     foreach ($rel in $engineFiles) {
         $rel = [string]$rel
