@@ -1,5 +1,4 @@
-//! About: the project, its author, its build, its updates and its legal
-//! position.
+//! About: the project's links, credits, updates, storage and legal position.
 
 use crate::theme;
 use crate::widgets::{self, Tone};
@@ -69,63 +68,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     discord(app, ui, &p);
     storage(app, ui, &p);
 
-    ui.columns(2, |cols| {
-        widgets::section(&mut cols[0], &p, "Build", |ui| {
-            widgets::kv(ui, &p, "Version", env!("CARGO_PKG_VERSION"));
-            widgets::kv(ui, &p, "Revision", env!("EW_GIT_REV"));
-            widgets::kv(ui, &p, "Target", &format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
-            widgets::kv(ui, &p, "Profile", if cfg!(debug_assertions) { "debug" } else { "release" });
-            widgets::kv(ui, &p, "Runtime", "EmblemWeave (in development)");
-            widgets::kv(ui, &p, "Baseline", "fefw-recomp, for play today");
-        });
-        widgets::section(&mut cols[1], &p, "Project", |ui| {
-            ui.label(
-                crate::i18n::text(
-                    "EmblemWeave is an independent project by XiØN. The source and every release live on GitHub; the other \
-                     links above are mirrors and a fallback for when the main site or GitHub is unavailable.",
-                )
-                .size(13.0)
-                .color(p.body),
-            );
-            ui.add_space(theme::SPACE_S);
-            project_link_row(
-                ui,
-                &p,
-                "Site",
-                &[("xiondigital.net/EmblemWeave", "https://xiondigital.net/EmblemWeave/")],
-            );
-            project_link_row(
-                ui,
-                &p,
-                "Mirrors",
-                &[
-                    ("GitHub", "https://github.com/XiONDiGiTaL/EmblemWeave"),
-                    ("GitLab", "https://gitlab.com/XiONDiGiTaL/emblemweave"),
-                    ("GitGud", "https://gitgud.io/xiondigital/EmblemWeave"),
-                ],
-            );
-            project_link_row(
-                ui,
-                &p,
-                "Fallback",
-                &[(
-                    "emblemweave.xiondigital.workers.dev",
-                    "https://emblemweave.xiondigital.workers.dev",
-                )],
-            );
-            ui.add_space(theme::SPACE_S);
-            ui.label(
-                crate::i18n::text("The tiles at the top of this page open each one in your browser. No account is needed to read the mirror or the fallback.")
-                    .size(12.5)
-                    .color(p.muted),
-            );
-        });
-    });
-
     widgets::section(ui, &p, "Legal", |ui| {
         ui.label(
             crate::i18n::text(
-                "EmblemWeave is an independent project by XiØN. It is not affiliated with, endorsed by, or supported by \
+                "EmblemWeave is not affiliated with, endorsed by, or supported by \
                  Nintendo or Intelligent Systems. It contains no game code, no game assets, no firmware and no keys, and it \
                  downloads none. You must supply data from your own legally obtained copy of the game; EmblemWeave only \
                  reads it. All trademarks belong to their respective owners.",
@@ -133,34 +79,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .size(13.0)
             .color(p.body),
         );
-    });
-}
-
-/// A Project row whose values are real links. The key column matches
-/// `widgets::kv`, so the Project section keeps one text grid while every value
-/// opens in the player's browser.
-fn project_link_row(ui: &mut egui::Ui, p: &theme::Palette, key: &str, links: &[(&str, &str)]) {
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::Vec2::new(170.0, 18.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_min_width(170.0);
-                ui.label(crate::i18n::text(key).size(13.0).color(p.muted));
-            },
-        );
-        for (i, (label, url)) in links.iter().enumerate() {
-            if i > 0 {
-                ui.label(egui::RichText::new(",").font(theme::mono(12.5)).color(p.muted));
-            }
-            ui.hyperlink_to(
-                egui::RichText::new(*label)
-                    .font(theme::mono(12.5))
-                    .color(p.accent_hi),
-                *url,
-            )
-            .on_hover_text(*url);
-        }
     });
 }
 
