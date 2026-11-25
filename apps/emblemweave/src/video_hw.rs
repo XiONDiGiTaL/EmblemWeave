@@ -81,9 +81,6 @@ pub fn target_dir() -> Option<PathBuf> {
     crate::engine::run_dir().map(|d| d.join("upscalers").join("ffmpeg"))
 }
 
-/// Which device the GPU field will make the engine open, using the same rule
-/// as the engine: a full name, a category, or Automatic (the best adapter type,
-/// then the most video memory).
 fn kind_rank(kind: &str) -> u8 {
     match kind {
         "Discrete" => 4,
@@ -99,6 +96,10 @@ fn default_device(devices: &[Device]) -> Option<&Device> {
         .max_by_key(|d| (kind_rank(d.kind), d.vram_mb))
 }
 
+/// Which device the GPU field will make the engine open, using the same rule
+/// as the engine: a full name, a category, or Automatic (the best adapter type,
+/// then the most video memory). A category or name that no longer exists falls
+/// back to the engine's default adapter, as the engine does.
 pub fn selected_device<'a>(value: &str, devices: &'a [Device]) -> Option<&'a Device> {
     let value = value.trim();
     match value.to_ascii_lowercase().as_str() {
@@ -187,7 +188,7 @@ fn matches(path: &Path, file: &RuntimeFile) -> bool {
 
 /// Download every missing file to a cache. Existing cached files with the
 /// pinned hash are reused, so a retry after a failed install does not start
-/// the 93 MiB DLL again.
+/// the 97 MB DLL again.
 pub fn download(
     progress: &mut dyn FnMut(u64, u64),
     cancel: &dyn Fn() -> bool,
