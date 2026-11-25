@@ -3,6 +3,9 @@ rem Sets up the MSVC + LLVM + CMake + Ninja environment for the runtime build (c
 rem The tool folders can be set beforehand: NX_VCVARS (vcvars64.bat), NX_LLVM_BIN, NX_CMAKE_BIN, NX_NINJA_BIN. Unset, the local toolchain
 rem folder NX_TOOLCHAIN (llvm\bin, cmakepy\cmake\data\bin under it) is used when it is set and exists, else the usual install
 rem paths (Visual Studio through vswhere, LLVM and CMake under Program Files, ninja on PATH or from WinGet).
+rem The launcher runs vcvars64.bat once and exports the result with NX_ENV_READY. Running it again from this script appends a
+rem second INCLUDE/LIB/PATH to an already long environment, and build_fefw.ps1's child cmd then refuses its command line.
+if defined NX_ENV_READY if defined INCLUDE if defined LIB exit /b 0
 set "NX_TC=%NX_TOOLCHAIN%"
 if not defined NX_TOOLCHAIN set "NX_TC=%~dp0..\..\work\no-toolchain"
 if not defined NX_VCVARS if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" set "NX_VCVARS=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"

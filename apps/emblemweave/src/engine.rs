@@ -3033,10 +3033,13 @@ pub fn build(
     // 5. fefw.exe.
     event_emitter.stage_started("fefw_exe", "Build fefw.exe", 5, 8).ok();
     ctx.start(4);
-    let fefw_envs: Vec<(&str, &str)> = match &vc_env {
-        Some(vc) => vec![("NX_VCVARS", vc)],
-        None => Vec::new(),
-    };
+    // The launcher already ran vcvars64 through toolchain::init and passes its INCLUDE, LIB and PATH to this step.
+    // NX_ENV_READY tells build_fefw.ps1's env.cmd not to run vcvars64 again: on a long inherited environment that second
+    // run crosses cmd.exe's 8191-character line limit before the runtime configure starts.
+    let mut fefw_envs: Vec<(&str, &str)> = vec![("NX_ENV_READY", "1")];
+    if let Some(vc) = &vc_env {
+        fefw_envs.push(("NX_VCVARS", vc));
+    }
     let fefw = || {
         run_env(
             ctx,

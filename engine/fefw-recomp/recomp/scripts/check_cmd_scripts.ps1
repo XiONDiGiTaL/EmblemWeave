@@ -13,8 +13,8 @@
     answers the removed --structured-events flag with its removal message. This runs those calls,
     and the same two scripts with a PATH near cmd's limit (through the launcher handshake and as
     a direct call), and fails on a cmd parse or line-limit error, a missing message, or a wrong
-    exit code. The direct call runs vcvars64.bat, so it needs Visual Studio's C++ tools and
-    reports SKIP without them.
+    exit code. The runtime env.cmd is checked the same way with the launcher handshake. The direct
+    call runs vcvars64.bat, so it needs Visual Studio's C++ tools and reports SKIP without them.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File engine\fefw-recomp\recomp\scripts\check_cmd_scripts.ps1
@@ -40,7 +40,9 @@ function Test-CmdScript {
         [string]$Path,
         # Set as engine.rs does for the build it starts: nx_env.cmd then keeps the environment
         # the launcher prepared and must not run vcvars64.bat again.
-        [switch]$Launcher
+        [switch]$Launcher,
+        # An absolute path for a script outside this folder, such as runtime\scripts\env.cmd.
+        [string]$ScriptPath
     )
 
     $label = "$Script $Arguments"
@@ -50,18 +52,29 @@ function Test-CmdScript {
 
     $oldPath = $env:PATH
     $oldReady = $env:NX_ENV_READY
+    $oldInclude = $env:INCLUDE
+    $oldLib = $env:LIB
     Push-Location $scripts
     try {
         if ($Path) { $env:PATH = $Path }
-        if ($Launcher) { $env:NX_ENV_READY = '1' } elseif ($Path) { Remove-Item Env:\NX_ENV_READY -ErrorAction SilentlyContinue }
+        if ($Launcher) {
+            $env:NX_ENV_READY = '1'
+            $env:INCLUDE = 'C:\__emblemweave_cmd_check\include'
+            $env:LIB = 'C:\__emblemweave_cmd_check\lib'
+        } elseif ($Path) {
+            Remove-Item Env:\NX_ENV_READY -ErrorAction SilentlyContinue
+        }
+        $target = if ($ScriptPath) { $ScriptPath } else { ".\$Script" }
         # 2>&1 goes to cmd, not to PowerShell: a redirected native stderr line becomes an
         # ErrorRecord, and with $ErrorActionPreference = 'Stop' that ends the run before the
         # failure can be reported.
-        $output = (& $cmdExe /c ".\$Script $Arguments 2>&1" | Out-String)
+        $output = (& $cmdExe /c "call `"$target`" $Arguments 2>&1" | Out-String)
         $code = $LASTEXITCODE
     } finally {
         $env:PATH = $oldPath
         if ($null -eq $oldReady) { Remove-Item Env:\NX_ENV_READY -ErrorAction SilentlyContinue } else { $env:NX_ENV_READY = $oldReady }
+        if ($null -eq $oldInclude) { Remove-Item Env:\INCLUDE -ErrorAction SilentlyContinue } else { $env:INCLUDE = $oldInclude }
+        if ($null -eq $oldLib) { Remove-Item Env:\LIB -ErrorAction SilentlyContinue } else { $env:LIB = $oldLib }
         Pop-Location
     }
 
@@ -111,6 +124,14 @@ if ($longPath.Length -lt 8191) {
     if (-not $vsPath) {
         Write-Host 'SKIP nx_env.cmd from a long PATH (direct): no Visual Studio C++ tools'
     } elseif (-not (Test-CmdScript -Script 'nx_env.cmd' -Arguments 'cmd /c exit 0' -Expected '' -ExpectedExit 0 -Path $longPath)) { $failed++ }
+    # build_fefw.ps1 calls runtime\scripts\env.cmd after the launcher has already run vcvars64.
+    # The handshake has to return without running it again; otherwise the long PATH makes cmd
+    # refuse the line and the runtime configure never starts.
+    $runtimeEnv = [System.IO.Path]::GetFullPath((Join-Path $scripts '..\..\runtime\scripts\env.cmd'))
+    if (-not (Test-Path $runtimeEnv)) {
+        Write-Host "FAIL runtime env.cmd not found at $runtimeEnv"
+        $failed++
+    } elseif (-not (Test-CmdScript -Script 'env.cmd' -ScriptPath $runtimeEnv -Arguments '' -Expected '' -ExpectedExit 0 -Path $longPath -Launcher)) { $failed++ }
 } else {
     Write-Host "SKIP the long-PATH cases: the inherited PATH is already $($longPath.Length) characters"
 }
