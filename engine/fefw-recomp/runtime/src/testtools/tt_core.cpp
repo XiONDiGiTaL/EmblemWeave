@@ -20,6 +20,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/game.h"
 #include "nxrt/log.h"
+#include "nxrt/memguard.h"
 #include "nxrt/runtime.h"
 #include "nxrt/module.h"
 #include "nxrt/timestep.h"
@@ -722,7 +723,8 @@ void frame_boundary(::Ctx* c) {
         s.last_mem_frame = k;
         PROCESS_MEMORY_COUNTERS_EX pmc{};
         pmc.cb = sizeof pmc;   // required by the API: a zero cb makes the query fail
-        if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc)) s.mem_mb = static_cast<double>(pmc.PrivateUsage) / 1048576.0;
+        if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc))
+            s.mem_mb = static_cast<double>(memguard_commit_bytes(pmc.PrivateUsage, pmc.PagefileUsage)) / 1048576.0;
         write_trace_line(s, k, h, g, valid, ms, s.mem_mb);
     } else {
         write_trace_line(s, k, h, g, valid, ms, 0);

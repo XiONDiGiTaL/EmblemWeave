@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Memory guard: a background thread polls the process's private commit (PrivateUsage); past the limit it calls the
-// on_exceed callback (default: write the report file, flush, TerminateProcess(3)). The footprint is logged every 30 s; one warning at 75% of the limit.
+// Memory guard: a background thread polls the process's commit (PrivateUsage, or PagefileUsage where a host such as Wine reports
+// PrivateUsage as 0); past the limit it calls the on_exceed callback (default: write the report file, flush, TerminateProcess(3)).
+// The footprint is logged every 30 s; one warning at 75% of the limit.
 // The report goes to crash_report_path() (the crash report's file name): reason "memory limit", the footprint, every gauge, the last 30 s of frame times.
 // Config: [memory] limit_gb (default 8) / env NXRT_MEMORY_LIMIT_GB; [memory] poll_ms (250).
 #pragma once
@@ -16,9 +17,16 @@ struct MemGuardOptions {
     void* user = nullptr;
 };
 
-uint64_t memguard_footprint();       // bytes of private commit of this process (0 if the query fails)
+// The commit figure shared by the guard, the gauges and the snapshots: PrivateUsage, falling back to PagefileUsage when the host reports
+// PrivateUsage as 0 (Wine/Proton). The fallback's treatment of video-memory allocations is not established, so memguard_footprint_host()
+// does not subtract the GPU discount when it is in use: that can over-report host memory but never weakens the guard.
+inline uint64_t memguard_commit_bytes(uint64_t private_usage, uint64_t pagefile_usage) {
+    return private_usage != 0 ? private_usage : pagefile_usage;
+}
+uint64_t memguard_footprint();       // bytes of commit of this process (PrivateUsage, else PagefileUsage; 0 if the query fails)
 // Private commit includes the video memory a process has allocated (WDDM keeps a commit charge for it). The guard is about host memory, so it
 // subtracts what this function returns (the GPU's dedicated usage of this process; the Vulkan device sets it). Null: no subtraction.
+// The subtraction is skipped when the footprint came from the PagefileUsage fallback (see memguard_commit_bytes).
 // Without it a game at 4K, with 5 GB of textures and render targets in video memory, ran into the 8 GB limit with only 3 GB of host memory.
 void memguard_set_discount(uint64_t (*gpu_bytes)());
 // Video memory of the device the game renders on, for the 30 s log line (the Vulkan device sets it; null: not logged). usage and budget
@@ -30,7 +38,7 @@ void memguard_set_video(void (*fn)(MemGuardVideo*));
 // the watchdog thread: the device's snapshot callback bounds its wait, so a stalled driver query cannot block a
 // freeze report (it reports no video line instead).
 bool memguard_video(MemGuardVideo* out);
-uint64_t memguard_footprint_host();  // memguard_footprint() minus the discount (what the guard compares with the limit)
+uint64_t memguard_footprint_host();  // memguard_footprint() minus the discount, unless the PagefileUsage fallback supplied it (what the guard compares with the limit)
 double memguard_limit_gb(const char* env_text);   // positive number or 8.0
 void memguard_start(const MemGuardOptions& opt = {});
 void memguard_stop();                // joins the guard thread

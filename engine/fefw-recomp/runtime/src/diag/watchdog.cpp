@@ -22,6 +22,7 @@
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/gauge.h"
+#include "nxrt/memguard.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/kernel.h"
@@ -261,10 +262,18 @@ std::string memory_text() {
     char b[512];
     std::string out = "memory at freeze:\n";
     if (got) {
-        std::snprintf(b, sizeof b,
-                      "  private commit %.2f GB, working set %.2f GB, peak working set %.2f GB, pagefile %.2f GB\n",
-                      static_cast<double>(pmc.PrivateUsage) / gb, static_cast<double>(pmc.WorkingSetSize) / gb,
-                      static_cast<double>(pmc.PeakWorkingSetSize) / gb, static_cast<double>(pmc.PagefileUsage) / gb);
+        const bool fallback = pmc.PrivateUsage == 0 && pmc.PagefileUsage != 0;
+        if (fallback)
+            std::snprintf(b, sizeof b,
+                          "  commit %.2f GB (PagefileUsage fallback: PrivateUsage is unavailable, no video-memory discount), working set %.2f GB, "
+                          "peak working set %.2f GB, pagefile %.2f GB\n",
+                          static_cast<double>(pmc.PagefileUsage) / gb, static_cast<double>(pmc.WorkingSetSize) / gb,
+                          static_cast<double>(pmc.PeakWorkingSetSize) / gb, static_cast<double>(pmc.PagefileUsage) / gb);
+        else
+            std::snprintf(b, sizeof b,
+                          "  private commit %.2f GB, working set %.2f GB, peak working set %.2f GB, pagefile %.2f GB\n",
+                          static_cast<double>(pmc.PrivateUsage) / gb, static_cast<double>(pmc.WorkingSetSize) / gb,
+                          static_cast<double>(pmc.PeakWorkingSetSize) / gb, static_cast<double>(pmc.PagefileUsage) / gb);
         out += b;
     } else {
         out += "  private commit: the query failed\n";

@@ -18,6 +18,7 @@
 #include "nxrt/diag.h"
 #include "nxrt/gauge.h"
 #include "nxrt/gfx.h"
+#include "nxrt/memguard.h"
 
 namespace nxrt {
 namespace {
@@ -52,9 +53,14 @@ MemorySnapshot diag_memory_snapshot() {
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     pmc.cb = sizeof pmc;   // required by the API: a zero cb made every snapshot report a failed query
     if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc))) {
+        const bool fallback = pmc.PrivateUsage == 0 && pmc.PagefileUsage != 0;
         out << "  Working Set:          " << format_bytes(pmc.WorkingSetSize) << " (peak " << format_bytes(pmc.PeakWorkingSetSize) << ")\n";
-        out << "  Private Bytes:        " << format_bytes(pmc.PrivateUsage) << "\n";
-        out << "  Pagefile Usage:       " << format_bytes(pmc.PagefileUsage) << " (peak " << format_bytes(pmc.PeakPagefileUsage) << ")\n";
+        if (fallback)
+            out << "  Private Bytes:        (unavailable: the host reports 0; Pagefile Usage is the commit fallback)\n";
+        else
+            out << "  Private Bytes:        " << format_bytes(pmc.PrivateUsage) << "\n";
+        out << "  Pagefile Usage:       " << format_bytes(pmc.PagefileUsage) << " (peak " << format_bytes(pmc.PeakPagefileUsage) << ")"
+            << (fallback ? " (commit fallback; no video-memory discount)" : "") << "\n";
         out << "  Quota Paged Pool:     " << format_bytes(pmc.QuotaPagedPoolUsage) << " (peak " << format_bytes(pmc.QuotaPeakPagedPoolUsage) << ")\n";
         out << "  Quota Non-Paged Pool: " << format_bytes(pmc.QuotaNonPagedPoolUsage) << " (peak " << format_bytes(pmc.QuotaPeakNonPagedPoolUsage) << ")\n";
         out << "  Page Fault Count:     " << pmc.PageFaultCount << "\n";

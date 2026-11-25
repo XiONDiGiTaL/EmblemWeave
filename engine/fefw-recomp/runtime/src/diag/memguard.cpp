@@ -54,6 +54,23 @@ uint64_t gb_to_bytes(double gb) {
     return static_cast<uint64_t>(b);
 }
 
+struct CommitQuery {
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    uint64_t bytes = 0;
+    bool ok = false;
+    bool fallback = false;   // PrivateUsage was 0 and PagefileUsage supplied the figure
+};
+
+CommitQuery query_commit() {
+    CommitQuery q;
+    q.pmc.cb = sizeof q.pmc;
+    q.ok = GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&q.pmc), sizeof q.pmc) != 0;
+    if (!q.ok) return q;
+    q.fallback = q.pmc.PrivateUsage == 0 && q.pmc.PagefileUsage != 0;
+    q.bytes = memguard_commit_bytes(q.pmc.PrivateUsage, q.pmc.PagefileUsage);
+    return q;
+}
+
 void raise_peak(uint64_t f) {
     uint64_t p = g_peak.load();
     while (f > p && !g_peak.compare_exchange_weak(p, f)) {
@@ -63,20 +80,29 @@ void raise_peak(uint64_t f) {
 // The memory-limit report: same file as the crash report. The core of it (reason, footprint, frame times) is written first; the gauges follow
 // once read, on a helper thread because a gauge callback takes the lock of the thing it counts and that lock may be held by a stuck thread.
 void write_limit_report(uint64_t footprint, uint64_t limit) {
-    PROCESS_MEMORY_COUNTERS_EX pmc{};
-    pmc.cb = sizeof pmc;
-    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc);
-    const uint64_t priv = static_cast<uint64_t>(pmc.PrivateUsage);
+    const CommitQuery q = query_commit();
+    const uint64_t priv = q.bytes;
     char b[512];
     std::string text;
     std::snprintf(b, sizeof b, "MEMORY LIMIT EXCEEDED (reason: memory limit)\n  footprint %.2f GB is over the %.1f GB limit ([memory] limit_gb)\n",
                   static_cast<double>(footprint) / kBytesPerGb, static_cast<double>(limit) / kBytesPerGb);
     text += b;
-    std::snprintf(b, sizeof b, "  private commit %.2f GB (the footprint is that minus %.2f GB of video memory), working set %.2f GB, peak working set %.2f GB, peak footprint %.2f GB\n",
-                  static_cast<double>(priv) / kBytesPerGb, static_cast<double>(priv > footprint ? priv - footprint : 0) / kBytesPerGb,
-                  static_cast<double>(pmc.WorkingSetSize) / kBytesPerGb, static_cast<double>(pmc.PeakWorkingSetSize) / kBytesPerGb,
-                  static_cast<double>(g_peak.load()) / kBytesPerGb);
-    text += b;
+    if (q.ok && q.fallback) {
+        std::snprintf(b, sizeof b,
+                      "  commit %.2f GB (PagefileUsage fallback: PrivateUsage is unavailable, so the video-memory discount is not applied), "
+                      "working set %.2f GB, peak working set %.2f GB, peak footprint %.2f GB\n",
+                      static_cast<double>(priv) / kBytesPerGb, static_cast<double>(q.pmc.WorkingSetSize) / kBytesPerGb,
+                      static_cast<double>(q.pmc.PeakWorkingSetSize) / kBytesPerGb, static_cast<double>(g_peak.load()) / kBytesPerGb);
+        text += b;
+    } else if (q.ok) {
+        std::snprintf(b, sizeof b, "  private commit %.2f GB (the footprint is that minus %.2f GB of video memory), working set %.2f GB, peak working set %.2f GB, peak footprint %.2f GB\n",
+                      static_cast<double>(priv) / kBytesPerGb, static_cast<double>(priv > footprint ? priv - footprint : 0) / kBytesPerGb,
+                      static_cast<double>(q.pmc.WorkingSetSize) / kBytesPerGb, static_cast<double>(q.pmc.PeakWorkingSetSize) / kBytesPerGb,
+                      static_cast<double>(g_peak.load()) / kBytesPerGb);
+        text += b;
+    } else {
+        text += "  process memory: the query failed\n";
+    }
     std::snprintf(b, sizeof b, "  presented frames: %llu\n", static_cast<unsigned long long>(diag_frame_count()));
     text += b;
     text += frame_times_summary(30.0);
@@ -210,13 +236,7 @@ void guard_loop(Settings s) {
 
 }  // namespace
 
-uint64_t memguard_footprint() {
-    PROCESS_MEMORY_COUNTERS_EX pmc{};
-    pmc.cb = sizeof pmc;
-    if (!GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc))
-        return 0;
-    return static_cast<uint64_t>(pmc.PrivateUsage);
-}
+uint64_t memguard_footprint() { return query_commit().bytes; }
 
 void memguard_set_discount(uint64_t (*gpu_bytes)()) { g_discount.store(gpu_bytes); }
 void memguard_set_video(void (*fn)(MemGuardVideo*)) { g_video.store(fn); }
@@ -231,10 +251,14 @@ bool memguard_video(MemGuardVideo* out) {
 }
 
 uint64_t memguard_footprint_host() {
-    const uint64_t f = memguard_footprint();
+    const CommitQuery q = query_commit();
+    if (!q.ok) return 0;
+    // Under the PagefileUsage fallback it is unknown whether Wine includes Vulkan allocations, so subtracting the GPU discount could
+    // under-count host memory. Skipping it can only over-report, which never weakens the guard.
+    if (q.fallback) return q.bytes;
     auto fn = g_discount.load();
     const uint64_t d = fn ? fn() : 0;
-    return d < f ? f - d : 0;
+    return d < q.bytes ? q.bytes - d : 0;
 }
 
 double memguard_limit_gb(const char* env_text) {

@@ -15,6 +15,7 @@
 
 #include "nxrt/cpu_info.h"
 #include "nxrt/diag.h"
+#include "nxrt/memguard.h"
 
 namespace nxrt::cpu {
 namespace {
@@ -190,7 +191,7 @@ Load sample() {
     pm.cb = sizeof pm;   // required by the API: a zero cb makes the query fail
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof pm)) {
         l.working_set = pm.WorkingSetSize;
-        l.committed = pm.PrivateUsage;
+        l.committed = memguard_commit_bytes(pm.PrivateUsage, pm.PagefileUsage);   // Wine reports PrivateUsage as 0
     }
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;

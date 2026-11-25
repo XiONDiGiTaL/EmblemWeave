@@ -42,6 +42,13 @@ void* commit_and_touch() {
 
 }  // namespace
 
+NXTEST(commit_uses_pagefile_only_when_private_is_unavailable) {
+    CHECK_EQ(nxrt::memguard_commit_bytes(123, 456), uint64_t{123});
+    CHECK_EQ(nxrt::memguard_commit_bytes(0, 456), uint64_t{456});   // Wine/Proton fallback
+    CHECK_EQ(nxrt::memguard_commit_bytes(0, 0), uint64_t{0});
+    CHECK_EQ(nxrt::memguard_commit_bytes(123, 0), uint64_t{123});
+}
+
 // A bare test process commits well under 1 MiB, so the check is that the query is live: it is non-zero and it rises by
 // the size of a 4 MiB commit.
 NXTEST(footprint_tracks_private_commit) {

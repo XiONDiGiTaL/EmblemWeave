@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Gauges and the soak sampler (declared in nxrt/gauge.h).
 #include "nxrt/gauge.h"
+#include "nxrt/memguard.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -610,6 +611,8 @@ void run(double interval_s, double t0) {
         PROCESS_MEMORY_COUNTERS_EX pm{};
         pm.cb = sizeof pm;
         GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm, sizeof pm);
+        const bool private_fallback = pm.PrivateUsage == 0 && pm.PagefileUsage != 0;
+        const uint64_t commit = memguard_commit_bytes(pm.PrivateUsage, pm.PagefileUsage);
         DWORD handles = 0;
         GetProcessHandleCount(GetCurrentProcess(), &handles);
         FILETIME c, e, k, u;
@@ -617,10 +620,11 @@ void run(double interval_s, double t0) {
         const double cpu_ms = (((uint64_t)k.dwHighDateTime << 32 | k.dwLowDateTime) + ((uint64_t)u.dwHighDateTime << 32 | u.dwLowDateTime)) / 10000.0;
         char buf[640];
         snprintf(buf, sizeof buf,
-                 "{\"t\":%.1f,\"frame\":%llu,\"win_frames\":%llu,\"ft_p50\":%.3f,\"ft_p99\":%.3f,\"ft_max\":%.2f,\"ws\":%llu,\"private\":%llu,\"peak_ws\":%llu,"
-                 "\"pagefile\":%llu,\"handles\":%lu,\"threads\":%u,\"gdi\":%lu,\"user\":%lu,\"cpu_ms\":%.0f",
+                 "{\"t\":%.1f,\"frame\":%llu,\"win_frames\":%llu,\"ft_p50\":%.3f,\"ft_p99\":%.3f,\"ft_max\":%.2f,\"ws\":%llu,\"private\":%llu,"
+                 "\"private_fallback\":%s,\"peak_ws\":%llu,\"pagefile\":%llu,\"handles\":%lu,\"threads\":%u,\"gdi\":%lu,\"user\":%lu,\"cpu_ms\":%.0f",
                  now - t0, (unsigned long long)diag_frame_count(), (unsigned long long)window_frames, p50, p99, mx, (unsigned long long)pm.WorkingSetSize,
-                 (unsigned long long)pm.PrivateUsage, (unsigned long long)pm.PeakWorkingSetSize, (unsigned long long)pm.PagefileUsage, (unsigned long)handles,
+                 (unsigned long long)commit, private_fallback ? "true" : "false", (unsigned long long)pm.PeakWorkingSetSize,
+                 (unsigned long long)pm.PagefileUsage, (unsigned long)handles,
                  thread_count(), (unsigned long)GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS), (unsigned long)GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS),
                  cpu_ms);
         std::string line = buf;
