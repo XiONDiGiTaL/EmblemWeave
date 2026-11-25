@@ -1756,12 +1756,16 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
     match nacp_title {
         Some((name, version)) => {
             let name = canonical_title(&name);
-            let sev = if name == TITLE_NAME { Severity::Ok } else { Severity::Warn };
+            // A display-name difference is cosmetic: the title id, ExeFS hashes
+            // and RomFS checks are what establish that this is the right game.
+            let sev = if name == TITLE_NAME { Severity::Ok } else { Severity::Info };
             g.checks.push(Check::new(sev, "Title", format!("{name}, version {version}")));
             g.title = Some((name, version));
         }
         None => g.checks.push(Check::new(
-            Severity::Warn,
+            // The message itself says the build and game do not need this. It
+            // only leaves the displayed name and version blank.
+            Severity::Info,
             "Title metadata",
             "control.nacp not found: the title name and display version stay blank, and neither the build nor the game needs it. An extracted .nsp keeps it at data\\control\\control.nacp",
         )),
@@ -1790,7 +1794,9 @@ fn finish(mut g: GameData, paths: &Paths) -> GameData {
             )
         } else if main.is_none() {
             Check::new(
-                Severity::Warn,
+                // This is a limit of the check, not a second problem: when the
+                // ExeFS is actually required, its own error is already present.
+                Severity::Info,
                 "Decoded module",
                 "present, but there is no ExeFS to check it against",
             )
@@ -2064,8 +2070,8 @@ mod tests {
         let mut g = GameData::default();
         g.checks.push(Check::new(
             Severity::Warn,
-            "Title metadata",
-            "control.nacp not found",
+            "Game build",
+            "a different build of the game",
         ));
         g.checks
             .push(Check::new(Severity::Warn, "RomFS", "Fs.bin.zst is missing"));
@@ -2074,11 +2080,11 @@ mod tests {
         assert_eq!(g.worst(), Severity::Warn);
         assert_eq!(
             g.attention_line().as_deref(),
-            Some("Title metadata: control.nacp not found (+1 more)")
+            Some("Game build: a different build of the game (+1 more)")
         );
         assert_eq!(
             g.attention_text().as_deref(),
-            Some("Title metadata: control.nacp not found\nRomFS: Fs.bin.zst is missing")
+            Some("Game build: a different build of the game\nRomFS: Fs.bin.zst is missing")
         );
         g.checks.clear();
         g.checks
