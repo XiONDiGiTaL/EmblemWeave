@@ -18,16 +18,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .size(15.0)
                 .color(p.body),
         );
-        // Center the attribution as one row. A plain `ui.horizontal` inside
-        // `vertical_centered` fills the width and leaves the content on the
-        // left; this layout centres the row under the subtitle.
-        ui.with_layout(
-            egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center),
+        // Measure the two pieces and allocate a row exactly that wide. A
+        // `with_layout` child fills the remaining height, which left a large
+        // scroll gap, while `ui.horizontal` keeps its contents on the left.
+        // A fixed-width child is centred by `vertical_centered`.
+        let by_text = crate::i18n::tr("by");
+        let name_text = crate::i18n::tr("XiØN");
+        let by_font = egui::FontId::proportional(15.0);
+        let name_font = theme::semibold(15.0);
+        let gap = 4.0;
+        let row_width = ui.fonts(|f| {
+            let by = f.layout_no_wrap(by_text.clone(), by_font.clone(), p.muted);
+            let name = f.layout_no_wrap(name_text.clone(), name_font.clone(), p.accent_hi);
+            by.size().x + gap + name.size().x
+        });
+        ui.allocate_ui_with_layout(
+            egui::vec2(row_width.ceil(), 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.label(crate::i18n::text("by").color(p.muted));
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.label(crate::i18n::text("by").font(by_font).color(p.muted));
                 ui.hyperlink_to(
                     crate::i18n::text("XiØN")
-                        .font(theme::semibold(15.0))
+                        .font(name_font)
                         .color(p.accent_hi),
                     "https://github.com/XiONDiGiTaL",
                 );
