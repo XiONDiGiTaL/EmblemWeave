@@ -38,6 +38,9 @@ const MAGIC: u32 = 0xCDEF_BCDD;
 const HDR_FNV_START: usize = 0x1F;
 const HDR_FNV_LEN: usize = 0xE0;
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+/// The game's account save buffer is 64 MiB. A slot whose payload is larger
+/// than that could never load in the game, so the native check rejects it.
+const NATIVE_SAVE_CAPACITY: usize = 64 * 1024 * 1024;
 
 pub fn fnv1a32(data: &[u8]) -> u32 {
     data.iter().fold(0x811C_9DC5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193))
@@ -178,6 +181,43 @@ impl Slot {
             .read_to_end(&mut payload)
             .map_err(|e| format!("decompressing: {e}"))?;
         Ok(Slot { path: path.to_path_buf(), raw, zstd_at, payload })
+    }
+
+    /// Decode the frame with the same zstd library and one-shot call the game's
+    /// native hook uses. `ruzstd` accepts some frames native zstd rejects, most
+    /// importantly a frame with a bad checksum but otherwise intact payload.
+    pub fn native_payload(&self) -> Result<Vec<u8>, String> {
+        let frame = self
+            .raw
+            .get(self.zstd_at..)
+            .ok_or("the slot holds no zstd frame")?;
+        // The native output must match the payload ruzstd read. Giving the
+        // one-shot call exactly that size catches a frame that expands to a
+        // different length, and avoids allocating the game's full 64 MiB save
+        // buffer for every launch. A payload beyond that buffer could never
+        // load in the game either.
+        if self.payload.len() > NATIVE_SAVE_CAPACITY {
+            return Err(format!(
+                "the slot's payload is {} bytes, larger than the game's save buffer",
+                self.payload.len()
+            ));
+        }
+        zstd::bulk::decompress(frame, self.payload.len().max(1))
+            .map_err(|e| format!("native zstd: {e}"))
+    }
+
+    /// Reject a frame the game's native decoder would reject, and require the
+    /// native payload to match the one the launcher read.
+    pub fn native_check(&self) -> Result<(), String> {
+        let native = self.native_payload()?;
+        if native != self.payload {
+            return Err(format!(
+                "native zstd decoded {} bytes, the slot's decoder decoded {}",
+                native.len(),
+                self.payload.len()
+            ));
+        }
+        Ok(())
     }
 
     /// Problems with the slot's checksums, empty when it is intact.

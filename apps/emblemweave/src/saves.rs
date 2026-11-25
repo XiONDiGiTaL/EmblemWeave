@@ -2170,7 +2170,12 @@ pub fn quarantine_damaged_autosave(
     }
     let reason = match crate::savefile::Slot::open(&slot) {
         Ok(parsed) => {
-            let problems = parsed.verify();
+            let mut problems = parsed.verify();
+            if problems.is_empty() {
+                if let Err(e) = parsed.native_check() {
+                    problems.push(e);
+                }
+            }
             if problems.is_empty() {
                 return Ok(None);
             }
@@ -3030,12 +3035,11 @@ mod tests {
 
     /// A minimal valid container for metadata tests. It has no GameUserData,
     /// so gold and renown are correctly absent rather than invented.
-    fn valid_slot(payload: &[u8]) -> Vec<u8> {
+    fn slot_with_frame(payload: &[u8], frame: Vec<u8>) -> Vec<u8> {
         let mut raw = vec![0u8; 0x124];
         raw[0..4].copy_from_slice(&0xCDEF_BCDDu32.to_le_bytes());
         raw[4..8].copy_from_slice(&0xE0u32.to_le_bytes());
         raw[0x104..0x108].copy_from_slice(&0xCDEF_BCDDu32.to_le_bytes());
-        let frame = raw_zstd_frame(payload);
         raw[0x108..0x10C].copy_from_slice(&(frame.len() as u32).to_le_bytes());
         raw[0x10C..0x110].copy_from_slice(&fnv1_32(payload).to_le_bytes());
         raw[0x110..0x114].copy_from_slice(&3u32.to_le_bytes());
@@ -3043,6 +3047,10 @@ mod tests {
         let header = fnv1a32(&raw[0x1F..0x1F + 0xE0]);
         raw[8..12].copy_from_slice(&header.to_le_bytes());
         raw
+    }
+
+    fn valid_slot(payload: &[u8]) -> Vec<u8> {
+        slot_with_frame(payload, raw_zstd_frame(payload))
     }
 
     #[test]
@@ -3074,6 +3082,50 @@ mod tests {
             quarantine_damaged_autosave(&save, "124").unwrap().is_none(),
             "a second Play does not find the same file"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_checksum_corrupt_frame_that_still_decompresses_is_rejected_before_play() {
+        let root = temp("checksum-autosave");
+        let save = root.join("save");
+        let auto = account_dir(&save).join("000/Auto");
+        let payload = b"payload whose contents still decode";
+
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+        encoder.include_checksum(true).unwrap();
+        std::io::Write::write_all(&mut encoder, payload).unwrap();
+        let mut frame = encoder.finish().unwrap();
+        let good = slot_with_frame(payload, frame.clone());
+        let good = crate::savefile::Slot::from_bytes(&auto, good).unwrap();
+        assert!(
+            good.native_check().is_ok(),
+            "native zstd accepts the same frame before its checksum is damaged"
+        );
+
+        let checksum = frame.len() - 4;
+        frame[checksum] ^= 0xFF;
+
+        let raw = slot_with_frame(payload, frame);
+        let parsed = crate::savefile::Slot::from_bytes(&auto, raw.clone()).unwrap();
+        assert_eq!(parsed.payload, payload, "the payload still decodes");
+        assert!(parsed.verify().is_empty(), "the slot's own checksums still pass");
+        assert!(
+            parsed.native_check().is_err(),
+            "native zstd rejects the damaged frame checksum"
+        );
+
+        write_bytes(&auto, &raw);
+        let found = quarantine_damaged_autosave(&save, "125")
+            .unwrap()
+            .expect("the checksum-damaged autosave is reported");
+        assert!(!auto.exists(), "the game must not open it again");
+        assert!(
+            found.reason.contains("native zstd"),
+            "the reason names the native rejection: {}",
+            found.reason
+        );
+        assert_eq!(std::fs::read(&found.kept).unwrap(), raw, "the bytes are kept unchanged");
         let _ = std::fs::remove_dir_all(root);
     }
 

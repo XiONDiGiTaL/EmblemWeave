@@ -28,7 +28,7 @@ Status vocabulary is the one the readiness audit uses:
 | #70 Cinematic AV1 (dav1d assembly) | Implemented - unverified | dav1d per-compiler flags build with NASM; assembly path enabled | Any cinematic played end to end; a NASM vs C-only comparison |
 | #75 Cinematic AV1 + Opus sync | Implemented - unverified | Worker-thread decoder, decode-ahead, clock-based dropping, bundled FFmpeg option | End-to-end video/audio playback and sync measurement |
 | #76 Find Units stutter | Implemented - unverified | Parallel scan, cancellation, progress | An in-battle frame-time measurement |
-| #77 Return-to-title crash / damaged autosave | Implemented - 10-cycle gameplay run, launcher guard automation-verified | Fault-handler initialisation and fallbacks; a current working-tree build completed 10 gameplay -> title -> gameplay cycles (31,301 frames, 456.7 s, 0 error lines, 21 screenshots); a damaged `Auto` is moved to backups before Play, with a regression test | The cause of the damaged `Auto` is unknown; the game's own path for damage found mid-session is unchanged; the run used a valid save and a working-tree build, and the reporter's damaged save was not available |
+| #77 Return-to-title crash / damaged autosave | Implemented - 10-cycle gameplay run, native-zstd checksum regression | Fault-handler initialisation and fallbacks; a current working-tree build completed 10 gameplay -> title -> gameplay cycles (31,301 frames, 456.7 s, 0 error lines, 21 screenshots); a damaged `Auto` is moved to backups before Play when the slot checksums or native zstd reject it | The cause of the damaged `Auto` is unknown; the game's own path for damage found mid-session is unchanged; the run used a valid save and a working-tree build, and the reporter's damaged save was not available |
 | #78 HDR left enabled after exit | Implemented - verified on one display | Full display snapshot (mode, HDR, SDR white, per monitor), sidecar snapshot for crash recovery, restore of only what the session changed, `SET_HDR_STATE`, 18 tests (13 fake, 5 live) | Live on Windows 11 26100 / RX 7900 XT, one 2560x1440@180 display: marked exclusive entered and exited normally, HDR-off stayed off, HDR-on stayed on, forcing HDR off during exclusive restored it, and a hard-killed marked session was repaired from the sidecar on the next launch. Remaining: SDR white is read-only (captured, not written), no second monitor, no live differing-mode restore, no live second restore of the same snapshot. |
 | #79 Saves not read | Implemented - fixture matrix run, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 16, 17, 19, 20 and 22 ran against the real engine: stale absolute paths honoured, nested save not adopted, missing `.meta` regenerated, foreign account ignored. Row 24's launcher import/backup/restore round-trip ran in a portable copy; its empty-profile UI flow and a reporter's own save remain (see `SAVE_VALIDATION_ISSUE79.md`) |
 | #90 Long inherited PATH stops the build | Implemented - automation-verified | `engine.rs` sets `NX_ENV_READY`, so `nx_env.cmd` keeps the launcher's vcvars environment instead of running it again; a direct call runs `vcvars64.bat` with a short PATH and merges both afterwards; every long value is only named through delayed expansion. `check_cmd_scripts.ps1` covers a 7,906-character PATH in launcher and direct mode, and `package_release.ps1` runs that check before packing | A launcher build started from that PATH, to completion; nothing above cmd's own ceiling can be fixed in the script |
@@ -109,9 +109,16 @@ The 2026-11-25 pass added a separate, narrower guard for the damaged-autosave pa
 explanation. A second Play starts without the bad autosave. A valid autosave is untouched, and nothing is deleted.
 `Global` is deliberately not checked: it has a different header and is not a slot.
 
+The guard also decodes the frame with `zstd::bulk::decompress`, the same library and one-shot semantics as the
+game's native hook. This closes a real gap: `ruzstd` accepts a frame whose frame checksum is corrupt while its
+payload still decodes, but native zstd rejects it. The new regression test builds such a frame, shows that the
+payload decodes and the slot's own FNV checksums pass, shows that native zstd rejects it, and shows that the guard
+moves it to backups. The native output is required to match the launcher's payload, and a payload larger than the
+game's 64 MiB save buffer is rejected before allocation.
+
 This prevents the next launch from repeating the crash, but it does not repair the frame, identify how it was
 damaged, or protect a session in which the corruption appears after Play. The reporter's save was not in either
-bundle, so the guard is tested with a truncated frame rather than their file.
+bundle, so the guard is tested with synthetic truncated and checksum-damaged frames rather than their file.
 
 ### #78 — HDR and display restoration
 
@@ -665,22 +672,26 @@ Not covered: the entry function returning (the game never returns), shutdown whi
 
 ## 2026-11-25 stability campaign validation
 
-Base `730fc46c` on `main`; no GitHub issue was commented on, closed or reopened. The only source change in this pass is
-the #77 damaged-autosave guard in `apps/emblemweave/src/saves.rs` and its call in `apps/emblemweave/src/engine.rs`.
+Base `730fc46c` on `main`; no GitHub issue was commented on, closed or reopened. The source changes in this pass are
+the #77 damaged-autosave guard in `apps/emblemweave/src/saves.rs`, its call in `apps/emblemweave/src/engine.rs`, and
+the native-zstd validation in `apps/emblemweave/src/savefile.rs`.
 
 ### #77 damaged-autosave guard
 
 `quarantine_damaged_autosave()` runs after `sync_save_dir()` and before the game starts. It opens the exact
-`account/<id>/000/Auto` slot the runtime reads at boot. A file that `Slot::open()` or `verify()` rejects is moved
-unchanged into `save/backups/<stamp>-damaged-autosave-Auto`, a `.why.txt` names the reason, and Play stops with a
-message naming both. The next Play starts without that file. A valid autosave is left in place. Nothing is deleted or
+`account/<id>/000/Auto` slot the runtime reads at boot. A file that `Slot::open()`, `verify()` or the native zstd
+check rejects is moved unchanged into `save/backups/<stamp>-damaged-autosave-Auto`, a `.why.txt` names the reason,
+and Play stops with a message naming both. The next Play starts without that file. A valid autosave is left in place. Nothing is deleted or
 overwritten, and the archive keeps the original bytes.
 
-Regression tests added: `a_damaged_autosave_is_moved_to_backups_before_play` and
-`a_valid_autosave_is_not_moved_by_the_play_guard`. The damaged case truncates a valid slot, checks that the bytes in
-backups are identical, that the `.why.txt` exists and that a second call finds nothing. The valid case checks that the
-file is not moved and no backups folder is created. This is a synthetic damaged frame, not the reporter's save (their
-save was not in the report bundle).
+Regression tests added: `a_damaged_autosave_is_moved_to_backups_before_play`,
+`a_checksum_corrupt_frame_that_still_decompresses_is_rejected_before_play` and
+`a_valid_autosave_is_not_moved_by_the_play_guard`. The first truncates a valid slot and checks that the bytes in
+backups are identical, that the `.why.txt` exists and that a second call finds nothing. The checksum case builds a
+valid checksummed frame, confirms native zstd accepts it, corrupts only the frame checksum, confirms the payload still
+decodes and the slot's FNV checksums still pass, confirms native zstd rejects it, and confirms the guard preserves
+the bytes in backups. The valid case checks that the file is not moved and no backups folder is created. These are
+synthetic frames, not the reporter's save (their save was not in the report bundle).
 
 Limitations: the guard is a launch-time quarantine, not a repair. It does not establish why the frame was damaged and
 does not protect a session that damages the autosave after Play has started. The game's own zstd hook still logs the
@@ -688,8 +699,8 @@ file and falls back; its guest-side copy path was not changed.
 
 ### Test results
 
-- Launcher: `cargo test -p emblemweave --locked` from the repository root. **434 passed, 0 failed, 13 ignored**
-  (447 total). This includes the two new #77 tests and the existing #79 save/profile cases.
+- Launcher: `cargo test -p emblemweave --locked` from the repository root. **435 passed, 0 failed, 13 ignored**
+  (448 total). This includes the three #77 autosave tests and the existing #79 save/profile cases.
 - Runtime: `engine/fefw-recomp/runtime/build/release/nxrt_tests.exe --all`. **980 passed, 0 failed, 29 skipped**
   (1009 total), including `write_watch` 17/17 and `watchdog` 19/19. The `svc_fs_romfs` group alone passed 21/21 and
   `svc_fs_volume` 13/13; the #94 case `romfs_package_overlay_markers_are_not_game_files` is in the former.
