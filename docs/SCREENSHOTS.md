@@ -9,9 +9,9 @@ The screenshots were captured from this tree.
 
 A layout check can pin the conditions a row has to survive: `--size 1280x720
 --scale 2` renders at 200 % scaling, `--scroll 900` opens the page further down,
-and `--gpu-list "Name|Integrated|512;Name|Discrete|20464"` supplies the adapter
-list (`none` is the no-Vulkan-device case). These flags change that run only and
-are never saved.
+and `--gpu-list "Name|Integrated|512|1;Name|Discrete|20464|0"` supplies the
+adapter list, with an optional fourth field for AV1 decode (`none` is the
+no-Vulkan-device case). These flags change that run only and are never saved.
 
 | | |
 | --- | --- |

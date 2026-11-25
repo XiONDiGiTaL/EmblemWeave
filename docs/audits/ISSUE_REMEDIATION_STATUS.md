@@ -699,8 +699,9 @@ file and falls back; its guest-side copy path was not changed.
 
 ### Test results
 
-- Launcher: `cargo test -p emblemweave --locked` from the repository root. **435 passed, 0 failed, 13 ignored**
-  (448 total). This includes the three #77 autosave tests and the existing #79 save/profile cases.
+- Launcher: `cargo test -p emblemweave --locked` from the repository root. **439 passed, 0 failed, 13 ignored**
+  (452 total). This includes the three #77 autosave tests, the existing #79 save/profile cases and the four D3D11VA
+  manifest/checker/CLI-capture tests.
 - Runtime: `engine/fefw-recomp/runtime/build/release/nxrt_tests.exe --all`. **980 passed, 0 failed, 29 skipped**
   (1009 total), including `write_watch` 17/17 and `watchdog` 19/19. The `svc_fs_romfs` group alone passed 21/21 and
   `svc_fs_volume` 13/13; the #94 case `romfs_package_overlay_markers_are_not_game_files` is in the former.

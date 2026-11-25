@@ -13,6 +13,10 @@ pub struct Device {
     /// `Discrete`, `Integrated`, `Virtual`, etc.
     pub kind: &'static str,
     pub vram_mb: u64,
+    /// The driver advertises `VK_KHR_video_decode_av1`. This is the hardware
+    /// AV1 decoder D3D11VA uses too; it is a capability report, not a promise
+    /// that every driver build will decode every movie.
+    pub av1_decode: bool,
 }
 
 /// Enumerate the Vulkan devices now. The loader is loaded dynamically so a
@@ -101,6 +105,13 @@ mod platform {
         rest: [u8; 1024],
     }
 
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct VkExtensionProperties {
+        extension_name: [u8; 256],
+        spec_version: u32,
+    }
+
     #[repr(C)]
     struct VkMemoryType {
         property_flags: u32,
@@ -133,6 +144,33 @@ mod platform {
         unsafe extern "system" fn(VkPhysicalDevice, *mut VkPhysicalDeviceProperties);
     type GetPhysicalDeviceMemoryProperties =
         unsafe extern "system" fn(VkPhysicalDevice, *mut VkPhysicalDeviceMemoryProperties);
+    type EnumerateDeviceExtensionProperties = unsafe extern "system" fn(
+        VkPhysicalDevice,
+        *const u8,
+        *mut u32,
+        *mut VkExtensionProperties,
+    ) -> i32;
+
+    unsafe fn has_extension(
+        device: VkPhysicalDevice,
+        enumerate: EnumerateDeviceExtensionProperties,
+        wanted: &[u8],
+    ) -> bool {
+        let mut count = 0u32;
+        if enumerate(device, ptr::null(), &mut count, ptr::null_mut()) != VK_SUCCESS || count == 0 {
+            return false;
+        }
+        let mut props: Vec<VkExtensionProperties> = vec![std::mem::zeroed(); count as usize];
+        if enumerate(device, ptr::null(), &mut count, props.as_mut_ptr()) != VK_SUCCESS {
+            return false;
+        }
+        props.truncate(count as usize);
+        let wanted = wanted.strip_suffix(&[0]).unwrap_or(wanted);
+        props.iter().any(|p| {
+            let end = p.extension_name.iter().position(|&b| b == 0).unwrap_or(p.extension_name.len());
+            &p.extension_name[..end] == wanted
+        })
+    }
 
     fn kind(device_type: u32) -> &'static str {
         match device_type {
@@ -176,6 +214,8 @@ mod platform {
         let Some(memory) = sym(b"vkGetPhysicalDeviceMemoryProperties\0") else {
             return Vec::new();
         };
+        let extensions = sym(b"vkEnumerateDeviceExtensionProperties\0")
+            .map(|f| std::mem::transmute::<*const c_void, EnumerateDeviceExtensionProperties>(f));
         let create: CreateInstance = std::mem::transmute(create);
         let destroy: DestroyInstance = std::mem::transmute(destroy);
         let enumerate: EnumeratePhysicalDevices = std::mem::transmute(enumerate);
@@ -238,10 +278,12 @@ mod platform {
                         .map(|h| h.size)
                         .max()
                         .unwrap_or(0);
+                    let av1_decode = extensions.is_some_and(|f| has_extension(dev, f, b"VK_KHR_video_decode_av1\0"));
                     out.push(Device {
                         name,
                         kind: kind(props.device_type),
                         vram_mb: vram / (1024 * 1024),
+                        av1_decode,
                     });
                 }
             }

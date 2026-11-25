@@ -52,6 +52,8 @@ pub enum JobResult {
     Engine(PathBuf),
     /// Game Setup's folder check: the overlay written for a packed package, when one was needed.
     Repaired(Option<PathBuf>),
+    /// The optional D3D11VA movie runtime was downloaded and installed.
+    VideoRuntime(PathBuf),
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +84,8 @@ pub enum JobKind {
     Engine,
     /// The one-click check on Game Setup: reads the package and writes the files it cannot serve in place.
     Repair,
+    /// Downloads and verifies the optional FFmpeg/D3D11VA movie runtime.
+    VideoRuntime,
 }
 
 impl JobKind {
@@ -93,6 +97,7 @@ impl JobKind {
             JobKind::Boot => "Running the game",
             JobKind::Engine => "Building the game",
             JobKind::Repair => "Checking the game folder",
+            JobKind::VideoRuntime => "Installing the D3D11VA runtime",
         }
     }
 
@@ -104,6 +109,7 @@ impl JobKind {
             JobKind::Boot => "boot",
             JobKind::Engine => "engine",
             JobKind::Repair => "repair",
+            JobKind::VideoRuntime => "video-runtime",
         }
     }
 }
@@ -306,6 +312,20 @@ impl Ctx {
             p.total = total;
             p.message =
                 format!("Unpacking the package: {} of {} copied", crate::fmt_size(done), crate::fmt_size(total));
+        });
+    }
+    /// Download progress uses the same byte counters, but says what is arriving
+    /// instead of pretending the package is being unpacked.
+    pub fn download(&self, done: u64, total: u64) {
+        self.with(|p| {
+            p.copied = done;
+            p.total = total;
+            p.fraction = if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) };
+            p.message = format!(
+                "Downloading the D3D11VA runtime: {} of {}",
+                crate::fmt_size(done),
+                crate::fmt_size(total)
+            );
         });
     }
     /// How far the running step is, when it prints a counter like Ninja's
@@ -1014,6 +1034,30 @@ fn verify(ctx: &Ctx, cc: &[String], funcs: &[ew_lift::LiftedFunction], out: &Pat
     let native: Vec<&str> = native.lines().filter(|l| l.starts_with("fn=")).collect();
     let ok = expected.iter().zip(&native).filter(|(a, b)| a.as_str() == **b).count();
     Ok((ok, expected.len()))
+}
+
+// ---- optional movie runtime ---------------------------------------------------------
+
+pub const VIDEO_RUNTIME_STAGES: &[&str] = &["Download the D3D11VA runtime", "Verify and install"];
+
+pub fn video_runtime() -> Job {
+    spawn(JobKind::VideoRuntime, VIDEO_RUNTIME_STAGES, |ctx| {
+        ctx.start(0);
+        let progress = ctx.clone();
+        let cancel = ctx.cancel.clone();
+        let cache = crate::video_hw::download(
+            &mut |done, total| progress.download(done, total),
+            &|| cancel.load(Ordering::Relaxed),
+        )?;
+        ctx.end(0, StageStatus::Done, "download verified");
+        ctx.start(1);
+        let dest = crate::video_hw::install(&cache)?;
+        // The cache is only a retry aid; the installed copy is the runtime the
+        // engine loads. Keeping both would leave ~100 MB of duplicate DLLs.
+        let _ = std::fs::remove_dir_all(&cache);
+        ctx.end(1, StageStatus::Done, dest.display().to_string());
+        Ok(JobResult::VideoRuntime(dest))
+    })
 }
 
 // ---- boot ---------------------------------------------------------------------------

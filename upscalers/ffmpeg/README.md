@@ -5,6 +5,12 @@ This folder is shipped in the release zip at `upscalers\ffmpeg`. The launcher de
 works without a separate download. The engine also searches the play folder's `upscalers\ffmpeg` and
 `upscalers` folders, so a player can replace these files there.
 
+The Graphics page's **Hardware video decode (D3D11VA, optional)** card reports whether the selected
+GPU advertises AV1 decode and can download or reinstall this exact pinned build. It fetches the files
+from the project's pinned commit, checks each SHA-256 before writing, and installs into the play
+folder's `upscalers\ffmpeg`. The bundled copy remains the offline path; the download is for a removed
+or damaged folder.
+
 ## What is here
 
 | File | Version | Size | SHA-256 |

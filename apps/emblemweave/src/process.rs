@@ -22,6 +22,19 @@ pub fn new_hidden(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
+/// A Windows system tool by name, with a PATH fallback for non-Windows tests.
+pub fn system_tool(name: &str) -> std::path::PathBuf {
+    let sys = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let path = sys.join("System32").join(name);
+    if path.is_file() {
+        path
+    } else {
+        std::path::PathBuf::from(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

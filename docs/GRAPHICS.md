@@ -68,9 +68,18 @@ applies at the next start.
   whose libavcodec major is 62 and libavutil major is 60; anything else is refused with a log line and dav1d is used.
   `upscalers\ffmpeg\README.md` records the build, hashes, licence and source links, and a player can replace the folder
   with another matching FFmpeg 8.x shared build.
-- **Hardware video decode** is FFmpeg's D3D11VA path. A D3D11VA device decodes AV1 on the GPU and the engine copies each
-  NV12 frame back for the player. If the GPU or driver cannot decode AV1, FFmpeg switches to its bundled libdav1d decoder
-  for that movie; the switch is logged. With the toggle off (or with dav1d selected), decode stays on the CPU.
+- **Hardware video decode (D3D11VA, optional)** is a card of its own in the Graphics page. It reads the Vulkan driver's
+  `VK_KHR_video_decode_av1` capability for the selected GPU, then lets the player download or reinstall the pinned
+  FFmpeg runtime and enable D3D11VA for that system. Enabling writes `media.movie_decoder = ffmpeg` and
+  `media.movie_hwaccel = 1`; turning it off writes dav1d and `0` again. It never changes the project's default, so a
+  machine without AV1 decode keeps dav1d unless its owner deliberately overrides the warning.
+
+The D3D11VA device decodes AV1 on the GPU and the engine copies each NV12 frame back for the player. If the GPU or driver
+cannot decode AV1, FFmpeg switches to its bundled libdav1d decoder for that movie; the switch is logged. The capability
+check is a report, not a hard gate: a driver can omit the Vulkan extension while still working through D3D11VA, so the
+card allows a manual enable, and the engine still falls back to dav1d when the first movie is refused. The check follows
+the Vulkan adapter the renderer selects; on a hybrid system, Windows' graphics preference for EmblemWeave still decides
+which adapter FFmpeg's D3D11 device opens. With the toggle off (or with dav1d selected), decode stays on the CPU.
 
 FFmpeg's native `av1` decoder is hardware-only: its source returns `ENOSYS` without an active hardware decoder, so the
 software path uses FFmpeg's `libdav1d` decoder. The point of the FFmpeg option is the D3D11VA path, not a faster software
@@ -80,8 +89,11 @@ decoder; dav1d remains the default. The headers in `runtime/third_party/ffmpeg/i
 
 What was checked: FFmpeg 8.1 (libavcodec 62, libavutil 60, swresample 6) decoded raw AV1 and movie-shaped packets (an
 av1C record plus packets with their sequence header removed) through the dynamic loader in both software and D3D11VA modes
-on an RX 7900 XT (Adrenalin 26.10.1). In-game cutscene timing on this path is not measured yet; the decoder choice exists
-because cutscenes were reported slow, so use the log's decoder line and a frame-time capture to compare on your own GPU.
+on an RX 7900 XT (Adrenalin 26.10.1). The launcher's runtime manifest, AV1 capability check and per-system writes are
+covered by unit tests, and the pinned files were fetched and matched their manifest hashes; the download/install card
+has not been clicked in a running window, and a real D3D11VA movie on hardware other than the RX 7900 XT has not been run
+here. In-game cutscene timing on this path is not measured yet; the decoder choice exists because cutscenes were
+reported slow, so use the log's decoder line and a frame-time capture to compare on your own GPU.
 
 ## Evaluated, not integrated
 

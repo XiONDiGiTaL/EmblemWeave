@@ -57,6 +57,7 @@ mod storage_manager_cli;
 mod toolchain;
 mod toolchain_manager;
 mod updater;
+mod video_hw;
 mod widgets;
 
 use config::Config;
@@ -541,6 +542,7 @@ impl App {
                     )
                 }
             },
+            JobKind::VideoRuntime => jobs::video_runtime(),
         };
         if kind != JobKind::Detect {
             self.note(format!("{} started", kind.title()), Tone::Accent);
@@ -689,6 +691,13 @@ impl App {
                     let text = format!("Runtime stopped: {}", report.stop.describe());
                     self.last_boot = Some((*report, ms));
                     self.notify(text, Tone::Accent);
+                }
+                Some(JobResult::VideoRuntime(dir)) => {
+                    drop(p);
+                    self.notify(
+                        format!("D3D11VA runtime installed in {}. Enable it on Graphics when you want it.", dir.display()),
+                        Tone::Ok,
+                    );
                 }
                 None => {}
             }
@@ -1058,7 +1067,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::audio_boost_master;
+    use super::{audio_boost_master, parse_capture_devices};
 
     #[test]
     fn cancelling_the_above_100_warning_restores_the_previous_master_volume() {
@@ -1069,6 +1078,15 @@ mod tests {
             "Cancel must restore the volume from before the warning, not leave 100%"
         );
         assert_eq!(audio_boost_master(175, previous, true), 1.75);
+    }
+
+    #[test]
+    fn a_capture_device_list_carries_the_optional_av1_flag() {
+        let devices = parse_capture_devices("Radeon 780M|Integrated|512|1;RTX 3050|Discrete|4096").unwrap();
+        assert_eq!(devices.len(), 2);
+        assert!(devices[0].av1_decode);
+        assert!(!devices[1].av1_decode);
+        assert!(parse_capture_devices("GPU|Discrete|4096|maybe").is_err());
     }
 }
 
@@ -1676,10 +1694,11 @@ fn capture_scroll(args: &[String]) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// `--gpu-list NAME|KIND|VRAM_MB;...` for a screenshot of the GPU row with a
-/// chosen adapter list. `none` (or an empty value) is the no-Vulkan-device
-/// case. Nothing here touches the real Vulkan enumeration or the saved
-/// settings; it only supplies the list this run draws.
+/// `--gpu-list NAME|KIND|VRAM_MB|AV1;...` for a screenshot of the GPU row with a
+/// chosen adapter list. The fourth field is optional (`1`, `true`, `yes` or
+/// `av1`); `none` (or an empty value) is the no-Vulkan-device case. Nothing here
+/// touches the real Vulkan enumeration or the saved settings; it only supplies
+/// the list this run draws.
 fn parse_capture_devices(spec: &str) -> Result<Vec<crate::gpu::Device>, String> {
     if spec.trim().is_empty() || spec.trim().eq_ignore_ascii_case("none") {
         return Ok(Vec::new());
@@ -1691,9 +1710,15 @@ fn parse_capture_devices(spec: &str) -> Result<Vec<crate::gpu::Device>, String> 
             let name = fields.next().unwrap_or_default().trim();
             let kind = fields.next().unwrap_or_default().trim();
             let vram = fields.next().unwrap_or("0").trim();
+            let av1 = fields.next().unwrap_or("0").trim().to_ascii_lowercase();
             if name.is_empty() {
                 return Err(format!("the device in {entry:?} has no name"));
             }
+            let av1_decode = match av1.as_str() {
+                "" | "0" | "false" | "no" => false,
+                "1" | "true" | "yes" | "av1" => true,
+                _ => return Err(format!("{av1:?} is not 0/1 for AV1 decode")),
+            };
             let kind = match kind.to_ascii_lowercase().as_str() {
                 "integrated" => "Integrated",
                 "discrete" => "Discrete",
@@ -1709,6 +1734,7 @@ fn parse_capture_devices(spec: &str) -> Result<Vec<crate::gpu::Device>, String> 
                 name: name.to_string(),
                 kind,
                 vram_mb,
+                av1_decode,
             })
         })
         .collect()

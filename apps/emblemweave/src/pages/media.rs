@@ -313,6 +313,7 @@ impl Preset {
 
 fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
+    let sdk = crate::engine::sdk();
     widgets::page_header(ui, &p, "Graphics", "Display and rendering options for the game's integrated engine, plus the optional ReShade layer.");
     widgets::pending_note(
         ui,
@@ -323,6 +324,7 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
     );
     memory_profile(app, ui);
     upscaler_files(app, ui);
+    video_hw_settings(app, ui, &sdk);
     reshade_settings(app, ui);
     let g = &mut app.config.graphics;
     // The engine resolves `auto` to a float such as 1.7777777777777777. Show the
@@ -361,7 +363,6 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "Render scale", "Internal resolution relative to the output; the upscaler fills the rest. Applies at the next start.", |ui| {
             widgets::Slider::new(&mut g.render_scale, 0.5..=2.0).fixed_decimals(2).suffix("×").show(ui, &p);
         });
-        let sdk = crate::engine::sdk();
         let help = upscaler_help(&g.upscaling, &sdk);
         widgets::setting_row(ui, &p, "Upscaling", &help, |ui| {
             combo(ui, "upscale", &mut g.upscaling, UPSCALERS);
@@ -400,24 +401,15 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
             },
         );
         let decoder_help = match &sdk.ffmpeg {
-            Some(dir) => format!("AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder. FFmpeg loads the libavcodec DLLs found in {} and uses D3D11VA when hardware acceleration is on; its software path is FFmpeg's libdav1d. Applies at the next start.", dir.display()),
-            None => "AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder and needs nothing. FFmpeg uses the avcodec-62.dll, avutil-60.dll and swresample-6.dll shipped in upscalers\\ffmpeg; if that folder is missing, the game uses dav1d. Applies at the next start.".into(),
+            Some(dir) => format!("AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder. FFmpeg loads the libavcodec DLLs found in {}; its hardware option is configured in the optional D3D11VA card above. Applies at the next start.", dir.display()),
+            None => "AV1 decoder for cutscene movies. dav1d is the engine's built-in CPU decoder and needs nothing. FFmpeg uses the avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg; if that folder is missing, use Hardware video decode above or the game uses dav1d. Applies at the next start.".into(),
         };
         widgets::setting_row(ui, &p, "Video decoder", &decoder_help, |ui| {
             combo(ui, "vdec", &mut g.video_decoder, VIDEO_DECODERS);
         });
         if g.video_decoder == "FFmpeg (libavcodec)" && sdk.ffmpeg.is_none() {
-            widgets::pending_note(ui, &p, "FFmpeg is selected, but avcodec-62.dll, avutil-60.dll and swresample-6.dll were not found in upscalers\\ffmpeg, so the game will use its built-in dav1d instead. Restore the shipped folder or put a matching FFmpeg 8.x shared build there to use it.");
+            widgets::pending_note(ui, &p, "FFmpeg is selected, but avcodec-62.dll, avutil-60.dll and swresample-6.dll were not found in upscalers\\ffmpeg, so the game will use its built-in dav1d instead. Download the runtime under Hardware video decode, or put a matching FFmpeg 8.x shared build there.");
         }
-        widgets::setting_row(
-            ui,
-            &p,
-            "Hardware video decode",
-            "FFmpeg only. D3D11VA decodes AV1 on the GPU and copies NV12 frames back to the engine; if the GPU or driver cannot, FFmpeg's libdav1d runs. With dav1d selected, the engine always decodes on the CPU.",
-            |ui| {
-                widgets::toggle(ui, &p, &mut g.video_hwaccel);
-            },
-        );
         let fsr4 = sdk.fsr4();
         let framegen = sdk.fsr_framegen();
         let preset_ready = sdk.fsr3.is_some();
@@ -798,6 +790,139 @@ fn memory_profile(app: &mut App, ui: &mut egui::Ui) {
     if restore {
         app.confirm = Some(crate::Confirm::RestoreGraphics);
     }
+}
+
+/// The optional hardware movie path. It is deliberately a drawer of its own:
+/// the user can see whether this GPU reports AV1 decode, install or repair the
+/// pinned runtime, and make D3D11VA this system's choice without changing the
+/// default for anyone else.
+fn video_hw_settings(app: &mut App, ui: &mut egui::Ui, sdk: &crate::engine::Sdk) {
+    let p = app.config.theme.palette();
+    let installed = sdk.ffmpeg.is_some();
+    let check = crate::video_hw::check(&app.config.graphics.gpu, crate::gpu::cached());
+    let enabled = app.config.graphics.video_decoder == "FFmpeg (libavcodec)"
+        && app.config.graphics.video_hwaccel;
+    let progress = app.running(crate::jobs::JobKind::VideoRuntime).map(|job| {
+        job.snapshot(|p| (p.fraction, p.message.clone()))
+    });
+    let summary = if !installed {
+        "runtime not installed".to_string()
+    } else if enabled {
+        "enabled for this system".to_string()
+    } else if check.supported() {
+        format!("available · {}", check.device().unwrap_or("GPU"))
+    } else {
+        "installed · off".to_string()
+    };
+
+    widgets::section_drawer(
+        ui,
+        &p,
+        "video-hw",
+        "Hardware video decode (D3D11VA, optional)",
+        &summary,
+        false,
+        |ui| {
+            ui.label(
+                crate::i18n::text(
+                    "Uses the GPU's AV1 decoder through FFmpeg's D3D11VA path and copies NV12 frames back to the engine. \
+                     It stays off unless you enable it, so dav1d remains the default for everyone else. The check below \
+                     reads the Vulkan driver's AV1 decode capability; if the driver refuses a movie, the engine falls \
+                     back to its built-in dav1d.",
+                )
+                .size(12.5)
+                .color(p.body),
+            );
+
+            let mut on = enabled;
+            let mut changed = false;
+            if installed && !matches!(check, crate::video_hw::Check::Checking) {
+                widgets::setting_row(
+                    ui,
+                    &p,
+                    "Use D3D11VA for this system",
+                    "Sets Video decoder to FFmpeg and hardware acceleration on. Turning it off restores the built-in dav1d. This is stored in your own settings and written before the next Play.",
+                    |ui| {
+                        if widgets::toggle(ui, &p, &mut on).changed() {
+                            changed = true;
+                        }
+                    },
+                );
+                if changed {
+                    let g = &mut app.config.graphics;
+                    if on {
+                        g.video_decoder = "FFmpeg (libavcodec)".into();
+                        g.video_hwaccel = true;
+                    } else {
+                        g.video_decoder = "dav1d (CPU)".into();
+                        g.video_hwaccel = false;
+                    }
+                    app.notify(
+                        if on {
+                            "D3D11VA enabled for this system; the next Play writes it"
+                        } else {
+                            "D3D11VA disabled; the built-in dav1d is selected again"
+                        },
+                        Tone::Ok,
+                    );
+                }
+            }
+
+            let (tone, detail) = match &check {
+                crate::video_hw::Check::Checking => (
+                    Tone::Neutral,
+                    "Checking this GPU's AV1 decode support…".to_string(),
+                ),
+                crate::video_hw::Check::NoDevice => (
+                    Tone::Warn,
+                    "No Vulkan 1.3 GPU was detected, so suitability cannot be checked. You can still download the runtime; the engine falls back to dav1d if the hardware refuses a movie.".to_string(),
+                ),
+                crate::video_hw::Check::Supported(name) => (
+                    Tone::Ok,
+                    format!("{name} reports AV1 decode. D3D11VA can use its hardware decoder."),
+                ),
+                crate::video_hw::Check::Unsupported(name) => (
+                    Tone::Warn,
+                    format!("{name} does not report AV1 decode. Enabling it is allowed, but the engine will probably fall back to dav1d."),
+                ),
+            };
+            ui.label(crate::i18n::text(detail).size(12.5).color(tone.colour(&p)));
+
+            ui.add_space(theme::SPACE_S);
+            ui.horizontal_wrapped(|ui| {
+                if installed {
+                    if widgets::button(ui, &p, "Reinstall runtime", progress.is_none())
+                        .on_hover_text(crate::i18n::tr("Downloads the pinned FFmpeg DLLs again and verifies every SHA-256 before replacing the runtime."))
+                        .clicked()
+                    {
+                        app.start(crate::jobs::JobKind::VideoRuntime);
+                    }
+                    if let Some(dir) = &sdk.ffmpeg {
+                        if widgets::button(ui, &p, "Open runtime folder", true).clicked() {
+                            let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                        }
+                    }
+                } else if widgets::primary_button(ui, &p, "Download runtime (about 97 MB)", progress.is_none())
+                    .on_hover_text(crate::i18n::tr("Downloads the exact FFmpeg 8.1 runtime from the pinned project commit. Every file is checked against its SHA-256 before it is installed."))
+                    .clicked()
+                {
+                    app.start(crate::jobs::JobKind::VideoRuntime);
+                }
+            });
+            if let Some((fraction, message)) = &progress {
+                ui.add(egui::ProgressBar::new(*fraction).text(message.clone()).desired_width(ui.available_width()));
+            }
+            ui.label(
+                crate::i18n::text(if installed {
+                    "The runtime is included in this release. Reinstall only if the folder is missing or damaged."
+                } else {
+                    "The release normally includes this runtime. Downloading repairs a missing or removed upscalers\\ffmpeg folder."
+                })
+                .size(11.5)
+                .color(p.muted),
+            );
+        },
+    );
 }
 
 const FSR_SDK_URL: &str = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases";
