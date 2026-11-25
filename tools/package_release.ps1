@@ -124,7 +124,8 @@ try {
     # path, save and build cache lives in `data` beside this file. An existing
     # profile is left alone by the launcher's own first-run check.
     New-Item -ItemType File -Force (Join-Path $pkg 'portable.txt') | Out-Null
-    foreach ($f in 'LICENSE', 'README.md') { Copy-Item (Join-Path $repo $f) $pkg }
+    # recomplauncher.json beside the program: how RecompLauncher sets the game up and starts EmblemWeave.exe.
+    foreach ($f in 'LICENSE', 'README.md', 'recomplauncher.json') { Copy-Item (Join-Path $repo $f) $pkg }
     # The README links docs/PACKAGE.md and the changelog, so both travel at the paths it names. Copying
     # `docs\PACKAGE.md` into the package root used to leave it as `PACKAGE.md`, where nothing looks for it;
     # tools/verify_archive.py is what noticed.
@@ -275,7 +276,7 @@ try {
     if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
     if (-not $py) { throw 'python is needed to verify the release archive (tools/verify_archive.py)' }
     $required = @(
-        'EmblemWeave.exe', 'portable.txt', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/INSTALL.md',
+        'EmblemWeave.exe', 'portable.txt', 'recomplauncher.json', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/INSTALL.md',
         'docs/USAGE.md', 'docs/BUILDING.md', 'docs/SECURITY.md', 'docs/TERMS.md', 'docs/PRIVACY.md',
         'docs/LEGAL.md', 'docs/DMCA.md', 'docs/RELEASE_VALIDATION.md', 'docs/PORTABLE_INSTALLATION.md',
         'docs/UPGRADE_AND_RECOVERY.md',

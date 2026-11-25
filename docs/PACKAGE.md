@@ -17,6 +17,7 @@ release-manifest.json    sidecar: SHA-256 of every file, plus source/build prove
 SHA256SUMS               combined checksums for the zip, translator and manifest
 ├── EmblemWeave.exe        the launcher (Rust, Release build) - this is the program you run
 ├── portable.txt           keeps settings, saves and build output in data/ beside the exe
+├── recomplauncher.json    how RecompLauncher sets the game up and starts EmblemWeave.exe
 ├── LICENSE                EmblemWeave's own licence
 ├── README.md              the README from the tag the zip was built from
 ├── docs/                  every guide page the README links, the changelog and its screenshots
