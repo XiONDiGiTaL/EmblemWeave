@@ -3,12 +3,11 @@
 One file per release, newest first. Each file is what the release notes said, word for word, so the README can stay a
 description of the current state instead of a wall of history.
 
-The current public release is **0.1.41**. The 0.1.42 file below is draft notes for a version that is still in
-development; its row says `unreleased` until the release is cut and the file becomes the shipped notes.
+The current public release is **0.1.42**. The 0.1.41 file is the previous release.
 
 | Version | Date | In one line |
 | --- | --- | --- |
-| [0.1.42](0.1.42.md) | unreleased | Draft notes: cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash mitigation, HDR exit handling (original-state restoration outstanding), save-directory reconciliation (field verification pending). |
+| [0.1.42](0.1.42.md) | 2026-11-25 | Cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash mitigation, HDR exit handling (original-state restoration outstanding), and save-directory reconciliation. Field verification remains listed in the release notes. |
 | [0.1.41](0.1.41.md) | 2026-11-20 | A measured performance controller, a Performance page, a themed nine-tab F1 menu, 200% master volume, real Vulkan GPU selection, save portraits and party cheats, and no drag glide. |
 | [0.1.40](0.1.40.md) | 2026-11-18 | Update and Play without a rebuild, cleaner add-on failures, and a bounded packed-audio cache. |
 | [0.1.39](0.1.39.md) | 2026-11-18 | Standard mode, DLC discovery, special-character build paths, and an updater that keeps the built game. |
