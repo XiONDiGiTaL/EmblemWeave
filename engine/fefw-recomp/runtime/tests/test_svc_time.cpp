@@ -8,11 +8,16 @@
 // file is still the placeholder they fail for that reason only.
 #include <chrono>
 #include <cstring>
+#include <thread>
 #include <vector>
 
+#include "../src/services/services_internal.h"
 #include "../src/services/timezone.h"
+#include "nxrt/abi.h"
 #include "nxrt/config.h"
+#include "nxrt/memory.h"
 #include "nxrt/services.h"
+#include "nxrt/svc.h"
 #include "svc_test_util.h"
 
 NXTEST_GROUP(svc_time)
@@ -75,6 +80,23 @@ const uint8_t* shm_of(nxsvc::Session& st, uint64_t* size = nullptr) {
     if (!obj) return nullptr;
     if (size) *size = obj->size;
     return reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(obj->host));
+}
+
+// The posix time the SDK's shared-memory reader gets from the clock context block at `off` (0x38 local, 0x80 network).
+int64_t shm_posix(const uint8_t* base, uint32_t off) {
+    int64_t offset = 0;
+    std::memcpy(&offset, live_slot(base, off, 4, 0x20), 8);
+    return offset + sdk_steady_secs(adjust_of(live_slot(base, 0xD0, 4, 0x38)), raw_ticks_ns());
+}
+
+// Waits up to 5 s (the service checks every second) for that time to read `ahead` seconds ahead of `from()`.
+template <class F>
+bool shm_reaches(const uint8_t* base, uint32_t off, F from, int64_t ahead) {
+    for (int i = 0; i < 250; ++i) {
+        if (abs64(shm_posix(base, off) - from() - ahead) <= 3) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
 }
 
 // Clears a zone override made by a test, so the next test starts from the default config.
@@ -315,6 +337,55 @@ NXTEST(svc_time_shared_memory_keeps_posix_across_steady_offset) {
     CHECK_EQ(p.base, p.limit);
     CHECK_EQ(p.base, kSteadyEpochNs + 1000000000000ll - p.clock_offset);
     CHECK(abs64(offset + sdk_steady_secs(p, raw_ticks_ns()) - host_unix()) <= 3);
+}
+
+NXTEST(svc_time_shared_memory_follows_host_clock) {
+    nxsvc::Env env;
+    nxsvc::Session st = nxsvc::connect("time:a");
+    nxsvc::Session user = st.sub(st.call(0));
+    // Mapped read-only as the SDK maps it (MapSharedMemory 0x13), so the service has to write into the guest's view.
+    nxsvc::Reply handle = st.call(20);
+    REQUIRE(handle.ok() && handle.copy.size() == 1);
+    const uint64_t view = mem::kAliasBase + 0x40000;
+    ::Ctx map{};
+    map.x[0] = handle.copy[0];
+    map.x[1] = view;
+    map.x[2] = 0x1000;
+    map.x[3] = 1;
+    svc_dispatch(&map, 0x13);
+    REQUIRE(static_cast<uint32_t>(map.x[0]) == 0u);
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(view);
+    // A clock the guest set keeps its distance from the host clock.
+    const int64_t set_back = 1700000000 - host_unix();
+    REQUIRE(user.call(1, nxsvc::Args().i64(1700000000)).ok());
+    // Forward, as after a sleep that stopped the performance counter; then backward, as a clock correction. No guest call in between.
+    for (const int64_t jump : {int64_t{7200}, int64_t{-3600}}) {
+        nxrt::services::time_set_host_skew_for_test(jump * 1000000000);
+        CHECK(shm_reaches(base, 0x38, host_unix, set_back + jump));
+        CHECK(shm_reaches(base, 0x80, host_unix, jump));
+        CHECK(abs64(user.call(0).get<int64_t>(0) - shm_posix(base, 0x38)) <= 3);   // IPC GetCurrentTime agrees
+    }
+    nxrt::services::reset_all();
+    ::Ctx unmap{};
+    unmap.x[0] = handle.copy[0];
+    unmap.x[1] = view;
+    unmap.x[2] = 0x1000;
+    svc_dispatch(&unmap, 0x14);
+    CHECK_EQ(static_cast<uint32_t>(unmap.x[0]), 0u);
+}
+
+NXTEST(svc_time_shared_memory_ignores_small_clock_movement) {
+    nxsvc::Env env;
+    nxsvc::Session st = nxsvc::connect("time:u");
+    const uint8_t* base = shm_of(st);
+    REQUIRE(base != nullptr);
+    uint32_t before = 0, after = 0;
+    std::memcpy(&before, base + 0x38, 4);
+    nxrt::services::time_set_host_skew_for_test(100000000);          // 100 ms, under the 500 ms that rewrites the contexts
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));    // at least two checks
+    std::memcpy(&after, base + 0x38, 4);
+    CHECK_EQ(after, before);
+    nxrt::services::reset_all();
 }
 
 NXTEST(svc_time_automatic_correction_flag) {

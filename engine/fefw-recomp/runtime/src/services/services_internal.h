@@ -21,6 +21,9 @@ void add(const std::string& name, ipc::ServiceFactory f);
 // Convenience for "a service made of a command table": builds a Service named `name`, lets `setup` add its commands.
 std::shared_ptr<ipc::Service> make_iface(const char* name, const std::function<void(ipc::Service&)>& setup);
 
+// time.cpp, for tests: adds `ns` to the host clock the time service reads, as setting the clock would. time_reset() puts it back to 0.
+void time_set_host_skew_for_test(int64_t ns);
+
 // Forwards one stored vibration value to the sink registered with nxrt::hid::set_vibration_sink (input_source.cpp). npad_slot is the input
 // slot (0..9), hand 0 = left or the only device, 1 = right. Does nothing when no sink is registered.
 void vibration_dispatch(uint32_t npad_slot, int hand, const nxrt::hid::VibrationValue& v);
