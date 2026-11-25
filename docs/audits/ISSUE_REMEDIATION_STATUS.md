@@ -1,6 +1,6 @@
 # Issue Remediation Status
 
-**Date:** 2026-11-24
+**Date:** 2026-11-25
 **Basis:** the code on canonical `main` after the FCC integration, the build and test run recorded in
 `ENGINE_AND_RENDERER_VALIDATION.md`, and the reconciled audit `V0.1.42_RELEASE_READINESS.md`.
 **No GitHub issue was closed or commented on.** Every status below is a statement about the code in this
@@ -28,11 +28,15 @@ Status vocabulary is the one the readiness audit uses:
 | #70 Cinematic AV1 (dav1d assembly) | Implemented - unverified | dav1d per-compiler flags build with NASM; assembly path enabled | Any cinematic played end to end; a NASM vs C-only comparison |
 | #75 Cinematic AV1 + Opus sync | Implemented - unverified | Worker-thread decoder, decode-ahead, clock-based dropping, bundled FFmpeg option | End-to-end video/audio playback and sync measurement |
 | #76 Find Units stutter | Implemented - unverified | Parallel scan, cancellation, progress | An in-battle frame-time measurement |
-| #77 Return-to-title stability | Implemented - unverified | Fault-handler initialisation and fallbacks; write-watch platform split now builds | 10+ menu/title cycles; the write-watch race path exercised |
+| #77 Return-to-title crash / damaged autosave | Implemented - 10-cycle gameplay run, launcher guard automation-verified | Fault-handler initialisation and fallbacks; a current working-tree build completed 10 gameplay -> title -> gameplay cycles (31,301 frames, 456.7 s, 0 error lines, 21 screenshots); a damaged `Auto` is moved to backups before Play, with a regression test | The cause of the damaged `Auto` is unknown; the game's own path for damage found mid-session is unchanged; the run used a valid save and a working-tree build, and the reporter's damaged save was not available |
 | #78 HDR left enabled after exit | Implemented - verified on one display | Full display snapshot (mode, HDR, SDR white, per monitor), sidecar snapshot for crash recovery, restore of only what the session changed, `SET_HDR_STATE`, 18 tests (13 fake, 5 live) | Live on Windows 11 26100 / RX 7900 XT, one 2560x1440@180 display: marked exclusive entered and exited normally, HDR-off stayed off, HDR-on stayed on, forcing HDR off during exclusive restored it, and a hard-killed marked session was repaired from the sidecar on the next launch. Remaining: SDR white is read-only (captured, not written), no second monitor, no live differing-mode restore, no live second restore of the same snapshot. |
 | #79 Saves not read | Implemented - fixture matrix run, reporter case open | R1-R8 reconciliation, adoption, diagnostics, empty-save guard, fixture harness with refusal/manifest tests | Rows 16, 17, 19, 20 and 22 ran against the real engine: stale absolute paths honoured, nested save not adopted, missing `.meta` regenerated, foreign account ignored. Row 24's launcher import/backup/restore round-trip ran in a portable copy; its empty-profile UI flow and a reporter's own save remain (see `SAVE_VALIDATION_ISSUE79.md`) |
 | #90 Long inherited PATH stops the build | Implemented - automation-verified | `engine.rs` sets `NX_ENV_READY`, so `nx_env.cmd` keeps the launcher's vcvars environment instead of running it again; a direct call runs `vcvars64.bat` with a short PATH and merges both afterwards; every long value is only named through delayed expansion. `check_cmd_scripts.ps1` covers a 7,906-character PATH in launcher and direct mode, and `package_release.ps1` runs that check before packing | A launcher build started from that PATH, to completion; nothing above cmd's own ceiling can be fixed in the script |
-| #92 Graphics GPU label overlap | Verified | The GPU row stacks the combo and its note in a top-down block constrained to the control column, so the note wraps; "Detected", "No Vulkan 1.3 device" and "Looking for Vulkan devices..." all use it | None for the row. Viewed at 200 % scaling with a three-adapter hybrid list, with no Vulkan device, and with a long selected adapter name (2026-11-24 captures below) |
+| #92 Graphics GPU label overlap | Verified | The GPU row stacks the combo and its note in a top-down block constrained to the control column, so the note wraps; "Detected", "No Vulkan 1.3 device" and "Looking for Vulkan devices..." all use it | None for the row. Viewed at 200 % scaling with a three-adapter hybrid list, with no Vulkan device, and with a long selected adapter name (2026-11-24 captures below); the 2026-11-25 pass re-inspected the captures and found no change to the row |
+| #94 Package overlay markers counted as game files | Implemented - automation-verified | `make_layout()` drops `.source` and `.written` from the root of a package overlay only; existing overlays are not rewritten | The regression runs in `nxrt_tests`; no full game launch was needed or run |
+| #97 Shader cache not reused | Implemented - automation-verified | `5e590bd4` removed the unused `ShaderCache`, put the translator build ID back in the journal header, and made `StartOver` delete the journal, every `.spv` and the preload pack | The 2026-11-24 harness smoke run covered header, resume and stale-file deletion; the full 3000-block corpus was not rerun in this pass |
+| #101 Cutscenes fail without NASM | Implemented - automation-verified | NASM is `Need::Always` in `deps.rs`, `tools.lock` marks it required, and the setup, requirements and troubleshooting docs say so | No engine build or assembly-versus-C decode measurement was made in this pass; the launcher suite covers the dependency table |
+| #104 GPU decoding | Deferred - enhancement | dav1d remains the default; FFmpeg/D3D11VA remains explicit; PR #105 is unmerged and needs a released FFmpeg 9.1 build | Engine-level evidence for a default change; isolated decoder benchmarks are not enough |
 | #7 Linux / Steam Deck | Outstanding - platform layer builds | POSIX platform layer, `write_watch_linux.cpp` compiles and links, platform self-test passes on Ubuntu 24.04, Vulkan probe runs | The rest of the runtime: core still links `psapi`, `diag/registry.cpp` includes `<windows.h>`, the graphics shell is Win32. `docs/LINUX.md` is missing (see `LINUX_BUILD_STATUS.md`) |
 
 ---
@@ -85,9 +89,29 @@ FFmpeg/D3D11VA path is not part of that run.
 
 ### #77 — return to title
 
-The 120-second FCC session is the only runtime evidence and it is not 10+ cycles. The write-watch refactor it
-depended on now builds (CR-1), which removes the "did the fix survive the refactor" question at the source level,
-but the race itself has not been exercised. The `[nvn] write_watch` unit test is part of the engine suite.
+The earlier 120-second FCC session is no longer the only runtime evidence. A preserved scripted run from
+2026-11-24 05:30 (`_recovery/issue77_live/out_cycle10`) completed 10 gameplay -> title -> gameplay cycles:
+**35,144 frames, 448.9 s, verdict pass, 21 screenshots, exit 0**. Its log records the paths and the script but not
+a commit; it ran after `e9c0ccc9` and before the later read-fault change. The current working-tree engine binary
+(`fefw.exe`, 169,846,272 bytes, built 2026-11-24 19:03, SHA-256
+`8006801906240415d912055bbb8aaa3d5cb5b2f49d2e837dd75f057d68175fae`, built over `730fc46c` with the preserved
+uncommitted movie changes) was run through the same 10-cycle script on 2026-11-24 21:30:
+**31,301 frames, 456.7 s, verdict pass, 21 screenshots, exit 0, 0 error lines, 0 guest traps, 0 zstd errors**. The
+screenshots show the title screen and the game scene at every cycle. This is real engine playback of the reported
+workflow, not a synthetic unit test. The build is not a clean archive, and the reporter's damaged save was not
+available, so the exact trigger is still not reproduced.
+
+The 2026-11-25 pass added a separate, narrower guard for the damaged-autosave path in the report. The reporter's
+`Auto` was damaged (`ZSTD_error_corruption_detected`, error -20) and the guest copied the decoder's error code
+(`0xffffffffffffffec`) as a copy length. Before Play starts the game, `quarantine_damaged_autosave()` opens the
+`Auto` slot the game will read. If parsing or verification fails, it moves the file byte for byte into
+`save/backups/<stamp>-damaged-autosave-Auto`, writes a `.why.txt` naming the reason, and stops the launch with an
+explanation. A second Play starts without the bad autosave. A valid autosave is untouched, and nothing is deleted.
+`Global` is deliberately not checked: it has a different header and is not a slot.
+
+This prevents the next launch from repeating the crash, but it does not repair the frame, identify how it was
+damaged, or protect a session in which the corruption appears after Play. The reporter's save was not in either
+bundle, so the guard is tested with a truncated frame rather than their file.
 
 ### #78 — HDR and display restoration
 
@@ -152,7 +176,7 @@ directory and are not committed.
 | #59 | Drag measurement on the reporter's Windows build, with and without DWM composition |
 | #70 / #75 | One cutscene played to completion with audio; decoder statistics and frame times recorded |
 | #76 | In-battle frame-time percentiles with the scan open and closed |
-| #77 | 10+ return-to-title cycles in one session with no fault |
+| #77 | 10+ return-to-title cycles in one session with no fault; a reporter's damaged save through the new guard |
 | #78 | Start with HDR on, exit, and show Windows still has HDR on with the original SDR white level and mode |
 | #79 | A reporter's own save, listed and loaded (the fixture matrix is done; row 24's UI flow is still open) |
 | #90 | A launcher build started from a PATH near 8,191 characters, to completion |
@@ -638,3 +662,60 @@ ends through the teardown instead of bypassing it, and the deadline path shares 
 Not covered: the entry function returning (the game never returns), shutdown while a guest thread holds a runtime lock (the
 15 s bound only prevents a wedge), and display/HDR restore, which `nxrt::shutdown()` does not perform. The change is in
 `game-build/fefw/src/fefw_main.cpp`, committed in `b5c7d4b7`.
+
+## 2026-11-25 stability campaign validation
+
+Base `730fc46c` on `main`; no GitHub issue was commented on, closed or reopened. The only source change in this pass is
+the #77 damaged-autosave guard in `apps/emblemweave/src/saves.rs` and its call in `apps/emblemweave/src/engine.rs`.
+
+### #77 damaged-autosave guard
+
+`quarantine_damaged_autosave()` runs after `sync_save_dir()` and before the game starts. It opens the exact
+`account/<id>/000/Auto` slot the runtime reads at boot. A file that `Slot::open()` or `verify()` rejects is moved
+unchanged into `save/backups/<stamp>-damaged-autosave-Auto`, a `.why.txt` names the reason, and Play stops with a
+message naming both. The next Play starts without that file. A valid autosave is left in place. Nothing is deleted or
+overwritten, and the archive keeps the original bytes.
+
+Regression tests added: `a_damaged_autosave_is_moved_to_backups_before_play` and
+`a_valid_autosave_is_not_moved_by_the_play_guard`. The damaged case truncates a valid slot, checks that the bytes in
+backups are identical, that the `.why.txt` exists and that a second call finds nothing. The valid case checks that the
+file is not moved and no backups folder is created. This is a synthetic damaged frame, not the reporter's save (their
+save was not in the report bundle).
+
+Limitations: the guard is a launch-time quarantine, not a repair. It does not establish why the frame was damaged and
+does not protect a session that damages the autosave after Play has started. The game's own zstd hook still logs the
+file and falls back; its guest-side copy path was not changed.
+
+### Test results
+
+- Launcher: `cargo test -p emblemweave --locked` from the repository root. **434 passed, 0 failed, 13 ignored**
+  (447 total). This includes the two new #77 tests and the existing #79 save/profile cases.
+- Runtime: `engine/fefw-recomp/runtime/build/release/nxrt_tests.exe --all`. **980 passed, 0 failed, 29 skipped**
+  (1009 total), including `write_watch` 17/17 and `watchdog` 19/19. The `svc_fs_romfs` group alone passed 21/21 and
+  `svc_fs_volume` 13/13; the #94 case `romfs_package_overlay_markers_are_not_game_files` is in the former.
+- #92: the current GPU row was re-read in `pages/media.rs`; the 2026-11-24 captures in `target/capture/` were inspected
+  again. The three-adapter list wraps "Detected: ..." below the combo inside the control column, and the no-device line
+  wraps in the same place, with no overlap or clipping. The captures are not committed.
+- #97: `Batch.cs` still puts `TranslatorBuildId` in the journal header; a different header calls `StartOver()`, which
+  deletes the journal, every `.spv` and `<out>.preload.pack*`. No `ShaderCache` remains. The prior smoke run covered a
+  resumed journal and deletion of a stale `.spv`; the full corpus was not rerun here.
+- #101: `deps.rs` has NASM as `Need::Always`; `tools.lock` has it in the required set; setup, requirements and
+  troubleshooting docs name it. No engine build or C-only-versus-assembly decode measurement was made in this pass.
+- #104: no code change. dav1d remains the default, FFmpeg/D3D11VA remains explicit, and PR #105 is still unmerged.
+  The existing engine-level evidence does not justify changing the default for 0.1.42.
+
+### What remains unverified
+
+One game session was run in this pass: the current working-tree engine binary (SHA-256
+`8006801906240415d912055bbb8aaa3d5cb5b2f49d2e837dd75f057d68175fae`) completed the preserved 10-cycle
+return-to-title script on 2026-11-24 21:30. It loaded the existing save, returned to the title screen and re-entered
+the game ten times: 31,301 frames, 456.7 s, verdict pass, 21 screenshots, exit 0, **0 error lines, 0 guest traps,
+0 zstd errors**. The log is `_recovery/issue77_live/run_cycle10_current.log`, the result is
+`out_cycle10_current/result.json`, and the screenshots are `shots_cycle10_current/`. It used a valid save and a
+working-tree build, not a clean archive or the reporter's damaged file. No cutscene, long session, or other
+hardware was tested.
+
+#77 now has its 10 cycles, but still needs a clean-build rerun and the reporter's damaged save through the guard.
+#79 still needs a reporter's own save; #92's captures are from 2026-11-24, not a new run; #97's full corpus and
+#101's decode measurement were not repeated; #104 needs engine-level evidence on the affected hardware. The
+runtime suite result is a clean full-suite run on this host, separate from the 10-cycle gameplay run.

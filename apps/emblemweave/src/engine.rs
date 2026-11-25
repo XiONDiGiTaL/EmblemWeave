@@ -5180,6 +5180,31 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
     // saves appear empty or missing even though they exist on disk. Refuse to launch when a save exists but
     // could not be put where the game reads it: starting anyway opens an empty game and looks like data loss.
     sync_save_dir(&dir)?;
+    // A damaged Auto file is opened at boot and can make the game copy the
+    // zstd error code as a length (#77). Check it before the game starts and
+    // move it to backups unchanged, so the next Play can reach the title
+    // screen and the player still has the file if it can be repaired.
+    if let Some(save_dir) = Config::save_dir() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_default();
+        match crate::saves::quarantine_damaged_autosave(&save_dir, &stamp) {
+            Ok(Some(damaged)) => {
+                return Err(format!(
+                    "The autosave could not be read: {}. It was moved to {} unchanged and nothing was deleted. Press Play again to start without it; if it was your only save, the launcher will ask before opening an empty game. Restore a backup on Saves if you have one.",
+                    damaged.reason,
+                    damaged.kept.display()
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(format!(
+                    "The autosave could not be checked or moved to backups: {e}. The game was not started; nothing was deleted."
+                ));
+            }
+        }
+    }
     // The account folder can be absent or empty while profiles/backups still
     // hold the playthrough. Starting then makes the game create a fresh save
     // and look like the player's progress vanished; the launcher asks first and

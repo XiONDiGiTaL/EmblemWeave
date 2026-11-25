@@ -2146,6 +2146,49 @@ pub fn restore_profile(save_dir: &Path, backup_name: &str) -> Result<Profile, St
     })
 }
 
+/// An autosave that could not be read, and where it was kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DamagedAutosave {
+    pub reason: String,
+    pub kept: PathBuf,
+}
+
+/// Check the autosave the game opens at boot before Play starts it. A damaged
+/// zstd frame is moved to the backups folder, byte for byte, so the game can
+/// reach its title screen instead of crashing when it copies the decoder's
+/// error code as a memory-copy length (#77). Nothing is deleted, and a valid
+/// autosave is never touched. `Global` is deliberately not checked: it has a
+/// different header and is not a slot, so validating it here would reject a
+/// healthy one.
+pub fn quarantine_damaged_autosave(
+    save_dir: &Path,
+    stamp: &str,
+) -> Result<Option<DamagedAutosave>, String> {
+    let slot = account_dir(save_dir).join("000").join("Auto");
+    if !slot.is_file() {
+        return Ok(None);
+    }
+    let reason = match crate::savefile::Slot::open(&slot) {
+        Ok(parsed) => {
+            let problems = parsed.verify();
+            if problems.is_empty() {
+                return Ok(None);
+            }
+            problems.join("; ")
+        }
+        Err(e) => e,
+    };
+    let kept = archive_slot(save_dir, &slot, &format!("{stamp}-damaged-autosave"))?;
+    let note = kept.with_extension("why.txt");
+    let _ = std::fs::write(
+        &note,
+        format!(
+            "The autosave could not be read before Play: {reason}\nThe file was moved here unchanged; no save data was deleted.\n"
+        ),
+    );
+    Ok(Some(DamagedAutosave { reason, kept }))
+}
+
 /// A slot in the current save, with the size the page shows beside it.
 pub fn slots_with_sizes(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64)> {
     slots(save_dir)
@@ -3000,6 +3043,51 @@ mod tests {
         let header = fnv1a32(&raw[0x1F..0x1F + 0xE0]);
         raw[8..12].copy_from_slice(&header.to_le_bytes());
         raw
+    }
+
+    #[test]
+    fn a_damaged_autosave_is_moved_to_backups_before_play() {
+        let root = temp("damaged-autosave");
+        let save = root.join("save");
+        let auto = account_dir(&save).join("000/Auto");
+        let mut damaged = valid_slot(b"payload");
+        damaged.truncate(damaged.len() - 2);
+        write_bytes(&auto, &damaged);
+        let before = std::fs::read(&auto).unwrap();
+
+        let found = quarantine_damaged_autosave(&save, "123")
+            .unwrap()
+            .expect("the damaged autosave is reported");
+        assert!(!auto.exists(), "the game must not open it again");
+        assert_eq!(std::fs::read(&found.kept).unwrap(), before, "the bytes are kept unchanged");
+        assert_eq!(
+            found.kept.parent(),
+            Some(save.join("backups").as_path()),
+            "the file is in the backups folder"
+        );
+        assert!(
+            found.kept.with_extension("why.txt").is_file(),
+            "the reason is written beside the kept file"
+        );
+
+        assert!(
+            quarantine_damaged_autosave(&save, "124").unwrap().is_none(),
+            "a second Play does not find the same file"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_valid_autosave_is_not_moved_by_the_play_guard() {
+        let root = temp("valid-autosave");
+        let save = root.join("save");
+        let auto = account_dir(&save).join("000/Auto");
+        write_bytes(&auto, &valid_slot(b"payload"));
+
+        assert!(quarantine_damaged_autosave(&save, "123").unwrap().is_none());
+        assert!(auto.is_file(), "a readable autosave is left in place");
+        assert!(!save.join("backups").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
