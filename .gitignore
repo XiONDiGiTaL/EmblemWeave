@@ -27,6 +27,8 @@ __pycache__/
 # The native Trinity page embeds canonical snapshots at compile time.
 !apps/emblemweave/src/pages/trinity_catalog.json
 !apps/emblemweave/src/pages/trinity_prefixes.json
+!apps/emblemweave/assets/trinity/plugin.json
+!apps/emblemweave/assets/trinity/emblemweave.json
 
 # Launch videos made with /brag (they contain game footage: keep them local)
 brag-output*/

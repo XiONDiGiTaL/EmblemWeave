@@ -29,6 +29,7 @@ mod manifest;
 mod memory;
 mod mods;
 mod onboarding;
+mod trinity_bundle;
 mod pad;
 mod pages;
 mod patches;
@@ -319,6 +320,11 @@ impl App {
             let _ = crate::engine::refresh_build_stamp();
         });
         let lab = labb::Ui::load(&config);
+        // The release carries Trinity in the launcher itself. Install or upgrade the
+        // mod folder before any page lists mods; the runtime's existing DLL loader
+        // then starts it on the next Play, with every other code mod unchanged.
+        #[cfg(windows)]
+        let trinity = trinity_bundle::ensure_installed();
         let mut app = App {
             stale_build_cache: None,
             stale_build_cached_at: None,
@@ -370,6 +376,12 @@ impl App {
             startup: Default::default(),
             last_frame: Instant::now(),
         };
+        #[cfg(windows)]
+        match trinity {
+            Ok(Some(note)) => app.note(note, Tone::Accent),
+            Ok(None) => {}
+            Err(error) => app.notify(format!("Trinity code mod not installed: {error}"), Tone::Warn),
+        }
         match repaired {
             Some(Ok(n)) if n > 0 => app.note(
                 format!("Finished the previous update: {n} release files written"),
