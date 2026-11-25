@@ -462,6 +462,23 @@ fn discord(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
 fn updates(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
     widgets::section(ui, p, "Updates", |ui| {
         widgets::kv(ui, p, "This build", env!("CARGO_PKG_VERSION"));
+        if updater::managed_by_recomplauncher() {
+            ui.add_space(theme::SPACE_S);
+            ui.horizontal_wrapped(|ui| {
+                widgets::button(ui, p, "Updates come from RecompLauncher", false);
+                ui.hyperlink_to(crate::i18n::text("All releases"), format!("https://github.com/{}/releases", updater::REPO));
+            });
+            ui.add_space(theme::SPACE_S);
+            ui.label(
+                crate::i18n::text(
+                    "RecompLauncher started this copy and installs new releases itself, so EmblemWeave does not check for or \
+                     install updates here.",
+                )
+                .size(12.5)
+                .color(p.muted),
+            );
+            return;
+        }
         let mut check = app.config.updates.check;
         ui.horizontal(|ui| {
             if widgets::toggle(ui, p, &mut check).changed() {

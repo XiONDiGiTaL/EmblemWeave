@@ -29,6 +29,17 @@ pub struct Release {
     pub asset: Option<(String, String)>,
 }
 
+/// Whether RecompLauncher started this copy. It sets `RECOMPLAUNCHER=1` on the programs it starts and installs every
+/// release itself, so such a copy never checks for, downloads or swaps in a release of its own: two updaters on one
+/// folder fight.
+pub fn managed_by_recomplauncher() -> bool {
+    managed_by_recomplauncher_from(&|k| std::env::var(k).ok())
+}
+
+pub fn managed_by_recomplauncher_from(env: &dyn Fn(&str) -> Option<String>) -> bool {
+    env("RECOMPLAUNCHER").is_some_and(|v| v.trim() == "1")
+}
+
 pub fn version_now() -> (u32, u32, u32) {
     parse_version(env!("CARGO_PKG_VERSION")).unwrap_or((0, 0, 0))
 }
@@ -682,6 +693,18 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn only_recomplauncher_one_leaves_updates_to_recomplauncher() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_string);
+            managed_by_recomplauncher_from(&move |k| if k == "RECOMPLAUNCHER" { value.clone() } else { None })
+        };
+        assert!(with(Some("1")));
+        assert!(!with(None));
+        assert!(!with(Some("")));
+        assert!(!with(Some("0")));
     }
 
     #[test]

@@ -463,7 +463,8 @@ impl App {
             app.notify(format!("This game folder was built by {built}; Overview has Repair / Rebuild now to update it to {now}."), Tone::Warn);
         }
         app.start(JobKind::Detect);
-        if app.config.updates.check {
+        // Started from RecompLauncher, which installs the releases itself.
+        if app.config.updates.check && !updater::managed_by_recomplauncher() {
             app.check_updates();
         }
         app
@@ -764,6 +765,9 @@ impl App {
 
     /// Ask GitHub for the newest release.
     pub fn check_updates(&mut self) {
+        if updater::managed_by_recomplauncher() {
+            return;
+        }
         if self.update.slot.is_some() || self.update.state == UpdateState::Downloading {
             return;
         }
@@ -782,6 +786,9 @@ impl App {
     /// rather than changing files underneath it. `data`, the built game, the fetched tools and the portable-storage choice
     /// are not part of the release and are preserved by [`updater::install`].
     pub fn install_update(&mut self) {
+        if updater::managed_by_recomplauncher() {
+            return;
+        }
         let UpdateState::Ready(release) = self.update.state.clone() else {
             return;
         };
