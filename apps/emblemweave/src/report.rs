@@ -304,6 +304,10 @@ pub fn bundle(app: &App, note: &str) -> Result<PathBuf, String> {
         .title_id
         .unwrap_or(crate::saves::FALLBACK_TITLE_ID);
     text.push_str(&crate::saves::describe_save_state(title));
+    if let Some(save_dir) = Config::save_dir() {
+        text.push_str("\n== save inventory (metadata only) ==\n");
+        text.push_str(&crate::saves::save_inventory(&save_dir, title));
+    }
     text.push_str("\n== recent settings ==\n");
     text.push_str(&format!("{:#?}\n", app.config));
 

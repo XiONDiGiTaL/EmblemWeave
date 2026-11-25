@@ -1045,6 +1045,110 @@ fn describe_account(root: &Path, indent: &str) -> String {
     s
 }
 
+/// A read-only, content-free inventory of the save tree for the Troubleshooter
+/// report.
+///
+/// It records the account folder, profiles and backups with slot/file counts,
+/// total sizes and timestamps. Slot contents are never opened, hashed or
+/// copied: this section is safe to attach to a public issue even when the save
+/// itself is not included.
+pub fn save_inventory(save_dir: &Path, title_id: u64) -> String {
+    let mut s = String::new();
+    s.push_str("save inventory (metadata only; no save contents)\n");
+    s.push_str(&format!("save dir: {}\n", save_dir.display()));
+    s.push_str(&format!("title id: {title_id:016X}\n"));
+    s.push_str(&format!("expected user: {DEFAULT_USER}\n\n"));
+
+    let account = account_dir(save_dir);
+    let stats = inventory_stats(&account);
+    s.push_str(&format!("account: {}\n", account.display()));
+    s.push_str(&format!(
+        "  current save: {}\n",
+        if has_save(&account) { "yes" } else { "no" }
+    ));
+    if let Some(nested) = save_below(&account).filter(|p| p.as_path() != account.as_path()) {
+        s.push_str(&format!("  nested save: {}\n", nested.display()));
+    }
+    s.push_str(&format!(
+        "  slots={} files={} bytes={} newest={}\n",
+        stats.slots,
+        stats.files,
+        stats.bytes,
+        when(stats.newest)
+    ));
+    let meta = account_meta_path(save_dir);
+    match std::fs::metadata(&meta) {
+        Ok(m) => s.push_str(&format!(
+            "  meta: present size={} modified={}\n",
+            m.len(),
+            when(m.modified().ok())
+        )),
+        Err(_) => s.push_str("  meta: missing\n"),
+    }
+
+    s.push_str("\nprofiles:\n");
+    let profiles = profiles(save_dir);
+    if profiles.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for p in profiles {
+        let stats = inventory_stats(&p.path);
+        s.push_str(&format!(
+            "  \"{}\": path={} slots={} files={} bytes={} newest={}\n",
+            p.name,
+            p.path.display(),
+            stats.slots,
+            stats.files,
+            stats.bytes,
+            when(stats.newest)
+        ));
+    }
+
+    s.push_str("\nbackups:\n");
+    let backups = backups(save_dir);
+    if backups.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for b in backups {
+        let stats = inventory_stats(&b.path);
+        s.push_str(&format!(
+            "  \"{}\": path={} kind={} slots={} files={} bytes={} created={} newest={}\n",
+            b.name,
+            b.path.display(),
+            if b.name.contains("-profile-") {
+                "profile backup"
+            } else {
+                "save backup"
+            },
+            backup_slot_count(&b.path),
+            stats.files,
+            stats.bytes,
+            when(b.modified),
+            when(stats.newest)
+        ));
+    }
+
+    s.push_str("\nrecoverable (not the current save):\n");
+    let recoverable = recoverable_saves(save_dir);
+    if recoverable.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for r in recoverable {
+        let stats = inventory_stats(&r.path);
+        s.push_str(&format!(
+            "  {} \"{}\": path={} slots={} files={} bytes={} newest={}\n",
+            r.kind.label(),
+            r.name,
+            r.path.display(),
+            r.slots,
+            stats.files,
+            stats.bytes,
+            when(stats.newest)
+        ));
+    }
+    s
+}
+
 /// A bounded, content-free listing of the save tree for a diagnostic bundle.
 ///
 /// Filenames, sizes, timestamps and hashes answer whether a slot exists and
@@ -1846,10 +1950,18 @@ pub struct Recoverable {
     pub slots: usize,
 }
 
-/// Number of slot files below a save folder. Metadata and the game's Global
-/// file do not count: a folder holding only those has no playthrough.
-fn slot_file_count(dir: &Path) -> usize {
-    let mut n = 0;
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct InventoryStats {
+    files: usize,
+    bytes: u64,
+    slots: usize,
+    newest: Option<SystemTime>,
+}
+
+/// Count files, bytes and slot files below `dir` from metadata only. No file is
+/// opened: this is the basis for the diagnostic inventory.
+fn inventory_stats(dir: &Path) -> InventoryStats {
+    let mut out = InventoryStats::default();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&d) else {
@@ -1859,12 +1971,48 @@ fn slot_file_count(dir: &Path) -> usize {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.is_file() && is_slot_candidate(&p) {
-                n += 1;
+                continue;
+            }
+            if !p.is_file() {
+                continue;
+            }
+            let is_slot = is_slot_candidate(&p);
+            let Ok(meta) = e.metadata() else {
+                // A slot can still be counted when its metadata cannot be read;
+                // the detailed file listing will show it as unreadable.
+                if is_slot {
+                    out.slots += 1;
+                }
+                continue;
+            };
+            out.files += 1;
+            out.bytes += meta.len();
+            if is_slot {
+                out.slots += 1;
+            }
+            if let Ok(t) = meta.modified() {
+                out.newest = Some(out.newest.map_or(t, |n| n.max(t)));
             }
         }
     }
-    n
+    out
+}
+
+/// Number of slot files below a save folder. Metadata and the game's Global
+/// file do not count: a folder holding only those has no playthrough.
+fn slot_file_count(dir: &Path) -> usize {
+    inventory_stats(dir).slots
+}
+
+/// The number of slot files in a whole-save or profile backup. A backup can
+/// hold an account tree or the flat contents of `000`; resolve it first.
+fn backup_slot_count(path: &Path) -> usize {
+    let Some(source) = resolve_source(path, FALLBACK_TITLE_ID) else {
+        return 0;
+    };
+    match source {
+        SaveSource::Folder(dir) | SaveSource::Flat(dir) => slot_file_count(&dir),
+    }
 }
 
 /// Every profile, profile backup, whole-save backup and orphan save that holds
@@ -2529,6 +2677,51 @@ mod tests {
             listed[0].modified,
             Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_795_525_256)),
             "the backup's age is when it was made, not the copied slot's mtime"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_inventory_lists_metadata_without_save_contents() {
+        let root = temp("save-inventory");
+        let save = root.join("save");
+        let secret = "DO-NOT-COPY-THIS-SAVE-PAYLOAD";
+        write(&account_dir(&save).join("000/Auto"), secret);
+        write(&account_dir(&save).join("000/Global"), "global data");
+        ensure_account_meta(&save, FALLBACK_TITLE_ID).unwrap();
+        store_profile(&save, "Run A", "1").unwrap();
+        write(
+            &save.join("backups/1795525256-import/account")
+                .join(DEFAULT_USER)
+                .join("000/Auto"),
+            secret,
+        );
+
+        let text = save_inventory(&save, FALLBACK_TITLE_ID);
+        for expected in [
+            "account:",
+            "current save: yes",
+            "meta: present",
+            "profiles:",
+            "\"Run A\"",
+            "backups:",
+            "1795525256-import",
+            "kind=save backup",
+            "slots=1",
+            "bytes=",
+            "created=",
+            "newest=",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        assert!(
+            text.matches("slots=1").count() >= 3,
+            "the account, profile and backup each report their slot count:\n{text}"
+        );
+        assert!(!text.contains(secret), "save contents must never enter the report");
+        assert!(
+            !text.contains("sha256="),
+            "the inventory is metadata-only; the detailed manifest keeps hashes"
         );
         let _ = std::fs::remove_dir_all(root);
     }
