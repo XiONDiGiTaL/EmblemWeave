@@ -199,7 +199,7 @@ the previous 440/427/13 baseline, matching the two new `process` tests.
 |---|---|---|
 | `docs/CONFIG.md`: `prewarm_threads` default `max(1, min(6, cpus / 4))` | code: `clamp(cpus / 8, 1, 2)`, capped by `prewarm_max_workers` (2) | doc corrected to the code |
 | FCC reports: `prewarm_workers` | config key is `prewarm_max_workers`; `prewarm_threads` is the worker count | doc rows added for the real keys |
-| `ISSUE_37_PHASE1_COMPLETION.md`: "commit 314f3b2e", "COMPLETE - DEPLOYMENT VERIFIED" | the files were untracked at that commit; runtime effect unmeasured | dated banner; status qualified |
+| Issue #37 completion report (removed after review; text at `3e10ad47`): "commit 314f3b2e", "COMPLETE - DEPLOYMENT VERIFIED" | the files were untracked at that commit; runtime effect unmeasured | dated banner; status qualified; see `docs/audits/REPORT_ACTION_REGISTER.md` |
 | `REKARINA_PERFORMANCE_RESULTS.md`: baseline P50/P95/P99 = 0.000 | metric had no producer (CR-6) | dated banner explaining the zeros |
 
 ---
@@ -228,11 +228,11 @@ follow-up branch built on today's `main`.
 **Competing versions.** FCC's reports claim completed, verified, deployed work. The reconciled readiness audit
 records #70/#75/#76 as implemented-unverified and records no release candidate.
 
-**Decision.** Do not delete or rewrite the historical reports; add dated banners and keep the audit authoritative.
-The reports remain useful evidence of what was attempted, and the banners prevent them from being quoted as a
-release verdict. Files: `FCC_FINAL_REPORT.md`, `ISSUE_70_RESOLUTION.md`, `ISSUE_37_PHASE1_COMPLETION.md`,
-`DEPLOYMENT_ISSUE37.md`, `REKARINA_PERFORMANCE_*.md`, plus the two `runtime/docs/audits/ISSUE_37_*.md` references
-whose paths and status were corrected.
+**Decision (superseded 2026-11-25).** The reports were initially kept with dated banners. After the action-register
+review, their actionable content was transferred to `docs/audits/REPORT_ACTION_REGISTER.md` and the three root
+reports were removed in a separate cleanup commit. Their original text remains in Git history at `3e10ad47`.
+`DEPLOYMENT_ISSUE37.md`, `REKARINA_PERFORMANCE_*.md` and the two `runtime/docs/audits/ISSUE_37_*.md` references
+remain, with their paths and status corrected.
 
 ---
 

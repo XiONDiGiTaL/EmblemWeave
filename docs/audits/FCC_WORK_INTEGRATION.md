@@ -49,13 +49,15 @@ The snapshot was still taken first, because "no evidence" is not proof.
 
 ## 2. Correcting FCC's own report
 
-`FCC_FINAL_REPORT.md` describes HEAD `28079a0a` and an Issue #70 commit `7b59b0ad`. Both objects exist and
+The historical FCC final report describes HEAD `28079a0a` and an Issue #70 commit `7b59b0ad`. Both objects exist and
 **both are ancestors of canonical `main`** (`git branch --contains 7b59b0ad` lists `main`, `origin/main`,
 `gitgud/main`, `gitlab/main`). Its branch/test/"working tree clean" statements describe an older session, not the
-tree that was handed over. The report is now committed with a dated banner; it is historical evidence, not a
-status document.
+tree that was handed over. The report was committed with a dated banner at `3e10ad47`; after the action-register
+review it was removed from the tree, and its text remains at that commit. It is historical evidence, not a status
+document. See `docs/audits/REPORT_ACTION_REGISTER.md`.
 
-Conversely, `ISSUE_37_PHASE1_COMPLETION.md` and `DEPLOYMENT_ISSUE37.md` name commit `314f3b2e` as the build they
+Conversely, the Issue #37 completion report (removed after review; text at `3e10ad47`) and `DEPLOYMENT_ISSUE37.md`
+name commit `314f3b2e` as the build they
 deployed, but `renderer_profiling.h`, `renderer_profiling.cpp`, the prewarm changes and the profiling docs were
 **untracked** in that commit's tree. The `X:\EmblemWeave` deployment was therefore built from a dirty tree and
 cannot be reproduced from `314f3b2e`. Those files are now committed here, and the deployment hashes are labelled
@@ -120,7 +122,7 @@ review was corrected; **Preserved** = kept (stash/snapshot) but not applied; **R
 |---|---|---|
 | Audio EQ, MAKO upscaler, overview page, play UI/docs WIP (45 files, 1,412 insertions) | `stash@{0}` | Unverified draft that overlaps live files (`engine.rs`, `main.rs`, `CONFIG.md`, `output_pass.*`, `play_*`). Applying it on top of an unbuilt tree would have mixed two unverified change sets and made any build failure unattributable. It stays in the stash for its author or a dedicated follow-up. |
 | Issue #70 dav1d flags | already on `main` (`7b59b0ad`) | Nothing to integrate; status corrected to implemented-unverified. |
-| `FCC_FINAL_REPORT.md`, `ISSUE_70_RESOLUTION.md` | repository root | Recorded with banners as historical evidence. |
+| The FCC final report and Issue #70 resolution report | repository root | Committed with banners at `3e10ad47`; removed after the action-register review. Text remains at that commit; see `docs/audits/REPORT_ACTION_REGISTER.md`. |
 | `REKARINA_PERFORMANCE_COMPARISON.md`, `REKARINA_PERFORMANCE_RESULTS.md` | `docs/audits/` | Recorded with banners; no performance claim is adopted. |
 
 ---

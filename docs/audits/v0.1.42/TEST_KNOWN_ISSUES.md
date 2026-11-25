@@ -115,7 +115,8 @@ Document them here and in CI configuration as known limitations. Fix the test in
 
 ## Related Files
 
-- `FCC_FINAL_REPORT.md` - Full FCC final report with analysis
-- `ISSUE_70_RESOLUTION.md` - Issue #70 technical resolution
+- `docs/audits/TEST_BASELINE.md` - current reproducible baseline; use this for status
+- `docs/audits/REPORT_ACTION_REGISTER.md` - durable disposition of the removed FCC/Issue #37/Issue #70 reports
+- The removed reports' original text remains in Git history at `3e10ad47`
 - `RELEASE_REPORT_v0.1.42.md` - Release report (updated to include Issue #70)
 - `REMEDIATION_SUMMARY_v0.1.42.md` - Remediation summary (updated to include Issue #70)

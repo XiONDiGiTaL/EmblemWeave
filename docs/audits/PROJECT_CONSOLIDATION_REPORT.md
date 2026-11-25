@@ -32,8 +32,10 @@ worktrees are untouched.
 
 ### One correction to the handover
 
-FCC's `FCC_FINAL_REPORT.md` describes HEAD `28079a0a`; that commit and its Issue #70 commit `7b59b0ad` are
-**ancestors of `main`**. The report is a stale snapshot. Its claims are now bannered rather than treated as status.
+The historical FCC final report describes HEAD `28079a0a`; that commit and its Issue #70 commit `7b59b0ad` are
+**ancestors of `main`**. The report is a stale snapshot. Its claims were bannered rather than treated as status,
+and the report was removed after the action-register review (`docs/audits/REPORT_ACTION_REGISTER.md`; original
+text at `3e10ad47`).
 Conversely, the Issue #37 Phase 1 work it described as "deployed and verified" was **untracked** at `314f3b2e`, so
 that deployment cannot be reproduced from the commit it names.
 
