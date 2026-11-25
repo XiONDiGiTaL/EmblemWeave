@@ -3383,6 +3383,42 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_frame_length_is_rejected_before_play() {
+        let root = temp("frame-length-autosave");
+        let save = root.join("save");
+        let auto = account_dir(&save).join("000/Auto");
+        let mut raw = valid_slot(b"payload whose header names the frame length");
+
+        let parsed = crate::savefile::Slot::from_bytes(&auto, raw.clone()).unwrap();
+        assert!(parsed.verify().is_empty(), "the frame starts intact");
+        assert!(parsed.native_check().is_ok(), "the frame decodes before the length is damaged");
+
+        // The length the game passes to zstd sits outside the header checksum;
+        // shortening it must not be mistaken for a readable frame.
+        let declared = u32::from_le_bytes([raw[0x108], raw[0x109], raw[0x10A], raw[0x10B]]);
+        raw[0x108..0x10C].copy_from_slice(&(declared / 2).max(1).to_le_bytes());
+        let parsed = crate::savefile::Slot::from_bytes(&auto, raw.clone()).unwrap();
+        assert!(parsed.verify().is_empty(), "the slot's own checksums still pass");
+        assert!(
+            parsed.native_check().is_err(),
+            "native zstd must see the truncated frame the game would read"
+        );
+
+        write_bytes(&auto, &raw);
+        let found = quarantine_damaged_autosave(&save, "126")
+            .unwrap()
+            .expect("the autosave with a damaged frame length is reported");
+        assert!(!auto.exists(), "the game must not open it again");
+        assert!(
+            found.reason.contains("native zstd"),
+            "the reason names the decoder rejection: {}",
+            found.reason
+        );
+        assert_eq!(std::fs::read(&found.kept).unwrap(), raw, "the bytes are kept unchanged");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_valid_autosave_is_not_moved_by_the_play_guard() {
         let root = temp("valid-autosave");
         let save = root.join("save");

@@ -187,10 +187,25 @@ impl Slot {
     /// native hook uses. `ruzstd` accepts some frames native zstd rejects, most
     /// importantly a frame with a bad checksum but otherwise intact payload.
     pub fn native_payload(&self) -> Result<Vec<u8>, String> {
-        let frame = self
-            .raw
-            .get(self.zstd_at..)
-            .ok_or("the slot holds no zstd frame")?;
+        // The game passes the compressed size from the slot header to zstd, so
+        // decode exactly that slice. Decoding to the end of the file instead
+        // would miss a damaged length field: a smaller length truncates the
+        // frame at boot and a larger one reads past it, while both can still
+        // look valid to a decoder that ignores the header (#77).
+        let declared = u32_at(&self.raw, 0x108).ok_or("the slot has no frame length")? as usize;
+        if declared == 0 {
+            return Err("the slot's frame length is zero".into());
+        }
+        let end = self
+            .zstd_at
+            .checked_add(declared)
+            .ok_or("the slot's frame length overflows")?;
+        let frame = self.raw.get(self.zstd_at..end).ok_or_else(|| {
+            format!(
+                "the slot says its frame is {declared} bytes, but only {} bytes follow the frame start",
+                self.raw.len().saturating_sub(self.zstd_at)
+            )
+        })?;
         // The native output must match the payload ruzstd read. Giving the
         // one-shot call exactly that size catches a frame that expands to a
         // different length, and avoids allocating the game's full 64 MiB save
