@@ -28,9 +28,6 @@
         { "path": "{install}/data/config.json", "if": "{install}/portable.txt" },
         { "path": "{config}/EmblemWeave/config.json" }
       ],
-      "always": {
-        "updates/check": "false"
-      },
       "new": {
         "interface_mode": "\"standard\""
       }
