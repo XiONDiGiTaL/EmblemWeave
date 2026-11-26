@@ -66,6 +66,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     credits(ui, &p);
     updates(app, ui, &p);
     discord(app, ui, &p);
+    issue_reports(app, ui, &p);
     storage(app, ui, &p);
 
     widgets::section(ui, &p, "Legal", |ui| {
@@ -456,6 +457,79 @@ fn discord(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
             .size(11.5)
             .color(p.muted),
         );
+    });
+}
+
+/// Opt-in issue reports (src/issue_upload.rs). Off by default and nothing is sent without a report server; turning it on
+/// first shows exactly what a report holds, and the player agrees to that, not to a switch.
+fn issue_reports(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
+    widgets::section(ui, p, "Issue reports", |ui| {
+        let asking_id = egui::Id::new("issue-reports-consent");
+        let mut asking = ui.data(|d| d.get_temp::<bool>(asking_id)).unwrap_or(false);
+        let server = crate::issue_upload::endpoint(&app.config.reports.endpoint);
+        let mut on = app.config.reports.send;
+        ui.horizontal(|ui| {
+            if widgets::toggle(ui, p, &mut on).changed() {
+                if on {
+                    // Not on yet: the player reads what is sent and agrees below.
+                    asking = true;
+                } else {
+                    app.config.reports.send = false;
+                    asking = false;
+                }
+            }
+            ui.label(crate::i18n::text("Send an anonymised report when a run crashes, freezes or runs badly").color(p.body));
+        });
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::text("Report server").color(p.body));
+            ui.add(
+                egui::TextEdit::singleline(&mut app.config.reports.endpoint)
+                    .hint_text("https://…")
+                    .desired_width(320.0),
+            );
+        });
+        let note = match (&server, app.config.reports.endpoint.trim().is_empty()) {
+            (Some(url), _) => format!("Reports go to {url}."),
+            (None, true) => "No report server is set, so nothing is sent even when this is on. EmblemWeave does not run one; \
+                             a project that does gives its address to put here."
+                .to_string(),
+            (None, false) => "That address cannot be used: it must start with https:// (http:// only to this PC).".to_string(),
+        };
+        ui.label(crate::i18n::text(note).size(11.5).color(if server.is_none() && !app.config.reports.endpoint.trim().is_empty() { p.warn } else { p.muted }));
+        if asking {
+            ui.add_space(theme::SPACE_S);
+            widgets::card_frame(p, egui::Margin::same(12)).show(ui, |ui| {
+                ui.label(crate::i18n::text("What a report holds").strong().color(p.body));
+                ui.add_space(4.0);
+                for line in [
+                    "Only after a run that crashed, froze, stopped with an error, hitched badly or stayed below 28 fps.",
+                    "This run's part of fefw.log and the crash or freeze file the game wrote, with your folders, user name, PC name and Steam ID replaced by placeholders first.",
+                    "The launcher version, Windows or Linux, the graphics card, frame-time numbers and the game's display settings (no paths).",
+                    "No save data, no game files, no mods and no account. At most three crash reports and one performance report a day.",
+                    "A copy of each report is saved as fefw_last_report.json beside the game log, so you can read exactly what was sent.",
+                ] {
+                    ui.label(crate::i18n::text(format!("• {}", crate::i18n::tr(line))).size(12.0).color(p.muted));
+                }
+                ui.add_space(theme::SPACE_S);
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, p, "Send reports", true).clicked() {
+                        app.config.reports.send = true;
+                        asking = false;
+                    }
+                    if widgets::button(ui, p, "Not now", true).clicked() {
+                        asking = false;
+                    }
+                });
+            });
+        }
+        if let Some(last) = crate::engine::run_dir().map(|d| d.join("fefw_last_report.json")).filter(|f| f.is_file()) {
+            ui.add_space(theme::SPACE_S);
+            if widgets::button(ui, p, "Show the last report", true).clicked() {
+                let _ = std::process::Command::new("explorer").arg("/select,").arg(&last).spawn();
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(asking_id, asking));
     });
 }
 

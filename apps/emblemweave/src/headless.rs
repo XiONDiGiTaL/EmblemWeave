@@ -282,6 +282,13 @@ fn play(config: &Config, out: &Out) -> i32 {
     while seen && crate::platform::game_running() {
         std::thread::sleep(Duration::from_secs(1));
     }
+    // The launch thread may still be writing the opt-in issue report; give it the upload's own time limit.
+    for _ in 0..25 {
+        if !crate::engine::launch_threads_active() {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
     out.result(&[("played", Value::Bool(seen))]);
     if seen { 0 } else { 1 }
 }

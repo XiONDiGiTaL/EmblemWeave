@@ -22,6 +22,7 @@ mod exe_icon;
 mod gamedata;
 mod headless;
 mod i18n;
+mod issue_upload;
 mod ingame;
 mod jobs;
 mod labb;

@@ -429,6 +429,16 @@ impl Default for Input {
     }
 }
 
+/// Anonymised issue reports (src/issue_upload.rs): sent only when `send` is on and a server is named.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reports {
+    /// The player agreed, on About > Issue reports, after reading what is sent.
+    pub send: bool,
+    /// The report server (`https://…`). Empty: `EW_REPORT_URL`, else none, and nothing is sent.
+    pub endpoint: String,
+}
+
 /// Update checking and the launcher's own overlay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -663,6 +673,8 @@ pub struct Config {
     /// `system.language`, reported to the runtime through nn::oe.
     pub ui_language: Language,
     pub updates: Updates,
+    /// Opt-in issue reports after a run that went wrong (src/issue_upload.rs). Off, and no server, by default.
+    pub reports: Reports,
     pub discord: Discord,
     pub graphics_preset: GraphicsPreset,
     pub hud: Hud,

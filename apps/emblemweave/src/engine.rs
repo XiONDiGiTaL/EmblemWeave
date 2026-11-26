@@ -4327,6 +4327,11 @@ pub fn effective_save_dir() -> Option<PathBuf> {
     map.get("fs.save_dir").cloned().map(PathBuf::from)
 }
 
+/// fefw.ini as `section.key` → value, for the issue report (src/issue_upload.rs).
+pub(crate) fn ini_values(text: &str) -> std::collections::HashMap<String, String> {
+    ini_parse(text)
+}
+
 fn ini_parse(text: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let mut section = String::new();
@@ -5251,6 +5256,13 @@ fn alert(text: String, good: bool) {
 }
 
 static WATCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Launch threads still alive: the watch, then the wait for the exit and the opt-in report.
+static LAUNCH_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a launch thread is still running (the game, or its issue report after it).
+pub fn launch_threads_active() -> bool {
+    LAUNCH_THREADS.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
 
 /// Whether a launch is still being watched, so the window keeps repainting
 /// until its finding arrives.
@@ -5306,6 +5318,11 @@ fn presented_fps(text: &str) -> Option<f32> {
             let rest = l.split("fps ").nth(1)?;
             rest.split(',').next()?.trim().parse::<f32>().ok()
         })
+}
+
+/// The graphics card a game log names, for the issue report.
+pub(crate) fn log_gpu_name(text: &str) -> Option<String> {
+    gpu_name(text)
 }
 
 fn gpu_name(text: &str) -> Option<String> {
@@ -5368,8 +5385,24 @@ fn tidy_link_temps(builds: &Path) -> usize {
 /// leaving the player with nothing to report but "black screen".
 fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
     WATCHING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    LAUNCH_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::thread::spawn(move || {
-        let _done = WatchGuard;
+        let launched = std::time::SystemTime::now();
+        let exited = {
+            let _done = WatchGuard;
+            watch_until_first_frame(&mut child, &log, from)
+        };
+        // The window stops repainting for the launch here; this thread stays until the game exits, for the opt-in
+        // issue report (src/issue_upload.rs), which does nothing unless the player turned it on and named a server.
+        let status = exited.or_else(|| child.wait().ok());
+        crate::issue_upload::after_run(&log, from, launched, status.and_then(|s| s.code()));
+        LAUNCH_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// The watch itself: the exit status when the game ended before it drew (or gave up), `None` once it drew or 90 s passed.
+fn watch_until_first_frame(child: &mut std::process::Child, log: &Path, from: u64) -> Option<std::process::ExitStatus> {
+    {
         let started = std::time::Instant::now();
         let mut offset = from;
         loop {
@@ -5388,7 +5421,7 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
                         false,
                     );
                 }
-                return;
+                return Some(status);
             }
             let text = new_log_text(&log, &mut offset);
             if let Some(fps) = presented_fps(&text) {
@@ -5399,7 +5432,7 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
                     ),
                     true,
                 );
-                return;
+                return None;
             }
             if started.elapsed().as_secs() >= 90 {
                 let gpu = gpu_name(&std::fs::read_to_string(&log).unwrap_or_default())
@@ -5411,10 +5444,10 @@ It is running on {gpu}. Try Windowed or Borderless on Graphics, update that card
                     ),
                     false,
                 );
-                return;
+                return None;
             }
         }
-    });
+    }
 }
 
 /// Start the game from the run folder. It runs on its own; the launcher
