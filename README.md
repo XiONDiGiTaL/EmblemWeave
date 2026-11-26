@@ -115,8 +115,8 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | 🤝 **Kudos** | Individuals whose work, preservation efforts, or continued development helped make EmblemWeave possible. |
 | [Goldoire](https://github.com/Goldoire) | Original creator of fefw-recomp. |
 | [Obersteinn](https://github.com/Obersteinn) | Preserved the final original fefw-recomp release and its supporting files. |
-| [metrist38](https://github.com/metrist38/fefw-recomp) | [fefw-recomp](https://github.com/metrist38/fefw-recomp) A continuation of the original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
-| [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber) | [ObeliskChamber](https://github.com/xinthefreefallxai/ObeliskChamber), based on the same origin source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
+| [metrist38](https://github.com/metrist38/fefw-recomp) | [fefw-recomp](https://github.com/metrist38/fefw-recomp), A continuation of the original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
+| [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber) | [ObeliskChamber](https://github.com/xinthefreefallxai/ObeliskChamber), based on the same original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
 | 🧩 **Resources** | Projects, libraries, frameworks and tools that make EmblemWeave possible. |
 | [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) | Shader translation. |
 | [egui](https://github.com/emilk/egui) | Launcher interface. |
