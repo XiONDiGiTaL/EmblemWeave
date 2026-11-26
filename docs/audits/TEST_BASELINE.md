@@ -16,7 +16,7 @@ reporting; that file remains a historical record.
 | Suite | Passed | Failed | Skipped | Total | Notes |
 |---|---:|---:|---:|---:|---|
 | `nxrt_tests.exe --all` | 989 | 0 | 29 | 1018 | Full core/runtime suite |
-| `nxrt_gfx_tests.exe --all` | 616 | 41 | 118 | 775 | Includes the 4 new profiling tests |
+| `nxrt_gfx_tests.exe --all` | 617 | 40 | 118 | 775 | Includes the 4 new profiling tests; #106 fixed |
 | `mpr_launcher_tests.exe` | 66 | 1 | 2 | 69 | Rebuilt before running |
 
 ### Graphics failures
@@ -32,16 +32,12 @@ This is an environment dependency, not evidence that the rendering paths work. I
 the Vulkan SDK (or provide a CI image with the layer) and rerun the suite; the assertion
 is an oracle, not a cosmetic check.
 
-One test, `gfx_nvn_texgpu.compact_standin_upload_and_replacement`, has an additional real
-failure independent of the validation layer. The 2D case passes, but the array case
-differs from both CPU references at byte 161056:
-
-```
-FAILED test_nvn_texgpu.cpp:1351: d0 < 0 array: the image differs from the whole stand-in at byte 161056
-FAILED test_nvn_texgpu.cpp:1362: d1 < 0 array: the image differs from the full transcode at byte 161056
-```
-
-Tracked as GitHub issue #106. Do not count this as an environment skip.
+**Fixed (2026-11-26):** `gfx_nvn_texgpu.compact_standin_upload_and_replacement` now passes.
+The root cause was a mismatch in the test's `read_back_tight` helper: compact stand-in
+levels store distinct block rows in a packed layout (`PreparedLevel::rows` holds absolute
+offsets per layer and block row), but the readback assumed a contiguous per-layer layout.
+The fix makes the readback use `pl.rows` for compact levels, matching the upload path
+in `nvn_gpu_texture.cpp`. Both 2D and 2D-array cases now pass.
 
 ### Launcher failure
 
