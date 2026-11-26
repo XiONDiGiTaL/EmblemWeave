@@ -54,6 +54,7 @@
 #include "nxrt/runtime.h"
 #include "nxrt/timestep.h"
 #include "nxrt/tt.h"
+#include "nxrt/update_check.h"
 #include "menu_mouse.h"
 #include "play_engine.h"
 #include "play_game.h"
@@ -1503,6 +1504,7 @@ bool start(const StartOptions& opt) {
                 }
                 st.overlay->install_on_renderer();
                 apply_fps_counter(st.settings.fps);
+                if (st.window) update::start();   // a newer release? (the overlay says so; not in headless test runs)
             }
         }
     }

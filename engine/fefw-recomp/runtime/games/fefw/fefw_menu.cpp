@@ -57,6 +57,7 @@
 #include "nxrt/haptic.h"
 #include "nxrt/platform.h"
 #include "nxrt/render_status.h"
+#include "nxrt/update_check.h"
 #include "play_selftest.h"   // play::exit_process (Quit game)
 #include "play_types.h"
 #include "play_ui.h"
@@ -166,6 +167,7 @@ constexpr IniKey kIni[] = {
     {"nvn", "prewarm_threads", "0", Norm::Number, true, "prewarm threads"},
     {"nvn", "shader_preload_threads", "6", Norm::Number, true, "shader preload threads"},
     {"nvn", "lean_draws", "1", Norm::Bool, true, "lean draw replay"},
+    {"update", "check", "1", Norm::Bool, false, "update check"},
 };
 
 const IniKey* ini_key(const char* sec, const char* key) {
@@ -1823,6 +1825,18 @@ void game_page(UiHost& host, Menu& m) {
                       "FFmpeg only: Hardware decodes AV1 on the GPU through D3D11VA and copies the NV12 frames back; if the GPU or driver cannot, FFmpeg's libdav1d runs. Software uses libdav1d directly. Applies at the next start.",
                       kHwNames, kHwVals, 2);
         end_rows();
+    }
+    if (!update::current_version().empty()) {   // the launcher (or the build) named this release
+        section("Updates");
+        if (begin_rows("upd")) {
+            constexpr const char* kNames[] = {"Off", "On"};
+            constexpr const char* kVals[] = {"0", "1"};
+            ini_combo_row(m, *ini_key("update", "check"), "Check for updates",
+                          "Asks GitHub once at start whether a newer release is out, and says so. Nothing is downloaded: the launcher installs updates.",
+                          kNames, kVals, 2);
+            end_rows();
+        }
+        update::start();   // turned on just now (it runs once, and not at all while off)
     }
 }
 

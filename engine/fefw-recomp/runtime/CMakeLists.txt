@@ -188,7 +188,7 @@ if(EXISTS "${NXRT_RECOMP_INCLUDE}")
 endif()
 target_link_libraries(nxrt PUBLIC nxrt_zstd)
 if(WIN32)
-    target_link_libraries(nxrt PUBLIC psapi)
+    target_link_libraries(nxrt PUBLIC psapi winhttp)   # winhttp: the release check (src/diag/update_check.cpp)
 else()
     find_package(Threads REQUIRED)
     target_link_libraries(nxrt PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
@@ -230,6 +230,16 @@ target_compile_definitions(nxrt PUBLIC
     NXRT_UPSCALER_NIS=${_nxrt_upscaler_nis}
     NXRT_UPSCALER_MAKO=${_nxrt_upscaler_mako}
 )
+# The release check (include/nxrt/update_check.h). EmblemWeave builds the runtime on the player's PC, so the launcher names its
+# release in fefw.ini ([update] version, repo) at every Play; a build may also name one here (NXRT_RELEASE_VERSION / NXRT_UPDATE_REPO,
+# fefw-recomp's release package), which the ini overrides.
+if(NXRT_RELEASE_VERSION)
+    set(_nxrt_update_defs "NXRT_RELEASE_VERSION=\"${NXRT_RELEASE_VERSION}\"" "NXRT_UPDATE_REPO=\"${NXRT_UPDATE_REPO}\"")
+    if(NXRT_RELEASE_BY_TAG)
+        list(APPEND _nxrt_update_defs NXRT_RELEASE_BY_TAG=1)
+    endif()
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/diag/update_check.cpp" PROPERTIES COMPILE_DEFINITIONS "${_nxrt_update_defs}")
+endif()
 include(cmake/media_deps.cmake)   # libvpx for the Switch 2 video decoders (optional)
 
 if(NXRT_BUILD_TESTS)

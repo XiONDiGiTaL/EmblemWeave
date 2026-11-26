@@ -18,6 +18,7 @@
 #include "nxrt/game.h"
 #include "nxrt/menu_i18n.h"
 #include "nxrt/services.h"
+#include "nxrt/update_check.h"
 #include "play_ui.h"
 
 namespace nxrt::play {
@@ -97,6 +98,11 @@ void draw_about_page(const std::string& settings_path) {
     ImGui::TextDisabled("%s", tr("Runtime commit: not recorded in this build"));
 #endif
     ImGui::Text(tr("Built %s %s"), __DATE__, __TIME__);
+    if (const std::string release = update::current_version(); !release.empty()) {
+        ImGui::Text(tr("Release %s"), release.c_str());
+        if (const std::string newer = update::available(); !newer.empty())
+            ImGui::TextColored(ImVec4(0.55f, 0.86f, 0.55f, 1.0f), tr("Version %s is available. Open the launcher to update."), newer.c_str());
+    }
 
     ImGui::SeparatorText(tr("Folders and files in use"));
     path_row("Working folder", absolute("."));

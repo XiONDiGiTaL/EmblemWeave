@@ -32,6 +32,7 @@
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
 #include "nxrt/menu_i18n.h"
+#include "nxrt/update_check.h"
 #include "nxrt/mod_panels.h"
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
@@ -350,7 +351,13 @@ struct Overlay::Impl {
     std::string mods_text;
     double mods_since_s = -1.0, mods_read_s = -1e9;
     bool mods_note_visible(double now_s);
-    void draw_mods_note(const FrameInfo& f);
+    float draw_mods_note(const FrameInfo& f);   // returns the y just under the note
+    // the note about a newer release (update::available()): up for kUpdateNoteSeconds of drawn frames while neither the menu nor the
+    // keyboard is open, so a loading stall does not use it up; the version is re-read once a second
+    std::string update_text;
+    double update_shown_s = 0, update_read_s = -1e9;
+    bool update_note_visible(double now_s, double dt_s);
+    void draw_update_note(const FrameInfo& f, float below);
     void draw_note(const FrameInfo& f);
 
     // The on-screen keyboard (services_api.h swkbdui). kb_mu guards the question and its text: key events edit it on the game's main thread,
@@ -1288,7 +1295,7 @@ bool Overlay::Impl::mods_note_visible(double now_s) {
     return now_s - mods_since_s < kModsNoteSeconds;
 }
 
-void Overlay::Impl::draw_mods_note(const FrameInfo& f) {
+float Overlay::Impl::draw_mods_note(const FrameInfo& f) {
     ImFont* font = ImGui::GetFont();
     const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 50.f), 13.f, 32.f);
     const float pad = size * 0.5f;
@@ -1301,6 +1308,42 @@ void Overlay::Impl::draw_mods_note(const FrameInfo& f) {
     dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), ImGui::GetColorU32(ui_theme::warn),
                 size * 0.3f, 0, 1.0f);
     dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), ImGui::GetColorU32(ui_theme::warn), mods_text.c_str());
+    return y0 + sz.y + 3.f * pad;
+}
+
+constexpr double kUpdateNoteSeconds = 15.0;
+bool Overlay::Impl::update_note_visible(double now_s, double dt_s) {
+    if (update_shown_s >= kUpdateNoteSeconds) return false;
+    if (now_s - update_read_s >= 1.0) {
+        update_read_s = now_s;
+        const std::string v = update::available();
+        update_text.clear();
+        if (!v.empty()) {
+            char text[160];
+            std::snprintf(text, sizeof text, tr("Version %s is available. Open the launcher to update."), v.c_str());
+            update_text = text;
+        }
+    }
+    if (update_text.empty()) return false;
+    update_shown_s += std::clamp(dt_s, 0.0, 0.1);
+    return true;
+}
+
+// At the top centre. below: where the mods note ends when that is up, else 0
+void Overlay::Impl::draw_update_note(const FrameInfo& f, float below) {
+    ImFont* font = ImGui::GetFont();
+    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 50.f), 13.f, 32.f);
+    const float pad = size * 0.5f;
+    const float y = std::max(size, below);
+    const float W = static_cast<float>(f.extent.width);
+    const float wrap = std::max(1.f, W - 4.f * pad);
+    const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, wrap, update_text.c_str());
+    const float x0 = (W - sz.x) * 0.5f - pad;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + sz.x + 2.f * pad, y + sz.y + 2.f * pad),
+                      ImGui::GetColorU32(ui_theme::with_alpha(ui_theme::surface_hi, 0.96f)), size * 0.3f);
+    dl->AddRect(ImVec2(x0, y), ImVec2(x0 + sz.x + 2.f * pad, y + sz.y + 2.f * pad), ImGui::GetColorU32(ui_theme::ok), size * 0.3f, 0, 1.0f);
+    dl->AddText(font, size, ImVec2(x0 + pad, y + pad), ImGui::GetColorU32(ui_theme::ok), update_text.c_str(), nullptr, wrap);
 }
 
 void Overlay::Impl::draw_note(const FrameInfo& f) {
@@ -1346,7 +1389,9 @@ void Overlay::draw(const FrameInfo& f) {
     const bool mods_on = s.mods_note_visible(now_s) && !s.ctx.renderer->capture_pending();
     const bool ptr_on = s.ptr_show.load(std::memory_order_relaxed) && (s.ptr_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
     const bool kb_on = s.kb_poll();
-    if (!s.visible && !counter_on && !note_on && !mods_on && !ptr_on && !kb_on) {
+    const bool update_on = !s.visible && !kb_on && !s.ctx.renderer->capture_pending() &&
+                           s.update_note_visible(now_s, std::chrono::duration<double>(now - s.last_frame).count());
+    if (!s.visible && !counter_on && !note_on && !mods_on && !update_on && !ptr_on && !kb_on) {
         s.last_frame = now;
         s.counter_was_on = false;
         return;
@@ -1369,7 +1414,7 @@ void Overlay::draw(const FrameInfo& f) {
     }
     // a screenshot leaves the counter out unless asked for; with the menu hidden there is then nothing to draw
     const bool show_counter = counter_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !show_counter && !note_on && !mods_on && !ptr_on && !kb_on) {
+    if (!s.visible && !show_counter && !note_on && !mods_on && !update_on && !ptr_on && !kb_on) {
         s.last_frame = now;
         return;
     }
@@ -1392,10 +1437,14 @@ void Overlay::draw(const FrameInfo& f) {
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     if (s.visible && !kb_on) s.build_ui();    // the keyboard is modal: the menu comes back once it is answered
-    if (kb_on) s.draw_keyboard(now_s);
+    if (kb_on) {
+        services::modapi::set_panel_visible(false);   // the keyboard stands in front of the menu
+        s.draw_keyboard(now_s);
+    }
     if (show_counter) s.draw_counter(f, now_s);
     if (note_on) s.draw_note(f);
-    if (mods_on) s.draw_mods_note(f);
+    const float under_mods = mods_on ? s.draw_mods_note(f) : 0.f;
+    if (update_on) s.draw_update_note(f, under_mods);
     if (ptr_on) {   // a plain arrow, white with a dark outline, sized with the frame height
         const float k = std::max(1.f, static_cast<float>(f.extent.height) / 720.f);
         const float x = s.ptr_x.load(std::memory_order_relaxed), y = s.ptr_y.load(std::memory_order_relaxed);
