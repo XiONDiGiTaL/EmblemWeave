@@ -124,7 +124,7 @@ int g_fail_streak = 0;
 int g_running = 0;                         // jobs being built by the workers right now
 
 // Tells the overlay how much shader work is waiting (queued + running). Caller holds g_mu.
-void publish_backlog_locked() { nxrt::gfx::set_shader_backlog(static_cast<int>(g_exact_q.size() + g_task_q.size() + g_hot_q.size() + g_pre_q.size() + g_cold_q.size() + g_up_q.size()) + g_running + g_up_running); }
+void publish_backlog_locked() { nxrt::gfx::set_shader_backlog(static_cast<int>(g_exact_q.size() + g_task_q.size() + g_hot_q.size() + g_pre_q.size() + (g_cold ? g_cold_q.size() : 0) + g_up_q.size()) + g_running + g_up_running); }
 
 thread_local const GraphicsKey* t_link_key = nullptr;      // the draw being linked on this thread, for the log line of a slow part
 
@@ -384,11 +384,14 @@ VkPipeline get_part(const std::string& key, bool render, const std::function<VkP
         Entry& e = it->second;
         if (e.state != 2) {
             const auto t0 = Clock::now();
+            const bool on_rt = render && nxrt::hitch_on_render_thread();
+            const uint64_t hp0 = on_rt ? nxrt::hitch_ticks() : 0;
             if (render && e.owner && !e.boosted.exchange(true)) boost_thread(e.owner);
             {
                 NXFT("pipe.libwait");
                 g_cv.wait(lk, [&] { return e.state == 2 || g_stop; });
             }
+            if (on_rt) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - hp0);
             if (render) {
                 ++g_stats.parts_waited;
                 g_stats.wait_ms += ms_since(t0);
@@ -658,6 +661,7 @@ void learn_raster(const RasterKey& r) {
     for (const RasterKey& k : g_rasters)
         if (k == r) return;
     g_rasters.push_back(r);
+    if (!g_cold) return;
     for (const auto& p : g_programs) {
         // A program no command buffer has been recorded with is not drawn: with the speculative queue off ([nvn] gpl_cold) its part for this raster
         // is built when a draw does ask for it, not now.
@@ -825,6 +829,7 @@ void gpl_program(const ShaderInfo* const stages[6], bool covered) {
     }
     if (!g_seen.insert(prog).second) return;
     ++g_stats.prog_new;
+    if (!g_cold) return;
     g_programs.push_back(prog);
     if (g_programs.size() > 512) g_programs.pop_front();
     queue_program(prog, false);
@@ -839,7 +844,7 @@ void gpl_program_bound(const ShaderInfo* const stages[6]) {
     ++g_stats.prog_bound;
     if (g_stop || g_covered.count(prog) || !g_hot.insert(prog).second) return;
     ++g_stats.prog_bound_new;
-    if (g_seen.insert(prog).second) {
+    if (g_seen.insert(prog).second && g_cold) {
         g_programs.push_back(prog);
         if (g_programs.size() > 512) g_programs.pop_front();
     }
@@ -854,10 +859,11 @@ void gpl_note_presents(uint64_t presents) {
 }
 
 namespace {
+constexpr int64_t kFramesFlowingNs = 2000000000LL;   // 2 s: ride through slow frames/hitches without disabling async GPL deferral (#147)
 bool frames_flowing() {
     const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
     const int64_t seen = g_frame_seen_ns.load(std::memory_order_relaxed);
-    return seen != 0 && now - seen < 100000000;
+    return seen != 0 && now - seen < kFramesFlowingNs;
 }
 bool part_done_locked(const std::string& key) {
     auto it = g_libs.find(key);
