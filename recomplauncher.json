@@ -1,0 +1,100 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "repo": "XiONDiGiTaL/EmblemWeave",
+  "name": "EmblemWeave",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your own dump of Fire Emblem: Fortune's Weave: a .nup, a .nx, a plaintext .nsp or .xci, or an extracted folder with exefs and romfs.",
+      "formats": [
+        { "type": "file", "extensions": ["nup", "nx", "nsp", "xci"] },
+        { "type": "folder" }
+      ]
+    }
+  ],
+  "start": {
+    "program": ["EmblemWeave.exe"],
+    "args": ["--game", "{input:game}"]
+  },
+  "system": {
+    "windows": { "version": "10", "graphics": { "vulkan": "1.3" } }
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "json",
+      "file": [
+        { "path": "{install}/data/config.json", "if": "{install}/portable.txt" },
+        { "path": "{config}/EmblemWeave/config.json" }
+      ],
+      "new": {
+        "interface_mode": "\"standard\""
+      }
+    }
+  ],
+  "saves": ["{install}/data/save"],
+  "folders": {
+    "saves": [
+      { "path": "{install}/data/save", "if": "{install}/portable.txt" },
+      { "path": "{config}/EmblemWeave/save" }
+    ],
+    "logs": [
+      { "path": "{install}/data/logs", "if": "{install}/portable.txt" },
+      { "path": "{config}/EmblemWeave/logs" }
+    ]
+  },
+  "settings": [
+    {
+      "id": "display_mode", "label": "Display mode", "group": "Display",
+      "help": "Windowed, borderless or exclusive. Used when you press Play in EmblemWeave.",
+      "choices": [
+        { "label": "Borderless window", "set": { "graphics/display_mode": "\"Borderless window\"" } },
+        { "label": "Exclusive fullscreen", "set": { "graphics/display_mode": "\"Exclusive fullscreen\"" } },
+        { "label": "Windowed", "set": { "graphics/display_mode": "\"Windowed\"" } }
+      ],
+      "defaults": { "graphics/display_mode": "\"Borderless window\"" }
+    },
+    {
+      "id": "resolution", "label": "Resolution", "group": "Display",
+      "help": "The picture's size and the window's. Native display keeps the game's own console size.",
+      "choices": [
+        { "label": "Native display", "set": { "graphics/resolution": "\"Native display\"" } },
+        { "label": "1280 x 720", "set": { "graphics/resolution": "\"1280 × 720\"" } },
+        { "label": "1920 x 1080", "set": { "graphics/resolution": "\"1920 × 1080\"" } },
+        { "label": "2560 x 1440", "set": { "graphics/resolution": "\"2560 × 1440\"" } },
+        { "label": "3840 x 2160", "set": { "graphics/resolution": "\"3840 × 2160\"" } }
+      ],
+      "defaults": { "graphics/resolution": "\"Native display\"" }
+    },
+    {
+      "id": "vsync", "label": "VSync", "group": "Display",
+      "help": "Waits for your screen's refresh before showing each frame, so the picture never tears.",
+      "choices": [
+        { "label": "On", "set": { "graphics/vsync": "true" } },
+        { "label": "Off", "set": { "graphics/vsync": "false" } }
+      ],
+      "defaults": { "graphics/vsync": "true" }
+    },
+    {
+      "id": "frame_limit", "label": "Frame-rate limit", "group": "Display",
+      "help": "Caps how often frames are shown. The game's own simulation keeps its tick.",
+      "slider": { "key": "graphics/frame_limit", "min": 30, "max": 240, "step": 1, "format": "%g" },
+      "defaults": { "graphics/frame_limit": "60" }
+    },
+    {
+      "id": "upscaling", "label": "Upscaling", "group": "Picture",
+      "help": "FSR 1.0 works on any graphics card. Off keeps the native render scale.",
+      "choices": [
+        { "label": "Off", "set": { "graphics/upscaling": "\"Off\"" } },
+        { "label": "FSR 1.0", "set": { "graphics/upscaling": "\"FSR 1.0\"" } },
+        { "label": "MAKO (spatial)", "set": { "graphics/upscaling": "\"MAKO (spatial)\"" } }
+      ],
+      "defaults": { "graphics/upscaling": "\"Off\"" }
+    }
+  ],
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your save, its backups and your save profiles.", "open": "saves" },
+    { "id": "logs", "label": "Logs", "help": "EmblemWeave's build and game logs, for a bug report.", "open": "logs" }
+  ]
+}
