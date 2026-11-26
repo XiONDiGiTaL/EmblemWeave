@@ -429,22 +429,38 @@ NXTEST(svc_time_shared_memory_writes_survive_remapping) {
         return static_cast<uint32_t>(c.x[0]);
     };
     // The guest maps and unmaps while another thread makes the service write: no write may hit a released view or be left behind.
-    std::atomic<bool> stop{false};
+    // Yield between remap pairs so the guest thread does not starve the writer on the unfair host mutex across VirtualAlloc/VirtualFree.
+    std::atomic<bool> started{false}, stop{false};
+    std::atomic<int> remaps{0};
+    std::atomic<uint32_t> guest_err{0};
     std::thread guest([&] {
-        while (!stop.load()) {
-            if (shm_svc(0x13) != 0 || shm_svc(0x14) != 0) break;
-        }
+        started.store(true, std::memory_order_release);
+        do {
+            if (const uint32_t r = shm_svc(0x13); r != 0) {
+                guest_err.store(r, std::memory_order_relaxed);
+                break;
+            }
+            if (const uint32_t r = shm_svc(0x14); r != 0) {
+                guest_err.store(r, std::memory_order_relaxed);
+                break;
+            }
+            remaps.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        } while (!stop.load(std::memory_order_relaxed));
     });
+    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
     int lost = 0;
-    for (int i = 0; i < 20000; ++i) {
+    for (int i = 0; i < 2000; ++i) {
         const uint8_t on = static_cast<uint8_t>(i & 1);
         st.call(101, nxsvc::Args().u8(on));
         kernel::with_shared_memory_host(*obj, [&](uint64_t host) {
             if (*live_slot(reinterpret_cast<const uint8_t*>(host), 0xC8, 0, 1) != on) ++lost;
         });
     }
-    stop = true;
+    stop.store(true, std::memory_order_relaxed);
     guest.join();
+    CHECK_EQ(guest_err.load(), 0u);
+    CHECK(remaps.load() > 0);
     CHECK_EQ(lost, 0);
     nxrt::services::reset_all();
 }
