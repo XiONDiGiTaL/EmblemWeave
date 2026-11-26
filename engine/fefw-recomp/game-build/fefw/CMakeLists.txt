@@ -129,6 +129,13 @@ target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fonts")
 configure_file("${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "${CMAKE_CURRENT_BINARY_DIR}/fonts/DejaVuSans.ttf" COPYONLY)
 configure_file("${FEFW_RUNTIME_DIR}/assets/fonts/Sora.ttf" "${CMAKE_CURRENT_BINARY_DIR}/fonts/Sora.ttf" COPYONLY)
+# The F1 menu's translation tables ([gfx] ui_language, runtime src/gfx/menu_i18n.cpp reads locales\<name>.ini next to the exe). Copied at
+# configure like the fonts, so every build carries the current ones; build_fefw.ps1 configures before each build.
+file(GLOB FEFW_MENU_LOCALES CONFIGURE_DEPENDS "${FEFW_ROOT}/locales/*.ini")
+foreach(_loc ${FEFW_MENU_LOCALES})
+    get_filename_component(_loc_name "${_loc}" NAME)
+    configure_file("${_loc}" "${CMAKE_CURRENT_BINARY_DIR}/locales/${_loc_name}" COPYONLY)
+endforeach()
 # The processor features this build's lifted libraries need (recomp/games/fefw/CMakeLists.txt FEFW_CPU_VARIANT): the stub passes the
 # them to the runtime, which checks the processor before the first game instruction (fefw_cpu.h). EmblemWeave names the variant in
 # FEFW_CPU_VARIANT (apps/emblemweave/src/cpu.rs): fma (FMA3 + AVX, the default) or compat (SSE4.2 + POPCNT).

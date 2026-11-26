@@ -5110,11 +5110,37 @@ pub fn adopt(
 /// volume go into `controls.ini`, which holds play mode's `[display]` and
 /// `[audio]` sections. A key the game's own menu has changed since the last
 /// write is left alone: the player made that choice in the game.
+/// What the launcher itself tells the game at every Play, beside the Graphics,
+/// Audio and Performance pages: the in-game release check (`[update]`, runtime
+/// `src/diag/update_check.cpp`) and the F1 menu's language (`[gfx]
+/// ui_language`, runtime `src/gfx/menu_i18n.cpp`).
+#[derive(Debug, Clone, Copy)]
+pub struct LauncherKeys {
+    /// Updates > Check for updates: the game asks too, once at start.
+    pub update_check: bool,
+    /// The launcher's language code; the F1 menu loads `locales/<code>.ini`
+    /// when the game has that table and stays in English otherwise.
+    pub ui_language: &'static str,
+}
+
+impl Default for LauncherKeys {
+    fn default() -> Self {
+        Self { update_check: true, ui_language: "en" }
+    }
+}
+
+impl LauncherKeys {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self { update_check: config.updates.check, ui_language: config.ui_language.code() }
+    }
+}
+
 fn write_settings(
     dir: &Path,
     g: &crate::config::Graphics,
     a: &crate::config::Audio,
     p: &crate::config::Performance,
+    l: &LauncherKeys,
     applied: &mut Values,
 ) -> Result<bool, String> {
     let fefw_path = dir.join("fefw.ini");
@@ -5135,14 +5161,27 @@ fn write_settings(
         fefw = set_ini_key(&fefw, "fs", "mods", &mods);
         touched = true;
     }
+    // The game's release check names this launcher's release: the runtime is
+    // built on this PC, so it cannot know which release it belongs to. These
+    // two are the launcher's facts, not choices, so they are always written.
+    for (key, value) in [("version", env!("CARGO_PKG_VERSION")), ("repo", crate::updater::REPO)] {
+        if ini_parse(&fefw).get(&format!("update.{key}")).map(String::as_str) != Some(value) {
+            fefw = set_ini_key(&fefw, "update", key, value);
+            touched = true;
+        }
+    }
     let mut desired = desired_values(g, a);
     desired.extend(crate::performance::values(p));
+    // The switch and the language are choices: the F1 menu can change both,
+    // and a change made there stands until the launcher's own setting moves.
+    desired.insert("update.check".into(), if l.update_check { "1" } else { "0" }.into());
+    desired.insert("gfx.ui_language".into(), l.ui_language.into());
     for (id, value) in desired {
         let (section, key) = id.split_once('.').unwrap_or(("", ""));
         let (in_fefw, in_ctl) = match section {
             "fefw" => (true, false),
             "display" | "audio" => (false, true),
-            "nvn" | "dlss" | "gfx" | "media" | "perf" => (true, false),
+            "nvn" | "dlss" | "gfx" | "media" | "perf" | "update" => (true, false),
             _ => (true, true),
         };
         let current = if in_fefw {
@@ -5504,7 +5543,7 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
     // settings the game can act on today; it reads them from its own ini files
     // at start. A file that cannot be written must not stop the game starting.
     let mut applied = applied_values();
-    if write_settings(&dir, graphics, audio, performance, &mut applied).is_ok() {
+    if write_settings(&dir, graphics, audio, performance, &LauncherKeys::from_config(config), &mut applied).is_ok() {
         save_applied(&applied);
     }
     // ReShade is a third-party overlay; this writes only its documented custom
@@ -7131,7 +7170,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
             ..crate::config::Audio::default()
         };
         let mut applied = Values::new();
-        assert!(write_settings(&dir, &g, &a, &crate::config::Performance::default(), &mut applied).unwrap());
+        assert!(write_settings(&dir, &g, &a, &crate::config::Performance::default(), &LauncherKeys::default(), &mut applied).unwrap());
         let controls = std::fs::read_to_string(dir.join("controls.ini")).unwrap();
         assert!(
             controls.contains("[audio]\nvolume = 1.85"),
@@ -7194,7 +7233,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         };
         let mut applied = Values::new();
         assert!(
-            write_settings(&dir, &g, &a, &crate::config::Performance::default(), &mut applied).unwrap(),
+            write_settings(&dir, &g, &a, &crate::config::Performance::default(), &LauncherKeys::default(), &mut applied).unwrap(),
             "the first start writes"
         );
 
@@ -7256,7 +7295,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
             ..crate::config::Graphics::default()
         };
         assert!(
-            write_settings(&dir, &g, &crate::config::Audio::default(), &crate::config::Performance::default(), &mut applied).unwrap(),
+            write_settings(&dir, &g, &crate::config::Audio::default(), &crate::config::Performance::default(), &LauncherKeys::default(), &mut applied).unwrap(),
             "a changed setting is written"
         );
         let text = std::fs::read_to_string(&game).unwrap();
@@ -7364,7 +7403,7 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let patched = original.replace("window_mode = borderless", "window_mode = exclusive");
         std::fs::write(&controls, &patched).unwrap();
         assert!(
-            !write_settings(&dir, &g, &crate::config::Audio::default(), &crate::config::Performance::default(), &mut applied).unwrap(),
+            !write_settings(&dir, &g, &crate::config::Audio::default(), &crate::config::Performance::default(), &LauncherKeys::default(), &mut applied).unwrap(),
             "nothing to write"
         );
         let text = std::fs::read_to_string(&controls).unwrap();
