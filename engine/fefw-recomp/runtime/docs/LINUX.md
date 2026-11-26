@@ -27,13 +27,14 @@ What is ported to the platform boundary but not yet linked into a Linux executab
 - host device / Steam Deck detection (DMI files and `SteamDeck=1` instead of the registry);
 - thread affinity parse (`std::strtoull`), the WAV writer's path (`fopen` with UTF-8), the video decoder's timing
   (`platform::now_ns`) and priority, and the audio renderer's thread boost (nice instead of MMCSS);
-- the UI language from the process locale and the `controls.ini` lookup without `GetPrivateProfileStringA`.
+- the UI language from the process locale and the `controls.ini` lookup without `GetPrivateProfileStringA`;
+- guest sync objects (`src/os/sync.cpp`) on `platform::Mutex` / `platform::Cond` / `platform::RWLock` (the Windows `sync`
+  test group still passes all 17 cases after the change).
 
 What still blocks a full Linux link (the current frontier, all in `src/`):
 
 | File | Windows dependency | Replacement |
 | --- | --- | --- |
-| `os/sync.cpp` | SRWLOCK / CONDITION_VARIABLE, `GetCurrentThreadId` | the platform mutex/condition/rwlock API |
 | `services/fs_volume.cpp` | `CreateFileW`/`ReadFile`/`WriteFile`, `MoveFileExW`, `OpenProcess` | `platform::File` plus positioned I/O and truncate; `/proc` for liveness |
 | `services/fs_romfs.cpp` | `CreateFileW`/`ReadFile`, UTF-16 conversion | `platform::File`, UTF-8 paths |
 | `services/misc.cpp` | `LoadLibraryExW`/`GetProcAddress`, `GetModuleFileNameW` | `dlopen`/`dlsym`, `/proc/self/exe` |
@@ -132,7 +133,7 @@ Third-party sources (zstd, and SDL3/Vulkan/volk/VMA/ImGui when the shell is on) 
 | --- | --- | --- |
 | Platform layer builds | yes | yes (GCC 13, Clang 18, WSL2) |
 | Platform self-test | yes | yes |
-| Core runtime builds | yes | 6 source files left (frontier above) |
+| Core runtime builds | yes | 5 source files left (frontier above) |
 | Runtime tests | yes | not yet configured |
 | Window + Vulkan | yes | no |
 | Audio device | yes (XAudio2) | no |
@@ -143,8 +144,8 @@ this build; WSL2 proves compilation and the platform contract, not RADV, PipeWir
 
 ## Roadmap
 
-1. **Core link on Linux**: port the frontier table above (`sync` first, then files, then the module loader), so `nxrt`
-   links natively. Verify with a Linux build of the runtime tests that do not need the graphics shell.
+1. **Core link on Linux**: port the frontier table above (the file services first, then `misc` and the two kernel
+   files), so `nxrt` links natively. Verify with a Linux build of the runtime tests that do not need the graphics shell.
 2. **Graphics shell**: port `src/gfx` with the vendor upscalers off, the Win32 display helper behind the platform, and
    SDL3 window/input/Vulkan surface as-is. Add the Linux equivalents of the Windows-only paths (crash shortcut,
    display modes).
