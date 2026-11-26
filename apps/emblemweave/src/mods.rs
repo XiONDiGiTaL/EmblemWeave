@@ -926,11 +926,38 @@ fn is_settings(rel: &str) -> bool {
     }
 }
 
+/// A mod's settings files, for the Mods page's Settings button: the files an
+/// update carries over, sorted, each followed by the new version's default
+/// an update put beside it (`<file>.new`), if there is one. Never an `.old`
+/// copy, a `.new` one of no settings file, or a manifest.
+pub fn settings_of(folder: &Path) -> Vec<String> {
+    let mut files = settings_files(folder);
+    files.sort_by_key(|f| f.to_lowercase());
+    files
+        .into_iter()
+        .flat_map(|f| {
+            let new = format!("{f}.new");
+            let beside = folder.join(&new).is_file().then_some(new);
+            std::iter::once(f).chain(beside)
+        })
+        .collect()
+}
+
 /// The settings files a mod folder could carry over: settings-looking, and
 /// not game data (`romfs/`) or source code (`src/`). Paths as written.
 fn settings_files(folder: &Path) -> Vec<String> {
     let mut files = Vec::new();
-    walk_rel_cased(folder, folder, &mut files);
+    // Game data and source code are never walked: a RomFS tree can hold thousands of files.
+    let Ok(entries) = std::fs::read_dir(folder) else { return files };
+    for e in entries.flatten() {
+        let Some(t) = kind(&e) else { continue };
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        if t.is_dir() && name != "romfs" && name != "src" {
+            walk_rel_cased(&e.path(), folder, &mut files);
+        } else if t.is_file() {
+            files.push(e.file_name().to_string_lossy().into_owned());
+        }
+    }
     files
         .into_iter()
         .filter(|rel| {
@@ -2237,6 +2264,23 @@ mod tests {
         for skip in ["plugin.toml", "exefs/plugin.ini", "manifest.cfg", "exefs/manifest.toml", "mod.toml", "plugin.json", "exefs/config_loader.lua", "config.dat", "settings.py", "exefs/config_menu.dll", "exefs/settings_ui.sites", "configpatch.ips", "README.md", "emblemweave.json", "manifest.json", "names.tsv", "LICENSE", "settings.ini.new", "exefs/turn.cfg.old", "config.json.new"] {
             assert!(!is_settings(skip), "{skip}");
         }
+    }
+
+    /// The Settings button lists a mod's settings files, each with the new
+    /// default an update put beside it, never other copies or manifests.
+    #[test]
+    fn the_settings_button_lists_only_settings_files() {
+        let root = temp("settings-of");
+        let m = root.join("M");
+        for f in ["exefs/settings.ini", "exefs/settings.ini.new", "exefs/gone.cfg.new", "exefs/turn.cfg.old", "exefs/m.dll", "exefs/plugin.toml", "emblemweave.json", "manifest.json", "romfs/config.ini", "src/config.toml", "Config.json", "README.md"] {
+            write(&m.join(f));
+        }
+        assert_eq!(settings_of(&m), vec!["Config.json".to_string(), "exefs/settings.ini".to_string(), "exefs/settings.ini.new".to_string()]);
+        let none = root.join("N");
+        write(&none.join("exefs/n.dll"));
+        write(&none.join("romfs/GameData/settings.ini"));
+        assert!(settings_of(&none).is_empty(), "no Settings button for a mod without settings files");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A newer upload of the other mod on a shared page is not an update.

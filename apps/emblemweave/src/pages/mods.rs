@@ -104,6 +104,7 @@ pub struct Ui {
     /// mod tree; recomputing them on every scroll frame cost more than drawing
     /// the page.
     scan: Option<Scan>,
+    deep: Option<Deep>,
 }
 
 /// A pending Install again: which mod, and how much background work had
@@ -130,9 +131,24 @@ struct Scan {
     site_problem: Option<String>,
     site_stale: bool,
     missing_code: Vec<String>,
+    /// Each mod's settings files (`mods::settings_of`), by folder: its
+    /// Settings button opens them. Read with the scan, never per frame.
+    settings: HashMap<PathBuf, Vec<String>>,
     /// The game is running (read with the scan, not on every frame): updates
     /// wait, and code mods, whose DLLs it holds, stay as they are.
     running: bool,
+}
+
+/// What the scan reads inside each mod's folder, kept while the mod folders
+/// stay the same: the rescan every `SCAN_TTL` would otherwise walk every mod
+/// for them again.
+struct Deep {
+    /// Each mod folder with its own and its `exefs` folder's modification
+    /// times, sorted: a mod added, removed, switched, replaced or given a new
+    /// file there changes it.
+    key: Vec<(PathBuf, Option<std::time::SystemTime>, Option<std::time::SystemTime>)>,
+    code_clashes: Vec<mods::Conflict>,
+    settings: HashMap<PathBuf, Vec<String>>,
 }
 
 /// Long enough that a scroll does not rescan, short enough that a folder
@@ -203,7 +219,20 @@ impl Ui {
         }
         let installed = mods::list(dir);
         let conflicts = mods::conflicts(&installed);
-        let code_clashes = mods::code_clashes(&installed);
+        let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let mut key: Vec<_> = installed.iter().map(|m| (m.path.clone(), modified(&m.path), modified(&m.path.join("exefs")))).collect();
+        key.sort();
+        if !matches!(&self.deep, Some(d) if d.key == key) {
+            let code_clashes = mods::code_clashes(&installed);
+            let settings = installed
+                .iter()
+                .map(|m| (m.path.clone(), mods::settings_of(&m.path)))
+                .filter(|(_, files)| !files.is_empty())
+                .collect();
+            self.deep = Some(Deep { key, code_clashes, settings });
+        }
+        let deep = self.deep.as_ref().expect("filled just above");
+        let (code_clashes, settings) = (deep.code_clashes.clone(), deep.settings.clone());
         let engine = crate::engine::root();
         let code = installed.iter().any(|m| m.has_code);
         let site_problem = code
@@ -232,12 +261,14 @@ impl Ui {
             site_problem,
             site_stale,
             missing_code,
+            settings,
             running: crate::platform::game_running(),
         });
     }
 
     fn invalidate_scan(&mut self) {
         self.scan = None;
+        self.deep = None;
     }
 }
 
@@ -308,6 +339,66 @@ fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone)
         Ok(i) => (format!("Installed {}", i.mods.join(", ")), Tone::Ok),
         Err(e) => (format!("Could not install {what}: {e}"), Tone::Bad),
     }
+}
+
+/// A file inside a mod, from its `/`-separated path: Explorer needs backslashes.
+fn mod_file(m: &Mod, rel: &str) -> PathBuf {
+    rel.split('/').fold(m.path.clone(), |p, part| p.join(part))
+}
+
+/// Explorer opening `path`: a file in the app Windows uses for it, a folder in
+/// a window. Explorer reads its own command line and splits a path at a comma
+/// unless the whole path is quoted, which `arg` only does for one with a
+/// space, so the path goes in quoted as it is.
+fn explorer(path: &std::path::Path) -> std::process::Command {
+    let mut c = std::process::Command::new("explorer");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.raw_arg(format!("\"{}\"", path.display()));
+    }
+    #[cfg(not(windows))]
+    c.arg(path);
+    c
+}
+
+/// The Settings button of a mod with settings files: one file opens in the
+/// app Windows has for it; with several, or one with the new version's
+/// default beside it (`<file>.new`), a menu lists them and the folder. The
+/// launcher never edits them itself.
+fn settings_button(ui: &mut egui::Ui, p: &theme::Palette, m: &Mod, files: &[String]) {
+    if let [only] = files {
+        if widgets::button(ui, p, "Settings", true).on_hover_text(format!("Opens {only} in the app Windows uses for it")).clicked() {
+            let _ = explorer(&mod_file(m, only)).spawn();
+        }
+        return;
+    }
+    let id = ui.make_persistent_id(("mod-settings", &m.path));
+    let b = widgets::button(ui, p, "Settings", true).on_hover_text("This mod's settings files");
+    if b.clicked() {
+        ui.memory_mut(|mem| mem.toggle_popup(id));
+    }
+    egui::popup_below_widget(ui, id, &b, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        ui.set_min_width(200.0);
+        // One line per path, however long.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        for f in files {
+            // `settings_of` puts a new default right under its file.
+            let new_default = f.strip_suffix(".new").is_some_and(|base| files.iter().any(|x| x == base));
+            let (label, tip) = if new_default {
+                (format!("{f} (new default)"), "The new version's default, put beside your file by an update: opens it in the app Windows uses for it")
+            } else {
+                (f.clone(), "Opens it in the app Windows uses for it")
+            };
+            if ui.button(RichText::new(label).font(theme::mono(12.0))).on_hover_text(tip).clicked() {
+                let _ = explorer(&mod_file(m, f)).spawn();
+            }
+        }
+        ui.separator();
+        if ui.button("Open mod folder").clicked() {
+            let _ = explorer(&m.path).spawn();
+        }
+    });
 }
 
 /// A launcher button's hover text. `widgets::button` drawn disabled is still
@@ -920,6 +1011,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             check_updates(&mut app.mods_ui, &installed);
         }
     }
+    let settings = app
+        .mods_ui
+        .scan
+        .as_ref()
+        .map(|scan| scan.settings.clone())
+        .unwrap_or_default();
     let running = app.mods_ui.scan.as_ref().is_some_and(|scan| scan.running);
     let busy = !app.mods_ui.jobs.is_empty() || !app.mods_ui.removing.is_empty() || !app.mods_ui.queued.is_empty() || !app.mods_ui.fetching.is_empty() || app.mods_ui.listing.is_some() || app.mods_ui.checking.is_some();
     if busy {
@@ -1206,7 +1303,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         app.mods_ui.removing.push((m.name.clone(), m.info.title.clone(), slot));
                     }
                     if widgets::button(ui, &p, "Folder", true).clicked() {
-                        let _ = std::process::Command::new("explorer").arg(&m.path).spawn();
+                        let _ = explorer(&m.path).spawn();
+                    }
+                    if let Some(files) = settings.get(&m.path) {
+                        settings_button(ui, &p, m, files);
                     }
                     if !m.info.source.is_empty() && m.info.source.starts_with("http") {
                         ui.hyperlink_to("Page", &m.info.source);
@@ -1438,7 +1538,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             if widgets::button(ui, &p, "Open mods folder", true).clicked() {
                 let _ = std::fs::create_dir_all(&dir);
-                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                let _ = explorer(&dir).spawn();
             }
         });
         ui.add_space(6.0);
@@ -1603,6 +1703,15 @@ mod tests {
             has_patches: false,
             installed_at: 0,
         }
+    }
+
+    /// A path with a comma reaches Explorer quoted as a whole.
+    #[cfg(windows)]
+    #[test]
+    fn explorer_gets_the_path_quoted() {
+        let c = explorer(std::path::Path::new(r"C:\Mods\Turn Control, v2\exefs\settings.ini"));
+        let args: Vec<_> = c.get_args().collect();
+        assert_eq!(args, vec![std::ffi::OsStr::new(r#""C:\Mods\Turn Control, v2\exefs\settings.ini""#)]);
     }
 
     /// A pending Install again lasts only while nothing moved under it.
