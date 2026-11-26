@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "revision": "2026-11-25",
   "repo": "https://github.com/XiONDiGiTaL/Trinity",
-  "summary": "One compatibility surface for EmblemWeave, fefw-recomp and ObeliskChamber, without erasing the character of any launcher.",
+  "summary": "One shared code-mod compatibility layer for EmblemWeave, fefw-recomp and ObeliskChamber, without erasing the character of any launcher.",
   "houses": [
     {
       "id": "emblemweave",
@@ -29,9 +29,9 @@
       "launcher": "Tauri 2 / Vite",
       "prefix": "fefw-recomp.",
       "accent": "#a78bfa",
-      "status": "Launcher verified",
-      "tone": "ok",
-      "evidence": "The actual fefw-recomp 0.2.13 launcher window loaded the Trinity page, built from the v0.2.13 tag. The 0.2.13 game runtime was not exercised.",
+      "status": "Runtime loaded",
+      "tone": "warn",
+      "evidence": "The actual 0.2.13 launcher window loaded the Trinity page. The prepared 0.2.13 game runtime loaded Trinity headless on API 3 with Quicksave and Turn Control and reached the first frame; no panel slot, no gameplay.",
       "adapter": "Host-styled Trinity page plus a future NXP loader",
       "listings": 5
     },
@@ -43,9 +43,9 @@
       "launcher": "Tauri 2 / Vite",
       "prefix": "obeliskchamber.",
       "accent": "#6fcf97",
-      "status": "Launcher verified",
-      "tone": "ok",
-      "evidence": "The actual ObeliskChamber 0.3.2 launcher window loaded the Trinity page. The game runtime was not exercised.",
+      "status": "Runtime loaded",
+      "tone": "warn",
+      "evidence": "The actual 0.3.2 launcher window loaded the Trinity page. The prepared 0.3.2 game runtime loaded Trinity headless on API 5, registered the panel and reached the first frame; no panel interaction or gameplay.",
       "adapter": "Panel-styled Trinity screen plus a future NXP loader",
       "listings": 5
     }
@@ -56,10 +56,10 @@
       "name": "Trinity Core",
       "kind": "runtime",
       "version": "0.2.0",
-      "status": "Runtime verified",
+      "status": "Runtime loaded",
       "tone": "warn",
       "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
-      "summary": "The shared capability registry and NXP bridge. It discovers the host, negotiates interfaces and exposes one panel model."
+      "summary": "The shared capability registry and NXP bridge. It loads in all three runtimes; panel drawing is verified only in EmblemWeave, and the Trinity panel capture is still pending."
     },
     {
       "id": "trinity.hub",
@@ -96,10 +96,10 @@
       "name": "Compatibility Bridge",
       "kind": "bridge",
       "version": "0.2.0",
-      "status": "Runtime verified",
+      "status": "Loaded on API 3/4/5",
       "tone": "warn",
       "hosts": ["emblemweave", "fefw-recomp", "obelisk-chamber"],
-      "summary": "Maps the existing NxModApi 3, 4 and 5 entry points onto NXP without forcing a host API version bump."
+      "summary": "Maps the existing NxModApi 3, 4 and 5 entry points onto NXP without forcing a host API version bump. Desktop plugin loading is verified on all three; gameplay is not."
     }
   ],
   "capabilities": [
