@@ -60,22 +60,28 @@ float from_key(int32_t k) {
     memcpy(&f, &i, 4);
     return f;
 }
-// The last value (as a key) before the answer of `test` first differs from its answer at lo; INT32_MIN when lo and hi agree.
+// A value (as a key) after which the answer of `test` changes from its answer at lo; INT32_MIN when lo and hi agree. The keys of
+// lo and hi can be further apart than an int32_t holds, hence the int64_t. `broken` counts results that are not such a place.
+long broken = 0;
 template <typename F>
 int32_t flip_point(float* value, float lo, float hi, F test) {
     const float saved = *value;
-    int32_t a = to_key(lo), b = to_key(hi);
+    int64_t a = to_key(lo), b = to_key(hi);
     *value = lo;
     const int at_lo = test();
     *value = hi;
     int32_t found = INT32_MIN;
     if (test() != at_lo) {
         while (b - a > 1) {
-            const int32_t m = a + (b - a) / 2;
-            *value = from_key(m);
+            const int64_t m = a + (b - a) / 2;
+            *value = from_key(static_cast<int32_t>(m));
             (test() == at_lo ? a : b) = m;
         }
-        found = a;
+        found = static_cast<int32_t>(a);
+        *value = from_key(found);
+        const int before = test();
+        *value = from_key(found + 1);
+        if (before != at_lo || test() == at_lo) broken++;
     }
     *value = saved;
     return found;
@@ -156,6 +162,6 @@ int main(int argc, char** argv) {
     }
     printf("%ld cases: view volume %ld differ (answers 0 / 1: %ld / %ld), cylinder %ld differ (answers 0 / 1: %ld / %ld)\n", cases, bad_v,
            ans[0], ans[1], bad_c, ans[2], ans[3]);
-    printf("edges: view volume %ld differ of %ld, cylinder %ld differ of %ld\n", edge_v, edges_v, edge_c, edges_c);
-    return bad_v || bad_c || edge_v || edge_c ? 1 : 0;
+    printf("edges: view volume %ld differ of %ld, cylinder %ld differ of %ld; %ld searches broken\n", edge_v, edges_v, edge_c, edges_c, broken);
+    return bad_v || bad_c || edge_v || edge_c || broken ? 1 : 0;
 }
