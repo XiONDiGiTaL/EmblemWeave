@@ -1046,11 +1046,15 @@ bool read_back_tight(Device& dev, Texture* t, const std::vector<be::PreparedLeve
         gpu::tex_transition(t, f, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         std::vector<VkBufferImageCopy> regions;
         for (uint32_t l = 0; l < table.size(); ++l) {
-            VkBufferImageCopy r = {};
-            r.bufferOffset = table[l].offset;
-            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, layers};
-            r.imageExtent = {table[l].width, table[l].height, table[l].depth};
-            regions.push_back(r);
+            // One copy per layer: its multi-layer copy loses the last block column of a block-compressed level with a partial row.
+            const uint64_t layer_bytes = layers ? table[l].size / layers : table[l].size;
+            for (uint32_t layer = 0; layer < layers; ++layer) {
+                VkBufferImageCopy r = {};
+                r.bufferOffset = table[l].offset + static_cast<uint64_t>(layer) * layer_bytes;
+                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1};
+                r.imageExtent = {table[l].width, table[l].height, table[l].depth};
+                regions.push_back(r);
+            }
         }
         vkCmdCopyImageToBuffer(f.cb, gpu::tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, static_cast<uint32_t>(regions.size()),
                                regions.data());
@@ -1364,10 +1368,6 @@ NXTEST(compact_standin_upload_and_replacement) {
     teardown(r);
 }
 
-// ---- sparse texture helpers used by the background preparation (nvn_texture_registry.cpp) ----------------------------------------------
-// gather copies the mapped tiles (unmapped bytes are zero), direct hands out a pointer when the range is one piece of one physical pool, and
-// the hash follows both the bytes and where they sit.
-NXTEST(sparse_texture_segments) {
 // [nvn] tex_async = standin: the job's result is in the image, then a dirty flag arrives without a newer generation (a notification, not a write).
 // The image must keep the final blocks: final_uploaded clears the stand-in marker, and the next ensure used to read that as "no stand-in yet" and
 // put a quick stand-in back over the final image.
@@ -1435,6 +1435,45 @@ NXTEST(a_redundant_dirty_keeps_the_uploaded_result) {
     teardown(r);
 }
 
+// A 2D array read back with download_texture must equal the game's storage byte for byte, including a level whose width is not a whole
+// number of blocks: level 5 here is 9x6, a 3x2 BC7 level, and a multi-layer copy loses its last block column.
+NXTEST(download_array_with_partial_block_column) {
+    Rig r;
+    if (!bring_up(r)) {
+        CHECK(false);
+        return;
+    }
+    if (!r.dev->features().bc) {
+        nxtest::skip("needs textureCompressionBC");
+        teardown(r);
+        return;
+    }
+    no_cache();
+    Tex x;
+    CHECK_MSG(make_tex(x, info(NVN_TEXTURE_TARGET_2D_ARRAY, 300, 200, 2, 7, NVN_FORMAT_BPTC_UNORM)), "array layout");
+    std::mt19937 rng(106);
+    for (uint8_t& b : x.lin) b = static_cast<uint8_t>(rng());
+    tile_into_storage(x);
+    const std::vector<uint8_t> want = x.mem;
+    CHECK_MSG(x.L.layout.levels[5].width == 9 && x.L.layout.levels[5].height == 6, "the partial level is 9x6");
+    Texture* t = x.t.get();
+    gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(t, f); });
+    CHECK_MSG(gpu::download_texture(t), "download_texture");
+    size_t diff = 0;
+    long first = -1;
+    for (size_t i = 0; i < x.mem.size() && i < want.size(); ++i)
+        if (x.mem[i] != want[i]) {
+            ++diff;
+            if (first < 0) first = static_cast<long>(i);
+        }
+    CHECK_MSG(diff == 0, ("the readback differs from the storage in " + std::to_string(diff) + " bytes, first at " + std::to_string(first)).c_str());
+    teardown(r);
+}
+
+// ---- sparse texture helpers used by the background preparation (nvn_texture_registry.cpp) ----------------------------------------------
+// gather copies the mapped tiles (unmapped bytes are zero), direct hands out a pointer when the range is one piece of one physical pool, and
+// the hash follows both the bytes and where they sit.
+NXTEST(sparse_texture_segments) {
     using nxrt::nvn::be::MemoryPool;
     using nxrt::nvn::be::texture_gather_virtual;
     using nxrt::nvn::be::texture_hash_virtual;

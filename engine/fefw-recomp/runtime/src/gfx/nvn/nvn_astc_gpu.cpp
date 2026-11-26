@@ -326,6 +326,29 @@ void record(VkCommandBuffer cb, const Scratch& sc, VkDescriptorSet dec, VkDescri
         }
         if (stamp) (*stamp)(1);
         barrier(cb, kComp, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, kCopy, VK_ACCESS_2_TRANSFER_READ_BIT);
+        // One copy per layer: a multi-layer copy of a block-compressed level whose width is not a whole number of blocks lost the last block
+        // column at mip 5 of a 300x200 array on the driver here (tex_upload splits for the same reason). The layer pitch is what the encoder
+        // wrote: whole block rows, or whole texel rows for an RGBA8 image.
+        std::vector<VkBufferImageCopy> per_layer;
+        for (const VkBufferImageCopy& c : co.copies) {
+            const uint32_t layers = c.imageSubresource.layerCount;
+            if (layers <= 1) {
+                per_layer.push_back(c);
+                continue;
+            }
+            const uint64_t layer_bytes = j.kind == Kind::Rgba
+                                             ? static_cast<uint64_t>(c.bufferRowLength) * c.bufferImageHeight * 4
+                                             : static_cast<uint64_t>(c.bufferRowLength / 4) * (c.bufferImageHeight / 4) *
+                                                   (j.kind == Kind::Bc1 ? 8 : 16);
+            for (uint32_t layer = 0; layer < layers; ++layer) {
+                VkBufferImageCopy d = c;
+                d.bufferOffset = c.bufferOffset + static_cast<uint64_t>(layer) * layer_bytes;
+                d.imageSubresource.baseArrayLayer = c.imageSubresource.baseArrayLayer + layer;
+                d.imageSubresource.layerCount = 1;
+                per_layer.push_back(d);
+            }
+        }
+        co.copies.swap(per_layer);
         sink(co);
     }
 }

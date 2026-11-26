@@ -174,11 +174,14 @@ bool read_image(Device& dev, Texture* t, const TexLayout& L, bool blocks, std::v
         std::vector<VkBufferImageCopy> regions;
         for (uint32_t l = 0; l < L.levels; ++l) {
             const tegra::LevelLayout& lv = L.layout.levels[l];
-            VkBufferImageCopy r = {};
-            r.bufferOffset = off[l];
-            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, L.layers};
-            r.imageExtent = {lv.width, lv.height, 1};
-            regions.push_back(r);
+            // One copy per layer: a multi-layer copy loses the last block column of a block-compressed level with a partial row.
+            for (uint32_t layer = 0; layer < L.layers; ++layer) {
+                VkBufferImageCopy r = {};
+                r.bufferOffset = off[l] + size[l] * layer;
+                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1};
+                r.imageExtent = {lv.width, lv.height, 1};
+                regions.push_back(r);
+            }
         }
         vkCmdCopyImageToBuffer(f.cb, gpu::tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, static_cast<uint32_t>(regions.size()), regions.data());
         if (prev != VK_IMAGE_LAYOUT_UNDEFINED) gpu::tex_transition(t, f, prev);
@@ -370,6 +373,7 @@ NXTEST(encode_to_bc7_layers_and_levels) {
         const struct { int target, format, w, h, depth, levels; bool opaque; const char* what; } cases[] = {
             {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_8x8, 256, 128, 1, 9, false, "8x8 256x128, full chain"},
             {NVN_TEXTURE_TARGET_2D_ARRAY, NVN_FORMAT_RGBA_ASTC_5x4_SRGB, 60, 44, 3, 2, false, "5x4 sRGB 60x44, 3 layers, 2 levels"},
+            {NVN_TEXTURE_TARGET_2D_ARRAY, NVN_FORMAT_RGBA_ASTC_8x8, 300, 200, 2, 7, false, "8x8 300x200, 2 layers, 7 levels (level 5 is 9x6: partial BC7 column)"},
             {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_8x8_SRGB, 128, 128, 1, 1, true, "8x8 sRGB 128x128, opaque blocks"},
         };
         for (const auto& c : cases) {

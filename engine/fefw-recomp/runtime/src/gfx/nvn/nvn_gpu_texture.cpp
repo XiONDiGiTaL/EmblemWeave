@@ -2869,11 +2869,17 @@ void tex_ensure_current(Texture* t, Frame& f) {
                 }
             continue;
         }
-        VkBufferImageCopy r = {};
-        r.bufferOffset = st.offset + pl.offset;
-        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - g->drop, 0, g->layers};
-        r.imageExtent = {pl.width, pl.height, pl.depth};
-        regions.push_back(r);
+        // One copy per layer: a multi-layer copy of a block-compressed level whose width is not a whole number of blocks lost its last
+        // block column on the driver here (BC7 9x6, level 5 of a 300x200 array, in both directions and whatever bufferRowLength says); the
+        // image then kept stale bytes there. Per-layer copies are byte-exact (measured with a raw-copy probe on this driver).
+        const uint64_t layer_bytes = g->layers ? pl.size / g->layers : pl.size;
+        for (uint32_t layer = 0; layer < g->layers; ++layer) {
+            VkBufferImageCopy r = {};
+            r.bufferOffset = st.offset + pl.offset + static_cast<uint64_t>(layer) * layer_bytes;
+            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - g->drop, layer, 1};
+            r.imageExtent = {pl.width, pl.height, pl.depth};
+            regions.push_back(r);
+        }
     }
     copy_regions_to_image(f, *g, st.buffer, regions);
     if (arm_later) tex_ww_arm_later(t, *g, have_hash, content_hash);
@@ -3753,11 +3759,14 @@ bool download_texture(Texture* t) {
         std::vector<VkBufferImageCopy> regions;
         for (uint32_t l = 0; l < L.levels; ++l) {
             const tegra::LevelLayout& lv = L.layout.levels[l];
-            VkBufferImageCopy r = {};
-            r.bufferOffset = lv.linear_offset;
-            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, g->layers};
-            r.imageExtent = {lv.width, lv.height, lv.depth};
-            regions.push_back(r);
+            // One copy per layer (see tex_upload): a multi-layer copy of a block-compressed level with a partial last block column loses it.
+            for (uint32_t layer = 0; layer < g->layers; ++layer) {
+                VkBufferImageCopy r = {};
+                r.bufferOffset = lv.linear_offset + static_cast<uint64_t>(layer) * lv.linear_slice_size;
+                r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1};
+                r.imageExtent = {lv.width, lv.height, lv.depth};
+                regions.push_back(r);
+            }
         }
         vkCmdCopyImageToBuffer(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, static_cast<uint32_t>(regions.size()),
                                regions.data());
