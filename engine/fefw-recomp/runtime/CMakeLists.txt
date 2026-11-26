@@ -102,6 +102,20 @@ endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
 endif()
+# ThinLTO: the C and C++ objects are LLVM bitcode, and lld-link optimises across source files at the link. On by default for Release
+# builds with clang and lld-link; the configure says which it is.
+set(_nxrt_lto_default OFF)
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_LINKER MATCHES "lld-link")
+    set(_nxrt_lto_default ON)
+endif()
+option(NXRT_LTO "Build the runtime with ThinLTO (needs clang-cl and lld-link)" ${_nxrt_lto_default})
+if(NXRT_LTO)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_LINKER MATCHES "lld-link")
+        message(FATAL_ERROR "NXRT_LTO needs clang-cl and lld-link (compiler ${CMAKE_CXX_COMPILER_ID}, linker ${CMAKE_LINKER})")
+    endif()
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-flto=thin>)
+endif()
+message(STATUS "nxrt: ThinLTO ${NXRT_LTO} (linker ${CMAKE_LINKER})")
 
 # Build performance options
 option(NXRT_UNITY_BUILD "Enable unity (jumbo) builds for faster compilation" OFF)
