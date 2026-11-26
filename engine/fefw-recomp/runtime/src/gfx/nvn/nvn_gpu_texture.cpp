@@ -40,6 +40,7 @@
 #include "nvn_enums.h"
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_resid_pressure.h"
 #include "nvn_residency.h"
 #include "extras/hdr_nvn.h"
 #include "nvn_astc_gpu.h"
@@ -2233,7 +2234,8 @@ void tex_residency_tick(Frame& f) {
     // the use is 5 points under it (at most 512 MiB a look); over 92%, ten seconds unused is enough.
     // Also trigger when raw OS usage (video_usage_percent) stays at/above max(residency_percent + 5, 85)%: fragmented VMA blocks hold freed
     // bytes so live_pct can sit below residency_percent while WDDM and pool_mirror_pressure_percent still see pressure, blocking new mirror
-    // chunks and forcing paging. Demoted images go into small_pool so original VMA blocks can empty and return to the OS.
+    // chunks and forcing paging. Demoted images go into small_pool so original VMA blocks can empty and return to the OS. On a
+    // unified-memory GPU, host RAM at/above max(residency_percent, 92)% triggers too (nvn_resid_pressure.h).
     int live_pct = nxrt::gfx::video_live_percent();   // the room free inside VMA's blocks is not pressure while OS usage is healthy
     int os_pct = nxrt::gfx::video_usage_percent();
     const int sys_pct = nxrt::gfx::video_sysram_usage_percent();   // unified-memory GPU: shared host RAM usage (-1 on discrete GPUs)
@@ -2245,11 +2247,9 @@ void tex_residency_tick(Frame& f) {
         if (os_pct >= 0) os_pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
         budget = test_mb << 20;
     }
-    const int os_trigger = std::min(100, std::max(cfg.percent + 5, 85));
-    const bool sys_pressure = sys_pct >= os_trigger;
-    const bool os_pressure = os_pct >= os_trigger || sys_pressure;
-    if (live_pct < cfg.percent && !os_pressure) return;
-    const int pct = os_pressure ? std::max({live_pct, os_pct, sys_pct}) : live_pct;
+    const ResidPressure pressure = resid_pressure(live_pct, os_pct, sys_pct, cfg.percent);
+    if (!pressure.demote) return;
+    const int pct = pressure.pct;
     const bool urgent = pct >= cfg.urgent_percent;
     const uint32_t idle_ms = static_cast<uint32_t>(urgent ? cfg.urgent_idle_s : cfg.idle_s) * 1000u;
     const uint64_t want = std::min<uint64_t>(budget / 100 * static_cast<uint64_t>(pct - cfg.percent + 5), 512ull << 20);
@@ -2288,7 +2288,7 @@ void tex_residency_tick(Frame& f) {
     if (n && (logged++ < 40 || logged % 50 == 0)) {
         const double budget_gib = static_cast<double>(budget) / (1024.0 * 1024.0 * 1024.0);
         const double freed_mb = static_cast<double>(freed) / (1024.0 * 1024.0);
-        if (sys_pressure && live_pct < cfg.percent && os_pct < os_trigger)
+        if (pressure.sysram_only)
             NXLOG_I(kTag, "residency: system RAM at %d%% (video memory at %d%% of the %.2f GiB budget): %d textures unused for %u s and more demoted (%.0f MB given back; %zu demoted "
                           "in all, %d of %zu candidates)%s", sys_pct, std::max(live_pct, os_pct), budget_gib, n, idle_ms / 1000, freed_mb, g_demoted.size(), n, cand.size(),
                     urgent ? " [urgent]" : "");
@@ -2343,6 +2343,7 @@ void tex_residency_restore(Frame& f) {
                 os_pct = static_cast<int>(real_budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
             }
         }
+        // video memory only: a draw wants these textures, and on a handheld host RAM stays high for reasons a held restore does not change
         const int os_warn = std::min(100, std::max(cfg.percent + 5, 85));
         if (os_pct >= 96) {
             // Near-OOM territory: hold off promoting demoted textures until VRAM drops below 96%.
