@@ -1319,9 +1319,12 @@ bool Overlay::Impl::update_note_visible(double now_s, double dt_s) {
         const std::string v = update::available();
         update_text.clear();
         if (!v.empty()) {
-            char text[160];
-            std::snprintf(text, sizeof text, tr("Version %s is available. Open the launcher to update."), v.c_str());
-            update_text = text;
+            // sized to fit: a player's own table or a long tag must not cut the text, which could split a character
+            const char* format = tr("Version %s is available. Open the launcher to update.");
+            if (const int n = std::snprintf(nullptr, 0, format, v.c_str()); n > 0) {
+                update_text.resize(static_cast<size_t>(n));
+                std::snprintf(update_text.data(), update_text.size() + 1, format, v.c_str());
+            }
         }
     }
     if (update_text.empty()) return false;
