@@ -102,8 +102,14 @@ pub fn parse(text: &str, from: &str) -> Result<(Option<String>, Vec<Site>), Stri
 /// The sites every mod in `mods` adds for main build `build_id`, switched-off mods included. A mod's `exefs` may sit up to
 /// three folders deep, as the Mods page finds it.
 pub fn collect(mods: &Path, build_id: &str) -> Result<Vec<Site>, String> {
+    collect_from(&crate::mods::list(mods), build_id)
+}
+
+/// The same collection when the caller already has the installed list, so a
+/// page does not walk every mod tree again just to read its `.sites` files.
+pub fn collect_from(installed: &[crate::mods::Mod], build_id: &str) -> Result<Vec<Site>, String> {
     let mut out = Vec::new();
-    for m in crate::mods::list(mods) {
+    for m in installed {
         for exefs in crate::mods::exefs_dirs(&m.path) {
             let mut files: Vec<PathBuf> = std::fs::read_dir(&exefs)
                 .map(|d| d.flatten().map(|e| e.path()).filter(|p| has_ext(p, "sites")).collect())
@@ -181,16 +187,26 @@ pub fn prepare(root: &Path, mods: &Path) -> Result<(PathBuf, Vec<Site>), String>
 /// A problem in the installed mods' .sites files (the first one, with the build's message), which stops the build; None when
 /// there is none or main's build ID cannot be read yet.
 pub fn problem(root: &Path, mods: &Path) -> Option<String> {
+    problem_for(root, &crate::mods::list(mods))
+}
+
+/// [`problem`] for a caller that already has the installed list.
+pub fn problem_for(root: &Path, installed: &[crate::mods::Mod]) -> Option<String> {
     let bid = main_build_id(root)?;
-    collect(mods, &bid).and_then(|sites| merged(root, &sites)).err()
+    collect_from(installed, &bid).and_then(|sites| merged(root, &sites)).err()
 }
 
 /// Whether the built game lacks hook sites the installed mods need: `Some(true)` when the game should be built again,
 /// `Some(false)` when it has them all, `None` when that cannot be told (no game built yet, or built before fefw.sites).
 pub fn stale(root: &Path, mods: &Path) -> Option<bool> {
+    stale_for(root, &crate::mods::list(mods))
+}
+
+/// [`stale`] for a caller that already has the installed list.
+pub fn stale_for(root: &Path, installed: &[crate::mods::Mod]) -> Option<bool> {
     let built = std::fs::read_to_string(built_list(root)).ok()?;
     let bid = main_build_id(root)?;
-    let sites = collect(mods, &bid).ok()?;
+    let sites = collect_from(installed, &bid).ok()?;
     let want = merged(root, &sites).ok()?;
     let norm = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
     if norm(&want) == norm(&built) {
@@ -291,6 +307,9 @@ mod tests {
         let f = ex.join("a.sites");
 
         std::fs::write(&f, "@nsobid DB93B0125F485060\nmidhook 0x71016f21f4\n").unwrap();
+        let installed = crate::mods::list(&mods);
+        assert_eq!(collect_from(&installed, BID).unwrap(), collect(&mods, BID).unwrap());
+        assert_eq!(problem_for(&root, &installed), problem(&root, &mods));
         assert_eq!(problem(&root, &mods), None);
         std::fs::write(&f, "midhook 0x71016f21f4\n").unwrap();
         assert!(problem(&root, &mods).unwrap().contains("Some_Mod/exefs/a.sites has no @nsobid line"));

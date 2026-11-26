@@ -23,6 +23,73 @@ pub struct Ui {
     installing: Option<(String, Slot<Installed>)>,
     /// The name typed into the save-as-profile box.
     profile_name: String,
+    /// The installed list and its conflict scan, kept briefly. Both walk every
+    /// mod tree; recomputing them on every scroll frame cost more than drawing
+    /// the page.
+    scan: Option<Scan>,
+}
+
+struct Scan {
+    at: std::time::Instant,
+    installed: Vec<mods::Mod>,
+    conflicts: Vec<mods::Conflict>,
+    /// The build's view of code mods, computed with the scan. These checks read
+    /// the game's build ID and every mod's `.sites` files, so leaving them in
+    /// the draw path was as expensive as the scan they depend on.
+    site_problem: Option<String>,
+    site_stale: bool,
+    missing_code: Vec<String>,
+}
+
+/// Long enough that a scroll does not rescan, short enough that a folder
+/// dropped in from Explorer appears on the next redraw. Actions on the page
+/// invalidate the scan immediately.
+const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl Ui {
+    fn refresh_scan(&mut self, dir: &std::path::Path) {
+        if self
+            .scan
+            .as_ref()
+            .is_some_and(|scan| scan.at.elapsed() < SCAN_TTL)
+        {
+            return;
+        }
+        let installed = mods::list(dir);
+        let conflicts = mods::conflicts(&installed);
+        let engine = crate::engine::root();
+        let code = installed.iter().any(|m| m.has_code);
+        let site_problem = code
+            .then(|| engine.as_deref().and_then(|root| crate::sites::problem_for(root, &installed)))
+            .flatten();
+        let site_stale = code
+            && engine
+                .as_deref()
+                .and_then(|root| crate::sites::stale_for(root, &installed))
+                == Some(true);
+        let missing_code = installed
+            .iter()
+            .filter(|m| m.has_code)
+            .filter(|m| {
+                engine
+                    .as_deref()
+                    .is_some_and(|root| crate::sites::mod_missing(root, &m.path))
+            })
+            .map(|m| m.name.clone())
+            .collect();
+        self.scan = Some(Scan {
+            at: std::time::Instant::now(),
+            installed,
+            conflicts,
+            site_problem,
+            site_stale,
+            missing_code,
+        });
+    }
+
+    fn invalidate_scan(&mut self) {
+        self.scan = None;
+    }
 }
 
 fn spawn<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Slot<T> {
@@ -65,6 +132,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     widgets::page_header(ui, &p, "Mods", "RomFS mods laid over the game's files when it starts, from an archive, a folder or GameBanana.");
     let Some(dir) = mods::dir() else { return };
+    app.mods_ui.refresh_scan(&dir);
+    let installed = app
+        .mods_ui
+        .scan
+        .as_ref()
+        .map(|scan| scan.installed.clone())
+        .unwrap_or_default();
+    let shared = app
+        .mods_ui
+        .scan
+        .as_ref()
+        .map(|scan| scan.conflicts.clone())
+        .unwrap_or_default();
+    let site_problem = app
+        .mods_ui
+        .scan
+        .as_ref()
+        .and_then(|scan| scan.site_problem.clone());
+    let site_stale = app
+        .mods_ui
+        .scan
+        .as_ref()
+        .is_some_and(|scan| scan.site_stale);
+    let missing_code = app
+        .mods_ui
+        .scan
+        .as_ref()
+        .map(|scan| scan.missing_code.clone())
+        .unwrap_or_default();
     let mut message: Option<(String, Tone)> = None;
     let busy = app.mods_ui.installing.is_some() || app.mods_ui.fetching.is_some() || app.mods_ui.listing.is_some();
     if busy {
@@ -104,21 +200,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let Some(r) = done {
             message = Some(installed_message(name, r));
             app.mods_ui.installing = None;
+            app.mods_ui.invalidate_scan();
         }
     }
 
     widgets::section(ui, &p, "Installed", |ui| {
-        let list = mods::list(&dir);
+        let list = &installed;
         if list.is_empty() {
             ui.label(RichText::new("No mods installed.").color(p.muted));
         }
         // Code mods whose hook sites the built game lacks (installed or updated since the last build).
-        let engine = crate::engine::root();
         // A problem in a .sites file stops the build: say which file and line before it is pressed.
-        if let Some(e) = engine.as_deref().filter(|_| list.iter().any(|m| m.has_code)).and_then(|r| crate::sites::problem(r, &dir)) {
+        if let Some(e) = site_problem.as_deref() {
             ui.label(RichText::new(format!("A code mod's hook sites cannot be used: {e}")).size(12.5).color(p.bad));
         }
-        let stale = list.iter().any(|m| m.has_code) && engine.as_deref().and_then(|r| crate::sites::stale(r, &dir)) == Some(true);
+        let stale = site_stale;
         if stale {
             ui.horizontal(|ui| {
                 ui.label(
@@ -131,12 +227,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         }
-        for m in &list {
+        for m in list {
             ui.horizontal(|ui| {
                 let mut on = m.enabled;
                 if widgets::toggle(ui, &p, &mut on).changed() {
-                    if let Err(e) = mods::set_enabled(m, on) {
-                        message = Some((e, Tone::Bad));
+                    match mods::set_enabled(m, on) {
+                        Ok(_) => app.mods_ui.invalidate_scan(),
+                        Err(e) => message = Some((e, Tone::Bad)),
                     }
                 }
                 ui.vertical(|ui| {
@@ -152,7 +249,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         bits.push("no romfs folder: the game will not see it".into());
                     }
                     if m.has_code {
-                        let missing = engine.as_deref().is_some_and(|r| crate::sites::mod_missing(r, &m.path));
+                        let missing = missing_code.iter().any(|name| name == &m.name);
                         bits.push(if missing { "code mod: needs Build the game".into() } else { "code mod".into() });
                     }
                     if m.has_patches {
@@ -163,7 +260,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::button(ui, &p, "Remove", true).on_hover_text("Moves the mod to the mods-removed folder").clicked() {
                         message = Some(match mods::remove(m) {
-                            Ok(to) => (format!("Moved {} to {}", m.info.title, to.display()), Tone::Ok),
+                            Ok(to) => {
+                                app.mods_ui.invalidate_scan();
+                                (format!("Moved {} to {}", m.info.title, to.display()), Tone::Ok)
+                            }
                             Err(e) => (e, Tone::Bad),
                         });
                     }
@@ -180,10 +280,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.label(RichText::new("Changes apply the next time the game starts. When two mods change the same file, the one later in the list wins. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust.").size(12.5).color(p.muted));
     });
-
-    // The rest of the page reads the folder once, after the toggles above.
-    let installed = mods::list(&dir);
-    let shared = mods::conflicts(&installed);
 
     widgets::section(ui, &p, "Conflicts", |ui| {
         let on = installed.iter().filter(|m| m.enabled).count();
@@ -270,6 +366,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             match mods::apply_profile(&installed, &want) {
                 Ok(n) => {
                     app.config.profile = app.config.profiles[i].name.clone();
+                    app.mods_ui.invalidate_scan();
                     message = Some((format!("Applied {}: {n} mods changed", app.config.profiles[i].name), Tone::Ok));
                 }
                 Err(e) => message = Some((e, Tone::Bad)),
@@ -301,6 +398,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if widgets::button(ui, &p, "From folder…", !busy).clicked() {
                 if let Some(f) = rfd::FileDialog::new().pick_folder() {
                     message = Some(installed_message(&f.display().to_string(), mods::install(&f, &dir, mods::Info::default())));
+                    app.mods_ui.invalidate_scan();
                 }
             }
             if widgets::button(ui, &p, "Open mods folder", true).clicked() {
@@ -367,7 +465,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if app.mods_ui.listing.is_some() {
             ui.spinner();
         }
-        let installed: Vec<u64> = mods::list(&dir).iter().filter_map(|m| m.info.gamebanana_id).collect();
+        let installed_ids: Vec<u64> = installed.iter().filter_map(|m| m.info.gamebanana_id).collect();
         let mut fetch: Option<u64> = None;
         egui::Grid::new("gb").num_columns(4).spacing([14.0, 6.0]).striped(true).show(ui, |ui| {
             for m in &app.mods_ui.browse {
@@ -377,7 +475,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.label(RichText::new(format!("{} by {}{}", m.kind, m.author, if m.version.is_empty() { String::new() } else { format!(", {}", m.version) })).size(12.0).color(p.muted));
                 });
                 ui.label(RichText::new(format!("♥ {}", m.likes)).color(p.muted));
-                if installed.contains(&m.id) {
+                if installed_ids.contains(&m.id) {
                     widgets::pill(ui, &p, "Installed", Tone::Ok);
                 } else {
                     ui.label("");

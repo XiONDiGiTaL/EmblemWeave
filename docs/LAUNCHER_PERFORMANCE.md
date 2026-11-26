@@ -295,3 +295,65 @@ sweep fell from 39.8 % to 21.1-26.8 % after caching that display state for one s
 CPU through the first nine seconds fell from 1.92 s to 1.00 s. Launcher tests: 432 passed, 0 failed,
 13 ignored. The reporter's Windows 10/11 hardware is still not reproduced. See
 `docs/audits/ISSUE_REMEDIATION_STATUS.md` for the run details.
+
+## 2026-11-26 Slowness on the Mods and Graphics pages
+
+After the window-movement fix, the reporter confirmed that dragging was resolved but reported a
+second symptom: the Mods and Graphics pages slow down while scrolling. That is a different
+workload from the caption move loop: the window is stationary and egui is drawing a frame for
+every wheel step.
+
+### Measurement
+
+The same portable probe install, 1440x900 window, 180 wheel steps at 20 ms intervals. CPU is the
+launcher process's own processor time over the 5.6-5.7 s scroll, as a percentage of one core.
+
+| Page | Before | After |
+|---|---:|---:|
+| Overview | 21.5% | 21.2% |
+| Graphics | 69.6-77.8% | 23.4-27.8% |
+| Mods | 99.4-99.6% | 18.5-20.6% |
+
+The idle measurement was 0% on all three pages before and after. The Overview number is the
+control: it did not change, so the probe conditions stayed comparable.
+
+### Cause
+
+Two page functions repeated filesystem work on every frame:
+
+| Call | Measured cost | Calls per frame |
+|---|---:|---:|
+| `engine::sdk()` | 1.889 ms | 3 on Graphics |
+| `mods::list()` | 5.695 ms | 3 on Mods |
+| `mods::conflicts()` | 2.277 ms | 1 on Mods |
+
+`engine::sdk()` recursively searched every upscaler layout for FSR, DLSS, XeSS and FFmpeg DLLs.
+`mods::list()` walked each mod tree twice to find `romfs`/`exefs`, then walked it again for the file
+count. On the probe's Trinity Core code mod, the Mods page also called `sites::problem()` and
+`sites::stale()` while drawing; both call `mods::list()` again, so the first caching pass left the
+page at 98.8% until those checks moved into the cached scan.
+
+At 60 FPS the Graphics SDK calls alone were 5.7 ms per frame, and the Mods scans were about
+19.4 ms per frame, more than a whole 16 ms frame before any layout or painting.
+
+### Fix
+
+- `mods.rs`: one installed/conflict/site scan is kept for one second. Toggling, removing,
+  installing or applying a profile invalidates it immediately, and a folder added outside the
+  launcher appears on the next redraw after the TTL.
+- `engine.rs`: the SDK layout and ReShade status are cached for two seconds. Adopting upscaler
+  files calls `forget_sdk()` so a just-installed DLL is visible on the next frame.
+- `sites.rs`: `collect_from`, `problem_for` and `stale_for` reuse the installed list instead of
+  walking every mod tree again for the same scan.
+
+### What this does and does not prove
+
+- The before/after numbers are from the reporter's stated symptom class (scrolling on those two
+  pages), but on the development machine, not the reporter's i9-9900K/RTX 3060 machine.
+- The scroll probe uses synthetic wheel input. Physical wheel and touchpad scrolling were not
+  measured.
+- Caption dragging was re-measured after the change: 1.5-4.7% of one core over two 3.0 s drags
+  (94 move steps each), 0 px sampled window lag. The window-movement path is therefore not a
+  regression.
+- The page still does a full scan once per second while it is visible, not once per frame. A much
+  larger mod collection would need a background index to remove that last periodic hitch.

@@ -356,6 +356,21 @@ pub fn reshade_layer_dir() -> PathBuf {
 /// Read ReShade's current state without changing anything. Missing files mean
 /// "not installed", not an error: ReShade is optional.
 pub fn reshade_status() -> ReshadeStatus {
+    use std::time::{Duration, Instant};
+    const TTL: Duration = Duration::from_secs(2);
+    static CACHE: std::sync::Mutex<Option<(Instant, ReshadeStatus)>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, status)) = cache.as_ref() {
+        if at.elapsed() < TTL {
+            return status.clone();
+        }
+    }
+    let status = read_reshade_status();
+    *cache = Some((Instant::now(), status.clone()));
+    status
+}
+
+fn read_reshade_status() -> ReshadeStatus {
     let common = reshade_layer_dir();
     // 6.8's setup writes the layer straight into `%ProgramData%\ReShade`; the
     // older layout kept the DLL one folder down. Both are a working install.
@@ -3659,9 +3674,33 @@ fn sdk_fsr(dirs: &[PathBuf]) -> Option<PathBuf> {
     .or_else(|| sdk_in(dirs, &folders, &["amd_fidelityfx_vk.dll"], true))
 }
 
+/// The SDK layout is a handful of directory walks. The Graphics page asks for
+/// it several times a frame, so keep the answer briefly; installing the files
+/// calls `forget_sdk` instead of waiting for the TTL.
+static SDK_CACHE: std::sync::Mutex<Option<(std::time::Instant, Sdk)>> = std::sync::Mutex::new(None);
+const SDK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Where the engine will look, in the same order: `upscalers\fsr` (and the older `upscalers\fsr3`), `upscalers\streamline`,
 /// `upscalers\xess`, under each of `sdk_dirs`.
 pub fn sdk() -> Sdk {
+    let mut cache = SDK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, sdk)) = cache.as_ref() {
+        if at.elapsed() < SDK_CACHE_TTL {
+            return sdk.clone();
+        }
+    }
+    let sdk = scan_sdk();
+    *cache = Some((std::time::Instant::now(), sdk.clone()));
+    sdk
+}
+
+/// Forget the SDK scan after files were installed, so the next page frame
+/// sees them instead of waiting for the cache to expire.
+fn forget_sdk() {
+    *SDK_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn scan_sdk() -> Sdk {
     let dirs = sdk_dirs();
     Sdk {
         fsr3: sdk_fsr(&dirs),
@@ -3806,6 +3845,7 @@ pub fn adopt_upscaler_files() -> Result<String, String> {
             }
         }
     }
+    forget_sdk();
     let sdk = sdk();
     let mut have: Vec<&str> = Vec::new();
     let mut lack: Vec<String> = Vec::new();
