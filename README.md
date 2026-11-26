@@ -21,6 +21,7 @@
 
 <p align="center">
   <a href="https://recomplauncher.com/game/emblemweave"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+  <a href="https://quiverlauncher.com/apps/fire-emblem-fortune-s-weave-emblemweave"><img alt="Get it on Quiver Launcher" src="assets/branding/quiver-launcher-button.png" height="48"></a>
 </p>
 
 <p align="center">
