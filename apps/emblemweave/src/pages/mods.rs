@@ -1,14 +1,32 @@
 //! Mods: the installed RomFS mods, importing archives and folders, and
 //! browsing and installing from GameBanana.
 
-use crate::mods::{self, GbFile, GbMod, Installed};
+use crate::mods::{self, GbFile, GbMod, Installed, Prepared};
 use crate::theme;
 use crate::widgets::{self, Tone};
 use crate::App;
 use eframe::egui::{self, RichText};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 type Slot<T> = Arc<Mutex<Option<Result<T, String>>>>;
+
+/// What a background download ends with.
+enum Step {
+    Done(Installed),
+    /// The download offers several variants: the user picks.
+    Choose(Prepared),
+}
+
+/// A question for the user. While it waits, nothing else is started.
+enum Ask {
+    /// Which of a GameBanana mod's files to download: any number, each
+    /// installed into its own folder.
+    File { m: GbMod, files: Vec<GbFile>, all: bool, picked: Vec<bool> },
+    /// Which variants of a download to install.
+    Variant { name: String, p: Prepared, picked: Vec<bool> },
+}
 
 #[derive(Default)]
 pub struct Ui {
@@ -17,10 +35,13 @@ pub struct Ui {
     more: bool,
     page: u32,
     listing: Option<Slot<(Vec<GbMod>, bool)>>,
-    /// The mod whose files are listed, and its files.
-    files: Option<(GbMod, Vec<GbFile>)>,
     fetching: Option<Slot<(GbMod, Vec<GbFile>)>>,
-    installing: Option<(String, Slot<Installed>)>,
+    /// The download or install running, and what it is.
+    installing: Option<(String, Slot<Step>)>,
+    /// Files picked together that wait for the install before them (one
+    /// install or question at a time), oldest first.
+    pending: VecDeque<(String, GbMod, GbFile)>,
+    ask: Option<Ask>,
     /// The name typed into the save-as-profile box.
     profile_name: String,
     /// The installed list and its conflict scan, kept briefly. Both walk every
@@ -47,6 +68,11 @@ struct Scan {
 const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Ui {
+    /// A question is open: the page behind it takes no typing.
+    fn asking(&self) -> bool {
+        self.ask.is_some()
+    }
+
     fn refresh_scan(&mut self, dir: &std::path::Path) {
         if self
             .scan
@@ -108,7 +134,7 @@ fn take<T>(slot: &Option<Slot<T>>) -> Option<Result<T, String>> {
 
 fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone) {
     match r {
-        Ok(i) if i.exefs_only => (
+        Ok(i) if i.mods.is_empty() => (
             format!("{what} only patches the game's code (exefs), which cannot apply to a recompiled game. Nothing was installed."),
             Tone::Warn,
         ),
@@ -116,10 +142,17 @@ fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone)
             format!("Installed {}. It adds hook sites to the game's code: press Build the game before playing, or its code mod cannot work.", i.mods.join(", ")),
             Tone::Warn,
         ),
-        Ok(i) if i.mods.len() > 1 => (format!("Installed {what} as {} variants; only the first is switched on: {}", i.mods.len(), i.mods.join(", ")), Tone::Ok),
+        Ok(i) if i.mods.len() > 1 && i.parts => (format!("Installed {what} as {} parts, all switched on: {}", i.mods.len(), i.mods.join(", ")), Tone::Ok),
+        Ok(i) if i.mods.len() > 1 => (format!("Installed {what} as {} variants; only {} is switched on: {}", i.mods.len(), i.mods[0], i.mods.join(", ")), Tone::Ok),
         Ok(i) => (format!("Installed {}", i.mods.join(", ")), Tone::Ok),
         Err(e) => (format!("Could not install {what}: {e}"), Tone::Bad),
     }
+}
+
+fn day(ts: u64) -> String {
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
 }
 
 /// Start loading the game's GameBanana list (the tour uses it too).
@@ -128,10 +161,272 @@ pub fn load_gamebanana(app: &mut App) {
     app.mods_ui.listing = Some(spawn(|| mods::gb_list(1)));
 }
 
+fn start_install(ui: &mut Ui, name: String, m: GbMod, f: GbFile, dir: PathBuf) {
+    let slot = spawn(move || {
+        let p = mods::gb_prepare(&m, &f)?;
+        if p.choices.len() > 1 {
+            return Ok(Step::Choose(p));
+        }
+        let picks: Vec<usize> = (0..p.choices.len()).collect();
+        let r = mods::finish(&p, &picks, &dir);
+        p.discard();
+        r.map(Step::Done)
+    });
+    ui.installing = Some((name, slot));
+}
+
+/// The files ticked when the file picker opens: the recommended one.
+fn default_picks(files: &[GbFile], rec: Option<usize>) -> Vec<bool> {
+    (0..files.len()).map(|i| Some(i) == rec).collect()
+}
+
+/// The ticked files in the order they are installed: page order, except that
+/// the files of one family (`mods::family`, one mod in several builds) come
+/// together, the one that fits this PC build best (`mods::pick` within the
+/// family) first.
+fn install_order(files: &[GbFile], picked: &[bool]) -> Vec<usize> {
+    let ticked: Vec<usize> = (0..files.len()).filter(|&i| picked.get(i).copied().unwrap_or(false)).collect();
+    let fams: Vec<String> = ticked.iter().map(|&i| mods::family(&files[i].name)).collect();
+    let mut order: Vec<(usize, bool, usize)> = ticked
+        .iter()
+        .enumerate()
+        .map(|(n, &i)| {
+            let first = fams.iter().position(|f| *f == fams[n]).unwrap_or(n);
+            (first, mods::pick(files, &files[i].name) != Some(i), i)
+        })
+        .collect();
+    order.sort();
+    order.into_iter().map(|(_, _, i)| i).collect()
+}
+
+/// Queue the ticked files of a mod's page (`install_order`): each is
+/// installed into its own folder, one after another (`next_pending`). With
+/// several, each install is named by its file too.
+fn queue_files(ui: &mut Ui, m: &GbMod, files: &[GbFile], picked: &[bool]) {
+    let chosen: Vec<&GbFile> = install_order(files, picked).into_iter().map(|i| &files[i]).collect();
+    let several = chosen.len() > 1;
+    for f in chosen {
+        let name = if several { format!("{} ({})", m.name, f.name) } else { m.name.clone() };
+        ui.pending.push_back((name, m.clone(), f.clone()));
+    }
+}
+
+/// Start the next picked file once nothing else runs or asks.
+fn next_pending(ui: &mut Ui, dir: &std::path::Path) {
+    if ui.installing.is_some() || ui.ask.is_some() || ui.fetching.is_some() {
+        return;
+    }
+    if let Some((name, m, f)) = ui.pending.pop_front() {
+        start_install(ui, name, m, f, dir.to_path_buf());
+    }
+}
+
+/// A file's description line: version, size, upload day and the author's note.
+fn file_meta(f: &GbFile) -> String {
+    let mut bits = Vec::new();
+    if !f.version.is_empty() {
+        bits.push(f.version.clone());
+    }
+    bits.push(if f.size >= 1_000_000 { format!("{:.1} MB", f.size as f64 / 1e6) } else { format!("{} KB", (f.size + 999) / 1000) });
+    if f.date > 0 {
+        bits.push(format!("uploaded {}", day(f.date)));
+    }
+    if !f.description.trim().is_empty() {
+        bits.push(f.description.trim().to_string());
+    }
+    bits.join("  ·  ")
+}
+
+/// The question waiting for an answer, as a dialog.
+fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Option<(String, Tone)> {
+    let p = app.config.theme.palette();
+    let mut message = None;
+    let mut done = false;
+    match app.mods_ui.ask.as_mut()? {
+        Ask::File { m, files, all, picked } => {
+            let rec = mods::pick(files, "");
+            let hidden = files.iter().filter(|f| !f.playable()).count();
+            let n_picked = picked.iter().filter(|x| **x).count();
+            let mut go = false;
+            let modal = widgets::modal(
+                ctx,
+                &p,
+                "mods-pick-file",
+                &format!("Which files of {}?", m.name),
+                "The mod's page offers several downloads. Old versions and source code are hidden; the recommended one fits this PC build. Each file you tick is installed into its own folder.",
+                640.0,
+                |ui| {
+                    for (i, f) in files.iter().enumerate() {
+                        if !*all && !f.playable() {
+                            continue;
+                        }
+                        ui.horizontal(|ui| {
+                            let mut on = picked[i];
+                            if widgets::toggle(ui, &p, &mut on).changed() {
+                                picked[i] = on;
+                            }
+                            ui.vertical(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(&f.name).font(theme::mono(13.0)).color(if f.playable() { p.ink } else { p.muted }));
+                                    if Some(i) == rec {
+                                        widgets::pill(ui, &p, "Recommended", Tone::Accent);
+                                    }
+                                    if f.archived {
+                                        widgets::pill(ui, &p, "Old version", Tone::Warn);
+                                    }
+                                    if f.source_only() {
+                                        widgets::pill(ui, &p, "Source code", Tone::Neutral);
+                                    } else if f.fit() < 0 {
+                                        widgets::pill(ui, &p, "Console / emulator", Tone::Warn);
+                                    }
+                                });
+                                ui.label(RichText::new(file_meta(f)).size(12.0).color(p.muted));
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+                    if hidden > 0 && hidden < files.len() {
+                        let label = if *all { "Hide old versions and source code".to_string() } else { format!("Show {hidden} old version{} and source code", if hidden == 1 { "" } else { "s" }) };
+                        if ui.link(RichText::new(label).size(12.5)).clicked() {
+                            *all = !*all;
+                        }
+                    }
+                    if n_picked > 1 {
+                        ui.label(RichText::new("Several picked: they are installed one after another, each into its own folder.").size(12.0).color(p.muted));
+                    }
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        let label = if n_picked > 1 { format!("Install {n_picked}") } else { "Install".to_string() };
+                        if widgets::primary_button(ui, &p, &label, n_picked > 0).clicked() {
+                            go = true;
+                        }
+                        if widgets::button(ui, &p, "Cancel", true).clicked() {
+                            done = true;
+                        }
+                        ui.hyperlink_to("Open the mod's page", &m.url);
+                    });
+                },
+            );
+            if go && n_picked > 0 {
+                let (m, files, picked) = (m.clone(), files.clone(), picked.clone());
+                done = true;
+                // The question is still set; it goes below, then the first file starts.
+                queue_files(&mut app.mods_ui, &m, &files, &picked);
+            } else if modal.close {
+                done = true;
+            }
+        }
+        Ask::Variant { name, p: prep, picked } => {
+            let mut go = false;
+            let title = format!("What to install from {name}?");
+            let builds = prep.platform_builds();
+            let sub = if builds {
+                "The download holds several versions of the mod, one per platform. Only the ones you pick are installed; the recommended one fits this PC build."
+            } else {
+                "The download holds several parts of the mod. Only the ones you pick are installed."
+            };
+            let rec = prep.recommended();
+            let n_picked = picked.iter().filter(|x| **x).count();
+            let modal = widgets::modal(
+                ctx,
+                &p,
+                "mods-pick-variant",
+                &title,
+                sub,
+                640.0,
+                |ui| {
+                    for (i, c) in prep.choices.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let mut on = picked[i];
+                            if widgets::toggle(ui, &p, &mut on).changed() {
+                                picked[i] = on;
+                            }
+                            ui.vertical(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(&c.label).font(theme::semibold(13.5)).color(p.ink));
+                                    if i == rec && c.fit > 0 {
+                                        widgets::pill(ui, &p, "Recommended", Tone::Accent);
+                                    }
+                                    if c.fit < 0 {
+                                        widgets::pill(ui, &p, "Console / emulator", Tone::Warn);
+                                    }
+                                });
+                                let mut bits = vec![format!("{} files", c.files)];
+                                if c.romfs.is_some() {
+                                    bits.push("game files (romfs)".into());
+                                }
+                                if c.exefs.is_some() {
+                                    bits.push("code (exefs)".into());
+                                }
+                                ui.label(RichText::new(bits.join("  ·  ")).size(12.0).color(p.muted));
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
+                    let n = picked.iter().filter(|x| **x).count();
+                    let ticked: Vec<usize> = (0..picked.len()).filter(|&i| picked[i]).collect();
+                    if n > 1 && prep.exclusive(&ticked) {
+                        // As `mods::finish` decides: the recommended one when picked, else the first picked.
+                        let on = if picked[rec] { rec } else { picked.iter().position(|x| *x).unwrap_or(0) };
+                        let why = if on != rec { ", the first picked," } else if prep.choices[rec].fit > 0 { ", the recommended one," } else { "" };
+                        let what = if builds { "Several picked" } else { "Several picked replace the same files" };
+                        let text = format!("{what}: {}{why} is switched on; the others are installed switched off.", prep.choices[on].label);
+                        ui.label(RichText::new(text).size(12.0).color(p.warn));
+                    } else if n > 1 {
+                        ui.label(RichText::new("Several picked: each is installed into its own folder, all switched on.").size(12.0).color(p.muted));
+                    }
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        let n = n_picked;
+                        let label = if n > 1 { format!("Install {n}") } else { "Install".to_string() };
+                        if widgets::primary_button(ui, &p, &label, n > 0).clicked() {
+                            go = true;
+                        }
+                        if widgets::button(ui, &p, "Cancel", true).clicked() {
+                            done = true;
+                        }
+                    });
+                },
+            );
+            if go {
+                let picks: Vec<usize> = (0..picked.len()).filter(|&i| picked[i]).collect();
+                if picks.is_empty() {
+                    return None;
+                }
+                let prep = prep.clone();
+                let d = dir.to_path_buf();
+                let name = name.clone();
+                let slot = spawn(move || {
+                    let r = mods::finish(&prep, &picks, &d);
+                    prep.discard();
+                    r.map(Step::Done)
+                });
+                app.mods_ui.installing = Some((name, slot));
+                // The install owns the unpacked copy now: drop the question without discarding it.
+                app.mods_ui.ask = None;
+                return None;
+            }
+            // A stray click beside the dialog does not throw the download away.
+            if (modal.close && !modal.veil) || done {
+                prep.discard();
+                done = true;
+                message = Some((format!("Nothing installed from {name}"), Tone::Neutral));
+            }
+        }
+    }
+    if done {
+        app.mods_ui.ask = None;
+    }
+    message
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
     widgets::page_header(ui, &p, "Mods", "RomFS mods laid over the game's files when it starts, from an archive, a folder or GameBanana.");
     let Some(dir) = mods::dir() else { return };
+    let mut messages: Vec<(String, Tone)> = Vec::new();
     app.mods_ui.refresh_scan(&dir);
     let installed = app
         .mods_ui
@@ -161,8 +456,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .map(|scan| scan.missing_code.clone())
         .unwrap_or_default();
-    let mut message: Option<(String, Tone)> = None;
-    let busy = app.mods_ui.installing.is_some() || app.mods_ui.fetching.is_some() || app.mods_ui.listing.is_some();
+    let busy = app.mods_ui.installing.is_some() || !app.mods_ui.pending.is_empty() || app.mods_ui.fetching.is_some() || app.mods_ui.listing.is_some() || app.mods_ui.ask.is_some();
     if busy {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
@@ -179,30 +473,47 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 app.mods_ui.more = more;
             }
-            Err(e) => message = Some((format!("GameBanana: {e}"), Tone::Bad)),
+            Err(e) => messages.push((format!("GameBanana: {e}"), Tone::Bad)),
         }
     }
     if let Some(r) = take(&app.mods_ui.fetching) {
         app.mods_ui.fetching = None;
         match r {
-            Ok((m, files)) if files.is_empty() => message = Some((format!("{} has no files to download", m.name), Tone::Warn)),
-            Ok((m, files)) if files.len() == 1 => {
-                let d = dir.clone();
-                let (mm, f) = (m.clone(), files[0].clone());
-                app.mods_ui.installing = Some((m.name.clone(), spawn(move || mods::gb_install(&mm, &f, &d))));
+            Ok((m, files)) if files.is_empty() => messages.push((format!("{} has no files to download", m.name), Tone::Warn)),
+            Ok((m, files)) => {
+                let playable: Vec<&GbFile> = files.iter().filter(|f| f.playable()).collect();
+                if playable.len() == 1 && playable[0].fit() >= 0 {
+                    let f = playable[0].clone();
+                    start_install(&mut app.mods_ui, m.name.clone(), m, f, dir.clone());
+                } else {
+                    let all = playable.is_empty();
+                    let picked = default_picks(&files, mods::pick(&files, ""));
+                    app.mods_ui.ask = Some(Ask::File { m, files, all, picked });
+                }
             }
-            Ok(x) => app.mods_ui.files = Some(x),
-            Err(e) => message = Some((format!("GameBanana: {e}"), Tone::Bad)),
+            Err(e) => messages.push((format!("GameBanana: {e}"), Tone::Bad)),
         }
     }
-    if let Some((name, slot)) = &app.mods_ui.installing {
-        let done = slot.lock().unwrap().take();
-        if let Some(r) = done {
-            message = Some(installed_message(name, r));
-            app.mods_ui.installing = None;
-            app.mods_ui.invalidate_scan();
+    let finished = app.mods_ui.installing.as_ref().and_then(|(name, slot)| Some((name.clone(), slot.lock().unwrap().take()?)));
+    if let Some((name, r)) = finished {
+        app.mods_ui.installing = None;
+        // An install changed the mods folder, even one that failed partway.
+        app.mods_ui.invalidate_scan();
+        match r {
+            Ok(Step::Done(i)) => messages.push(installed_message(&name, Ok(i))),
+            Ok(Step::Choose(prep)) => {
+                let rec = prep.recommended();
+                let picked = (0..prep.choices.len()).map(|i| i == rec).collect();
+                app.mods_ui.ask = Some(Ask::Variant { name, p: prep, picked });
+            }
+            Err(e) => messages.push(installed_message(&name, Err(e))),
         }
     }
+    let ctx = ui.ctx().clone();
+    if let Some(m) = ask_modal(app, &ctx, &dir) {
+        messages.push(m);
+    }
+    next_pending(&mut app.mods_ui, &dir);
 
     widgets::section(ui, &p, "Installed", |ui| {
         let list = &installed;
@@ -233,7 +544,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 if widgets::toggle(ui, &p, &mut on).changed() {
                     match mods::set_enabled(m, on) {
                         Ok(_) => app.mods_ui.invalidate_scan(),
-                        Err(e) => message = Some((e, Tone::Bad)),
+                        Err(e) => messages.push((e, Tone::Bad)),
                     }
                 }
                 ui.vertical(|ui| {
@@ -245,7 +556,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if !m.info.version.is_empty() {
                         bits.push(m.info.version.clone());
                     }
-                    if !m.has_romfs {
+                    if !m.info.variant.is_empty() {
+                        bits.push(m.info.variant.clone());
+                    }
+                    if !m.has_romfs && !m.has_exefs {
                         bits.push("no romfs folder: the game will not see it".into());
                     }
                     if m.has_code {
@@ -259,7 +573,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::button(ui, &p, "Remove", true).on_hover_text("Moves the mod to the mods-removed folder").clicked() {
-                        message = Some(match mods::remove(m) {
+                        messages.push(match mods::remove(m) {
                             Ok(to) => {
                                 app.mods_ui.invalidate_scan();
                                 (format!("Moved {} to {}", m.info.title, to.display()), Tone::Ok)
@@ -270,7 +584,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if widgets::button(ui, &p, "Folder", true).clicked() {
                         let _ = std::process::Command::new("explorer").arg(&m.path).spawn();
                     }
-                    if !m.info.source.is_empty() {
+                    if !m.info.source.is_empty() && m.info.source.starts_with("http") {
                         ui.hyperlink_to("Page", &m.info.source);
                     }
                 });
@@ -357,7 +671,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 app.config.profile = name.clone();
                 app.mods_ui.profile_name.clear();
-                message = Some((format!("Saved the mods that are on as {name}"), Tone::Ok));
+                messages.push((format!("Saved the mods that are on as {name}"), Tone::Ok));
             }
         });
 
@@ -367,22 +681,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 Ok(n) => {
                     app.config.profile = app.config.profiles[i].name.clone();
                     app.mods_ui.invalidate_scan();
-                    message = Some((format!("Applied {}: {n} mods changed", app.config.profiles[i].name), Tone::Ok));
+                    messages.push((format!("Applied {}: {n} mods changed", app.config.profiles[i].name), Tone::Ok));
                 }
-                Err(e) => message = Some((e, Tone::Bad)),
+                Err(e) => messages.push((e, Tone::Bad)),
             }
         }
         if let Some(i) = overwrite {
             let enabled: Vec<String> = installed.iter().filter(|m| m.enabled).map(|m| m.name.clone()).collect();
             app.config.profiles[i].enabled = enabled;
-            message = Some((format!("Updated {}", app.config.profiles[i].name), Tone::Ok));
+            messages.push((format!("Updated {}", app.config.profiles[i].name), Tone::Ok));
         }
         if let Some(i) = delete {
             let gone = app.config.profiles.remove(i);
             if app.config.profile.eq_ignore_ascii_case(&gone.name) {
                 app.config.profile.clear();
             }
-            message = Some((format!("Removed {}", gone.name), Tone::Ok));
+            messages.push((format!("Removed {}", gone.name), Tone::Ok));
         }
     });
 
@@ -392,13 +706,33 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 if let Some(f) = rfd::FileDialog::new().add_filter("Mod archive", &["zip", "7z", "rar", "tar", "gz"]).pick_file() {
                     let d = dir.clone();
                     let name = f.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    app.mods_ui.installing = Some((name, spawn(move || mods::install(&f, &d, mods::Info::default()))));
+                    let slot = spawn(move || {
+                        let p = mods::prepare(&f, mods::Info::default())?;
+                        if p.choices.len() > 1 {
+                            return Ok(Step::Choose(p));
+                        }
+                        let picks: Vec<usize> = (0..p.choices.len()).collect();
+                        let r = mods::finish(&p, &picks, &d);
+                        p.discard();
+                        r.map(Step::Done)
+                    });
+                    app.mods_ui.installing = Some((name, slot));
                 }
             }
             if widgets::button(ui, &p, "From folder…", !busy).clicked() {
                 if let Some(f) = rfd::FileDialog::new().pick_folder() {
-                    message = Some(installed_message(&f.display().to_string(), mods::install(&f, &dir, mods::Info::default())));
-                    app.mods_ui.invalidate_scan();
+                    let d = dir.clone();
+                    let name = f.display().to_string();
+                    // Looking at the folder and copying it walk its files: off the UI thread, like an archive.
+                    let slot = spawn(move || {
+                        let p = mods::prepare(&f, mods::Info::default())?;
+                        if p.choices.len() > 1 {
+                            return Ok(Step::Choose(p));
+                        }
+                        let picks: Vec<usize> = (0..p.choices.len()).collect();
+                        mods::finish(&p, &picks, &d).map(Step::Done)
+                    });
+                    app.mods_ui.installing = Some((name, slot));
                 }
             }
             if widgets::button(ui, &p, "Open mods folder", true).clicked() {
@@ -408,50 +742,36 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut app.mods_ui.link).hint_text("https://gamebanana.com/mods/…").desired_width(320.0));
+            // While a question is open, keys go to the dialog, not to this field behind it.
+            ui.add_enabled(!app.mods_ui.asking(), egui::TextEdit::singleline(&mut app.mods_ui.link).hint_text("https://gamebanana.com/mods/…").desired_width(320.0));
             let id = mods::gb_id(&app.mods_ui.link);
             if widgets::button(ui, &p, "Install from GameBanana", id.is_some() && !busy).clicked() {
                 let id = id.unwrap();
                 app.mods_ui.fetching = Some(spawn(move || mods::gb_mod(id)));
             }
         });
+        if app.mods_ui.fetching.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Reading the mod's page on GameBanana…");
+            });
+        }
         if let Some((name, _)) = &app.mods_ui.installing {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(format!("Installing {name}…"));
             });
         }
-    });
-
-    let mut chosen: Option<(GbMod, GbFile)> = None;
-    if let Some((m, files)) = &app.mods_ui.files {
-        let mut close = false;
-        widgets::section(ui, &p, &format!("Files of {}", m.name), |ui| {
-            for f in files {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&f.name).font(theme::mono(13.0)).color(p.ink));
-                    ui.label(RichText::new(format!("{:.1} MB", f.size as f64 / 1e6)).color(p.muted));
-                    if !f.description.is_empty() {
-                        ui.label(RichText::new(&f.description).color(p.body));
-                    }
-                    if widgets::button(ui, &p, "Install", !busy).clicked() {
-                        chosen = Some((m.clone(), f.clone()));
-                    }
-                });
-            }
-            if widgets::button(ui, &p, "Close", true).clicked() {
-                close = true;
-            }
-        });
-        if close {
-            app.mods_ui.files = None;
+        let waiting = app.mods_ui.pending.len();
+        if waiting > 0 {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{waiting} more file{} to install after this one.", if waiting == 1 { "" } else { "s" })).size(12.5).color(p.muted));
+                if ui.link(RichText::new("Cancel the rest").size(12.5)).clicked() {
+                    app.mods_ui.pending.clear();
+                }
+            });
         }
-    }
-    if let Some((m, f)) = chosen {
-        let d = dir.clone();
-        app.mods_ui.files = None;
-        app.mods_ui.installing = Some((m.name.clone(), spawn(move || mods::gb_install(&m, &f, &d))));
-    }
+    });
 
     widgets::section(ui, &p, "GameBanana", |ui| {
         ui.horizontal(|ui| {
@@ -502,7 +822,44 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.label(RichText::new("Mods are made by their authors and installed as they are; code mods made for this engine (a DLL in exefs) load at start, but .ips / .pchtxt patches cannot apply.").size(12.5).color(p.muted));
     });
 
-    if let Some((text, tone)) = message {
+    for (text, tone) in messages {
         app.notify(text, tone);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gfile(id: u64, name: &str, desc: &str, date: u64) -> GbFile {
+        GbFile { id, name: name.into(), description: desc.into(), date, ..GbFile::default() }
+    }
+
+    /// The file picker ticks the recommended file; every ticked file is
+    /// queued, in page order, each to be installed into its own folder.
+    #[test]
+    fn the_file_picker_ticks_the_recommended_file_and_queues_each_ticked_one() {
+        let m = GbMod { id: 742827, kind: "Mod".into(), name: "Turn Control".into(), author: String::new(), version: String::new(), likes: 0, url: String::new() };
+        let files = vec![gfile(1, "turncontrol-030-emblemweave.zip", "for recomps", 200), gfile(2, "turncontrol-030-emulator.zip", "atmosphere for emus", 200)];
+        let rec = mods::pick(&files, "");
+        assert_eq!(rec, Some(0));
+        assert_eq!(default_picks(&files, rec), vec![true, false]);
+        let mut ui = Ui::default();
+        queue_files(&mut ui, &m, &files, &[true, true]);
+        let names: Vec<(String, u64)> = ui.pending.iter().map(|(n, _, f)| (n.clone(), f.id)).collect();
+        assert_eq!(names, vec![("Turn Control (turncontrol-030-emblemweave.zip)".to_string(), 1), ("Turn Control (turncontrol-030-emulator.zip)".to_string(), 2)]);
+        // The file that fits this PC build goes first within its family, wherever it is on the page.
+        let flipped = vec![files[1].clone(), files[0].clone()];
+        assert_eq!(install_order(&flipped, &[true, true]), vec![1, 0]);
+        let mut ui = Ui::default();
+        queue_files(&mut ui, &m, &flipped, &[true, true]);
+        assert_eq!(ui.pending.iter().map(|(_, _, f)| f.id).collect::<Vec<_>>(), vec![1, 2]);
+        // Other families keep page order, each family together.
+        let three = vec![gfile(3, "other-100.zip", "", 100), files[1].clone(), files[0].clone()];
+        assert_eq!(install_order(&three, &[true, true, true]), vec![0, 2, 1]);
+        // One file keeps the mod's own name.
+        let mut ui = Ui::default();
+        queue_files(&mut ui, &m, &files, &[false, true]);
+        assert_eq!(ui.pending.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(), vec!["Turn Control"]);
     }
 }

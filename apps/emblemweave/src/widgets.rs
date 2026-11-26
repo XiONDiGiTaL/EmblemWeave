@@ -504,6 +504,9 @@ pub fn button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> egui
 /// control; the body decides whether its own primary action also closes.
 pub struct Modal {
     pub close: bool,
+    /// The close came from a click on the veil outside the panel, which a
+    /// dialog holding work (an unpacked download) may ignore.
+    pub veil: bool,
 }
 
 /// One dialog frame for every floating panel in the launcher. It draws a
@@ -523,9 +526,10 @@ pub fn modal(
     let screen = ctx.screen_rect();
     let width = width.clamp(300.0, (screen.width() - 40.0).max(300.0));
     let mut close = false;
-    // The veil is its own layer, created first so the dialog is above it. It
-    // catches a click anywhere outside the panel, including on the page behind.
-    egui::Area::new(egui::Id::new(("modal-veil", id)))
+    let mut veil = false;
+    // The veil is its own layer. It catches a click anywhere outside the
+    // panel, including on the page behind.
+    let veil_layer = egui::Area::new(egui::Id::new(("modal-veil", id)))
         .fixed_pos(screen.min)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -533,8 +537,11 @@ pub fn modal(
             ui.painter().rect_filled(rect, 0, Color32::from_black_alpha(150));
             if response.clicked() {
                 close = true;
+                veil = true;
             }
-        });
+        })
+        .response
+        .layer_id;
     let frame = egui::Frame::new()
         .fill(p.surface)
         .stroke(Stroke::new(1.0_f32, p.line_strong))
@@ -544,7 +551,7 @@ pub fn modal(
     // A Window, rather than a bare Area, gives the content the whole screen as
     // its available height. An anchored Area only offered the half below the
     // anchor, which pushed footers into a scroll viewport.
-    egui::Window::new(title)
+    let panel = egui::Window::new(title)
         .id(egui::Id::new(("modal-panel", id)))
         .title_bar(false)
         .collapsible(false)
@@ -587,10 +594,16 @@ pub fn modal(
             ui.add_space(8.0);
             footer(ui);
         });
+    // Both layers share an order, and egui brings the one last clicked to the
+    // front: a click on the veil would leave it over the panel, which then
+    // takes no clicks. Tying the panel to the veil keeps it directly above.
+    if let Some(panel) = panel {
+        ctx.set_sublayer(veil_layer, panel.response.layer_id);
+    }
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         close = true;
     }
-    Modal { close }
+    Modal { close, veil }
 }
 
 fn modal_close(ui: &mut egui::Ui, p: &Palette) -> bool {
