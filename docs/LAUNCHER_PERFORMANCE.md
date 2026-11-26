@@ -340,7 +340,7 @@ At 60 FPS the Graphics SDK calls alone were 5.7 ms per frame, and the Mods scans
 
 - `mods.rs`: one installed/conflict/site scan is kept for one second. Toggling, removing,
   installing or applying a profile invalidates it immediately, and a folder added outside the
-  launcher appears on the next redraw after the TTL.
+  launcher appears once a redraw after the TTL has rescanned it (see the follow-up below).
 - `engine.rs`: the SDK layout and ReShade status are cached for two seconds. Adopting upscaler
   files calls `forget_sdk()` so a just-installed DLL is visible on the next frame.
 - `sites.rs`: `collect_from`, `problem_for` and `stale_for` reuse the installed list instead of
@@ -357,3 +357,25 @@ At 60 FPS the Graphics SDK calls alone were 5.7 ms per frame, and the Mods scans
   regression.
 - The page still does a full scan once per second while it is visible, not once per frame. A much
   larger mod collection would need a background index to remove that last periodic hitch.
+  (Fixed in the follow-up below.)
+
+### Follow-up: the once-a-second hitch
+
+On an install with 16 mods, 12 of them code mods, that periodic scan was a visible lag spike every
+second while scrolling. Measured in a release build on that install:
+
+| Part of one scan | Before | After |
+|---|---:|---:|
+| `mods::list()` | 11-13 ms | unchanged |
+| `mods::conflicts()` | about 1 ms | unchanged |
+| `.sites` checks (`problem_for`, `stale_for`, `mod_missing` per code mod) | 178-183 ms | 7.1-7.7 ms |
+
+The `.sites` checks read the whole prepared `main` (about 35 MB) for its build ID and code segment,
+once per check and once per code mod, though both live in the NSO header.
+
+- `sites.rs`: `main_build_id` and `merged` read only the first 0x100 bytes of `main`.
+- `mods.rs`: the periodic rescan runs on a thread and the page keeps drawing the last scan until it
+  is done. The first scan, the one after an action on the page and the one on coming back to the
+  page from another stay on the UI thread, so the list is never empty or out of date; a background
+  scan that started before an action is thrown away. A background scan that panics stops the
+  periodic rescans until the next action on the page or the next visit to it, so a crash report is not written every second.

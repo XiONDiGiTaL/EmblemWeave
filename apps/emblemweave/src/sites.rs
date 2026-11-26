@@ -46,9 +46,20 @@ pub fn built_list(root: &Path) -> PathBuf {
     crate::engine::game_exe(root).with_file_name("fefw.sites")
 }
 
+/// The first 0x100 bytes of the prepared ExeFS's `main` (its NSO header). The
+/// Mods page's hook-site checks run on every rescan and only need the header;
+/// reading the whole ~35 MB file each time made the rescan hitch.
+fn main_header(root: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let f = std::fs::File::open(root.join("game").join("dump").join("exefs").join("main")).ok()?;
+    let mut data = Vec::with_capacity(0x100);
+    f.take(0x100).read_to_end(&mut data).ok()?;
+    Some(data)
+}
+
 /// main's build ID from the prepared ExeFS (the NSO header's 32 bytes at 0x40), as upper-case hex without trailing zeros.
 pub fn main_build_id(root: &Path) -> Option<String> {
-    let data = std::fs::read(root.join("game").join("dump").join("exefs").join("main")).ok()?;
+    let data = main_header(root)?;
     let id = data.get(0x40..0x60)?;
     let hex: String = id.iter().map(|b| format!("{b:02X}")).collect();
     Some(hex.trim_end_matches('0').to_string()).filter(|h| !h.is_empty())
@@ -140,7 +151,7 @@ pub fn merged(root: &Path, sites: &[Site]) -> Result<String, String> {
     if sites.is_empty() {
         return Ok(base);
     }
-    let text = std::fs::read(root.join("game").join("dump").join("exefs").join("main")).ok().and_then(|d| {
+    let text = main_header(root).and_then(|d| {
         let u = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64);
         Some((u(0x14)?, u(0x18)?))
     });
@@ -277,6 +288,34 @@ mod tests {
     use super::*;
 
     const BID: &str = "DB93B0125F4850601D61C3EDDE012F8EB2ECFE77";
+
+    /// The build ID and code segment come from the NSO header alone, and a
+    /// file too short for them reads as no build ID, as a whole-file read did.
+    #[test]
+    fn reads_only_main_header() {
+        let root = std::env::temp_dir().join(format!("ew-sites-header-{}", std::process::id()));
+        let exefs = root.join("game").join("dump").join("exefs");
+        std::fs::create_dir_all(&exefs).unwrap();
+        let mut nso = vec![0u8; 0x200];
+        nso[0x40..0x54].copy_from_slice(&[0xDB, 0x93, 0xB0, 0x12, 0x5F, 0x48, 0x50, 0x60, 0x1D, 0x61, 0xC3, 0xED, 0xDE, 0x01, 0x2F, 0x8E, 0xB2, 0xEC, 0xFE, 0x77]);
+        std::fs::write(exefs.join("main"), &nso).unwrap();
+        assert_eq!(main_build_id(&root).as_deref(), Some(BID));
+        assert_eq!(main_header(&root).map(|h| h.len()), Some(0x100));
+        // merged() checks a mod's site against the code segment from the header
+        // (offset at 0x14, size at 0x18), here 0x100..0x1100.
+        nso[0x14..0x18].copy_from_slice(&0x100u32.to_le_bytes());
+        nso[0x18..0x1C].copy_from_slice(&0x1000u32.to_le_bytes());
+        std::fs::write(exefs.join("main"), &nso).unwrap();
+        let base = base_list(&root);
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::write(&base, "inline 0x7100000200\n").unwrap();
+        let site = |addr| Site { from: "m/exefs/m.sites:1".into(), kind: "midhook".into(), addr };
+        assert!(merged(&root, &[site(MAIN_BASE + 0x104)]).is_ok());
+        assert!(merged(&root, &[site(MAIN_BASE + 0x1100)]).unwrap_err().contains("outside main's code"));
+        std::fs::write(exefs.join("main"), &nso[..0x50]).unwrap();
+        assert_eq!(main_build_id(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn build_ids_match_like_atmosphere() {
