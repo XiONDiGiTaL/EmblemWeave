@@ -1,12 +1,266 @@
-# Issue #79: Save Data Forensic Analysis (two independent reports)
+Status: **both diagnostic bundles and msalgadob's `otherdata.zip` were examined on
+2026-11-26. One concrete defect explains the observable failure in both reports
+and is fixed; msalgadob's four-hour playthrough was rebuilt from the archive in a
+separate copy and mounts in the runner. The in-game Continue menu itself was not
+captured, so no gameplay load is claimed.**
 
-Status: **open — one dangerous failure path is now guarded, but neither reporter's
-exact lost save tree is available, so a single root cause is not proven.**
+## 0. Update 2026-11-26: the archives, the cause, and the recovery
 
-This document replaces the earlier single-report conclusion that the original
-reporter had accidentally deleted a profile. That event is in the bundle, but it
-does not establish where the missing save was, and the second reporter never
-mentions a profile deletion.
+### 0.1 The archives
+
+| Archive | SHA-256 | Contents |
+| --- | --- | --- |
+| `emblemweave-report-1795382099629.zip` (KalHawke) | `3a3ee40c…cabef7696` | `report.txt`, `environment.txt`, `config.json`, `game/{fefw.ini,fefw.log,controls.ini}`, the launcher logs; **no save tree** |
+| `emblemweave-report-1795483280940.zip` (msalgadob) | `3500f822…67d6a0e5b` | the same shape; **no save tree** |
+| `otherdata.zip` (msalgadob) | `17302107…852ef45` | 33 files, 1.2 MB: the `account` folder, its `.meta`, and the `backups`/`profiles` contents flattened into one folder |
+
+`otherdata.zip` is original user data. Every examination below ran on a copy
+(`tmp/issue79/…`, not committed); the extracted tree's SHA-256 manifest is
+identical before and after the work.
+
+### 0.2 KalHawke
+
+* Build 0.1.41 (`a56d1e2`), portable data root `G:\Games\EmblemWeave-v0.1.40\data`.
+* `game/fefw.ini` has `[fs] save_dir = G:/Games/EmblemWeave-v0.1.40/data/save`, and
+  `game/fefw.log` records `save data in 'G:/Games/EmblemWeave-v0.1.40/data/save'`:
+  the launcher and the runtime agreed on the root. No stale-root or wrong-user
+  cause applies to this report.
+* `game/fefw.log` (a 146-second session, ended from the F1 menu) contains **no**
+  `no such save data` line and **no** `creating the account save data` line. On
+  0.1.41 those were the messages of the empty-save path, so the runtime found an
+  account save and mounted it. (0.1.41 logged mount failures, not successes, so
+  the successful mount itself is not in the log.)
+* The launcher activity shows the profile `First Run 0.1.41` moved to
+  `backups/1795381792-profile-First Run 0.1.41` at 21:09:52, then the game started
+  at 21:10:04 and presented its first frame at 21:10:11. A profile is a copy; moving
+  it does not touch the account save.
+* The bundle cannot show the contents of `000` at that launch: 0.1.41 had no save
+  inventory, and the report was generated after the user had already moved Auto
+  into and back out of the backups folder. It therefore cannot prove the original
+  state, only rule causes out.
+
+The operation the reporter describes — Auto moved into the backups folder and
+back — is exactly the operation that produces a stamped file (0.4). The bundle is
+consistent with that mechanism and rules out a root, UID or title mismatch, but
+the tree that would prove it was never attached.
+
+### 0.3 msalgadob
+
+| Path in the archive | Size | What it is |
+| --- | --- | --- |
+| `0100000000000000706d635257464546.meta` | 191 | canonical metadata: `size=67108864`, `journal=67108864`, `owner=4007ef01f8ae000`, the UID at `attr[8..24]`, `type=1` — the layout `meta_text()` writes |
+| `0100…/000/1795325701-Auto` | 33,520 | the **only** file in the live account save; SHA-256 `2a3011e1…b2d4ca8`; the valid slot header `ddbc efcd` |
+| `1795393583/000/` | 8 files | the four-hour session: `Chapter_Ism_0_2`, `Chapter_Ism_0_3`, `Chapter_Led_1_1`…`1_4`, `Route_Ism`, `Global`; written 2026-11-22 00:05–02:33 local |
+| 15 × `<stamp>/000/1795325701-Auto` | 33,520 each | repeated recovery attempts, each a whole-save backup of an account that held only the stamped autosave |
+| `1795655727/000/{Auto, Global}` | 198,200 + 64 | a later playthrough, 2026-11-25 22:15 local, after the user deleted profiles/accounts/backups and started again |
+| `1795655769-profile-test`, `1795655767-profile-test2` | | profile backups made while trying to recover |
+
+Three facts settle the case:
+
+1. The live account folder had **no `Auto`**. It had one file whose name is the
+   backups stamp plus the slot name (`1795325701-Auto`), so the game could not open
+   an autosave and offered no Continue.
+2. The four-hour playthrough was not lost: all its slots were in
+   `backups/1795393583/000`, made when the user restored or loaded something. The
+   launcher's own backup-first behavior preserved it.
+3. The stamp `1795325701` is 2026-11-22 02:35 local, three minutes after the
+   autosave's own write time (02:32) — the moment the launcher renamed it.
+
+Timestamps inside the archive are the user's local time (UTC−3); the epoch in a
+folder name is UTC, which is why `1795393583` reads as 2026-11-23 00:26 UTC.
+
+### 0.4 The cause
+
+`saves::archive_slot` — the Saves page's **Move to backups** — renames
+`account/<uid>/000/Auto` to `<save>/backups/<stamp>-Auto`. Moving that file back
+into `000` by hand keeps the stamped name, and the game opens only `Auto`, so the
+volume mounts, the game enumerates no autosave and starts as if the save were
+empty. The launcher listed the stamped file but had no way to promote it, and
+neither 0.1.41 nor 0.1.42 copied it to the name the game reads. That is the whole
+failure: no save format, `.meta`, UID, title-id or journal defect is involved.
+
+msalgadob's archive is that state, on disk, with the missing playthrough sitting
+in `backups`. KalHawke's report describes the same move; his bundle cannot show
+the resulting tree, but it rules out the other candidates.
+
+### 0.5 The fix (in the same tree as this document)
+
+* `saves::stamped_slot_name` recognises `<stamp>-<slot>`, and `kind_of` reports it
+  as the slot it names, so the Saves page lists it instead of hiding it.
+* Before Play, `saves::repair_backup_named_slots` copies every readable stamped
+  slot (`Auto` and manual chapter saves only) to its own name. The stamped file
+  is never renamed, moved or deleted; an existing slot always wins; a file that
+  fails `Slot::verify` or the native zstd decode is never promoted.
+* The Saves page shows **Recover** beside such a file and keeps a note of what it
+  did. `EmblemWeave.exe --recover-saves` runs the same repair without the window.
+* `--import-save`, Restore and Load keep their backup-first behavior, so the
+  account that is replaced is still in `backups/`.
+
+### 0.6 Recovery of msalgadob's playthrough (on a copy)
+
+1. A fresh portable fixture root was filled from `otherdata.zip` under an override
+   of `APPDATA`; the live installation was never touched.
+2. `EmblemWeave.exe --import-save <archive>/1795393583` printed
+   `Imported 8 save files …; the previous save is in …\backups\1795682327`
+   (the stamped account was moved aside, not deleted).
+3. The reporter's `1795325701-Auto` was put back into `000` and
+   `EmblemWeave.exe --recover-saves` printed
+   `Recovered the save the game could not open: 1795325701-Auto -> Auto`.
+4. Result: `000` holds `Auto` (33,520 bytes, SHA-256 `2a3011e1…b2d4ca8`, byte-for-byte
+   the archive's file), the six chapter saves, `Route_Ism` and `Global`; the `.meta`
+   is present; `backups/1795393583` is byte-identical.
+5. `fefw.exe --ini <fixture>` logged
+   `save data opened: account/0100000000000000706d635257464546 … (10 files in 000, meta present)`
+   and no `creating the account save data` line; the game reached its title
+   sequence.
+
+The Continue entry and a loaded playthrough are **not** claimed: the game window
+accepted focus but not synthetic keys (Enter, Space, Z, a mouse click), so the
+title menu could not be driven.
+
+### 0.7 Limits
+
+* KalHawke's live tree was never in the bundle; his cause is established by the
+  operation he describes plus the archive that proves the mechanism, not by his
+  own files.
+* 0.1.40/0.1.41 binaries are not installed here, so cross-version checks are
+  format-level fixtures, not runs of those releases.
+* The recovered save mounts; whether the title menu lists Continue is unverified.
+
+The earlier text below is kept as the investigation record it was; its "open"
+status is superseded by this section.# Issue #79: Save Data Forensic Analysis (two independent reports)
+
+Status: **both diagnostic bundles and msalgadob's `otherdata.zip` were examined on
+2026-11-26. One concrete defect explains the observable failure in both reports
+and is fixed; msalgadob's four-hour playthrough was rebuilt from the archive in a
+separate copy and mounts in the runner. The in-game Continue menu itself was not
+captured, so no gameplay load is claimed.**
+
+## 0. Update 2026-11-26: the archives, the cause, and the recovery
+
+### 0.1 The archives
+
+| Archive | SHA-256 | Contents |
+| --- | --- | --- |
+| `emblemweave-report-1795382099629.zip` (KalHawke) | `3a3ee40c…cabef7696` | `report.txt`, `environment.txt`, `config.json`, `game/{fefw.ini,fefw.log,controls.ini}`, the launcher logs; **no save tree** |
+| `emblemweave-report-1795483280940.zip` (msalgadob) | `3500f822…67d6a0e5b` | the same shape; **no save tree** |
+| `otherdata.zip` (msalgadob) | `17302107…852ef45` | 33 files, 1.2 MB: the `account` folder, its `.meta`, and the `backups`/`profiles` contents flattened into one folder |
+
+`otherdata.zip` is original user data. Every examination below ran on a copy
+(`tmp/issue79/…`, not committed); the extracted tree's SHA-256 manifest is
+identical before and after the work.
+
+### 0.2 KalHawke
+
+* Build 0.1.41 (`a56d1e2`), portable data root `G:\Games\EmblemWeave-v0.1.40\data`.
+* `game/fefw.ini` has `[fs] save_dir = G:/Games/EmblemWeave-v0.1.40/data/save`, and
+  `game/fefw.log` records `save data in 'G:/Games/EmblemWeave-v0.1.40/data/save'`:
+  the launcher and the runtime agreed on the root. No stale-root or wrong-user
+  cause applies to this report.
+* `game/fefw.log` (a 146-second session, ended from the F1 menu) contains **no**
+  `no such save data` line and **no** `creating the account save data` line. On
+  0.1.41 those were the messages of the empty-save path, so the runtime found an
+  account save and mounted it. (0.1.41 logged mount failures, not successes, so
+  the successful mount itself is not in the log.)
+* The launcher activity shows the profile `First Run 0.1.41` moved to
+  `backups/1795381792-profile-First Run 0.1.41` at 21:09:52, then the game started
+  at 21:10:04 and presented its first frame at 21:10:11. A profile is a copy; moving
+  it does not touch the account save.
+* The bundle cannot show the contents of `000` at that launch: 0.1.41 had no save
+  inventory, and the report was generated after the user had already moved Auto
+  into and back out of the backups folder. It therefore cannot prove the original
+  state, only rule causes out.
+
+The operation the reporter describes — Auto moved into the backups folder and
+back — is exactly the operation that produces a stamped file (0.4). The bundle is
+consistent with that mechanism and rules out a root, UID or title mismatch, but
+the tree that would prove it was never attached.
+
+### 0.3 msalgadob
+
+| Path in the archive | Size | What it is |
+| --- | --- | --- |
+| `0100000000000000706d635257464546.meta` | 191 | canonical metadata: `size=67108864`, `journal=67108864`, `owner=4007ef01f8ae000`, the UID at `attr[8..24]`, `type=1` — the layout `meta_text()` writes |
+| `0100…/000/1795325701-Auto` | 33,520 | the **only** file in the live account save; SHA-256 `2a3011e1…b2d4ca8`; the valid slot header `ddbc efcd` |
+| `1795393583/000/` | 8 files | the four-hour session: `Chapter_Ism_0_2`, `Chapter_Ism_0_3`, `Chapter_Led_1_1`…`1_4`, `Route_Ism`, `Global`; written 2026-11-22 00:05–02:33 local |
+| 15 × `<stamp>/000/1795325701-Auto` | 33,520 each | repeated recovery attempts, each a whole-save backup of an account that held only the stamped autosave |
+| `1795655727/000/{Auto, Global}` | 198,200 + 64 | a later playthrough, 2026-11-25 22:15 local, after the user deleted profiles/accounts/backups and started again |
+| `1795655769-profile-test`, `1795655767-profile-test2` | | profile backups made while trying to recover |
+
+Three facts settle the case:
+
+1. The live account folder had **no `Auto`**. It had one file whose name is the
+   backups stamp plus the slot name (`1795325701-Auto`), so the game could not open
+   an autosave and offered no Continue.
+2. The four-hour playthrough was not lost: all its slots were in
+   `backups/1795393583/000`, made when the user restored or loaded something. The
+   launcher's own backup-first behavior preserved it.
+3. The stamp `1795325701` is 2026-11-22 02:35 local, three minutes after the
+   autosave's own write time (02:32) — the moment the launcher renamed it.
+
+Timestamps inside the archive are the user's local time (UTC−3); the epoch in a
+folder name is UTC, which is why `1795393583` reads as 2026-11-23 00:26 UTC.
+
+### 0.4 The cause
+
+`saves::archive_slot` — the Saves page's **Move to backups** — renames
+`account/<uid>/000/Auto` to `<save>/backups/<stamp>-Auto`. Moving that file back
+into `000` by hand keeps the stamped name, and the game opens only `Auto`, so the
+volume mounts, the game enumerates no autosave and starts as if the save were
+empty. The launcher listed the stamped file but had no way to promote it, and
+neither 0.1.41 nor 0.1.42 copied it to the name the game reads. That is the whole
+failure: no save format, `.meta`, UID, title-id or journal defect is involved.
+
+msalgadob's archive is that state, on disk, with the missing playthrough sitting
+in `backups`. KalHawke's report describes the same move; his bundle cannot show
+the resulting tree, but it rules out the other candidates.
+
+### 0.5 The fix (in the same tree as this document)
+
+* `saves::stamped_slot_name` recognises `<stamp>-<slot>`, and `kind_of` reports it
+  as the slot it names, so the Saves page lists it instead of hiding it.
+* Before Play, `saves::repair_backup_named_slots` copies every readable stamped
+  slot (`Auto` and manual chapter saves only) to its own name. The stamped file
+  is never renamed, moved or deleted; an existing slot always wins; a file that
+  fails `Slot::verify` or the native zstd decode is never promoted.
+* The Saves page shows **Recover** beside such a file and keeps a note of what it
+  did. `EmblemWeave.exe --recover-saves` runs the same repair without the window.
+* `--import-save`, Restore and Load keep their backup-first behavior, so the
+  account that is replaced is still in `backups/`.
+
+### 0.6 Recovery of msalgadob's playthrough (on a copy)
+
+1. A fresh portable fixture root was filled from `otherdata.zip` under an override
+   of `APPDATA`; the live installation was never touched.
+2. `EmblemWeave.exe --import-save <archive>/1795393583` printed
+   `Imported 8 save files …; the previous save is in …\backups\1795682327`
+   (the stamped account was moved aside, not deleted).
+3. The reporter's `1795325701-Auto` was put back into `000` and
+   `EmblemWeave.exe --recover-saves` printed
+   `Recovered the save the game could not open: 1795325701-Auto -> Auto`.
+4. Result: `000` holds `Auto` (33,520 bytes, SHA-256 `2a3011e1…b2d4ca8`, byte-for-byte
+   the archive's file), the six chapter saves, `Route_Ism` and `Global`; the `.meta`
+   is present; `backups/1795393583` is byte-identical.
+5. `fefw.exe --ini <fixture>` logged
+   `save data opened: account/0100000000000000706d635257464546 … (10 files in 000, meta present)`
+   and no `creating the account save data` line; the game reached its title
+   sequence.
+
+The Continue entry and a loaded playthrough are **not** claimed: the game window
+accepted focus but not synthetic keys (Enter, Space, Z, a mouse click), so the
+title menu could not be driven.
+
+### 0.7 Limits
+
+* KalHawke's live tree was never in the bundle; his cause is established by the
+  operation he describes plus the archive that proves the mechanism, not by his
+  own files.
+* 0.1.40/0.1.41 binaries are not installed here, so cross-version checks are
+  format-level fixtures, not runs of those releases.
+* The recovered save mounts; whether the title menu lists Continue is unverified.
+
+The earlier text below is kept as the investigation record it was; its "open"
+status is superseded by this section.
 
 ## 1. Reports examined
 

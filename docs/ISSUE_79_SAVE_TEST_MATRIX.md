@@ -161,3 +161,30 @@ the manual instructions for the launcher-side rows.
   substituting a launcher-only check.
 - #79 stays open until at least one reporter (or an identical portable reproduction) confirms the save survives restart
   and update. R3 adoption is a recovery path, not proof of discovery.
+---
+
+## F. Executed 2026-11-26: archive fixtures, recovery and the mount check
+
+Fixtures are copies under `tmp/issue79/` (not committed). The extracted archive's
+SHA-256 manifest is identical before and after every step.
+
+| Scenario | Result | Evidence |
+| --- | --- | --- |
+| KalHawke: Move Auto to backups, copy it back by hand, restart | **PASS (automated)** | `an_autosave_moved_to_backups_and_back_by_hand_opens_after_a_restart`: the stamped file is listed by `slots()`, Play's repair copies it to `Auto` byte-for-byte, chapters, `Global` and `.meta` unchanged |
+| msalgadob: stamped-only account plus `backups/<stamp>/000` with chapters | **PASS (automated)** | `a_stamped_autosave_beside_a_whole_save_backup_recovers_the_playthrough`: restore installs the 8 files, the repair adds `Auto`, the archive backup is unchanged, the empty-namespace guard clears |
+| A stamped slot the native decoder or the payload checksum rejects | **PASS (automated)** | `a_stamped_slot_the_native_decoder_rejects_is_not_promoted`, `a_stamped_slot_with_a_bad_payload_checksum_is_not_promoted` |
+| Real `otherdata.zip` → import + recover | **PASS** | `--import-save` installed 8 files and kept the stamped account in `backups`; `--recover-saves` printed `1795325701-Auto -> Auto`; SHA-256 of `Auto` equals the archive's file (`2a3011e1…b2d4ca8`) |
+| Runner mounts the recovered playthrough | **PASS (mount only)** | `save data opened: account/0100… (10 files in 000, meta present)`; no create line |
+| Continue entry and gameplay load | **NOT VERIFIED** | synthetic keyboard/mouse input did not reach the game menu |
+| Populated `000` without `.meta` | **PASS (runtime, previous run)** | `fs.cpp` repair line; the 12 files were preserved |
+| Full launcher test suite | **PASS** | 481 passed, 0 failed, 14 ignored (`cargo test -p emblemweave --locked`) |
+
+Row coverage from this run: 19 and 22 are now automated; 24 gained the
+backup-and-restore test above; the KalHawke rows in §B that describe a slot moved
+out of and back into `000` are the first row here. Rows 10–13 and 15–18 (portable
+and moved installs, profile UI) remain untested; nothing in this table was checked
+against a personal live save.
+
+The same limit as §E applies: a launcher badge or a successful mount is not a
+gameplay load. §0.6 of `ISSUE_79_SAVE_FORENSIC_ANALYSIS.md` records what was
+observed and what was not.

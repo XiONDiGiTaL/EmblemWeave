@@ -146,3 +146,21 @@ all-file rollback there. Until then, this page's recovery procedure is the suppo
 - Check for a running `EmblemWeave.exe` and active builds before replacing files. A running executable cannot be
   replaced on Windows, and a running build can corrupt its output.
 - Use the release manifest and SHA-256 values; do not trust a re-zipped or renamed download.
+
+## Recovering save data after an update or a backup move
+
+1. Open **Saves**. The page lists the slot files in the account folder the game
+   reads (`<save folder>\account\0100000000000000706d635257464546\000`).
+2. If a slot is named `<stamp>-Auto` or `<stamp>-Chapter_…`, it was moved back out
+   of `backups\` by hand and the game cannot open it. Press **Recover** beside it,
+   or run `EmblemWeave.exe --recover-saves`. The file is copied to `Auto` (or the
+   chapter name); the stamped original stays where it is.
+3. If the current save is empty while **Saves** lists a profile or a whole-save
+   backup, load or restore it. The save being replaced is moved to `backups`
+   first, so the step can be undone.
+4. If a profile or backup is under another account folder, **Use this save** on
+   the orphan list installs it at the canonical path after backing up the current
+   save.
+5. Do not delete `backups\` until the game has shown the playthrough and a
+   restart has kept it. The diagnostic bundle's `saves.txt` lists every file,
+   size and hash under the save root, so it can prove what a later launch read.

@@ -1,9 +1,15 @@
 # Issue #79: Remediation specification
 
-> **Implemented since this spec was written (2026-11-22):** the Saves page now
-> distinguishes emulator title folders that exist but are empty from saves that
-> can be imported (`saves::survey`, `pages/setup.rs`). This is visibility only:
-> R1–R5 remain proposals, and R6 is partial.
+> **Status 2026-11-26:** R1 (`engine::sync_save_dir` + the empty-namespace
+> guard), R2 (both pages show the effective folder from `fefw.ini` next to the
+> configured one), R4 (the runtime logs the full root, repairs a missing `.meta`
+> and no longer says "created" for a tree that had files), R5 (`saves.txt` and the
+> save inventory in every bundle) and R6 are implemented. R3 is implemented as the
+> Saves page's orphan list + **Use this save**, the stamped-slot **Recover** action,
+> and `--recover-saves`. The verified behavior, including the archive examination
+> and the recovery of msalgadob's playthrough, is in
+> `ISSUE_79_SAVE_FORENSIC_ANALYSIS.md` §0; this document stays as the design
+> record.
 
 **Audience:** FCC (owner of the active runtime remediation and the personal gameplay installation).
 **Status:** proposal for review. This document changes no code. Nothing here authorizes a data migration on a

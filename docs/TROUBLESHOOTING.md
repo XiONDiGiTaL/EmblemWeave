@@ -194,6 +194,14 @@ It looks in both `%APPDATA%` and `%LOCALAPPDATA%`, at `<save id>\<title id>` and
 
 Import copies into EmblemWeave's own save folder (`%APPDATA%\EmblemWeave\save\account\0100000000000000706d635257464546\000` by default) and moves any existing save to `backups` first. It never changes or deletes the emulator's copy.
 
+A save moved back out of `backups\` by hand keeps the launcher's timestamp in its
+name (`1795325701-Auto`), and the game opens only `Auto`. That file mounts but the
+game sees no autosave. Play copies it to the game's name before starting; the
+Saves page shows **Recover** beside it, and
+`EmblemWeave.exe --recover-saves` does the same without opening the window. The
+original stamped file is left in place. The folder the game reads is
+`<save folder>\account\0100000000000000706d635257464546\000`.
+
 ## The graphics device was lost on Intel graphics (#72)
 
 `GPU DEVICE LOST` in the first seconds of a launch on an Intel GPU (Iris Xe, UHD, Core Ultra or Arc) has two known
