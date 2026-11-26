@@ -58,6 +58,28 @@ NXTEST(guard_no_device_local_heap) {
     CHECK_EQ(nxrt::gfx::vk_guard_discount_heap(mp, VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU), -1);
 }
 
+NXTEST(guard_device_coherent_memory_only_where_a_protected_type_is_last) {
+    constexpr VkMemoryPropertyFlags kLocal = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    constexpr VkMemoryPropertyFlags kProtected = kLocal | VK_MEMORY_PROPERTY_PROTECTED_BIT;
+    constexpr VkMemoryPropertyFlags kCoherent = kLocal | VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD | VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD;
+    constexpr VkMemoryPropertyFlags kVisible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    // RADV PHOENIX (Ryzen Z1 Extreme): plain, protected, then coherent, with a host-visible coherent type after those
+    VkPhysicalDeviceMemoryProperties mp{};
+    heap(mp, 0, 10 * kGiB, true);
+    mtype(mp, 0, 0, kLocal);
+    mtype(mp, 1, 0, kProtected);
+    mtype(mp, 2, 0, kCoherent);
+    mtype(mp, 3, 0, kCoherent | kVisible);
+    CHECK(nxrt::gfx::vk_needs_device_coherent_memory(mp));
+    // no protected type: the last one is plain memory already, and the feature would move FSR to uncached memory
+    mtype(mp, 1, 0, kLocal);
+    CHECK(!nxrt::gfx::vk_needs_device_coherent_memory(mp));
+    // a protected type and no coherent one to follow it: the feature would change nothing
+    mtype(mp, 1, 0, kProtected);
+    mp.memoryTypeCount = 2;
+    CHECK(!nxrt::gfx::vk_needs_device_coherent_memory(mp));
+}
+
 NXTEST(guard_gpu_bytes_is_zero_without_an_allocator) {
     CHECK_EQ(nxrt::gfx::vk_guard_gpu_bytes(), 0ull);   // no device in this group: the null allocator reads as 0
 }

@@ -36,6 +36,9 @@ namespace gfx {
 // discrete GPU; on other GPUs only a device-local heap that no host-visible memory type uses. -1: subtract nothing.
 int vk_guard_discount_heap(const VkPhysicalDeviceMemoryProperties& mp, VkPhysicalDeviceType type);
 uint64_t vk_guard_gpu_bytes();   // what the guard subtracts now: 0 without a device, with an integrated GPU, or once the device is gone
+// True when the last device-local type the CPU cannot map is a protected one unless the device coherent types are counted: the case in
+// which FSR 3 allocates in protected memory on a device without deviceCoherentMemory (vk_device.cpp).
+bool vk_needs_device_coherent_memory(const VkPhysicalDeviceMemoryProperties& mp);
 }  // namespace gfx
 
 }  // namespace nxrt

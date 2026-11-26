@@ -450,6 +450,17 @@ int vk_guard_discount_heap(const VkPhysicalDeviceMemoryProperties& mp, VkPhysica
 
 uint64_t vk_guard_gpu_bytes() { return gpu_bytes_for_guard(); }
 
+bool vk_needs_device_coherent_memory(const VkPhysicalDeviceMemoryProperties& mp) {
+    VkMemoryPropertyFlags last_without = 0, last_with = 0;
+    for (uint32_t t = 0; t < mp.memoryTypeCount; ++t) {
+        const VkMemoryPropertyFlags f = mp.memoryTypes[t].propertyFlags;
+        if (!(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) || (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) continue;
+        last_with = f;
+        if (!(f & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD)) last_without = f;
+    }
+    return (last_without & VK_MEMORY_PROPERTY_PROTECTED_BIT) && !(last_with & VK_MEMORY_PROPERTY_PROTECTED_BIT);
+}
+
 // ---- GPU quirks: video memory near the OS budget (#49) --------------------------------------------------------------------------
 namespace {
 GpuQuirks g_quirks;
@@ -879,6 +890,21 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     // the FSR SDK v2.4.0 upscaler builds compute shaders with derivative groups wherever the GPU offers them (it does not check that the
     // device enabled them: VUID-VkShaderModuleCreateInfo-pCode-08740 / 08742 otherwise); the NV extension shares the feature struct
     if (!add_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &acsd)) add_ext(VK_NV_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &acsd);
+    // FSR 3's DLLs take the last device-local type an image allows that the CPU cannot map. Mesa 26.3.1's RADV lists the device coherent
+    // types for an image only on a device with this feature, which left a protected type last on a Ryzen Z1 Extreme: the upscaled scene
+    // was plain white. With it, FSR gets the type it got from earlier Mesa. VMA leaves those types alone (its allocator flag is not set)
+    // and the runtime's own picks take the first match. [gfx] amd_coherent_memory = auto|1|0.
+    VkPhysicalDeviceCoherentMemoryFeaturesAMD acm = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COHERENT_MEMORY_FEATURES_AMD};
+    bool x_acm = false;
+    {
+        VkPhysicalDeviceDriverProperties drv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &drv};
+        vkGetPhysicalDeviceProperties2(physical_, &p2);
+        VkPhysicalDeviceMemoryProperties mp{};
+        vkGetPhysicalDeviceMemoryProperties(physical_, &mp);
+        const bool wanted = drv.driverID == VK_DRIVER_ID_MESA_RADV && vk_needs_device_coherent_memory(mp);
+        if (quirk_key("amd_coherent_memory", wanted)) x_acm = add_ext(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME, &acm);
+    }
     bool rba2 = false;
     if (x_prb && has_dext(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) {
         VkPhysicalDeviceRobustness2FeaturesEXT r2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
@@ -973,6 +999,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     // 3: the core robustBufferAccess device feature (no pipeline pNext); 2/1: VK_EXT_pipeline_robustness, with/without robustness2;
     // 0: neither (the device refuses both, or [nvn] robust_ubo = false).
     features_.ubo_robustness = pipeline_robust ? (rba2 ? 2 : 1) : (avail.features.robustBufferAccess ? 3 : 0);
+    if (x_acm && acm.deviceCoherentMemory)
+        NXLOG_I(kTag, "device coherent memory enabled, so FSR 3 does not allocate in protected memory ([gfx] amd_coherent_memory)");
     NXLOG_I(kTag, "texture compression on this GPU: BC %s, ASTC-LDR %s, ETC2 %s", features_.bc ? "yes" : "no",
             features_.astc_ldr ? "yes" : "no", features_.etc2 ? "yes" : "no");
     NXLOG_I(kTag, "features: geometry %d float64 %d int64 %d dualSrc %d logicOp %d multiViewport %d drawParams %d descIndexing %d interlock %d depthClipControl %d customBorder %d hostMemImport %d pushDesc %d uboRobustness %d (%s)",
