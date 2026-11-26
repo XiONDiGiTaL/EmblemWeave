@@ -10,6 +10,7 @@
 // addresses (NVNbufferAddress) are stored as given; the replay resolves them against the pool registry at submit time.
 #pragma once
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -149,11 +150,61 @@ struct CommandBuffer;
 // runs when the NVN call returns (cmdmem_run_pending, from the thunk in nvn_abi.h).
 void cmdmem_charge(CommandBuffer* cb, Op op, uint32_t blob_size);
 
+// Uninitialized byte buffer for CmdList records: avoids std::vector::resize() zero-filling 32-64 bytes before memcpy on every NVN command.
+class RawBytes {
+public:
+    RawBytes() = default;
+    ~RawBytes() { std::free(data_); }
+    RawBytes(const RawBytes&) = delete;
+    RawBytes& operator=(const RawBytes&) = delete;
+    uint8_t* data() { return data_; }
+    const uint8_t* data() const { return data_; }
+    uint8_t* begin() { return data_; }
+    uint8_t* end() { return data_ + size_; }
+    const uint8_t* begin() const { return data_; }
+    const uint8_t* end() const { return data_ + size_; }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    void clear() { size_ = 0; }
+    void reserve(size_t n) {
+        if (n <= cap_) return;
+        size_t nc = cap_ ? cap_ * 2 : 1024;
+        if (nc < n) nc = n;
+        uint8_t* p = static_cast<uint8_t*>(std::realloc(data_, nc));
+        if (!p) throw std::bad_alloc();
+        data_ = p;
+        cap_ = nc;
+    }
+    uint8_t* append_uninit(size_t n) {
+        const size_t at = size_;
+        const size_t need = at + n;
+        if (need > cap_) reserve(need);
+        size_ = need;
+        return data_ + at;
+    }
+    void insert(uint8_t* pos, const uint8_t* first, const uint8_t* last) {
+        const size_t n = static_cast<size_t>(last - first);
+        if (!n) return;
+        if (pos == data_ + size_) {
+            std::memcpy(append_uninit(n), first, n);
+        } else {
+            const size_t off = static_cast<size_t>(pos - data_);
+            reserve(size_ + n);
+            std::memmove(data_ + off + n, data_ + off, size_ - off);
+            std::memcpy(data_ + off, first, n);
+            size_ += n;
+        }
+    }
+private:
+    uint8_t* data_ = nullptr;
+    size_t size_ = 0, cap_ = 0;
+};
+
 class CmdList : public Obj {
 public:
     static constexpr Kind kKind = Kind::CmdList;
     CmdList() : Obj(kKind) {}
-    std::vector<uint8_t> bytes;
+    RawBytes bytes;
     std::vector<Ref<Obj>> held;           // objects the payloads point to
     uint64_t handle = 0;                  // NVNcommandHandle (0 until EndRecording)
     uint32_t record_count = 0;
@@ -178,12 +229,17 @@ private:
         if (meter) cmdmem_charge(meter, op, blob_size);
         const uint32_t p = (payload_size + 7u) & ~7u, b = (blob_size + 7u) & ~7u;
         const uint32_t total = static_cast<uint32_t>(sizeof(RecHeader)) + p + b;
-        const size_t at = bytes.size();
-        bytes.resize(at + total);   // zero-initialised padding
+        uint8_t* dst = bytes.append_uninit(total);
         RecHeader h{static_cast<uint16_t>(op), 0, total};
-        std::memcpy(&bytes[at], &h, sizeof h);
-        if (payload_size) std::memcpy(&bytes[at + sizeof h], payload, payload_size);
-        if (blob_size) std::memcpy(&bytes[at + sizeof h + p], blob, blob_size);
+        std::memcpy(dst, &h, sizeof h);
+        if (payload_size) {
+            std::memcpy(dst + sizeof h, payload, payload_size);
+            if (p > payload_size) std::memset(dst + sizeof h + payload_size, 0, p - payload_size);
+        }
+        if (blob_size) {
+            std::memcpy(dst + sizeof h + p, blob, blob_size);
+            if (b > blob_size) std::memset(dst + sizeof h + p + blob_size, 0, b - blob_size);
+        }
         ++record_count;
     }
 };

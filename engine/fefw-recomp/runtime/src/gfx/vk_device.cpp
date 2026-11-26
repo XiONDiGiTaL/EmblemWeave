@@ -344,6 +344,7 @@ uint64_t gpu_bytes_for_guard() {      // the device's dedicated memory in use by
 
 bool g_budget_exact = false;           // VK_EXT_memory_budget is on: heap usage and budget are the driver's figures
 int g_video_heap = -1;                 // the largest device-local heap (guarded by g_guard_mu, as the allocator pointer)
+bool g_video_unified = false;          // integrated GPU or no dedicated VRAM heap (shares system RAM with the CPU)
 void video_for_guard(nxrt::MemGuardVideo* out) {
     std::unique_lock<std::timed_mutex> lk(g_guard_mu, std::defer_lock);
     if (!lk.try_lock_for(std::chrono::milliseconds(200))) return;   // the freeze report gets no video line rather than a blocked thread
@@ -368,6 +369,7 @@ void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
         g_guard_heap = mp ? vk_guard_discount_heap(*mp, type) : -1;
         g_guard_vma = a;
         g_video_heap = static_cast<int>(heap);
+        g_video_unified = (type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) || g_guard_heap < 0;
     }
     nxrt::memguard_set_discount(&gpu_bytes_for_guard);
     nxrt::memguard_set_video(&video_for_guard);
@@ -416,6 +418,7 @@ void unregister_vma_gauges() {
         g_guard_vma = nullptr;
         g_video_heap = -1;
         g_guard_heap = -1;
+        g_video_unified = false;
     }
     const char* const names[] = {"vma.device_usage_mb", "vma.device_budget_mb", "vma.pressure_percent", "vma.live_pressure_percent",
                                "vma.alloc_count", "vma.alloc_mb", "vma.block_count", "vma.block_mb"};
@@ -537,6 +540,24 @@ int video_live_percent() {
             if (h.budget) pct = static_cast<int>(live * 100 / h.budget);
         }
     }
+    last.store(pct, std::memory_order_relaxed);
+    return pct;
+}
+
+// On a unified-memory GPU (integrated GPU or no dedicated VRAM heap, sharing system RAM with the CPU),
+// host physical RAM usage in percent (sampled at most every 250 ms); -1 on discrete GPUs or before a device exists.
+int video_sysram_usage_percent() {
+    static std::atomic<int64_t> next_ms{0};
+    static std::atomic<int> last{-1};
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t due = next_ms.load(std::memory_order_relaxed);
+    if (now < due || !next_ms.compare_exchange_strong(due, now + 250, std::memory_order_relaxed)) return last.load(std::memory_order_relaxed);
+    bool unified = false;
+    {
+        std::lock_guard<std::timed_mutex> lk(g_guard_mu);
+        unified = g_guard_vma && g_video_heap >= 0 && g_video_unified;
+    }
+    const int pct = unified ? nxrt::memguard_sysram_usage_percent() : -1;
     last.store(pct, std::memory_order_relaxed);
     return pct;
 }

@@ -40,6 +40,8 @@ bool arm(Region* r, uint64_t first, uint64_t count);
 // Owner: true when every page of the run is armed and nobody wrote it since.
 bool all_valid(const Region* r, uint64_t first, uint64_t count);
 bool page_valid(const Region* r, uint64_t page);
+// Direct pointer to the atomic valid-page bitmap (for inlined hot-path checks on the owner thread).
+const std::atomic<uint64_t>* valid_bitmap(const Region* r);
 // Owner: some page of [first, first + count) is valid (pages past the region are not); word by word (rt agent).
 bool any_valid(const Region* r, uint64_t first, uint64_t count);
 bool page_banned(const Region* r, uint64_t page);
@@ -47,6 +49,8 @@ bool page_banned(const Region* r, uint64_t page);
 void invalidate(Region* r, uint64_t first, uint64_t count);
 // Owner: appends the pages written by the CPU since the last call (page indices) and clears that record.
 void take_written(Region* r, std::vector<uint64_t>& out);
+// Monotonic sequence bumped whenever any region marks a page written (lets callers with many regions skip scanning when idle).
+uint64_t write_seq();
 
 // Any thread: the operating system is about to write [p, p + n) (a file read into guest memory): armed pages in the range become writable
 // and count as written. Cheap when no region exists.

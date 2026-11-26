@@ -39,7 +39,9 @@ struct BindingDesc {
 struct ProgLayout {
     VkDescriptorSetLayout sets[5] = {};         // 0..3 the program's own; kPoolSet (4) the shared pool arrays, when a stage samples through them
     VkPipelineLayout layout = VK_NULL_HANDLE;
-    std::vector<BindingDesc> bindings;          // every used descriptor of every stage, sorted by (set, binding)
+    std::vector<BindingDesc> bindings;          // every used descriptor of every stage, grouped by set (0..3, kPoolSet)
+    uint16_t set_begin[5] = {};                 // [set_begin[s], set_end[s]) in `bindings` for set s
+    uint16_t set_end[5] = {};
     bool has_set[5] = {};
     VkShaderStageFlags push_stages = 0;         // push constant range [0, push_bytes) of generated stages (ShaderInfo::push_bytes); 0 = none
     uint32_t push_bytes = 0;
@@ -55,21 +57,10 @@ struct ProgLayout {
     // A per-program invariant of the replay: a storage buffer the program's shaders write (one that [nvn] gfx_ssbo_readonly proves read-only
     // does not count) or a storage image. A draw of this program then writes memory; worked out once here instead of over every binding a draw.
     bool writes_storage = false;
-
-    // --- Invariant caches for fast descriptor set building (Phase 2.2) ---
-    // Pre-computed VkWriteDescriptorSet templates for each set (0..3), static parts only.
-    // The dynamic parts (pBufferInfo, pImageInfo, pTexelBufferView) are filled in at build time.
-    struct WriteTemplate {
-        VkWriteDescriptorSet write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        uint32_t binding = 0;
-        VkDescriptorType type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        // Source classification for dynamic data lookup
-        uint8_t source_class = 0;  // 0=uniform, 1=storage, 2=image, 3=sampler, 4=texel, 5=push_const, 6=driver_const, 7=support, 8=constant_data, 9=uniform_block
-        int32_t source_index = -1; // index into the source array (ubo, ssbo, tex, img, etc.)
-        int32_t nvn_stage = -1;    // NVN shader stage this binding comes from
-    };
-    std::array<std::vector<WriteTemplate>, 4> set_templates;  // templates for sets 0..3
-    bool templates_built = false;
+    // Per-program precomputed texture/image binding indices into `bindings`, avoiding full-binding scans in prep/feedback/vol3d/depth checks.
+    bool has_3d_sampler = false;
+    std::vector<uint16_t> sampled_tex_bindings;  // COMBINED_IMAGE_SAMPLER with SamplerBinding / HandleInUniform / ImageBinding
+    std::vector<uint16_t> storage_img_bindings;  // STORAGE_IMAGE
 };
 
 // [nvn] push_uniforms (default true): programs whose set 0 fits the device's push descriptor limit push it (ProgLayout::push_set0). False when the

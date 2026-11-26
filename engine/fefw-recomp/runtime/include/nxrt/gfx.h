@@ -166,6 +166,9 @@ uint64_t video_budget_bytes();      // the OS's video memory budget for this pro
 bool video_memory_pressure();       // [gfx] pressure_detail is on and the usage is over 90% of that budget (sampled at most every 250 ms)
 int video_usage_percent();          // this process' use of that budget in percent, on every GPU (sampled at most every 250 ms; -1: not known)
 int video_live_percent();           // the same less the room free inside VMA's blocks (reused by the next allocations): [gfx] residency
+// On a unified-memory GPU (an integrated GPU, or no dedicated video memory heap), host physical RAM usage in percent
+// (sampled at most every 250 ms); -1 on discrete GPUs or if unknown.
+int video_sysram_usage_percent();
 
 struct DeviceLimitsExt {
     uint64_t min_imported_host_alignment = 0;   // VK_EXT_external_memory_host (0: not available)

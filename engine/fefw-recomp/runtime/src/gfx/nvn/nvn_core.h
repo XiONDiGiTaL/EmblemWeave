@@ -132,6 +132,7 @@ void lifetime_texture_freed(const Texture* t);
 void pool_register(MemoryPool* p);
 void pool_unregister(MemoryPool* p);
 PoolHit pool_lookup(uint64_t gpu_address);          // pool is null when the address is in no pool
+uint64_t pool_gen();                                // monotonic generation bumped on pool register/unregister
 inline uint8_t* host_ptr(uint64_t gpu_address) { return reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(gpu_address)); }
 
 // The data of an NVNbuffer (0x30 bytes in the game's memory).
@@ -187,6 +188,11 @@ struct Texture : Obj {
     bool sparse_all = true;
 };
 
+inline uint64_t next_pool_uid() {
+    static std::atomic<uint64_t> n{1};
+    return n.fetch_add(1, std::memory_order_relaxed);
+}
+
 struct TexturePool : Obj {
     static constexpr Kind kKind = Kind::TexturePool;
     TexturePool() : Obj(kKind) {}
@@ -196,6 +202,7 @@ struct TexturePool : Obj {
         bool has_view = false;
         bool used = false;
     };
+    const uint64_t uid = next_pool_uid();   // unique per-lifetime id so address reuse cannot alias render-thread caches
     MemoryPool* mem = nullptr;
     int64_t offset = 0;
     int count = 0;
@@ -203,6 +210,7 @@ struct TexturePool : Obj {
     // Registrations so far and the ids of the latest ones, oldest first (changes.back() is registration `version`): the pool descriptor
     // arrays (nvn_pipeline.cpp) write only the ids changed since they were last current. Under `lock`.
     uint64_t version = 0;
+    std::atomic<uint64_t> seq{0};           // odd while a registration writes `entries`, even when stable (render-thread cache)
     std::vector<uint32_t> changes;
     std::shared_mutex lock;
 };
@@ -210,12 +218,14 @@ struct TexturePool : Obj {
 struct SamplerPool : Obj {
     static constexpr Kind kKind = Kind::SamplerPool;
     SamplerPool() : Obj(kKind) {}
+    const uint64_t uid = next_pool_uid();   // as TexturePool's
     MemoryPool* mem = nullptr;
     int64_t offset = 0;
     int count = 0;
     std::vector<SamplerInfo> entries;
     std::vector<uint8_t> used;
     uint64_t version = 0;                   // as TexturePool's
+    std::atomic<uint64_t> seq{0};           // as TexturePool's
     std::vector<uint32_t> changes;
     std::shared_mutex lock;
 };

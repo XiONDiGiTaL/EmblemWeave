@@ -441,6 +441,7 @@ bool split_submission(Frame& f) {
     vkBeginCommandBuffer(next, &bi);
     s.cb = next;
     f.cb = next;
+    ++f.split_seq;
     g->ctr.submits.fetch_add(1);
     g_splits.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -1415,13 +1416,14 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     gp->rend = rend;
     gp->limiter = limiter;
     gp->keep_aspect = keep_aspect;
-    {   // [nvn] submit_batch: auto = frame under Wine (each kernel submission walks the imported pools again, flush_batch), 1 elsewhere.
+    {   // [nvn] submit_batch: auto = frame under Wine on non-NVIDIA GPUs (RADV/ANV kernel submission walks imported pools), 1 elsewhere.
         // frame: one kernel submission per frame, the present's; N: flush every N submissions and whenever the render thread idles.
         std::string b = nxrt::config_get_str("nvn", "submit_batch", "auto");
         HMODULE nt = GetModuleHandleW(L"ntdll.dll");
         const bool wine = nt && GetProcAddress(nt, "wine_get_version");
-        const std::string how = b == "auto" ? (wine ? "auto, Wine" : "auto, not Wine") : b;
-        if (b == "auto") b = wine ? "frame" : "1";
+        const bool nvidia = dev.properties().vendorID == 0x10de;
+        const std::string how = b == "auto" ? (wine ? (nvidia ? "auto, Wine+NVIDIA" : "auto, Wine") : "auto, not Wine") : b;
+        if (b == "auto") b = (wine && !nvidia) ? "frame" : "1";
         gp->frame_batch = b == "frame";
         gp->batch_max = gp->frame_batch ? kSlots / 2 : static_cast<uint32_t>(std::clamp<int64_t>(std::atoll(b.c_str()), 1, kSlots / 2));
         NXLOG_I(kTag, "submit_batch %s (%s)", gp->frame_batch ? "frame" : std::to_string(gp->batch_max).c_str(), how.c_str());

@@ -83,6 +83,8 @@ void pool_unregister(MemoryPool* p) {
     g_pool_gen.fetch_add(1, std::memory_order_release);
 }
 
+uint64_t pool_gen() { return g_pool_gen.load(std::memory_order_acquire); }
+
 // Each thread keeps the pools it found (64 slots by the address's MiB), valid while no pool was registered or removed (g_pool_gen): the render thread looks up
 // the same few pools thousands of times a frame, and the map walk under the shared lock was ~7 % of its time (rt agent, notes/rt.md).
 // A pool's gpu_base and size are set before it is registered and never change. [nvn] pool_cache (default on).
@@ -90,19 +92,19 @@ PoolHit pool_lookup(uint64_t gpu_address) {
     // direct mapped by the address's MiB (the survey's page-keyed cache, notes/survey-perf.md #6): one compare on a hit
     struct Hit { uint64_t lo = 0, len = 0; MemoryPool* p = nullptr; };
     constexpr size_t kWays = 64;
-    thread_local uint64_t c_gen = ~0ull;
-    thread_local Hit c_hit[kWays];
+    struct PoolCache { uint64_t gen = ~0ull; Hit hit[kWays]; };
+    thread_local PoolCache pc;
     static const bool cache_on = nxrt::config_get_bool("nvn", "pool_cache", true);
     static const bool check = nxrt::config_get_bool("nvn", "rt_check", false);   // [nvn] rt_check: the map gives the same pool
-    Hit& slot = c_hit[(gpu_address >> 20) % kWays];
-    if (cache_on && c_gen == g_pool_gen.load(std::memory_order_acquire))
+    Hit& slot = pc.hit[(gpu_address >> 20) & (kWays - 1)];
+    if (cache_on && pc.gen == g_pool_gen.load(std::memory_order_acquire))
         if (const Hit& h = slot; gpu_address - h.lo < h.len) {
             if (check) {
                 std::shared_lock<std::shared_mutex> lk(g_pool_mu);
                 auto it = g_pools.upper_bound(gpu_address);
                 MemoryPool* m = nullptr;
                 if (it != g_pools.begin() && gpu_address < std::prev(it)->second->gpu_base + std::prev(it)->second->size) m = std::prev(it)->second;
-                if (m != h.p && c_gen == g_pool_gen.load()) NXLOG_W("nvn.rtcheck", "mismatch: pool_lookup cache");
+                if (m != h.p && pc.gen == g_pool_gen.load()) NXLOG_W("nvn.rtcheck", "mismatch: pool_lookup cache");
             }
             return {h.p, gpu_address - h.lo};
         }
@@ -114,9 +116,9 @@ PoolHit pool_lookup(uint64_t gpu_address) {
     if (gpu_address >= p->gpu_base + p->size) return {};
     if (cache_on) {
         const uint64_t gen = g_pool_gen.load(std::memory_order_relaxed);   // under the lock: the map as of this generation
-        if (gen != c_gen) {
-            for (Hit& h : c_hit) h = Hit();
-            c_gen = gen;
+        if (gen != pc.gen) {
+            for (Hit& h : pc.hit) h = Hit();
+            pc.gen = gen;
         }
         slot = {p->gpu_base, p->size, p};
     }

@@ -6,6 +6,10 @@
 // The dispatch and scratch-chunk scheme follows astral-chain-pc-recomp's runtime/vk_astc.c (MIT, Copyright (c) 2026 Valiantsin Dzerakh;
 // THIRD_PARTY_NOTICES.md).
 #include "nvn_astc_gpu.h"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 #include <algorithm>
 #include <atomic>
@@ -24,8 +28,10 @@
 #include <thread>
 
 #include "nxrt/config.h"
+#include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
+#include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/renderer_profiling.h"
 #include "astc2bc7.h"
@@ -818,13 +824,19 @@ void init_locked() {
         s.st.store(2);
         return;
     }
-    // auto leaves integrated GPUs on the CPU path: on an AMD Radeon iGPU a new area's transcodes (with [gfx] astc_bc = bc1, its default
-    // there) held frames for 1 to 2 s each, up to Windows' 2 s GPU timeout, and one run ended in VK_ERROR_DEVICE_LOST. [gfx] astc_gpu = on
-    // still uses the GPU there.
+    // auto leaves integrated GPUs on the CPU path on Windows: on a Windows AMD Radeon iGPU a new area's transcodes (with [gfx] astc_bc = bc1,
+    // its default there) held frames for 1 to 2 s each, up to Windows' 2 s TDR timeout, and one run ended in VK_ERROR_DEVICE_LOST. Under
+    // Wine/Linux on AMD RADV (Steam Deck, ROG Ally Linux) there is no 2 s WDDM TDR and self-test + Dagsion runs pass cleanly at ~0.5-1.4 ms/Mtexel
+    // (with astc_gpu_handoff_ms and astc_gpu_cap_ms still guarding slower iGPUs). [gfx] astc_gpu = on still uses the GPU everywhere.
     if (m == "auto" && device().properties().deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-        NXLOG_I(kTag, "ASTC textures are transcoded on the CPU on this integrated GPU ([gfx] astc_gpu = auto; on uses the GPU)");
-        s.st.store(2);
-        return;
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        const bool wine = nt && GetProcAddress(nt, "wine_get_version");
+        const bool amd = device().properties().vendorID == 0x1002;
+        if (!(wine && amd)) {
+            NXLOG_I(kTag, "ASTC textures are transcoded on the CPU on this integrated GPU ([gfx] astc_gpu = auto; on uses the GPU)");
+            s.st.store(2);
+            return;
+        }
     }
     {
         std::string c = nxrt::config_get_str("gfx", "astc_gpu_cache", "auto");
@@ -982,7 +994,15 @@ void tick_present() {
 
 double budget_now() {
     State& s = S();
-    return s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    double b = s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    // During paced gameplay (not loading), don't let slow frames inflate the ASTC GPU budget and compound GPU overload;
+    // under high OS VRAM pressure (>= 92%), cap further so WDDM paging doesn't turn a pass into a 30-50 ms stall.
+    if (!nxrt::frame_limiter_unpaced()) {
+        b = std::min(b, std::min(s.budget_ms, 4.0));
+        const int os_pct = nxrt::gfx::video_usage_percent();
+        if (os_pct >= 92) b = std::min(b, 2.0);
+    }
+    return b;
 }
 
 double rate_now() { return S().rate / S().slow; }
