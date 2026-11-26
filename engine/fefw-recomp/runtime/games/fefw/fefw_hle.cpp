@@ -98,9 +98,9 @@ extern "C" void nx_hle_zstd_multiframe(Ctx* c, void (*orig)(Ctx*)) {
 // multiply-add contraction (the pragma) and a fused multiply-add where the original has FMLA (cull_fma, following the lifted code's own
 // choice for the build).
 //
-// FEFW_HLE_CULL (environment): unset or 0 = the lifted originals (default), 1 = the native tests, 2 = both, compared: the lifted
+// FEFW_HLE_CULL (environment): unset or 1 = the native tests (default), 0 = the lifted originals, 2 = both, compared: the lifted
 // answer is the one returned, and cull_verify.log beside the program gets the first 16 calls that differ and a count line at the
-// first call and at each power of four after it.
+// first call and at each power of four after it. recomp/tests/hle_cull_test.cpp compares the two outside the game.
 #pragma clang fp contract(off)
 
 namespace {
@@ -239,7 +239,7 @@ int cull_mode() {
     int v = __atomic_load_n(&mode, __ATOMIC_RELAXED);
     if (v < 0) {
         const char* e = getenv("FEFW_HLE_CULL");
-        v = e && e[0] >= '1' && e[0] <= '2' && !e[1] ? e[0] - '0' : 0;
+        v = e && e[0] >= '0' && e[0] <= '2' && !e[1] ? e[0] - '0' : 1;
         __atomic_store_n(&mode, v, __ATOMIC_RELAXED);
     }
     return v;
