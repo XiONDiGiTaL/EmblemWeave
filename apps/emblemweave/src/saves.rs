@@ -2437,6 +2437,31 @@ pub fn repair_backup_named_slots(save_dir: &Path) -> Result<Vec<RepairedSlot>, S
     Ok(out)
 }
 
+/// What the launcher says when it recovers slots before Play: which file it
+/// could not open, and the name it copied it to. The launch continues, so the
+/// note has to name the save without asking for another press.
+pub fn repair_note(repaired: &[RepairedSlot]) -> String {
+    let name = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let list = repaired
+        .iter()
+        .map(|r| format!("{} -> {}", name(&r.from), name(&r.to)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match repaired.len() {
+        0 => String::new(),
+        1 => format!(
+            "Recovered the save the game could not open: {list}. The copy is what the game reads, the original is untouched, and the game is starting now."
+        ),
+        n => format!(
+            "Recovered {n} saves the game could not open: {list}. The copies are what the game reads, the originals are untouched, and the game is starting now."
+        ),
+    }
+}
+
 /// A slot in the current save, with the size the page shows beside it.
 pub fn slots_with_sizes(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64)> {
     slots(save_dir)
@@ -3371,6 +3396,33 @@ mod tests {
 
     fn valid_slot(payload: &[u8]) -> Vec<u8> {
         slot_with_frame(payload, raw_zstd_frame(payload))
+    }
+
+    #[test]
+    fn the_repair_note_names_the_save_and_does_not_ask_for_another_press() {
+        let repaired = vec![RepairedSlot {
+            from: PathBuf::from("1795325701-Auto"),
+            to: PathBuf::from("Auto"),
+        }];
+        let note = repair_note(&repaired);
+        assert!(note.contains("1795325701-Auto -> Auto"), "{note}");
+        assert!(note.contains("starting now"), "{note}");
+        assert!(!note.to_lowercase().contains("press play"), "{note}");
+
+        let two = vec![
+            RepairedSlot {
+                from: PathBuf::from("1795325701-Auto"),
+                to: PathBuf::from("Auto"),
+            },
+            RepairedSlot {
+                from: PathBuf::from("1795325701-Chapter_Ism_0_2"),
+                to: PathBuf::from("Chapter_Ism_0_2"),
+            },
+        ];
+        let note = repair_note(&two);
+        assert!(note.contains("Recovered 2 saves"), "{note}");
+        assert!(note.contains("originals are untouched"), "{note}");
+        assert!(repair_note(&[]).is_empty());
     }
 
     #[test]

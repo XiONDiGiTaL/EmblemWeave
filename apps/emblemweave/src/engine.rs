@@ -5253,23 +5253,17 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
         // under the game's name and keep the stamped file as it was.
         match crate::saves::repair_backup_named_slots(&save_dir) {
             Ok(repaired) if !repaired.is_empty() => {
-                let names = repaired
-                    .iter()
-                    .map(|r| {
-                        r.to.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(format!(
-                    "Found {} save file(s) under a backup name ({}). The game cannot open those, so each one was copied to the name it reads; the original files are untouched. Press Play again to continue from them.",
-                    repaired.len(),
-                    names
-                ));
+                // The copy is already where the game reads it, so this launch
+                // can go ahead: say which save was recovered and carry on
+                // instead of asking for a second Play.
+                let note = crate::saves::repair_note(&repaired);
+                crate::crash::note(&note);
+                alert(note, true);
             }
             Ok(_) => {}
             Err(e) => {
+                // Nothing was copied, so the game would start a new save:
+                // stop this launch and leave the files alone.
                 return Err(format!(
                     "A save file under a backup name could not be restored: {e}. The game was not started; nothing was deleted."
                 ));
