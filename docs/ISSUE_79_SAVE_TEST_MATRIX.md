@@ -175,7 +175,8 @@ SHA-256 manifest is identical before and after every step.
 | A stamped slot the native decoder or the payload checksum rejects | **PASS (automated)** | `a_stamped_slot_the_native_decoder_rejects_is_not_promoted`, `a_stamped_slot_with_a_bad_payload_checksum_is_not_promoted` |
 | Real `otherdata.zip` → import + recover | **PASS** | `--import-save` installed 8 files and kept the stamped account in `backups`; `--recover-saves` printed `1795325701-Auto -> Auto`; SHA-256 of `Auto` equals the archive's file (`2a3011e1…b2d4ca8`) |
 | Runner mounts the recovered playthrough | **PASS (mount only)** | `save data opened: account/0100… (10 files in 000, meta present)`; no create line |
-| Continue entry and gameplay load | **NOT VERIFIED** | synthetic keyboard/mouse input did not reach the game menu |
+| Continue entry and gameplay load | **PASS** | title menu listed **Continue**; the slot showed “Chapter 4 — THE INDELIBLE PAST” (2:54, Normal/Classic); Yes loaded Dagson Base, the log says `(10 files in 000, meta present)` with no create line, and holding the stick moved the character; frames and log in §0.7 of `ISSUE_79_SAVE_FORENSIC_ANALYSIS.md` |
+| Stamped-only account (control) | **PASS (no false Continue)** | `000` with only `1795325701-Auto`: `(1 files in 000, meta present)`, no Continue, first-run “Autosave — Saving…” tutorial, no `Auto` written in 40 s |
 | Populated `000` without `.meta` | **PASS (runtime, previous run)** | `fs.cpp` repair line; the 12 files were preserved |
 | Full launcher test suite | **PASS** | 481 passed, 0 failed, 14 ignored (`cargo test -p emblemweave --locked`) |
 
@@ -185,6 +186,8 @@ out of and back into `000` are the first row here. Rows 10–13 and 15–18 (por
 and moved installs, profile UI) remain untested; nothing in this table was checked
 against a personal live save.
 
-The same limit as §E applies: a launcher badge or a successful mount is not a
-gameplay load. §0.6 of `ISSUE_79_SAVE_FORENSIC_ANALYSIS.md` records what was
-observed and what was not.
+A launcher badge or a successful mount is not a gameplay load; the Continue row
+above is one — it names the screen, the slot and the loaded scene, and §0.7 of
+`ISSUE_79_SAVE_FORENSIC_ANALYSIS.md` records the timings and the stamped-only
+control. It still does not cover a physical controller, battle or menu saves, or a
+save write followed by a restart.
