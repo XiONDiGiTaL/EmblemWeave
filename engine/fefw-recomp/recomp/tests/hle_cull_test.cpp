@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The native culling tests of game-build/fefw/src/fefw_hle.cpp against the game's own (lifted) functions, on random inputs: ordinary
 // volumes and boxes, and "wild" ones (random bytes, NaN, infinities, signed zeros, empty and inverted boxes, every plane count and
-// flag). Needs cull_fns.inc, which hle_cull_extract.py writes from a lift of your own dump (game code: never committed).
+// flag), and for each case the radius and the plane offset at which the answers change, which must match exactly (random answers alone do
+// not show a difference in rounding). Needs cull_fns.inc, which hle_cull_extract.py writes from a lift of your own dump (game code: never committed).
 //
 //   clang++ -O2 -mfma -std=c++20 -fno-exceptions -ffp-contract=off -I recomp/include -I recomp/tests -I game-build/fefw/third_party/zstd
 //       recomp/tests/hle_cull_test.cpp game-build/fefw/src/fefw_hle.cpp <zstd decoder objects or stubs> -o hle_cull_test
 //   hle_cull_test [cases, default 3000000]        exit 0 when no answer differs
 // Run it for each way the game code is built: -mfma, and without it with and without -DNX_FAST_FMA.
 #include <nxrecomp/cxx.h>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +46,40 @@ int lifted(void (*fn)(Ctx*), void* v, void* b) {
     fn(g_c);
     return static_cast<int>(static_cast<uint32_t>(g_c->x[0]));
 }
+// The yes / no answers of random inputs hardly ever fall where one rounding decides them, so a version that rounds differently passes
+// them. This looks for that place: float values as ordered integers, bisected between lo and hi until the answer changes. Both versions
+// of a test must change at the very same value.
+int32_t to_key(float f) {
+    int32_t i;
+    memcpy(&i, &f, 4);
+    return i >= 0 ? i : -(i & 0x7fffffff);
+}
+float from_key(int32_t k) {
+    const uint32_t i = k >= 0 ? static_cast<uint32_t>(k) : static_cast<uint32_t>(-k) | 0x80000000u;
+    float f;
+    memcpy(&f, &i, 4);
+    return f;
+}
+// The last value (as a key) before the answer of `test` first differs from its answer at lo; INT32_MIN when lo and hi agree.
+template <typename F>
+int32_t flip_point(float* value, float lo, float hi, F test) {
+    const float saved = *value;
+    int32_t a = to_key(lo), b = to_key(hi);
+    *value = lo;
+    const int at_lo = test();
+    *value = hi;
+    int32_t found = INT32_MIN;
+    if (test() != at_lo) {
+        while (b - a > 1) {
+            const int32_t m = a + (b - a) / 2;
+            *value = from_key(m);
+            (test() == at_lo ? a : b) = m;
+        }
+        found = a;
+    }
+    *value = saved;
+    return found;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -53,6 +89,7 @@ int main(int argc, char** argv) {
     alignas(16) float box[8];
     alignas(16) uint8_t cyl[0xc0];
     long bad_v = 0, bad_c = 0, ans[4] = {0, 0, 0, 0};
+    long edge_v = 0, edge_c = 0, edges_v = 0, edges_c = 0;
     for (long it = 0; it < cases; it++) {
         const bool wild = it % 3 == 0;
         for (auto& x : vol) x = wild ? static_cast<uint8_t>(g()) : 0;
@@ -100,8 +137,25 @@ int main(int argc, char** argv) {
         const int a2 = lifted(g_7101980580, cyl, box), b2 = nx_hle_cull_cylinder_box_raw(reinterpret_cast<uint64_t>(cyl), reinterpret_cast<uint64_t>(box));
         if (a2 != b2 && bad_c++ < 8) printf("cylinder: lifted %d, native %d (case %ld)\n", a2, b2, it);
         ans[2 + (a2 & 1)]++;
+
+        // the radius at which the cylinder test starts to answer yes
+        float* r = reinterpret_cast<float*>(cyl + 0xac);
+        const int32_t rl = flip_point(r, 0.0f, 1e6f, [&] { return lifted(g_7101980580, cyl, box); });
+        const int32_t rn = flip_point(r, 0.0f, 1e6f, [&] { return nx_hle_cull_cylinder_box_raw(reinterpret_cast<uint64_t>(cyl), reinterpret_cast<uint64_t>(box)); });
+        if (rl != INT32_MIN) edges_c++;
+        if (rl != rn && edge_c++ < 8) printf("cylinder radius edge: lifted %d, native %d (case %ld)\n", rl, rn, it);
+        // the offset of one plane at which the view volume test changes its answer
+        if (planes > 0) {
+            const int p = static_cast<int>(g() % static_cast<unsigned>(planes));
+            float* d = reinterpret_cast<float*>(vol + 0x30 + 0x20 * p) + 4;
+            const int32_t vl = flip_point(d, -1e6f, 1e6f, [&] { return lifted(g_71019786c0, vol, box); });
+            const int32_t vn = flip_point(d, -1e6f, 1e6f, [&] { return nx_hle_cull_view_box_raw(reinterpret_cast<uint64_t>(vol), reinterpret_cast<uint64_t>(box)); });
+            if (vl != INT32_MIN) edges_v++;
+            if (vl != vn && edge_v++ < 8) printf("view volume plane edge: lifted %d, native %d (case %ld)\n", vl, vn, it);
+        }
     }
     printf("%ld cases: view volume %ld differ (answers 0 / 1: %ld / %ld), cylinder %ld differ (answers 0 / 1: %ld / %ld)\n", cases, bad_v,
            ans[0], ans[1], bad_c, ans[2], ans[3]);
-    return bad_v || bad_c ? 1 : 0;
+    printf("edges: view volume %ld differ of %ld, cylinder %ld differ of %ld\n", edge_v, edges_v, edge_c, edges_c);
+    return bad_v || bad_c || edge_v || edge_c ? 1 : 0;
 }
