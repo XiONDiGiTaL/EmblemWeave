@@ -2284,18 +2284,24 @@ void tex_residency_tick(Frame& f) {
         g_gauge_demoted_mb.add(static_cast<int64_t>(saved >> 20));
         g_gauge_demotions.add(1);
     }
-    static int logged = 0;
-    if (n && (logged++ < 40 || logged % 50 == 0)) {
-        const double budget_gib = static_cast<double>(budget) / (1024.0 * 1024.0 * 1024.0);
-        const double freed_mb = static_cast<double>(freed) / (1024.0 * 1024.0);
-        if (pressure.sysram_only)
-            NXLOG_I(kTag, "residency: system RAM at %d%% (video memory at %d%% of the %.2f GiB budget): %d textures unused for %u s and more demoted (%.0f MB given back; %zu demoted "
-                          "in all, %d of %zu candidates)%s", sys_pct, std::max(live_pct, os_pct), budget_gib, n, idle_ms / 1000, freed_mb, g_demoted.size(), n, cand.size(),
-                    urgent ? " [urgent]" : "");
-        else
-            NXLOG_I(kTag, "residency: video memory at %d%% of the %.2f GiB budget: %d textures unused for %u s and more demoted (%.0f MB given back; %zu demoted "
-                          "in all, %d of %zu candidates)%s", pct, budget_gib, n, idle_ms / 1000, freed_mb, g_demoted.size(), n, cand.size(), urgent ? " [urgent]" : "");
-    }
+    // one line a round (a look that demoted something) for the first 40, then every 50th: the totals count the rounds not logged too
+    static uint64_t rounds = 0, total_n = 0, total_bytes = 0;
+    if (!n) return;
+    ++rounds;
+    total_n += static_cast<uint64_t>(n);
+    total_bytes += freed;
+    if (rounds > 40 && rounds % 50 != 0) return;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    const double budget_gib = static_cast<double>(budget) / (1024.0 * kMiB);
+    char use[128];
+    if (pressure.sysram_only)
+        std::snprintf(use, sizeof use, "system RAM at %d%% (video memory at %d%% of the %.2f GiB budget)", sys_pct, std::max(live_pct, os_pct), budget_gib);
+    else
+        std::snprintf(use, sizeof use, "video memory at %d%% of the %.2f GiB budget", pct, budget_gib);
+    NXLOG_I(kTag, "residency: %s: %d of %zu candidates unused for %u s and more demoted (%.0f MB given back)%s; round %llu, %llu demotions (%.0f MB) so far, "
+                  "%zu textures demoted now%s", use, n, cand.size(), idle_ms / 1000, static_cast<double>(freed) / kMiB, urgent ? " [urgent]" : "",
+            static_cast<unsigned long long>(rounds), static_cast<unsigned long long>(total_n), static_cast<double>(total_bytes) / kMiB, g_demoted.size(),
+            rounds == 40 ? "; from here on only every 50th round is logged" : "");
 }
 
 // Once per present: the demoted textures a draw used again (everything once the marks are incomplete) are made whole, the most recently
