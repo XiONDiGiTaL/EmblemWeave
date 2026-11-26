@@ -22,9 +22,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Two tests compare the embedded Trinity manifests with Trinity/shared.
+      # Keep that checkout beside this repo and point TRINITY_ROOT at it; the
+      # commit is the one the embedded copies were synced from.
+      - uses: actions/checkout@v4
+        with:
+          repository: XiONDiGiTaL/Trinity
+          ref: aa1f627104e7dd0cc317d31154b3e407006ec40c
+          path: Trinity
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run the launcher test suite
         env:
           RUST_BACKTRACE: 1
+          TRINITY_ROOT: ${{ github.workspace }}/Trinity
         run: cargo test -p emblemweave --locked
