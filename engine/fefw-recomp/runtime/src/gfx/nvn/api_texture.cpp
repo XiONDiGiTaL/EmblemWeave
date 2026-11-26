@@ -20,6 +20,7 @@
 #include "nvn_impl.h"
 #include "nvn_texture_layout.h"
 #include "nxrt/gauge.h"
+#include "nxrt/display_override.h"
 
 namespace nxrt::nvn {
 namespace {
@@ -224,7 +225,34 @@ void overflow_gone(const Texture* t) {
 // ---- entry points ---------------------------------------------------------------------------------------------------------
 NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* builder) {
     if (!texture || !builder) return 0;
-    const TextureBuilderInfo info = decode(builder);
+    TextureBuilderInfo info = decode(builder);
+    // nxrt/display_override.h ([fefw] wide_textures): a display-sized (3840x2160) or output-fitted 2D render target, in a pool the CPU
+    // cannot access, is made the output's size with GPU memory of its own. Anything the overflow path could not back keeps the game's size.
+    int wide_from_w = 0, wide_from_h = 0;
+    if (nxrt::display_override::active() && info.depth <= 1 && info.target == NVN_TEXTURE_TARGET_2D &&
+        (info.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) {
+        TextureBuilderInfo wi = info;
+        bool wide = false;
+        if (wi.width == 3840 && wi.height == 2160) {
+            wi.width = nxrt::display_override::output_w.load();
+            wi.height = nxrt::display_override::texture_h.load();
+            wide = true;
+        } else {
+            wide = nxrt::display_override::widen_fitted(&wi.width, &wi.height);
+        }
+        const MemoryPool* wpool = be::host_of<MemoryPool>(info.pool);
+        if (wide && wpool && !wpool->is_virtual && !overflow_refusal(*wpool, wi)) {
+            wide_from_w = info.width;
+            wide_from_h = info.height;
+            info = wi;
+            static std::atomic<int> s_wl{0};
+            if (s_wl.fetch_add(1) < 12)
+                NXLOG_I("nvn", "nvnTextureInitialize: %dx%d target (format %d, flags 0x%x) made %dx%d, GPU memory of its own", wide_from_w,
+                        wide_from_h, info.format, static_cast<unsigned>(info.flags), info.width, info.height);
+            if (info.flags & NVN_TEXTURE_FLAGS_DISPLAY) nxrt::display_override::display_widened.fetch_add(1);
+        }
+    }
+    const bool widened = wide_from_w > 0;
     const TexLayout L = be::compute_texture_layout(info);
     static std::atomic<int> s_fail_logs{0};
     auto fail = [&](const char* why) -> NVNboolean {
@@ -237,7 +265,7 @@ NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* bu
     MemoryPool* pool = be::host_of<MemoryPool>(info.pool);
     if (!pool) return fail("no pool, or a pool that is not ours");
     bool overflow = false;
-    if (!pool->is_virtual && (info.offset < 0 || static_cast<uint64_t>(info.offset) + L.storage_size > pool->size)) {
+    if (!pool->is_virtual && (widened || info.offset < 0 || static_cast<uint64_t>(info.offset) + L.storage_size > pool->size)) {
         const char* refused = overflow_refusal(*pool, info);
         if (refused) {
             static std::atomic<int> s_size_logs{0};
@@ -306,6 +334,8 @@ NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* bu
     t->block_linear = L.block_linear;
     t->block_height_gobs = L.block_linear ? L.layout.levels[0].gob_blocks_y : 0;
     t->is_display = (info.flags & NVN_TEXTURE_FLAGS_DISPLAY) != 0;
+    t->wide_from_w = wide_from_w;
+    t->wide_from_h = wide_from_h;
     t->cpu_coherent = t->mem && (pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED) && !(pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
     t->levels = L.levels;
     t->layers = L.layers;

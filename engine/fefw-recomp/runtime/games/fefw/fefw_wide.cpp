@@ -35,7 +35,8 @@
 //   movies       the movie draw (0x1904aa0) clears the target to opaque black and draws into the centred 16:9 viewport; a midhook in
 //                front of its tail-called draw draws, puts the viewport back to the whole target and returns.
 // Outputs narrower than 16:9 are not widened: fefw_res.cpp fits the output to 16:9 inside them and the window letterboxes it. Wider than
-// 3840 (the game's window textures; 5120x1440) fefw_res.cpp keeps the shape at 3840 wide and the window scales it up.
+// 3840 (the game's window textures) fefw_res.cpp draws it at its own size up to 7680x2160 ([fefw] wide_textures), else keeps the shape
+// at 3840 wide and the window scales it up.
 #include "fefw_game.h"
 
 #include <algorithm>

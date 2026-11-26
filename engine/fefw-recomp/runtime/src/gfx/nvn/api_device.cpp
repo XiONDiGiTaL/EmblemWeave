@@ -23,6 +23,7 @@
 //
 // Layouts and enum values are those of the NVN header (third_party/nvn/nvn.h). Event signal mode WRITE is the header's
 // NVN_EVENT_SIGNAL_MODE_WRITE. Constants used by the device info table: nvn_device_info.inc.
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <vector>
@@ -33,6 +34,7 @@
 #include "nvn_gpu.h"
 #include "nvn_impl.h"
 #include "nxrt/gauge.h"
+#include "nxrt/display_override.h"
 #include "nxrt/log.h"
 
 namespace nxrt::nvn {
@@ -308,6 +310,7 @@ NVNwindowAcquireTextureResult acquire_texture(be::Window* w, NVNsync* sync, int*
 
 void nvnQueuePresentTexture(NVNqueue* queue, NVNwindow* window, int index) {
     if (!be::host_of<be::Queue>(queue)) return;
+    if (nxrt::display_override::armed.load(std::memory_order_relaxed)) nxrt::display_override::presents.fetch_add(1, std::memory_order_relaxed);
     be::Window* w = be::host_of<be::Window>(window);
     if (!w) return;
     if (index < 0 || index >= static_cast<int>(w->textures.size())) {
@@ -485,6 +488,16 @@ void nvnWindowSetCrop(NVNwindow* window, int x, int y, int width, int height) {
     be::Window* w = be::host_of<be::Window>(window);
     if (!w) return;
     std::lock_guard<std::mutex> lk(w->lock);
+    {   // nxrt/display_override.h: the game crops to min(output, its display): a fitted size, or 3840 wide, becomes the output's
+        int cw = width, ch = height;
+        if (x == 0 && y == 0 && nxrt::display_override::widen_fitted(&cw, &ch)) {
+            width = cw;
+            height = ch;
+        } else if (x == 0 && y == 0 && width == 3840 && nxrt::display_override::active()) {
+            width = nxrt::display_override::output_w.load();
+            height = std::min(height, nxrt::display_override::output_h.load());
+        }
+    }
     w->crop[0] = x;
     w->crop[1] = y;
     w->crop[2] = width;

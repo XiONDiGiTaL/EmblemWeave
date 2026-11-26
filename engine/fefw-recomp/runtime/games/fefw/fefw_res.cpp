@@ -30,6 +30,7 @@
 // the pool is placed exactly where it was before. 0 = off: such targets get offset -1 (the back end still backs them, but texture objects over
 // one of them cannot share its image), and above 1440p output the render is capped at half per side.
 #include "fefw_game.h"
+#include "nxrt/display_override.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,6 +43,8 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <chrono>
+#include <thread>
 #include <utility>
 
 #include "nxrt/abi.h"
@@ -52,6 +55,8 @@
 #include "nxrt/module.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
+
+#include <windows.h>
 
 namespace nxrt::games::fefw {
 
@@ -73,6 +78,9 @@ struct Res {
     uint64_t base = 0;
     uint64_t sdk_fn = 0;
     int out_w = 0, out_h = 0;      // 0: the config's own
+    int display_w = 0;             // [fefw] wide_textures: the 2160p display width the game is given (0: its own 3840)
+    int fit_w = 0, fit_h = 0;      // with display_w: the output's shape within 3840 wide, used unless the back end is armed
+    std::atomic<bool> vi_seen{false};   // the game asked vi for its display buffer size (vi_answer)
     int render_w = 0, render_h = 0;
     double ratio = 0;              // 0: the config's own
     int shadow = 0;
@@ -308,9 +316,23 @@ void read_options(Res& r) {
     else if (o == "2160p" || o == "4k") r.out_w = 3840, r.out_h = 2160;
     else if (o == "window") window_output(&r.out_w, &r.out_h, wide);
     else if (o != "console" && !o.empty() && !parse_wxh(o, &r.out_w, &r.out_h)) NXLOG_W(kTag, "[fefw] output = %s is not known: console", o.c_str());
-    if (wide && r.out_w > 0 && wide_aspect(r.out_w, r.out_h)) {
+    // [fefw] wide_textures = auto: an ultrawide output wider than the 3840x2160 window textures (up to 7680x2160) keeps its own size. The
+    // NVN back end makes the game's display-sized targets that wide (nxrt/display_override.h) and widen_display_later() widens the game's
+    // display size once they exist. off: the shape is scaled into 3840 wide (below).
+    if (r.out_w > 0 && wide_native(r.out_w, r.out_h)) {
+        r.display_w = r.out_w;
+        const double sc = std::min(static_cast<double>(kMaxW) / r.out_w, static_cast<double>(kMaxH) / r.out_h);
+        r.fit_w = 2 * static_cast<int>(std::lround(r.out_w * sc / 2));
+        r.fit_h = 2 * static_cast<int>(std::lround(r.out_h * sc / 2));
+        display_override::texture_h = kMaxH;
+        display_override::output_h = r.out_h;
+        display_override::output_w = r.out_w;   // armed later (vi_answer)
+    } else if (wide && r.out_w > 0 && wide_aspect(r.out_w, r.out_h)) {
         // [fefw] ultrawide: the shape is kept within the 3840x2160 window textures (5120x1440 -> 3840x1080; the window scales it up)
         const double s = std::min({1.0, static_cast<double>(kMaxW) / r.out_w, static_cast<double>(kMaxH) / r.out_h});
+        if (s < 1.0 && wide_textures_mode() != "off")
+            NXLOG_I(kTag, "[fefw] output %dx%d is not drawn at its own size: that needs up to 7680 x 2160, a height that fits 3840 wide "
+                          "exactly and the 2160p display ([fefw] wide_textures)", r.out_w, r.out_h);
         if (s < 1.0) {
             const int w0 = r.out_w, h0 = r.out_h;
             r.out_w = 2 * static_cast<int>(std::lround(w0 * s / 2));
@@ -323,7 +345,7 @@ void read_options(Res& r) {
         r.out_h = (r.out_w * 9 / 16) & ~1;
         NXLOG_I(kTag, "[fefw] output %dx%d is narrower than 16:9: %dx%d, letterboxed ([fefw] ultrawide = auto)", r.out_w, h0, r.out_w, r.out_h);
     }
-    if (r.out_w > kMaxW || r.out_h > kMaxH) {
+    if ((r.out_w > kMaxW && r.out_w != r.display_w) || r.out_h > kMaxH) {
         NXLOG_W(kTag, "[fefw] output %dx%d is above the game's 3840x2160 window textures: 3840x2160", r.out_w, r.out_h);
         r.out_w = std::min(r.out_w, kMaxW);
         r.out_h = std::min(r.out_h, kMaxH);
@@ -362,7 +384,14 @@ void apply(Res& r) {
         std::memcpy(v, reinterpret_cast<const void*>(cfg[i]), sizeof v);
         if (r.quality_from >= 0 && i != r.quality_from)
             std::memcpy(reinterpret_cast<void*>(cfg[i] + kShadow), reinterpret_cast<const void*>(cfg[r.quality_from] + kShadow), kConfigBytes - kShadow);
-        int32_t ow = r.out_w > 0 ? r.out_w : v[0], oh = r.out_h > 0 ? r.out_h : v[1];
+        // [fefw] wide_textures: the output's own size only once the back end is armed (vi_answer); before that, or after a fallback,
+        // its shape within 3840 wide
+        const bool native = r.display_w > 0 && display_override::active();
+        if (first && i == 0 && r.display_w > 0 && !r.vi_seen.load())
+            NXLOG_W(kTag, "[fefw] the render configs are read before the game asked for its display size: output %dx%d (not at its own size)",
+                    r.fit_w, r.fit_h);
+        const int32_t want_w = r.display_w > 0 && !native ? r.fit_w : r.out_w, want_h = r.display_w > 0 && !native ? r.fit_h : r.out_h;
+        int32_t ow = want_w > 0 ? want_w : v[0], oh = want_h > 0 ? want_h : v[1];
         int32_t rw = v[2], rh = v[3];
         if (r.render_w > 0) rw = r.render_w, rh = r.render_h;
         else if (r.ratio > 0)   // even sizes: the SSAO pass works on 2x2 blocks
@@ -379,6 +408,13 @@ void apply(Res& r) {
                         (oh + 1) / 2);
             rw = (ow + 1) / 2;
             rh = (oh + 1) / 2;
+        }
+        // A render size the back end would take for one it widens (5120x1440 at 75 %: 3840x1080), itself or a half of it, is made
+        // smaller (nxrt/display_override.h keep_apart_h), last so no cap puts it back.
+        if (native) {
+            const int kh = display_override::keep_apart_h(ow, oh, rw, rh);
+            if (kh != rh && first && i == 0) NXLOG_I(kTag, "[fefw] render %dx%d matches a size the back end widens: %dx%d", rw, rh, rw, kh);
+            rh = kh;
         }
         const int32_t sizes[4] = {ow, oh, rw, rh};
         std::memcpy(reinterpret_cast<void*>(cfg[i]), sizes, sizeof sizes);
@@ -408,6 +444,109 @@ void get_current_graphics_scale(::Ctx* c) {
 
 }  // namespace
 
+// Outputs wider than 3840 ([fefw] wide_textures). The game turns nn::vi's buffer size (0..3 = 720p..2160p) into its display size through
+// two tables in its rodata, widths at 0x1abc2c0 and heights at 0x1abc050 (read at 0x1814190, 0x1818160 and 0x1818590 every frame into
+// the graphics object [0x21e60d8] + 0x33f0). That size seeds its window textures (0x18102a4) and gives its present crop and the screen
+// size constants of its last passes. Widening only the targets leaves those passes sampling with 1/3840 (the columns past 3840 repeat the
+// last one); widening the 2160p width from the start instead puts the picture about a third of the screen off-centre (tested with
+// 5120x2160 and 5120x2880 displays). What works: the back end makes the 3840x2160 and output-fitted targets the output's width when the
+// game creates them, and the table's 2160p width becomes the output's width once those exist.
+std::string wide_textures_mode() {
+    std::string v = config_get_str("fefw", "wide_textures", "auto");
+    for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return v == "off" ? "off" : "auto";
+}
+
+// The output must fit 3840 wide exactly (h * 3840 / w a whole number: the game's fitted targets are then known sizes), and the game must
+// be given the 2160p display (the vi answer is checked again when the game asks, vi_answer below).
+bool wide_native(int w, int h) {
+    if (wide_mode() == "off" || wide_textures_mode() != "auto") return false;
+    if (w <= kMaxW || w > 2 * kMaxW || h <= 0 || h > kMaxH || !wide_aspect(w, h)) return false;
+    if (w % 2 || h % 2 || (static_cast<long long>(h) * kMaxW) % w != 0 || static_cast<long long>(h) * kMaxW / w < 256) return false;
+    const int64_t vi = config_get_int("vi", "buffer_max_resolution", -1);
+    return vi < 0 || vi > 2;
+}
+
+namespace {
+
+constexpr uint64_t kDisplayWidths = 0x1abc2c0;   // u32[4], the display width per vi buffer size (0 720p .. 3 2160p)
+
+// Writes the 2160p entry, restoring the page's protection exactly as it was.
+bool poke_display_width(uint64_t base, uint32_t expect, uint32_t v) {
+    const uint64_t a = base + kDisplayWidths + 3 * 4;
+    uint32_t cur = 0;
+    if (!mem::is_mapped(a, 4)) return false;
+    std::memcpy(&cur, reinterpret_cast<const void*>(a), 4);
+    if (cur != expect) {
+        NXLOG_W(kTag, "[fefw] the display width table holds %u, not %u: not widened", cur, expect);
+        return false;
+    }
+    DWORD old = 0, back = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(a), 4, PAGE_READWRITE, &old)) {
+        NXLOG_W(kTag, "[fefw] the display width table cannot be written (error %lu): not widened", GetLastError());
+        return false;
+    }
+    std::memcpy(reinterpret_cast<void*>(a), &v, 4);
+    if (!VirtualProtect(reinterpret_cast<void*>(a), 4, old, &back))
+        NXLOG_W(kTag, "[fefw] the display width table's protection could not be put back (error %lu)", GetLastError());
+    return true;
+}
+
+// The game asks vi for its display buffer size before it makes its window textures. Arm the back end only when the answer is 2160p and
+// the table is the one expected; otherwise fall back to the shape scaled into 3840 wide (as with wide_textures = off), before the game
+// reads its render configs (get_current_graphics_scale).
+void vi_answer(uint32_t answer) {
+    Res& r = rs();
+    if (r.vi_seen.exchange(true) || r.display_w <= 0) return;
+    uint32_t cur = 0;
+    const uint64_t a = r.base + kDisplayWidths + 3 * 4;
+    if (mem::is_mapped(a, 4)) std::memcpy(&cur, reinterpret_cast<const void*>(a), 4);
+    if (answer == 3 && cur == static_cast<uint32_t>(kMaxW)) {
+        display_override::armed.store(true, std::memory_order_release);
+        NXLOG_I(kTag, "[fefw] output %dx%d at its own size: the back end widens the display targets", r.out_w, r.out_h);
+        return;
+    }
+    display_override::output_w = 0;
+    NXLOG_W(kTag, "[fefw] output %dx%d not at its own size (display answer %u, table %u: it needs 2160p and 3840): %dx%d, the same shape",
+            r.out_w, r.out_h, answer, cur, r.fit_w, r.fit_h);
+}
+
+// Widening the table from the start puts the picture off-centre, so it waits until the window textures were made wider and the game has
+// presented 120 frames with them, and at least two seconds have passed (both found by testing; neither alone is known to be enough).
+void widen_display_later() {
+    const int width = rs().display_w;
+    std::thread([width] {
+        using namespace std::chrono_literals;
+        log_set_thread_name("fefw-widen");
+        Res& r = rs();
+        const auto start = std::chrono::steady_clock::now();
+        auto waited = [&] { return std::chrono::steady_clock::now() - start; };
+        while (display_override::display_widened.load() < 2 && waited() < 60s) {
+            if (display_override::output_w.load() == 0) return;   // vi_answer fell back
+            std::this_thread::sleep_for(50ms);
+        }
+        if (display_override::display_widened.load() < 2) {
+            NXLOG_W(kTag, "[fefw] the window textures were not made wider within a minute: the display width is left at 3840");
+            return;
+        }
+        const auto armed_at = std::chrono::steady_clock::now();
+        const uint64_t p0 = display_override::presents.load();
+        while ((display_override::presents.load() < p0 + 120 || std::chrono::steady_clock::now() - armed_at < 2s) && waited() < 120s)
+            std::this_thread::sleep_for(50ms);
+        if (display_override::output_w.load() == 0) return;
+        if (display_override::presents.load() < p0 + 120) {
+            NXLOG_W(kTag, "[fefw] the game presented %llu frames in two minutes, not 120: the display width is left at 3840",
+                    static_cast<unsigned long long>(display_override::presents.load() - p0));
+            return;
+        }
+        if (poke_display_width(r.base, kMaxW, static_cast<uint32_t>(width)))
+            NXLOG_I(kTag, "[fefw] the game's 2160p display width: 3840 -> %d after %llu frames (output %dx%d at its own size)", width,
+                    static_cast<unsigned long long>(display_override::presents.load() - p0), r.out_w, r.out_h);
+    }).detach();
+}
+
+}  // namespace
+
 bool res_rt_pool_extended() { return rp().extended.load(); }
 
 void res_install(uint64_t base) {
@@ -416,6 +555,10 @@ void res_install(uint64_t base) {
     r.base = base;
     rt_pool_install();
     read_options(r);
+    if (r.display_w > 0) {
+        g_vi_buffer_answer_hook = vi_answer;
+        widen_display_later();
+    }
     if (wide_mode() != "off") wide_install(base, r.out_w, r.out_h);   // only an output wider than 16:9 installs anything
     if (!any_option(r)) return;
     r.sdk_fn = module_find_symbol(kGetScale);
