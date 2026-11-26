@@ -1077,11 +1077,12 @@ inline bool range_all_valid_inline(const Mirror& m, uint64_t first, uint64_t cou
     return true;
 }
 
-bool range_valid(const Mirror& m, uint64_t first, uint64_t count) {
+bool range_valid(const Mirror& m, uint64_t first, uint64_t count, bool* used_tv = nullptr) {
     if (range_all_valid_inline(m, first, count)) return true;
     if (m.tv_list.empty()) return false;
     for (uint64_t p = first; p < first + count; ++p)
         if (!page_valid(m, p) && !bit_get(m.tv, p)) return false;
+    if (used_tv) *used_tv = true;
     return true;
 }
 
@@ -1432,9 +1433,10 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use, bool* from_mir
     if (first / chunk_pages != last / chunk_pages) { g_use_skip[use]++; g_skip_why[3]++; return out; }
     const VkBuffer cb = mirror_chunk(*m, first);
     if (!cb) { g_use_skip[use]++; g_skip_why[4]++; return out; }
+    bool via_tv = false;
     const bool rv = (first == last)
-        ? (page_valid(*m, first) || (!m->tv_list.empty() && bit_get(m->tv, first)))
-        : range_valid(*m, first, last - first + 1);
+        ? (page_valid(*m, first) || (!m->tv_list.empty() && bit_get(m->tv, first) && (via_tv = true)))
+        : range_valid(*m, first, last - first + 1, &via_tv);
     if (rv || (out_lazy() && new_servable(*m, first, last))) {
         out.buffer = cb;
         out.offset = poff - (first / chunk_pages) * kChunkBytes;
@@ -1451,19 +1453,11 @@ BufRef resolve_read(uint64_t gpu_address, uint64_t size, int use, bool* from_mir
         }
         if (hot_copy_on()) {
             const uint8_t sb = static_cast<uint8_t>(1u << std::min<uint32_t>(g_sub_idx, 7));
-            if (rv) {
-                if (!m->sig_pages.empty()) {
-                    for (uint64_t p = first; p <= last; ++p)
-                        if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb;
-                }
-            } else {
-                bool via_tv = false;
-                for (uint64_t p = first; p <= last; ++p) {
+            if (!m->sig_pages.empty()) {
+                for (uint64_t p = first; p <= last; ++p)
                     if (m->sig[static_cast<size_t>(p)]) m->sig[static_cast<size_t>(p)] |= sb;
-                    via_tv |= !page_valid(*m, p);
-                }
-                if (via_tv) ++g_hotcopy_binds;
             }
+            if (via_tv) ++g_hotcopy_binds;
         }
         g_st_dev_binds.store(g_st_dev_binds.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         g_use_dev[use]++;
