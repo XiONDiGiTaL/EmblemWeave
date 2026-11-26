@@ -25,7 +25,69 @@ pub fn ensure_installed() -> Result<Option<String>, String> {
     let mods = crate::engine::run_dir()
         .ok_or_else(|| "the launcher data folder is unavailable".to_string())?
         .join("mods");
+    // A package dropped beside EmblemWeave.exe or under plugins/ is an explicit
+    // request to use that payload instead of the embedded release. The runtime
+    // still loads it from the mods folder, so no loader change is needed.
+    if let Some(dll) = external_dll() {
+        return ensure_external_in(&mods, &dll);
+    }
     ensure_in(&mods)
+}
+
+const EXTERNAL_PATHS: [&str; 6] = [
+    "plugins/TrinityCore/exefs/Trinity.dll",
+    "plugins/TrinityCore/Trinity.dll",
+    "plugins/Trinity.dll",
+    "TrinityCore/exefs/Trinity.dll",
+    "TrinityCore/Trinity.dll",
+    "Trinity.dll",
+];
+
+/// The first `Trinity.dll` beside the launcher or under its `plugins/` folder.
+fn external_dll() -> Option<PathBuf> {
+    let root = crate::platform::exe_dir()?;
+    EXTERNAL_PATHS
+        .iter()
+        .map(|rel| root.join(rel))
+        .find(|path| path.is_file())
+}
+
+/// Stage an externally supplied DLL, keeping a newer installed copy rather than
+/// downgrading it. The manifest beside the DLL wins when present; otherwise the
+/// embedded manifest and version describe the staged payload.
+fn ensure_external_in(mods: &Path, dll: &Path) -> Result<Option<String>, String> {
+    let package = match dll.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        Some("exefs") | Some("lib") => dll.parent().and_then(|p| p.parent()).unwrap_or(Path::new(".")),
+        _ => dll.parent().unwrap_or(Path::new(".")),
+    };
+    let external_manifest = package.join("plugin.json");
+    let external_version = manifest_version(&external_manifest);
+    let folder = mods.join(MOD_FOLDER);
+    let exefs = folder.join("exefs");
+    let target = exefs.join(DLL_NAME);
+    let installed = manifest_version(&folder.join("plugin.json"));
+
+    if let (Some(ext), Some(inst)) = (&external_version, &installed) {
+        if version_tuple(inst) > version_tuple(ext) {
+            return Ok(None);
+        }
+    }
+
+    std::fs::create_dir_all(&exefs)
+        .map_err(|e| format!("creating {}: {e}", exefs.display()))?;
+    write_atomic(&target, &std::fs::read(dll).map_err(|e| format!("reading {}: {e}", dll.display()))?)?;
+    if external_manifest.is_file() {
+        write_atomic(&folder.join("plugin.json"), &std::fs::read(&external_manifest).map_err(|e| format!("reading {}: {e}", external_manifest.display()))?)?;
+    } else {
+        write_atomic(&folder.join("plugin.json"), PLUGIN_JSON.as_bytes())?;
+    }
+    write_atomic(&folder.join("emblemweave.json"), EMBLEMWEAVE_JSON.as_bytes())?;
+
+    let version = external_version.as_deref().unwrap_or(BUNDLED_VERSION);
+    Ok(Some(format!(
+        "Trinity {version} installed from {} for code mods",
+        dll.display()
+    )))
 }
 
 /// The testable part: install under a supplied mods folder.
@@ -96,6 +158,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("moving {} to {}: {e}", temporary.display(), path.display()))
 }
 
+fn manifest_version(manifest: &Path) -> Option<String> {
+    installed_version(manifest)
+}
+
 fn installed_version(manifest: &Path) -> Option<String> {
     let text = std::fs::read_to_string(manifest).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -155,6 +221,42 @@ mod tests {
             b"newer"
         );
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    #[test]
+    fn installs_a_root_dll_with_the_embedded_manifest() {
+        let root = temp("external");
+        let mods = root.join("mods");
+        std::fs::write(root.join(DLL_NAME), b"external payload").unwrap();
+        let message = ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().unwrap();
+        assert!(message.contains("installed from"));
+        assert_eq!(
+            std::fs::read(mods.join(MOD_FOLDER).join("exefs").join(DLL_NAME)).unwrap(),
+            b"external payload"
+        );
+        assert_eq!(
+            installed_version(&mods.join(MOD_FOLDER).join("plugin.json")).as_deref(),
+            Some(BUNDLED_VERSION)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keeps_a_newer_install_over_an_external_dll() {
+        let root = temp("external-newer");
+        let mods = root.join("mods");
+        let folder = mods.join(MOD_FOLDER);
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("plugin.json"), r#"{"version":"9.9.9"}"#).unwrap();
+        std::fs::write(folder.join("exefs").join(DLL_NAME), b"installed").unwrap();
+        std::fs::write(root.join(DLL_NAME), b"older external").unwrap();
+        std::fs::write(root.join("plugin.json"), r#"{"version":"0.2.0"}"#).unwrap();
+        assert!(ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"installed"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
