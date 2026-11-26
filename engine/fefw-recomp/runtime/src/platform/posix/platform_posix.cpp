@@ -2,6 +2,7 @@
 // The POSIX side of nxrt/platform.h, for the Linux port (docs/LINUX.md, phase 2). It answers the same contract as the
 // win32 file: mmap for the guest arenas, pthreads for threads, pthread mutexes and conditions for the runtime's short
 // critical sections, CLOCK_MONOTONIC for the tick and plain file descriptors for the file calls.
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -16,11 +17,13 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -797,6 +800,376 @@ uintptr_t module_base() {
 
 [[noreturn]] void process_exit(int code) {
     _exit(code);
+}
+
+// --- positioned files, names, libraries and process identity ------------------------------------------------------------------------
+
+bool file_read_at(File* f, int64_t offset, void* buf, std::size_t bytes, std::size_t* done) {
+    if (done) *done = 0;
+    if (!f || f->fd < 0 || offset < 0) return false;
+    auto* p = static_cast<char*>(buf);
+    std::size_t at = 0;
+    while (at < bytes) {
+        const ssize_t got = ::pread(f->fd, p + at, bytes - at, static_cast<off_t>(offset + static_cast<int64_t>(at)));
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (got == 0) break;
+        at += static_cast<std::size_t>(got);
+    }
+    if (done) *done = at;
+    return true;
+}
+
+bool file_write_at(File* f, int64_t offset, const void* buf, std::size_t bytes) {
+    if (!f || f->fd < 0 || offset < 0) return false;
+    const auto* p = static_cast<const char*>(buf);
+    std::size_t at = 0;
+    while (at < bytes) {
+        const ssize_t wrote = ::pwrite(f->fd, p + at, bytes - at, static_cast<off_t>(offset + static_cast<int64_t>(at)));
+        if (wrote < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (wrote == 0) return false;
+        at += static_cast<std::size_t>(wrote);
+    }
+    return true;
+}
+
+bool file_truncate(File* f, int64_t size) {
+    if (!f || f->fd < 0 || size < 0) return false;
+    return ::ftruncate(f->fd, static_cast<off_t>(size)) == 0;
+}
+
+bool file_flush(File* f) {
+    if (!f || f->fd < 0) return false;
+    return ::fsync(f->fd) == 0;
+}
+
+File* file_open_update(const char* path_utf8) {
+    if (!path_utf8) return nullptr;
+    const int fd = ::open(path_utf8, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return nullptr;
+    auto* f = new File;
+    f->fd = fd;
+    return f;
+}
+
+File* file_create_new(const char* path_utf8) {
+    if (!path_utf8) return nullptr;
+    const int fd = ::open(path_utf8, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (fd < 0) return nullptr;
+    auto* f = new File;
+    f->fd = fd;
+    return f;
+}
+
+bool file_sync(const char* path_utf8) {
+    if (!path_utf8) return false;
+    const int fd = ::open(path_utf8, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok = ::fsync(fd) == 0;
+    ::close(fd);
+    return ok;
+}
+
+bool file_rename(const char* from_utf8, const char* to_utf8, bool replace) {
+    if (!from_utf8 || !to_utf8) return false;
+    if (!replace && ::access(to_utf8, F_OK) == 0) return false;
+    if (::rename(from_utf8, to_utf8) != 0) return false;
+    // Flush the new directory entry, as MoveFileExW's MOVEFILE_WRITE_THROUGH does: a crash right after the rename must
+    // not lose it.
+    std::string dir(to_utf8);
+    const std::size_t slash = dir.rfind('/');
+    dir = slash == std::string::npos ? std::string(".") : slash == 0 ? std::string("/") : dir.substr(0, slash);
+#ifdef O_DIRECTORY
+    const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#else
+    const int dfd = ::open(dir.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
+    if (dfd >= 0) {
+        ::fsync(dfd);
+        ::close(dfd);
+    }
+    return true;
+}
+
+bool file_times(const char* path_utf8, FileTimes* out) {
+    if (!out) return false;
+    *out = FileTimes{};
+    if (!path_utf8) return false;
+    struct stat st{};
+    if (::stat(path_utf8, &st) != 0) return false;
+    out->created = 0;   // POSIX keeps no creation time here; a caller that needs one falls back to `modified`
+    out->modified = static_cast<int64_t>(st.st_mtim.tv_sec);
+    out->accessed = static_cast<int64_t>(st.st_atim.tv_sec);
+    return true;
+}
+
+std::string host_path(const char* path_utf8) {
+    return path_utf8 ? std::string(path_utf8) : std::string();
+}
+
+uint32_t process_id() {
+    return static_cast<uint32_t>(::getpid());
+}
+
+bool process_alive(uint32_t pid) {
+    if (pid == 0) return false;
+    if (::kill(static_cast<pid_t>(pid), 0) == 0) return true;
+    return errno == EPERM;   // exists, and is not ours to signal
+}
+
+void* library_open(const char* path_utf8) {
+    if (!path_utf8) return nullptr;
+    return ::dlopen(path_utf8, RTLD_NOW | RTLD_LOCAL);
+}
+
+void* library_symbol(void* library, const char* name) {
+    if (!library || !name) return nullptr;
+    return ::dlsym(library, name);
+}
+
+void library_close(void* library) {
+    if (library) ::dlclose(library);
+}
+
+bool library_file_name(const char* stem, const char* file_name, int* version) {
+    if (version) *version = 0;
+    if (!stem || !file_name) return false;
+    const std::string prefix = std::string("lib") + stem + ".so";
+    const std::string name(file_name);
+    if (name.size() < prefix.size() || name.compare(0, prefix.size(), prefix) != 0) return false;
+    if (name.size() == prefix.size()) return true;   // the development name, libavcodec.so
+    if (name[prefix.size()] != '.') return false;
+    const std::string mid = name.substr(prefix.size() + 1);
+    if (mid.empty()) return false;
+    int v = 0;
+    for (char c : mid) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+    }
+    if (version) *version = v;
+    return true;
+}
+
+std::string module_path() {
+    std::string path(256, '\0');
+    for (;;) {
+        const ssize_t n = ::readlink("/proc/self/exe", path.data(), path.size());
+        if (n < 0) return {};
+        if (static_cast<std::size_t>(n) < path.size()) {
+            path.resize(static_cast<std::size_t>(n));
+            return path;
+        }
+        path.resize(path.size() * 2);
+    }
+}
+
+bool random_bytes(void* buf, std::size_t bytes) {
+    if (!buf && bytes) return false;
+    const int fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    auto* p = static_cast<unsigned char*>(buf);
+    std::size_t done = 0;
+    while (done < bytes) {
+        const ssize_t got = ::read(fd, p + done, bytes - done);
+        if (got <= 0) {
+            ::close(fd);
+            return false;
+        }
+        done += static_cast<std::size_t>(got);
+    }
+    ::close(fd);
+    return true;
+}
+
+// --- host threads and topology -----------------------------------------------------------------------------------------------------
+
+namespace {
+
+std::string read_line(const std::string& path) {
+    std::ifstream in(path);
+    std::string s;
+    std::getline(in, s);
+    return s;
+}
+
+uint32_t thread_number(const char* name) {
+    if (!name || !*name) return 0;
+    uint32_t v = 0;
+    for (const char* p = name; *p; ++p) {
+        if (*p < '0' || *p > '9') return 0;
+        v = v * 10 + static_cast<uint32_t>(*p - '0');
+    }
+    return v;
+}
+
+// /proc/<pid>/stat after the command name, which may itself hold spaces and parentheses: state and CPU ticks (utime +
+// stime, fields 12 and 13 after the command).
+bool proc_stat(const std::string& path, char* state, uint64_t* cpu_ticks) {
+    const std::string line = read_line(path);
+    const std::size_t close = line.rfind(')');
+    if (close == std::string::npos) return false;
+    std::istringstream rest(line.substr(close + 1));
+    std::string tok;
+    uint64_t utime = 0, stime = 0;
+    char st = '?';
+    for (int i = 0; rest >> tok; ++i) {
+        if (i == 0 && !tok.empty()) st = tok[0];
+        if (i == 11) utime = std::strtoull(tok.c_str(), nullptr, 10);
+        if (i == 12) {
+            stime = std::strtoull(tok.c_str(), nullptr, 10);
+            *state = st;
+            *cpu_ticks = utime + stime;
+            return true;
+        }
+    }
+    return false;
+}
+
+// How many times the thread was switched away from (voluntary) and off a processor (involuntary) so far.
+uint64_t switch_count(const std::string& status_path) {
+    std::ifstream in(status_path);
+    std::string line;
+    uint64_t n = 0;
+    while (std::getline(in, line)) {
+        const std::size_t at = line.find("ctxt_switches:");
+        if (at == std::string::npos) continue;
+        n += std::strtoull(line.c_str() + at + std::strlen("ctxt_switches:"), nullptr, 10);
+    }
+    return n;
+}
+
+}  // namespace
+
+void process_thread_ids(std::vector<uint32_t>* out) {
+    if (!out) return;
+    out->clear();
+    DIR* dir = ::opendir("/proc/self/task");
+    if (!dir) return;
+    while (const dirent* e = ::readdir(dir))
+        if (const uint32_t id = thread_number(e->d_name)) out->push_back(id);
+    ::closedir(dir);
+}
+
+int host_thread_ideal_processor(uint32_t id) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (::sched_getaffinity(static_cast<pid_t>(id), sizeof set, &set) != 0) return -1;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        if (CPU_ISSET(cpu, &set)) return cpu;
+    return -1;
+}
+
+int host_thread_priority(uint32_t id) {
+    errno = 0;
+    const int v = ::getpriority(PRIO_PROCESS, static_cast<id_t>(id));
+    return errno ? 0 : v;
+}
+
+bool host_thread_set_affinity(uint32_t id, uint64_t mask) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int cpus = 0;
+    for (int cpu = 0; cpu < 64 && cpu < CPU_SETSIZE; ++cpu)
+        if ((mask >> cpu) & 1) {
+            CPU_SET(cpu, &set);
+            ++cpus;
+        }
+    if (!cpus) return false;
+    return ::sched_setaffinity(static_cast<pid_t>(id), sizeof set, &set) == 0;
+}
+
+bool host_thread_set_ideal_processor(uint32_t, int) {
+    return false;   // POSIX has no ideal processor: the scheduler picks from the affinity mask
+}
+
+bool host_thread_set_priority(uint32_t id, int priority) {
+    int nice = 0;
+    switch (static_cast<ThreadPriority>(priority)) {
+        case ThreadPriority::TimeCritical: nice = -20; break;
+        case ThreadPriority::Highest: nice = -10; break;
+        case ThreadPriority::AboveNormal: nice = -5; break;
+        case ThreadPriority::Normal: nice = 0; break;
+        case ThreadPriority::BelowNormal: nice = 10; break;
+        case ThreadPriority::Lowest: nice = 19; break;
+        default: return false;
+    }
+    return ::setpriority(PRIO_PROCESS, static_cast<id_t>(id), nice) == 0;
+}
+
+uint64_t physical_core_mask(int processor) {
+    if (processor < 0 || processor >= 64) return 0;
+    const uint64_t bit = 1ull << processor;
+    const std::string line = read_line("/sys/devices/system/cpu/cpu" + std::to_string(processor) + "/topology/thread_siblings_list");
+    if (line.empty()) return bit;
+    uint64_t mask = 0;
+    std::size_t at = 0;
+    while (at < line.size()) {
+        const std::size_t comma = line.find(',', at);
+        const std::string part = line.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        const std::size_t dash = part.find('-');
+        const int first = std::atoi(part.c_str());
+        const int last = dash == std::string::npos ? first : std::atoi(part.c_str() + dash + 1);
+        for (int cpu = first; cpu <= last && cpu < 64; ++cpu) mask |= 1ull << cpu;
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+    return mask ? mask : bit;
+}
+
+bool host_snapshot(HostSnapshot* out) {
+    if (!out) return false;
+    out->threads.clear();
+    out->processes.clear();
+    const long hz = ::sysconf(_SC_CLK_TCK);
+    const uint64_t per_tick = hz > 0 ? static_cast<uint64_t>(10000000ll / hz) : 10000ull;
+    const uint32_t self = static_cast<uint32_t>(::getpid());
+    if (DIR* tasks = ::opendir("/proc/self/task")) {
+        while (const dirent* e = ::readdir(tasks)) {
+            const uint32_t tid = thread_number(e->d_name);
+            if (!tid) continue;
+            const std::string base = "/proc/self/task/" + std::to_string(tid);
+            char state = '?';
+            uint64_t ticks = 0;
+            if (!proc_stat(base + "/stat", &state, &ticks)) continue;
+            HostSnapshot::Thread t;
+            t.id = tid;
+            t.ready = state == 'R';   // running, or runnable on a run queue
+            t.switches = switch_count(base + "/status");
+            t.cpu_100ns = ticks * per_tick;
+            out->threads.push_back(t);
+        }
+        ::closedir(tasks);
+    }
+    DIR* procs = ::opendir("/proc");
+    if (!procs) return !out->threads.empty();
+    while (const dirent* e = ::readdir(procs)) {
+        const uint32_t pid = thread_number(e->d_name);
+        if (!pid || pid == self) continue;
+        const std::string base = "/proc/" + std::to_string(pid);
+        char state = '?';
+        uint64_t ticks = 0;
+        if (!proc_stat(base + "/stat", &state, &ticks)) continue;   // gone since readdir
+        HostSnapshot::Proc p;
+        p.id = pid;
+        p.cpu_100ns = ticks * per_tick;
+        out->processes.push_back(p);
+    }
+    ::closedir(procs);
+    return true;
+}
+
+bool process_name(uint32_t pid, std::string* name) {
+    if (name) name->clear();
+    if (!pid) return false;
+    const std::string n = read_line("/proc/" + std::to_string(pid) + "/comm");
+    if (n.empty()) return false;
+    if (name) *name = n;
+    return true;
 }
 
 }  // namespace nxrt::platform

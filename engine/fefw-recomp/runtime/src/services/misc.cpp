@@ -28,9 +28,9 @@
 #include "nxrt/config.h"
 #include "services_internal.h"
 
-#include <windows.h>
-#include <bcrypt.h>
 #include <filesystem>
+
+#include "nxrt/platform.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -42,7 +42,6 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#pragma comment(lib, "bcrypt")
 
 namespace nxrt::services {
 
@@ -53,7 +52,8 @@ namespace fs = std::filesystem;
 constexpr const char* kOpusTag = "hwopus";
 
 struct OpusApi {
-    HMODULE util_mod = nullptr, codec_mod = nullptr;
+    void* util_mod = nullptr;
+    void* codec_mod = nullptr;
     decltype(&::avutil_version) avutil_version = nullptr;
     decltype(&::avcodec_version) avcodec_version = nullptr;
     decltype(&::av_version_info) av_version_info = nullptr;
@@ -82,77 +82,49 @@ const OpusApi* g_opus_api = nullptr;
 std::string g_opus_version;
 
 template <typename T>
-bool resolve_opus(HMODULE module, const char* name, T& fn) {
-    fn = reinterpret_cast<T>(GetProcAddress(module, name));
+bool resolve_opus(void* module, const char* name, T& fn) {
+    fn = reinterpret_cast<T>(nxrt::platform::library_symbol(module, name));
     return fn != nullptr;
 }
 
-std::wstring widen_opus(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    if (n <= 0) return {};
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
-    if (!w.empty() && w.back() == L'\0') w.pop_back();
-    return w;
-}
-
-std::wstring lower_opus(std::wstring s) {
-    for (wchar_t& c : s)
-        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
-    return s;
-}
-
-bool dll_named_opus(const fs::path& p, const wchar_t* prefix, std::wstring& name) {
-    name = lower_opus(p.filename().wstring());
-    const std::wstring pre(prefix);
-    return name.size() > pre.size() + 4 && name.compare(0, pre.size(), pre) == 0 &&
-           name.compare(name.size() - 4, 4, L".dll") == 0;
+// A library file of `stem` ("avcodec", "avutil") in `dir`, the major this build's headers describe preferred and the
+// highest otherwise; library_file_name knows each platform's naming ("avcodec-62.dll", "libavcodec.so.62").
+bool find_library(const fs::path& dir, const char* stem, int want, fs::path& out) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return false;
+    int best = -1;
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; it != end && !ec; it.increment(ec)) {
+        int v = 0;
+        const std::string name = it->path().filename().string();
+        if (!nxrt::platform::library_file_name(stem, name.c_str(), &v)) continue;
+        if (v == want) {
+            out = it->path();
+            return true;
+        }
+        if (v > best) {
+            best = v;
+            out = it->path();
+        }
+    }
+    return best >= 0;
 }
 
 bool pair_in_opus(const fs::path& dir, fs::path& codec, fs::path& util) {
-    std::error_code ec;
-    if (!fs::is_directory(dir, ec)) return false;
-    std::vector<fs::path> codecs, utils;
-    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; it != end && !ec; it.increment(ec)) {
-        std::wstring name;
-        if (dll_named_opus(it->path(), L"avcodec-", name)) codecs.push_back(it->path());
-        else if (dll_named_opus(it->path(), L"avutil-", name)) utils.push_back(it->path());
-    }
-    std::sort(codecs.begin(), codecs.end());
-    std::sort(utils.begin(), utils.end());
-    // Prefer the major pair this build's headers describe (avcodec-62 / avutil-60)
-    for (const auto& c : codecs)
-        for (const auto& u : utils) {
-            const std::wstring cn = lower_opus(c.filename().wstring()), un = lower_opus(u.filename().wstring());
-            if (cn == L"avcodec-62.dll" && un == L"avutil-60.dll") {
-                codec = c;
-                util = u;
-                return true;
-            }
-        }
-    if (!codecs.empty() && !utils.empty()) {
-        codec = codecs.front();
-        util = utils.front();
-        return true;
-    }
-    return false;
+    // The major pair this build's headers describe (avcodec 62 / avutil 60) when the folder has it, else any pair.
+    return find_library(dir, "avcodec", LIBAVCODEC_VERSION_MAJOR, codec) &&
+           find_library(dir, "avutil", LIBAVUTIL_VERSION_MAJOR, util);
 }
 
 const OpusApi* load_opus_pair(const fs::path& codec, const fs::path& util, std::string& why) {
-    HMODULE u = LoadLibraryExW(util.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    void* u = nxrt::platform::library_open(util.string().c_str());
     if (!u) {
-        why = "avutil could not be loaded (" + std::to_string(GetLastError()) + ")";
+        why = "avutil could not be loaded (" + util.filename().string() + ")";
         return nullptr;
     }
-    const fs::path dir = codec.parent_path();
-    DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(dir.c_str());
-    HMODULE c = LoadLibraryExW(codec.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (!c) c = LoadLibraryExW(codec.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (cookie) RemoveDllDirectory(cookie);
+    void* c = nxrt::platform::library_open(codec.string().c_str());
     if (!c) {
-        why = "avcodec could not be loaded (" + std::to_string(GetLastError()) + "); keep avutil-60.dll and swresample-6.dll beside it";
-        FreeLibrary(u);
+        why = "avcodec could not be loaded (" + codec.filename().string() + "); keep avutil and swresample beside it";
+        nxrt::platform::library_close(u);
         return nullptr;
     }
     auto* api = new OpusApi();
@@ -160,8 +132,8 @@ const OpusApi* load_opus_pair(const fs::path& codec, const fs::path& util, std::
     api->codec_mod = c;
     auto fail = [&](const char* missing) {
         why = std::string("a function is missing: ") + missing;
-        FreeLibrary(c);
-        FreeLibrary(u);
+        nxrt::platform::library_close(c);
+        nxrt::platform::library_close(u);
         delete api;
         return static_cast<const OpusApi*>(nullptr);
     };
@@ -171,8 +143,8 @@ const OpusApi* load_opus_pair(const fs::path& codec, const fs::path& util, std::
     if (AV_VERSION_MAJOR(uv) != LIBAVUTIL_VERSION_MAJOR || AV_VERSION_MAJOR(cv) != LIBAVCODEC_VERSION_MAJOR) {
         why = "version " + std::to_string(AV_VERSION_MAJOR(cv)) + "." + std::to_string(AV_VERSION_MINOR(cv)) +
               " does not match this build's " + std::to_string(LIBAVCODEC_VERSION_MAJOR) + ".x";
-        FreeLibrary(c);
-        FreeLibrary(u);
+        nxrt::platform::library_close(c);
+        nxrt::platform::library_close(u);
         delete api;
         return nullptr;
     }
@@ -206,12 +178,12 @@ const OpusApi* find_opus_api() {
     if (g_opus_version == "!") return nullptr;   // a previous attempt failed; do not rescan on every decoder
     std::vector<fs::path> dirs;
     const std::string configured = config_get_str("media", "ffmpeg_dir", "");
-    if (!configured.empty()) dirs.emplace_back(widen_opus(configured));
-    wchar_t exe[MAX_PATH] = {};
-    if (GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
+    if (!configured.empty()) dirs.emplace_back(configured);
+    const std::string exe = nxrt::platform::module_path();
+    if (!exe.empty()) {
         const fs::path base = fs::path(exe).parent_path();
-        dirs.push_back(base / L"upscalers" / L"ffmpeg");
-        dirs.push_back(base / L"upscalers");
+        dirs.push_back(base / "upscalers" / "ffmpeg");
+        dirs.push_back(base / "upscalers");
         dirs.push_back(base);
     }
     std::string first_why;
@@ -229,7 +201,7 @@ const OpusApi* find_opus_api() {
     }
     g_opus_version = "!";
     if (!first_why.empty()) NXLOG_W(kOpusTag, "FFmpeg is not usable for Opus: %s", first_why.c_str());
-    else NXLOG_W(kOpusTag, "FFmpeg is not installed: put avcodec-62.dll, avutil-60.dll and swresample-6.dll in upscalers\\ffmpeg");
+    else NXLOG_W(kOpusTag, "FFmpeg is not installed: put avcodec, avutil and swresample where the runtime loads them (upscalers/ffmpeg)");
     return nullptr;
 }
 
@@ -459,9 +431,8 @@ std::shared_ptr<Service> make_csrng() {
             }
             while (off < b.size) {
                 const uint64_t n = std::min<uint64_t>(b.size - off, 0x10000000ull);
-                const NTSTATUS st = BCryptGenRandom(nullptr, buf_mut(b) + off, static_cast<ULONG>(n), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-                if (!BCRYPT_SUCCESS(st)) {
-                    NXLOG_E("csrng", "BCryptGenRandom failed: 0x%lX", static_cast<unsigned long>(st));
+                if (!nxrt::platform::random_bytes(buf_mut(b) + off, static_cast<size_t>(n))) {
+                    NXLOG_E("csrng", "the host CSPRNG failed");
                     return kNotSupported;
                 }
                 off += n;

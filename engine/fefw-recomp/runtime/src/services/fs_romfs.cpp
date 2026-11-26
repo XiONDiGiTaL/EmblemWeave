@@ -2,15 +2,10 @@
 // Adapted from yuzu src/core/file_sys/fsmitm_romfsbuild.cpp (GPL-2.0-or-later; the table layout, entry sizes, the name hash and the
 // bucket count rule) and ScarletNX src/nx/hle/filesystem/fs.c (GPL-3.0-or-later; the same rules, with unsigned name bytes).
 // The image is laid out in memory: the header, the four tables and a map of segments. File data is read from the host files on demand.
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include "fs_romfs.h"
 #include "packed_cache.h"
 
 #include <nxrt/config.h>
-
-#include <windows.h>
 
 #include <algorithm>
 #include <array>
@@ -24,6 +19,7 @@
 #include <vector>
 
 #include "nxrt/diag.h"
+#include "nxrt/platform.h"
 #include "nxrt/log.h"
 #include "nxrt/nup.h"
 #include "nxrt/nx.h"
@@ -41,7 +37,6 @@ constexpr uint64_t kFileFixed = 0x20;       // file entry without its name
 constexpr size_t kMaxName = 255;            // bytes of UTF-8 in one name
 constexpr size_t kMaxPath = 0x300;          // SDK FS_MAX_PATH (0x301 with the terminator); the path counts its leading '/'
 constexpr size_t kOpenFiles = 16;           // host files kept open by the cache
-constexpr size_t kLongPath = 240;           // host paths this long or longer get the \\?\ prefix
 
 uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
 uint64_t pad4(size_t n) { return align_up(n, 4); }
@@ -73,37 +68,23 @@ uint64_t bucket_count(uint64_t n) {
     return c;
 }
 
-bool to_utf8(const std::wstring& w, std::string& out) {
-    out.clear();
-    if (w.empty()) return true;
-    const int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
-    if (n <= 0) return false;
-    out.resize(static_cast<size_t>(n));
-    return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w.data(), static_cast<int>(w.size()), out.data(), n, nullptr, nullptr) == n;
+// A host path as std::filesystem sees it: UTF-8 in, with this platform's long-path form applied (platform::host_path).
+std::filesystem::path fs_path(const std::string& utf8) {
+    const std::string p = nxrt::platform::host_path(utf8.c_str());
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(p.data()), p.size()));
 }
 
-bool to_wide(const std::string& s, std::wstring& out) {
-    out.clear();
-    if (s.empty()) return false;
-    const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    if (n <= 0) return false;
-    out.resize(static_cast<size_t>(n));
-    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()), out.data(), n) == n;
-}
-
-// Host paths that may exceed MAX_PATH get the extended-length prefix. The input must already use backslashes.
-std::wstring long_path(std::wstring p) {
-    std::replace(p.begin(), p.end(), L'/', L'\\');
-    if (p.size() < kLongPath || p.compare(0, 4, L"\\\\?\\") == 0) return p;
-    if (p.compare(0, 2, L"\\\\") == 0) return L"\\\\?\\UNC\\" + p.substr(2);
-    return L"\\\\?\\" + p;
+// The UTF-8 form of a host path (a file name, a folder entry).
+std::string u8_of(const std::filesystem::path& p) {
+    const std::u8string s = p.u8string();
+    return std::string(reinterpret_cast<const char*>(s.data()), s.size());
 }
 
 // One folder or file of the host tree. Layout fields are filled in once the tree is complete.
 struct Node {
     std::string name;            // UTF-8; empty for the root
     std::string path;            // image path: "" for the root, "/a/b" otherwise
-    std::wstring host;           // host path to open
+    std::string host;            // host path to open (UTF-8)
     bool is_dir = false;
     uint64_t size = 0;           // files only
     uint64_t src = 0;            // files: offset of the data in the host file (0, or the extent in a .nup)
@@ -127,7 +108,7 @@ std::string shown(const Node& n) { return n.path.empty() ? std::string("/") : n.
 // Fills dir.kids from the host folder dir.host, recursively. False with msg set at the first entry that cannot be described.
 bool scan(Node& dir, std::string& msg) {
     std::error_code ec;
-    std::filesystem::directory_iterator it(std::filesystem::path(dir.host), ec);
+    std::filesystem::directory_iterator it(fs_path(dir.host), ec);
     if (ec) {
         msg = "cannot read folder " + shown(dir);
         return false;
@@ -140,8 +121,8 @@ bool scan(Node& dir, std::string& msg) {
         }
         if (it == end) break;
         const std::filesystem::directory_entry& e = *it;
-        std::string name;
-        if (!to_utf8(e.path().filename().wstring(), name) || name.empty() || name.size() > kMaxName) {
+        const std::string name = u8_of(e.path().filename());
+        if (name.empty() || name.size() > kMaxName) {
             msg = "name cannot be stored in a RomFS (1 to 255 bytes of UTF-8): " + shown(dir) + "/" + name;
             return false;
         }
@@ -152,7 +133,7 @@ bool scan(Node& dir, std::string& msg) {
             msg = "path too long for a RomFS (0x300 bytes): " + k.path;
             return false;
         }
-        k.host = long_path(e.path().wstring());
+        k.host = u8_of(e.path());
         std::error_code sec;
         const std::filesystem::file_status st = e.symlink_status(sec);
         if (sec) {
@@ -410,7 +391,7 @@ struct Segment {
 };
 
 struct FileRec {
-    std::wstring host;
+    std::string host;
     bool archived = false;       // read from the .nx archive rather than the host
     nx::File nx_src;             // the archive record, when archived
     uint64_t size = 0;
@@ -424,23 +405,12 @@ struct FileRec {
 
 // The whole of a file of the tree (a host file, or its range of a package). False when it cannot be read.
 bool read_whole(const Node& f, std::vector<uint8_t>& out) {
-    HANDLE h = CreateFileW(f.host.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    nxrt::platform::File* h = nxrt::platform::file_open(f.host.c_str(), false);
+    if (!h) return false;
     out.resize(static_cast<size_t>(f.size));
-    uint64_t done = 0;
-    bool ok = true;
-    while (ok && done < f.size) {
-        const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(f.size - done, 1ull << 30));
-        const uint64_t ofs = f.src + done;
-        OVERLAPPED ov{};
-        ov.Offset = static_cast<DWORD>(ofs & 0xFFFFFFFFull);
-        ov.OffsetHigh = static_cast<DWORD>(ofs >> 32);
-        DWORD got = 0;
-        ok = ReadFile(h, out.data() + done, chunk, &got, &ov) && got == chunk;
-        done += chunk;
-    }
-    CloseHandle(h);
+    std::size_t got = 0;
+    const bool ok = nxrt::platform::file_read_at(h, static_cast<int64_t>(f.src), out.data(), out.size(), &got) && got == out.size();
+    nxrt::platform::file_close(h);
     return ok;
 }
 
@@ -462,15 +432,14 @@ struct Layout {
 bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits, Layout& L,
                  std::string* err) {
     std::string msg;
-    std::wstring wdir;
     const bool packaged = nup::is_nup(host_dir);
     const bool archived = !packaged && nx::is_nx(host_dir);
-    if (!to_wide(host_dir, wdir)) {
-        if (err) *err = "host folder name is empty or not valid UTF-8";
+    if (host_dir.empty()) {
+        if (err) *err = "host folder name is empty";
         return false;
     }
     std::error_code ec;
-    const std::filesystem::path abs = std::filesystem::absolute(std::filesystem::path(wdir), ec);
+    const std::filesystem::path abs = std::filesystem::absolute(fs_path(host_dir), ec);
     // A package is a single file and is served through its own reader, so only a path that is neither a package nor a folder is rejected here.
     if (ec || (!packaged && !archived && !std::filesystem::is_directory(abs, ec))) {
         if (err) *err = "not a folder: " + host_dir;
@@ -478,7 +447,7 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
     }
     Node root;
     root.is_dir = true;
-    root.host = long_path(abs.wstring());
+    root.host = u8_of(abs);
     if (packaged || archived) L.package = host_dir;
     std::shared_ptr<nx::Reader> archive;
     const bool scanned = archived ? scan_nx(host_dir, root, msg, archive) : packaged ? scan_nup(host_dir, root, msg) : scan(root, msg);
@@ -493,16 +462,15 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
     uint32_t taken = 0, installed_mod_files = 0, installed_mod_added_files = 0, package_overlay_files = 0, shadowed_mod_files = 0;
     for (size_t i = 0; i < overlays.size(); i++) {
         const RomfsOverlay& o = overlays[i];
-        std::wstring wo;
         std::error_code oec;
-        const std::filesystem::path oabs = to_wide(o.path, wo) ? std::filesystem::absolute(std::filesystem::path(wo), oec) : std::filesystem::path();
+        const std::filesystem::path oabs = o.path.empty() ? std::filesystem::path() : std::filesystem::absolute(fs_path(o.path), oec);
         if (oabs.empty() || oec || !std::filesystem::is_directory(oabs, oec)) {
             NXLOG_W("fs", "romfs overlay '%s' is not a folder: left out", o.path.c_str());
             continue;
         }
         Node ov;
         ov.is_dir = true;
-        ov.host = long_path(oabs.wstring());
+        ov.host = u8_of(oabs);
         std::string omsg;
         if (!scan(ov, omsg)) {
             NXLOG_W("fs", "romfs overlay '%s' left out: %s", o.path.c_str(), omsg.c_str());
@@ -718,13 +686,11 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
 
 // One host file kept open. The box closes its handle when the last reader and the cache have let go of it.
 struct HandleBox {
-    HANDLE h = INVALID_HANDLE_VALUE;
+    nxrt::platform::File* f = nullptr;
     HandleBox() = default;
     HandleBox(const HandleBox&) = delete;
     HandleBox& operator=(const HandleBox&) = delete;
-    ~HandleBox() {
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    }
+    ~HandleBox() { nxrt::platform::file_close(f); }
 };
 
 struct OpenSlot {
@@ -804,11 +770,10 @@ struct RomfsImage::Impl {
             }
         }
         const FileRec& f = l.files[idx];
-        HANDLE h = CreateFileW(f.host.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return nullptr;
+        nxrt::platform::File* opened = nxrt::platform::file_open(f.host.c_str(), false);
+        if (!opened) return nullptr;
         auto box = std::make_shared<HandleBox>();
-        box->h = h;
+        box->f = opened;
         if (cache.size() < kOpenFiles) {
             cache.push_back(OpenSlot{idx, ++tick, box});
         } else {
@@ -844,19 +809,10 @@ struct RomfsImage::Impl {
         }
         std::shared_ptr<HandleBox> box = acquire(idx);
         if (!box) return false;
-        const mem::ww::OsWriteScope ws(out, n);   // ReadFile fails on a page the write tracker made read-only
-        while (n > 0) {
-            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(n, 1ull << 30));
-            OVERLAPPED ov{};
-            ov.Offset = static_cast<DWORD>(ofs & 0xFFFFFFFFull);
-            ov.OffsetHigh = static_cast<DWORD>(ofs >> 32);
-            DWORD got = 0;
-            // A short read means the file shrank since build(): an error, not zeros.
-            if (!ReadFile(box->h, out, chunk, &got, &ov) || got != chunk) return false;
-            out += chunk;
-            ofs += chunk;
-            n -= chunk;
-        }
+        const mem::ww::OsWriteScope ws(out, n);   // reading into a page the write tracker made read-only
+        std::size_t got = 0;
+        // A short read means the file shrank since build(): an error, not zeros.
+        if (!nxrt::platform::file_read_at(box->f, static_cast<int64_t>(ofs), out, static_cast<std::size_t>(n), &got) || got != n) return false;
         return true;
     }
 };

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "nxrt/platform.h"
 
@@ -123,6 +124,71 @@ int main() {
             file_close(r);
         }
         check(file_open((dir + "/nope.bin").c_str(), false) == nullptr, "opening a missing file fails instead of crashing");
+    }
+
+    // files: positioned I/O, truncate, rename, times, and an update open that does not truncate.
+    {
+        const std::string dir = temp_dir();
+        const std::string a = dir + "/pos.bin", b = dir + "/pos-renamed.bin";
+        File* w = file_create_new(a.c_str());
+        check(w != nullptr, "file_create_new creates a new file");
+        check(file_create_new(a.c_str()) == nullptr, "file_create_new refuses a file that exists");
+        if (w) {
+            const char digits[] = "0123456789";
+            check(file_write_at(w, 4, digits, 10), "file_write_at writes at an offset");
+            check(file_size(w) == 14, "the file grows to the end of the positioned write");
+            char four[4] = {};
+            std::size_t got = 0;
+            check(file_read_at(w, 2, four, 4, &got) && got == 4, "file_read_at reads across the gap");
+            check(four[0] == 0 && four[1] == 0 && four[2] == '0' && four[3] == '1', "the gap reads as zeros and the data follows it");
+            check(file_truncate(w, 6), "file_truncate shortens the file");
+            check(file_size(w) == 6, "the size follows the truncate");
+            check(file_flush(w), "file_flush succeeds");
+            file_close(w);
+        }
+        check(file_sync(a.c_str()), "file_sync flushes a file by name");
+        FileTimes times{};
+        check(file_times(a.c_str(), &times) && times.modified > 0, "file_times reports a write time");
+        check(file_rename(a.c_str(), b.c_str(), true), "file_rename moves the file");
+        check(!file_exists(a.c_str()) && file_exists(b.c_str()), "the renamed file is the one that exists");
+        File* u = file_open_update(b.c_str());
+        check(u != nullptr, "file_open_update opens an existing file for writing");
+        if (u) {
+            char first = 1;
+            std::size_t got = 0;
+            check(file_read_at(u, 0, &first, 1, &got) && got == 1 && first == 0, "the update open did not truncate the file");
+            file_close(u);
+        }
+    }
+
+    // process identity, library names, the CSPRNG and the scheduler snapshot.
+    check(process_id() != 0, "process_id names this process");
+    check(process_alive(process_id()), "process_alive sees this process");
+    check(!process_alive(0x7FFFFFF0u), "process_alive does not see a pid nothing runs under");
+    {
+        int version = 0;
+#if defined(_WIN32)
+        check(library_file_name("avcodec", "avcodec-62.dll", &version) && version == 62, "library_file_name knows avcodec-62.dll (version 62)");
+#else
+        check(library_file_name("avcodec", "libavcodec.so.62", &version) && version == 62, "library_file_name knows libavcodec.so.62 (version 62)");
+#endif
+        check(!library_file_name("avcodec", "avcodec.txt", &version), "library_file_name refuses a file that is not a library");
+    }
+    {
+        unsigned char bytes[16] = {};
+        check(random_bytes(bytes, sizeof bytes), "random_bytes fills a buffer");
+    }
+    {
+        std::vector<std::uint32_t> ids;
+        process_thread_ids(&ids);
+        bool self = false;
+        for (const std::uint32_t id : ids) self = self || id == thread_id();
+        check(!ids.empty() && self, "process_thread_ids lists the calling thread");
+        check(host_thread_ideal_processor(thread_id()) >= 0, "host_thread_ideal_processor answers for this thread");
+        check(physical_core_mask(0) != 0, "physical_core_mask answers for processor 0");
+        HostSnapshot snapshot;
+        check(host_snapshot(&snapshot) && !snapshot.threads.empty(), "host_snapshot lists this process's threads");
+        check(!snapshot.processes.empty(), "host_snapshot lists other processes");
     }
 
     std::printf("%d failure(s)\n", failures);

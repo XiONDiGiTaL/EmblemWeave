@@ -4,8 +4,6 @@
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #include "fs_volume.h"
 
-#include <windows.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -16,6 +14,7 @@
 #include <sstream>
 
 #include "nxrt/log.h"
+#include "nxrt/platform.h"
 #include "nxrt/write_watch.h"
 
 namespace stdfs = std::filesystem;
@@ -39,35 +38,25 @@ std::string parent_of(const std::string& path) {
     return i == 0 || i == std::string::npos ? std::string("/") : path.substr(0, i);
 }
 
-// Positioned I/O on a Win32 handle (several threads may call it at once).
+// Positioned I/O on a platform file (several threads may call it at once: no shared file position is moved).
 class HostFile final : public VFile {
 public:
-    HostFile(HANDLE h, uint32_t mode) : h_(h), mode_(mode) {}
-    ~HostFile() override {
-        if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
-    }
+    HostFile(nxrt::platform::File* f, uint32_t mode) : f_(f), mode_(mode) {}
+    ~HostFile() override { nxrt::platform::file_close(f_); }
     uint32_t read(int64_t offset, void* dst, uint64_t size, uint64_t* got) override {
         *got = 0;
         if (offset < 0) return rc::kOutOfRange;
         if (!(mode_ & kModeRead)) return rc::kReadNotPermitted;
         uint8_t* d = static_cast<uint8_t*>(dst);
-        const mem::ww::OsWriteScope ws(d, size);   // ReadFile fails on a page the write tracker made read-only
-        while (size) {
-            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(size, 0x40000000));
-            OVERLAPPED ov{};
-            ov.Offset = static_cast<DWORD>(static_cast<uint64_t>(offset) & 0xFFFFFFFFu);
-            ov.OffsetHigh = static_cast<DWORD>(static_cast<uint64_t>(offset) >> 32);
-            DWORD n = 0;
-            if (!ReadFile(h_, d, chunk, &n, &ov)) {
-                if (GetLastError() == ERROR_HANDLE_EOF) break;
+        const mem::ww::OsWriteScope ws(d, size);   // reading into a page the write tracker made read-only
+        uint64_t at = 0;
+        while (at < size) {
+            std::size_t n = 0;
+            if (!nxrt::platform::file_read_at(f_, offset + static_cast<int64_t>(at), d + at, static_cast<std::size_t>(size - at), &n))
                 return rc::kGenericFailure;
-            }
-            if (n == 0) break;
+            if (n == 0) break;   // the end of the file
             *got += n;
-            d += n;
-            offset += n;
-            size -= n;
-            if (n < chunk) break;
+            at += n;
         }
         return 0;
     }
@@ -77,76 +66,45 @@ public:
         int64_t cur = 0;
         get_size(&cur);
         if (static_cast<uint64_t>(offset) + size > static_cast<uint64_t>(cur) && !(mode_ & kModeAppend)) return rc::kNoAppend;
-        const uint8_t* s = static_cast<const uint8_t*>(src);
-        const mem::ww::OsReadScope rs(s, size);   // WriteFile fails on a page the write tracker guarded (a deferred GPU result)
-        while (size) {
-            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(size, 0x40000000));
-            OVERLAPPED ov{};
-            ov.Offset = static_cast<DWORD>(static_cast<uint64_t>(offset) & 0xFFFFFFFFu);
-            ov.OffsetHigh = static_cast<DWORD>(static_cast<uint64_t>(offset) >> 32);
-            DWORD n = 0;
-            if (!WriteFile(h_, s, chunk, &n, &ov) || n == 0) return rc::kGenericFailure;
-            s += n;
-            offset += n;
-            size -= n;
-        }
-        return 0;
+        const auto* s = static_cast<const uint8_t*>(src);
+        const mem::ww::OsReadScope rs(s, size);   // writing from a page the write tracker guarded (a deferred GPU result)
+        return nxrt::platform::file_write_at(f_, offset, s, static_cast<std::size_t>(size)) ? 0 : rc::kGenericFailure;
     }
-    uint32_t flush() override { return (mode_ & kModeWrite) ? (FlushFileBuffers(h_) ? 0 : rc::kGenericFailure) : 0; }
+    uint32_t flush() override { return (mode_ & kModeWrite) ? (nxrt::platform::file_flush(f_) ? 0 : rc::kGenericFailure) : 0; }
     uint32_t set_size(int64_t size) override {
         if (!(mode_ & kModeWrite)) return rc::kWriteNotPermitted;
         if (size < 0) return rc::kOutOfRange;
         std::lock_guard<std::mutex> lk(size_mu_);
-        LARGE_INTEGER li;
-        li.QuadPart = size;
-        if (!SetFilePointerEx(h_, li, nullptr, FILE_BEGIN) || !SetEndOfFile(h_)) return rc::kGenericFailure;
-        return 0;
+        return nxrt::platform::file_truncate(f_, size) ? 0 : rc::kGenericFailure;
     }
     uint32_t get_size(int64_t* size) override {
-        LARGE_INTEGER li;
-        if (!GetFileSizeEx(h_, &li)) return rc::kGenericFailure;
-        *size = li.QuadPart;
+        const int64_t n = nxrt::platform::file_size(f_);
+        if (n < 0) return rc::kGenericFailure;
+        *size = n;
         return 0;
     }
 
 private:
-    HANDLE h_;
+    nxrt::platform::File* f_;
     uint32_t mode_;
     std::mutex size_mu_;
 };
-
-HANDLE open_host(const stdfs::path& p, bool write, DWORD disposition) {
-    return CreateFileW(p.c_str(), write ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                       nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
-}
-
-bool pid_alive(DWORD pid) {
-    HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pid);
-    if (!p) return GetLastError() == ERROR_ACCESS_DENIED;
-    const bool alive = WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
-    CloseHandle(p);
-    return alive;
-}
 
 // A mutex shared by every process that opens the same save folder: commit and recovery do not interleave.
 class RootLock {
 public:
     explicit RootLock(const std::string& root) {
-        size_t h = std::hash<std::string>{}(root);
-        wchar_t name[64];
-        std::swprintf(name, 64, L"nxrt_save_%016llx", static_cast<unsigned long long>(h));
-        m_ = CreateMutexW(nullptr, FALSE, name);
-        if (m_) WaitForSingleObject(m_, INFINITE);
+        const size_t h = std::hash<std::string>{}(root);
+        char name[64];
+        std::snprintf(name, sizeof name, "nxrt_save_%016llx", static_cast<unsigned long long>(h));
+        handle_ = nxrt::platform::named_mutex_create(name, nullptr);
     }
     ~RootLock() {
-        if (m_) {
-            ReleaseMutex(m_);
-            CloseHandle(m_);
-        }
+        if (handle_) nxrt::platform::named_mutex_destroy(handle_);
     }
 
 private:
-    HANDLE m_ = nullptr;
+    void* handle_ = nullptr;
 };
 
 // Applies a decided commit. Marker lines: "W <work folder>", "R <committed folder>", then "D rel" (delete), "M rel" (make folder),
@@ -379,8 +337,8 @@ Volume::Volume(const std::string& root, bool journal, bool read_only, uint64_t c
         stdfs::create_directories(s.root, ec);
         recover(root);
         s.marker = stdfs::path(s.root.string() + ".commit");
-        s.work = stdfs::path(s.root.string() + ".work." + std::to_string(GetCurrentProcessId()));
-        s.journal_file = stdfs::path(s.root.string() + ".journal." + std::to_string(GetCurrentProcessId()));
+        s.work = stdfs::path(s.root.string() + ".work." + std::to_string(nxrt::platform::process_id()));
+        s.journal_file = stdfs::path(s.root.string() + ".journal." + std::to_string(nxrt::platform::process_id()));
         stdfs::remove_all(s.work, ec);   // a second open in this process starts from the committed state
         stdfs::create_directories(s.work, ec);
         s.ok = stdfs::is_directory(s.root, ec) && stdfs::is_directory(s.work, ec);
@@ -423,8 +381,8 @@ void Volume::recover(const std::string& root_s) {
         const std::string tail = name.substr(stem.size());
         const bool is_work = tail.rfind(".work.", 0) == 0, is_journal = tail.rfind(".journal.", 0) == 0;
         if (!is_work && !is_journal) continue;
-        const DWORD pid = static_cast<DWORD>(std::strtoul(tail.c_str() + (is_work ? 6 : 9), nullptr, 10));
-        if (!pid || pid == GetCurrentProcessId() || pid_alive(pid)) continue;
+        const uint32_t pid = static_cast<uint32_t>(std::strtoul(tail.c_str() + (is_work ? 6 : 9), nullptr, 10));
+        if (!pid || pid == nxrt::platform::process_id() || nxrt::platform::process_alive(pid)) continue;
         std::error_code e2;
         stdfs::remove_all(it->path(), e2);
         NXLOG_I("fs", "uncommitted %s of process %lu discarded (%s)", is_work ? "work folder" : "journal", static_cast<unsigned long>(pid), name.c_str());
@@ -438,15 +396,11 @@ uint32_t Volume::create_file(const std::string& path, int64_t size) {
     if (path == "/") return rc::kPathAlreadyExists;
     if (p_->lookup(path).exists) return rc::kPathAlreadyExists;
     if (const uint32_t r = p_->ensure_parents(path)) return r;
-    HANDLE h = open_host(p_->wpath(path), true, CREATE_NEW);
-    if (h == INVALID_HANDLE_VALUE) return rc::kGenericFailure;
+    nxrt::platform::File* f = nxrt::platform::file_create_new(to_u8(p_->wpath(path)).c_str());
+    if (!f) return rc::kGenericFailure;
     uint32_t r = 0;
-    if (size) {
-        LARGE_INTEGER li;
-        li.QuadPart = size;
-        if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN) || !SetEndOfFile(h)) r = rc::kGenericFailure;
-    }
-    CloseHandle(h);
+    if (size && !nxrt::platform::file_truncate(f, size)) r = rc::kGenericFailure;
+    nxrt::platform::file_close(f);
     p_->tomb.erase(path);   // harmless when absent; a re-created path is served from the work layer
     return r;
 }
@@ -567,9 +521,9 @@ uint32_t Volume::open_file(const std::string& path, uint32_t mode, std::shared_p
         if (const uint32_t r = p_->materialize_file(path)) return r;
         host = p_->wpath(path);
     }
-    HANDLE h = open_host(host, write, OPEN_EXISTING);
-    if (h == INVALID_HANDLE_VALUE) return rc::kPathNotFound;
-    *out = std::make_shared<HostFile>(h, mode);
+    nxrt::platform::File* opened = write ? nxrt::platform::file_open_update(to_u8(host).c_str()) : nxrt::platform::file_open(to_u8(host).c_str(), false);
+    if (!opened) return rc::kPathNotFound;
+    *out = std::make_shared<HostFile>(opened, mode);
     return 0;
 }
 
@@ -582,15 +536,11 @@ uint32_t Volume::file_times(const std::string& path, FileTimes* out) {
     std::lock_guard<std::mutex> lk(p_->mu);
     const Impl::Found f = p_->lookup(path);
     if (!f.exists) return rc::kPathNotFound;
-    WIN32_FILE_ATTRIBUTE_DATA d;
-    if (!GetFileAttributesExW(f.host.c_str(), GetFileExInfoStandard, &d)) return rc::kGenericFailure;
-    auto posix = [](const FILETIME& ft) {
-        const uint64_t t = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-        return static_cast<int64_t>(t / 10000000ull) - 11644473600ll;
-    };
-    out->created = posix(d.ftCreationTime);
-    out->modified = posix(d.ftLastWriteTime);
-    out->accessed = posix(d.ftLastAccessTime);
+    nxrt::platform::FileTimes t;
+    if (!nxrt::platform::file_times(to_u8(f.host).c_str(), &t)) return rc::kGenericFailure;
+    out->created = t.created > 0 ? t.created : t.modified;   // POSIX keeps no creation time: the write time stands in
+    out->modified = t.modified;
+    out->accessed = t.accessed;
     out->valid = true;
     return 0;
 }
@@ -622,11 +572,7 @@ uint32_t Volume::commit() {
             dirs.push_back(g);
         } else {
             files.push_back(g);
-            HANDLE h = CreateFileW(it->path().c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-            if (h != INVALID_HANDLE_VALUE) {
-                FlushFileBuffers(h);
-                CloseHandle(h);
-            }
+            nxrt::platform::file_sync(to_u8(it->path()).c_str());
         }
     }
     for (const std::string& d : dirs) body += "M " + d + "\n";
@@ -641,15 +587,9 @@ uint32_t Volume::commit() {
             return rc::kGenericFailure;
         }
     }
-    {
-        HANDLE h = CreateFileW(s.journal_file.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) {
-            FlushFileBuffers(h);
-            CloseHandle(h);
-        }
-    }
-    if (!MoveFileExW(s.journal_file.c_str(), s.marker.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        NXLOG_E("fs", "save commit %s: making the decided marker failed (error %lu)", to_u8(s.root).c_str(), GetLastError());
+    nxrt::platform::file_sync(to_u8(s.journal_file).c_str());
+    if (!nxrt::platform::file_rename(to_u8(s.journal_file).c_str(), to_u8(s.marker).c_str(), true)) {
+        NXLOG_E("fs", "save commit %s: making the decided marker failed", to_u8(s.root).c_str());
         return rc::kGenericFailure;
     }
     if (g_crash_point == 1) return rc::kGenericFailure;   // decided, nothing applied

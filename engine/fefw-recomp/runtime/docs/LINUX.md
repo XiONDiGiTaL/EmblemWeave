@@ -29,17 +29,23 @@ What is ported to the platform boundary but not yet linked into a Linux executab
   (`platform::now_ns`) and priority, and the audio renderer's thread boost (nice instead of MMCSS);
 - the UI language from the process locale and the `controls.ini` lookup without `GetPrivateProfileStringA`;
 - guest sync objects (`src/os/sync.cpp`) on `platform::Mutex` / `platform::Cond` / `platform::RWLock` (the Windows `sync`
-  test group still passes all 17 cases after the change).
+  test group still passes all 17 cases after the change);
+- the volume and RomFS file services (`services/fs_volume.cpp`, `services/fs_romfs.cpp`) on `platform::File` with positioned
+  reads and writes, truncate, `file_sync`/`file_rename` and `file_times`, and the save-folder lock on `named_mutex_*`
+  (`svc_fs`, `svc_fs_volume` and `svc_fs_romfs` pass on Windows, and the platform self-test covers the new calls on both
+  backends);
+- the Opus decoder's FFmpeg load and the `csrng` service (`services/misc.cpp`) on `library_open`/`library_symbol`,
+  `module_path` and `random_bytes`;
+- host thread placement and the starvation guard (`kernel/host_place.cpp`, `kernel/starvation_guard.cpp`) on
+  `process_thread_ids`, `host_thread_*`, `physical_core_mask` and `host_snapshot` (NtQuerySystemInformation on Windows,
+  `/proc` on Linux).
 
-What still blocks a full Linux link (the current frontier, all in `src/`):
-
-| File | Windows dependency | Replacement |
-| --- | --- | --- |
-| `services/fs_volume.cpp` | `CreateFileW`/`ReadFile`/`WriteFile`, `MoveFileExW`, `OpenProcess` | `platform::File` plus positioned I/O and truncate; `/proc` for liveness |
-| `services/fs_romfs.cpp` | `CreateFileW`/`ReadFile`, UTF-16 conversion | `platform::File`, UTF-8 paths |
-| `services/misc.cpp` | `LoadLibraryExW`/`GetProcAddress`, `GetModuleFileNameW` | `dlopen`/`dlsym`, `/proc/self/exe` |
-| `kernel/host_place.cpp` | processor topology and ideal-processor APIs | `/sys/devices/system/cpu` + `thread_set_affinity` |
-| `kernel/starvation_guard.cpp` | `NtQuerySystemInformation` thread states | POSIX scheduling equivalent, or a Linux guard |
+No source file is left that includes `windows.h` outside that Windows-only list. The full runtime library builds on Linux
+(`nxrt`, 75 compile steps, `libnxrt.a`); the first frontier that was five files (`fs_volume`, `fs_romfs`, `misc`,
+`host_place`, `starvation_guard`) is empty. What has not happened yet is a **link of an executable**: the full Linux
+configuration builds only the static libraries, so unresolved symbols from the excluded subsystems (gauge, ftrace, crash
+reporting, the test tools, the graphics shell) are unmeasured. That link needs those subsystems' Linux designs or a
+reduced entry point, and is the next step after the graphics shell.
 
 Windows-only subsystems are left out of a Linux build, not stubbed: crash handler and minidump writer, symbol stack
 walks, sampler, watchdog, memory guard, registry helpers, CPU/SMBIOS diagnostics, the gauge sampler, Media Foundation
@@ -132,8 +138,8 @@ Third-party sources (zstd, and SDL3/Vulkan/volk/VMA/ImGui when the shell is on) 
 | Check | Windows | Linux |
 | --- | --- | --- |
 | Platform layer builds | yes | yes (GCC 13, Clang 18, WSL2) |
-| Platform self-test | yes | yes |
-| Core runtime builds | yes | 5 source files left (frontier above) |
+| Platform self-test | yes | yes (including the file, library and scheduler calls) |
+| Core runtime builds | yes | yes (`libnxrt.a`, no `windows.h` outside the Windows-only list) |
 | Runtime tests | yes | not yet configured |
 | Window + Vulkan | yes | no |
 | Audio device | yes (XAudio2) | no |
@@ -144,8 +150,9 @@ this build; WSL2 proves compilation and the platform contract, not RADV, PipeWir
 
 ## Roadmap
 
-1. **Core link on Linux**: port the frontier table above (the file services first, then `misc` and the two kernel
-   files), so `nxrt` links natively. Verify with a Linux build of the runtime tests that do not need the graphics shell.
+1. **Core link on Linux**: the sources are ported; what remains is an executable that links `nxrt` (a reduced entry
+   point, or Linux designs for the excluded subsystems), then a Linux build of the runtime tests that do not need the
+   graphics shell.
 2. **Graphics shell**: port `src/gfx` with the vendor upscalers off, the Win32 display helper behind the platform, and
    SDL3 window/input/Vulkan surface as-is. Add the Linux equivalents of the Windows-only paths (crash shortcut,
    display modes).

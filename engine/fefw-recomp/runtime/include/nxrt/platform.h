@@ -6,6 +6,8 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace nxrt::platform {
 
@@ -278,5 +280,73 @@ uint64_t tick_count_ms();
 // Base address of the running executable's image. The dispatch table stores code offsets relative to this anchor
 // (dispatch.cpp's flat table), so an address outside the image is recognised without a per-site lookup.
 uintptr_t module_base();
+
+// --- files, positioned and by name -------------------------------------------------------------------------------------
+// Positioned I/O moves no shared file position, so several threads may use one File at once (the volume and RomFS readers
+// do). file_read_at fills as much as it can and reports it in `done` (short at the end of the file).
+bool file_read_at(File* f, int64_t offset, void* buf, std::size_t bytes, std::size_t* done);
+bool file_write_at(File* f, int64_t offset, const void* buf, std::size_t bytes);
+bool file_truncate(File* f, int64_t size);
+bool file_flush(File* f);                       // the bytes written so far reach the device (fsync)
+// An existing file for reading and writing without truncating it, and a new one that must not exist yet.
+File* file_open_update(const char* path_utf8);
+File* file_create_new(const char* path_utf8);
+bool file_sync(const char* path_utf8);          // fsync a file by name (a journal just written and closed)
+bool file_rename(const char* from_utf8, const char* to_utf8, bool replace);   // replace: atomic, the directory entry flushed
+struct FileTimes {
+    int64_t created = 0, modified = 0, accessed = 0;   // seconds since 1970; created is 0 where the host does not keep it
+};
+bool file_times(const char* path_utf8, FileTimes* out);
+// A host path for the file calls: UTF-8 in and out, in this platform's long-path form (on Windows the \\?\ prefix for
+// paths of 240 bytes or more; unchanged on POSIX).
+std::string host_path(const char* path_utf8);
+
+// --- process identity ----------------------------------------------------------------------------------------------------
+uint32_t process_id();
+bool process_alive(uint32_t pid);   // false when there is no such process (one that may not be inspected counts as alive)
+
+// --- shared libraries (the FFmpeg Opus decoder, src/services/misc.cpp) -----------------------------------------------------
+void* library_open(const char* path_utf8);
+void* library_symbol(void* library, const char* name);
+void library_close(void* library);
+// Whether `file_name` is this platform's name for the library `stem`, with the version in it in `version` (0 when none):
+// "avcodec-62.dll" on Windows, "libavcodec.so.62" on POSIX.
+bool library_file_name(const char* stem, const char* file_name, int* version);
+
+// --- the running executable ----------------------------------------------------------------------------------------------
+std::string module_path();          // UTF-8; empty when it cannot be asked
+
+// --- random --------------------------------------------------------------------------------------------------------------
+bool random_bytes(void* buf, std::size_t bytes);   // the OS CSPRNG
+
+// --- host threads, scheduling and topology (kernel/host_place.cpp, kernel/starvation_guard.cpp) ---------------------------
+// Threads are named by the id the OS gives them (platform::thread_id), not by a Thread handle: the runtime places threads
+// it did not start (the render thread, the driver's). A setter answers false when the OS refuses it or has no such notion
+// (POSIX has no ideal processor, and raising another thread's priority needs privilege).
+void process_thread_ids(std::vector<uint32_t>* out);   // every thread of this process, the caller's included
+int host_thread_ideal_processor(uint32_t id);          // -1 unknown; the lowest processor of its affinity on POSIX
+int host_thread_priority(uint32_t id);                 // the OS's own value (Windows bands, POSIX nice level)
+bool host_thread_set_affinity(uint32_t id, uint64_t mask);
+bool host_thread_set_ideal_processor(uint32_t id, int processor);
+bool host_thread_set_priority(uint32_t id, int priority);
+uint64_t physical_core_mask(int processor);            // the SMT siblings of `processor`, else 1 << processor
+// One poll of the host's scheduler: every thread of this process (ready or not, its context switches and CPU time) and
+// every process (CPU time, and the image name when `names`). The starvation guard compares two polls.
+struct HostSnapshot {
+    struct Thread {
+        uint32_t id = 0;
+        bool ready = false;          // running, or runnable and waiting for a processor
+        uint64_t switches = 0;       // context switches so far
+        uint64_t cpu_100ns = 0;      // kernel + user time
+    };
+    struct Proc {
+        uint32_t id = 0;
+        uint64_t cpu_100ns = 0;
+    };
+    std::vector<Thread> threads;
+    std::vector<Proc> processes;
+};
+bool host_snapshot(HostSnapshot* out);
+bool process_name(uint32_t pid, std::string* name);   // the image name, UTF-8 (the base name, no folder)
 
 }  // namespace nxrt::platform

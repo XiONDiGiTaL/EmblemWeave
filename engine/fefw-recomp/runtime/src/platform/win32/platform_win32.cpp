@@ -3,11 +3,17 @@
 // so the win32 build keeps its exact behaviour: QPC for the clock, a high-resolution waitable timer for long sleeps,
 // VirtualAlloc for the guest arenas, SRW locks for the runtime's short critical sections and CreateFileW for files.
 #include <windows.h>
+#include <bcrypt.h>
+#include <tlhelp32.h>
 
 #include <process.h>
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "bcrypt.lib")
 
 #include "nxrt/platform.h"
 
@@ -265,7 +271,9 @@ struct File {
 File* file_open(const char* path_utf8, bool write) {
     const std::wstring w = wide(path_utf8);
     if (w.empty()) return nullptr;
-    HANDLE h = CreateFileW(w.c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, nullptr,
+    // Read, write and delete sharing: the save volumes keep a file open for reading while another handle opens it for
+    // writing (the same file can be materialized and reopened), as the volume code did with CreateFileW before the split.
+    HANDLE h = CreateFileW(w.c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            write ? CREATE_ALWAYS : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return nullptr;
     auto* f = new File;
@@ -574,6 +582,375 @@ uintptr_t module_base() {
 
 [[noreturn]] void process_exit(int code) {
     ExitProcess(static_cast<UINT>(code));
+}
+
+// --- positioned files, names, libraries and process identity ---------------------------------------------------------------------------
+
+bool file_read_at(File* f, int64_t offset, void* buf, std::size_t bytes, std::size_t* done) {
+    if (done) *done = 0;
+    if (!f || f->handle == INVALID_HANDLE_VALUE || offset < 0) return false;
+    auto* p = static_cast<char*>(buf);
+    std::size_t at = 0;
+    while (at < bytes) {
+        const DWORD chunk = static_cast<DWORD>(bytes - at > 0x40000000 ? 0x40000000 : bytes - at);
+        OVERLAPPED ov{};
+        const uint64_t ofs = static_cast<uint64_t>(offset) + at;
+        ov.Offset = static_cast<DWORD>(ofs & 0xFFFFFFFFu);
+        ov.OffsetHigh = static_cast<DWORD>(ofs >> 32);
+        DWORD got = 0;
+        if (!ReadFile(f->handle, p + at, chunk, &got, &ov)) {
+            if (GetLastError() == ERROR_HANDLE_EOF) break;
+            return false;
+        }
+        at += got;
+        if (got < chunk) break;
+    }
+    if (done) *done = at;
+    return true;
+}
+
+bool file_write_at(File* f, int64_t offset, const void* buf, std::size_t bytes) {
+    if (!f || f->handle == INVALID_HANDLE_VALUE || offset < 0) return false;
+    const auto* p = static_cast<const char*>(buf);
+    std::size_t at = 0;
+    while (at < bytes) {
+        const DWORD chunk = static_cast<DWORD>(bytes - at > 0x40000000 ? 0x40000000 : bytes - at);
+        OVERLAPPED ov{};
+        const uint64_t ofs = static_cast<uint64_t>(offset) + at;
+        ov.Offset = static_cast<DWORD>(ofs & 0xFFFFFFFFu);
+        ov.OffsetHigh = static_cast<DWORD>(ofs >> 32);
+        DWORD wrote = 0;
+        if (!WriteFile(f->handle, p + at, chunk, &wrote, &ov) || wrote == 0) return false;
+        at += wrote;
+    }
+    return true;
+}
+
+bool file_truncate(File* f, int64_t size) {
+    if (!f || f->handle == INVALID_HANDLE_VALUE || size < 0) return false;
+    LARGE_INTEGER to;
+    to.QuadPart = size;
+    if (!SetFilePointerEx(f->handle, to, nullptr, FILE_BEGIN)) return false;
+    return SetEndOfFile(f->handle) != 0;
+}
+
+bool file_flush(File* f) {
+    if (!f || f->handle == INVALID_HANDLE_VALUE) return false;
+    return FlushFileBuffers(f->handle) != 0;
+}
+
+File* file_open_update(const char* path_utf8) {
+    const std::wstring w = wide(path_utf8);
+    if (w.empty()) return nullptr;
+    HANDLE h = CreateFileW(w.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return nullptr;
+    auto* f = new File;
+    f->handle = h;
+    return f;
+}
+
+File* file_create_new(const char* path_utf8) {
+    const std::wstring w = wide(path_utf8);
+    if (w.empty()) return nullptr;
+    HANDLE h = CreateFileW(w.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return nullptr;
+    auto* f = new File;
+    f->handle = h;
+    return f;
+}
+
+bool file_sync(const char* path_utf8) {
+    const std::wstring w = wide(path_utf8);
+    if (w.empty()) return false;
+    HANDLE h = CreateFileW(w.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    const bool ok = FlushFileBuffers(h) != 0;
+    CloseHandle(h);
+    return ok;
+}
+
+bool file_rename(const char* from_utf8, const char* to_utf8, bool replace) {
+    const std::wstring a = wide(from_utf8), b = wide(to_utf8);
+    if (a.empty() || b.empty()) return false;
+    return MoveFileExW(a.c_str(), b.c_str(), MOVEFILE_WRITE_THROUGH | (replace ? MOVEFILE_REPLACE_EXISTING : 0)) != 0;
+}
+
+bool file_times(const char* path_utf8, FileTimes* out) {
+    if (!out) return false;
+    *out = FileTimes{};
+    const std::wstring w = wide(path_utf8);
+    if (w.empty()) return false;
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    if (!GetFileAttributesExW(w.c_str(), GetFileExInfoStandard, &d)) return false;
+    const auto secs = [](const FILETIME& ft) {
+        const uint64_t t = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+        return static_cast<int64_t>(t / 10000000ull) - 11644473600ll;
+    };
+    out->created = secs(d.ftCreationTime);
+    out->modified = secs(d.ftLastWriteTime);
+    out->accessed = secs(d.ftLastAccessTime);
+    return true;
+}
+
+std::string host_path(const char* path_utf8) {
+    std::string p = path_utf8 ? path_utf8 : "";
+    if (p.size() < 240) return p;
+    for (char& c : p)
+        if (c == '/') c = '\\';
+    if (p.compare(0, 4, "\\\\?\\") == 0) return p;
+    if (p.compare(0, 2, "\\\\") == 0) return "\\\\?\\UNC\\" + p.substr(2);
+    return "\\\\?\\" + p;
+}
+
+uint32_t process_id() {
+    return static_cast<uint32_t>(GetCurrentProcessId());
+}
+
+bool process_alive(uint32_t pid) {
+    HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!p) return GetLastError() == ERROR_ACCESS_DENIED;
+    const bool alive = WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
+    CloseHandle(p);
+    return alive;
+}
+
+void* library_open(const char* path_utf8) {
+    const std::wstring w = wide(path_utf8);
+    if (w.empty()) return nullptr;
+    return reinterpret_cast<void*>(LoadLibraryExW(w.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
+}
+
+void* library_symbol(void* library, const char* name) {
+    if (!library || !name) return nullptr;
+    return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(library), name));
+}
+
+void library_close(void* library) {
+    if (library) FreeLibrary(reinterpret_cast<HMODULE>(library));
+}
+
+bool library_file_name(const char* stem, const char* file_name, int* version) {
+    if (version) *version = 0;
+    if (!stem || !file_name) return false;
+    std::string name;
+    for (const char* p = file_name; *p; ++p) name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*p))));
+    const std::string prefix = std::string(stem) + "-", suffix = ".dll";
+    if (name.size() <= prefix.size() + suffix.size()) return false;
+    if (name.compare(0, prefix.size(), prefix) != 0) return false;
+    if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+    const std::string mid = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+    if (mid.empty() || mid.size() > 4) return false;
+    int v = 0;
+    for (char c : mid) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+    }
+    if (version) *version = v;
+    return true;
+}
+
+std::string module_path() {
+    std::wstring buf(260, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+        if (n == 0) return {};
+        if (n < buf.size()) {
+            buf.resize(n);
+            break;
+        }
+        buf.resize(buf.size() * 2);
+    }
+    const int need = WideCharToMultiByte(CP_UTF8, 0, buf.data(), static_cast<int>(buf.size()), nullptr, 0, nullptr, nullptr);
+    if (need <= 0) return {};
+    std::string out(static_cast<std::size_t>(need), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, buf.data(), static_cast<int>(buf.size()), out.data(), need, nullptr, nullptr);
+    return out;
+}
+
+bool random_bytes(void* buf, std::size_t bytes) {
+    if (!buf && bytes) return false;
+    auto* p = static_cast<unsigned char*>(buf);
+    std::size_t done = 0;
+    while (done < bytes) {
+        const ULONG n = static_cast<ULONG>(bytes - done > 0x10000000 ? 0x10000000 : bytes - done);
+        if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, p + done, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG))) return false;
+        done += n;
+    }
+    return true;
+}
+
+// --- host threads and topology ------------------------------------------------------------------------------------------------------
+
+namespace {
+
+HANDLE open_thread(uint32_t id) {
+    return OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, static_cast<DWORD>(id));
+}
+
+// The parts of the NtQuerySystemInformation(SystemProcessInformation) records this needs (Windows Vista and later, x64).
+struct NtThreadInfo {
+    LARGE_INTEGER kernel_time, user_time, create_time;
+    ULONG wait_time;
+    PVOID start_address;
+    PVOID unique_process, unique_thread;
+    LONG priority, base_priority;
+    ULONG context_switches, thread_state, wait_reason;
+};
+static_assert(sizeof(NtThreadInfo) == 0x50, "SYSTEM_THREAD_INFORMATION");
+struct NtProcInfo {
+    ULONG next_entry_offset, number_of_threads;
+    uint8_t body[0x100 - 8];
+};
+static_assert(sizeof(NtProcInfo) == 0x100, "SYSTEM_PROCESS_INFORMATION");
+
+using NtQuerySystemInformationFn = LONG(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+
+}  // namespace
+
+void process_thread_ids(std::vector<uint32_t>* out) {
+    if (!out) return;
+    out->clear();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof te;
+    const DWORD pid = GetCurrentProcessId();
+    if (Thread32First(snap, &te)) do {
+        if (te.th32OwnerProcessID == pid) out->push_back(te.th32ThreadID);
+    } while (Thread32Next(snap, &te));
+    CloseHandle(snap);
+}
+
+int host_thread_ideal_processor(uint32_t id) {
+    HANDLE h = open_thread(id);
+    if (!h) return -1;
+    PROCESSOR_NUMBER pn{};
+    const int v = GetThreadIdealProcessorEx(h, &pn) ? static_cast<int>(pn.Number) : -1;
+    CloseHandle(h);
+    return v;
+}
+
+int host_thread_priority(uint32_t id) {
+    HANDLE h = open_thread(id);
+    if (!h) return 0;
+    const int v = GetThreadPriority(h);
+    CloseHandle(h);
+    return v == THREAD_PRIORITY_ERROR_RETURN ? 0 : v;
+}
+
+bool host_thread_set_affinity(uint32_t id, uint64_t mask) {
+    HANDLE h = open_thread(id);
+    if (!h) return false;
+    const bool ok = SetThreadAffinityMask(h, static_cast<DWORD_PTR>(mask)) != 0;
+    CloseHandle(h);
+    return ok;
+}
+
+bool host_thread_set_ideal_processor(uint32_t id, int processor) {
+    if (processor < 0 || processor > 63) return false;
+    HANDLE h = open_thread(id);
+    if (!h) return false;
+    PROCESSOR_NUMBER pn{};
+    pn.Number = static_cast<BYTE>(processor);
+    const bool ok = SetThreadIdealProcessorEx(h, &pn, nullptr) != 0;
+    CloseHandle(h);
+    return ok;
+}
+
+bool host_thread_set_priority(uint32_t id, int priority) {
+    HANDLE h = open_thread(id);
+    if (!h) return false;
+    const bool ok = SetThreadPriority(h, priority) != 0;
+    CloseHandle(h);
+    return ok;
+}
+
+uint64_t physical_core_mask(int processor) {
+    const uint64_t bit = processor >= 0 && processor < 64 ? 1ull << processor : 0;
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (len) {
+        std::vector<unsigned char> buf(len);
+        auto* base = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data());
+        if (GetLogicalProcessorInformationEx(RelationProcessorCore, base, &len)) {
+            for (DWORD off = 0; off < len;) {
+                auto* e = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
+                if (e->Relationship == RelationProcessorCore && e->Processor.GroupMask[0].Group == 0 &&
+                    (e->Processor.GroupMask[0].Mask & bit))
+                    return static_cast<uint64_t>(e->Processor.GroupMask[0].Mask);
+                off += e->Size;
+            }
+        }
+    }
+    return bit;
+}
+
+bool host_snapshot(HostSnapshot* out) {
+    if (!out) return false;
+    out->threads.clear();
+    out->processes.clear();
+    static NtQuerySystemInformationFn query = reinterpret_cast<NtQuerySystemInformationFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation")));
+    if (!query) return false;
+    std::vector<uint8_t> buf(1 << 20);
+    const uint32_t pid = GetCurrentProcessId();
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        ULONG need = 0;
+        const LONG st = query(5, buf.data(), static_cast<ULONG>(buf.size()), &need);
+        if (st < 0) {
+            if (need <= buf.size()) return false;
+            buf.resize(need + (need >> 3));
+            continue;
+        }
+        for (std::size_t off = 0;;) {
+            const uint8_t* rec = buf.data() + off;
+            const auto* p = reinterpret_cast<const NtProcInfo*>(rec);
+            const uint64_t ppid = *reinterpret_cast<const uint64_t*>(rec + 0x50);
+            if (ppid == pid) {
+                const auto* t = reinterpret_cast<const NtThreadInfo*>(rec + sizeof(NtProcInfo));
+                for (ULONG i = 0; i < p->number_of_threads; ++i) {
+                    HostSnapshot::Thread e;
+                    e.id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t[i].unique_thread));
+                    e.ready = t[i].thread_state == 1 || t[i].thread_state == 3;   // ready, standby
+                    e.switches = t[i].context_switches;
+                    e.cpu_100ns = static_cast<uint64_t>(t[i].kernel_time.QuadPart) + static_cast<uint64_t>(t[i].user_time.QuadPart);
+                    out->threads.push_back(e);
+                }
+            } else {
+                HostSnapshot::Proc proc;
+                proc.id = static_cast<uint32_t>(ppid);
+                proc.cpu_100ns = *reinterpret_cast<const uint64_t*>(rec + 0x28) + *reinterpret_cast<const uint64_t*>(rec + 0x30);
+                out->processes.push_back(proc);
+            }
+            if (!p->next_entry_offset) break;
+            off += p->next_entry_offset;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool process_name(uint32_t pid, std::string* name) {
+    if (name) name->clear();
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (!p) return false;
+    wchar_t buf[MAX_PATH];
+    DWORD n = static_cast<DWORD>(sizeof buf / sizeof buf[0]);
+    const bool ok = QueryFullProcessImageNameW(p, 0, buf, &n) != 0;
+    CloseHandle(p);
+    if (!ok) return false;
+    if (!name) return true;
+    const wchar_t* base = buf;
+    for (DWORD i = 0; i < n; ++i)
+        if (buf[i] == L'\\' || buf[i] == L'/') base = buf + i + 1;
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, base, static_cast<int>(n - (base - buf)), nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) return false;
+    name->resize(static_cast<std::size_t>(bytes));
+    WideCharToMultiByte(CP_UTF8, 0, base, static_cast<int>(n - (base - buf)), name->data(), bytes, nullptr, nullptr);
+    return true;
 }
 
 }  // namespace nxrt::platform
