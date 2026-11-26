@@ -2672,6 +2672,12 @@ void tex_ensure_current(Texture* t, Frame& f) {
         g->uploaded = true;
         return;
     }
+    // A dirty flag without a newer generation, after the final data went into the image: a notification rather than a write. Preparing here used to
+    // put a quick stand-in back over the final image (final_uploaded had just cleared the stand-in marker), and the next use showed the stand-in.
+    if (dirty && g->uploaded && !g->gpu_written && texprep::final_on_screen(t)) {
+        t->cpu_dirty.store(false);
+        return;
+    }
     t->cpu_dirty.exchange(false);
     // before the storage is read: a write from now on makes it dirty again. Off the render thread (tex_ww_arm_later): the content hash of what
     // the upload reads is taken here instead, and the worker compares it after arming.

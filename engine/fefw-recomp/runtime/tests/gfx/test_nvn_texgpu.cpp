@@ -1368,6 +1368,73 @@ NXTEST(compact_standin_upload_and_replacement) {
 // gather copies the mapped tiles (unmapped bytes are zero), direct hands out a pointer when the range is one piece of one physical pool, and
 // the hash follows both the bytes and where they sit.
 NXTEST(sparse_texture_segments) {
+// [nvn] tex_async = standin: the job's result is in the image, then a dirty flag arrives without a newer generation (a notification, not a write).
+// The image must keep the final blocks: final_uploaded clears the stand-in marker, and the next ensure used to read that as "no stand-in yet" and
+// put a quick stand-in back over the final image.
+NXTEST(a_redundant_dirty_keeps_the_uploaded_result) {
+    config_set("gfx", "astc_gpu", "off");
+    struct Restore { ~Restore() { config_set("gfx", "astc_gpu", "auto"); } } restore;
+    Rig r;
+    if (!bring_up(r)) {
+        CHECK(false);
+        return;
+    }
+    if (!r.dev->features().bc || r.dev->features().astc_ldr) {
+        nxtest::skip("needs BC and no native ASTC (the stand-in path)");
+        teardown(r);
+        return;
+    }
+    no_cache();
+    namespace tp = nxrt::nvn::be::texprep;
+    Tex x;
+    CHECK(make_tex(x, info(NVN_TEXTURE_TARGET_2D, 1024, 512, 1, 11, NVN_FORMAT_RGBA_ASTC_8x8)));
+    std::mt19937 rng(91);
+    for (uint32_t l = 0; l < x.L.layout.levels.size(); ++l) {
+        const tegra::LevelLayout& lv = x.L.layout.levels[l];
+        for (uint32_t y = 0; y < lv.blocks_y; ++y)
+            for (uint32_t bx = 0; bx < lv.blocks_x; ++bx) {
+                uint8_t* blk = x.lin.data() + lv.linear_offset + y * lv.linear_row_stride + bx * 16;
+                blk[0] = 0xFC;
+                blk[1] = 0xFD;
+                std::memset(blk + 2, 0xFF, 6);
+                uint16_t c[4];
+                for (uint16_t& v : c) v = static_cast<uint16_t>(rng());
+                std::memcpy(blk + 8, c, 8);
+            }
+    }
+    tile_into_storage(x);
+    Texture* t = x.t.get();
+    be::TexCaps si;
+    si.provisional = true;
+    si.standin_first = true;
+    si.image_format = VK_FORMAT_BC7_UNORM_BLOCK;
+    be::PreparedTexture want_si, want_full;
+    CHECK_MSG(be::prepare_texture(*t, si, want_si), want_si.error);
+    CHECK_MSG(be::prepare_texture(*t, be::TexCaps(), want_full), want_full.error);
+    gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(t, f); });
+    CHECK(tp::standin_on_screen(t));
+    // the job is done: an ensure takes its result (the dirty flag is the notification, not a write)
+    tp::wait_idle_for_test();
+    t->cpu_dirty.store(true);
+    gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(t, f); });
+    std::vector<uint8_t> got;
+    CHECK_MSG(read_back_tight(*r.dev, t, want_full.level, 1, got), "result readback failed");
+    const long d0 = first_diff(got, want_full.data);
+    CHECK_MSG(d0 < 0, ("the image differs from the full transcode at byte " + std::to_string(d0)).c_str());
+    // the same dirty again, with no new content: nothing is uploaded, the final blocks stay and no stand-in is prepared over them
+    uint64_t up1 = 0, up2 = 0;
+    gpu::run_on_render_thread([&] { up1 = gpu::tex_stats().uploads; });
+    t->cpu_dirty.store(true);
+    gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(t, f); });
+    gpu::run_on_render_thread([&] { up2 = gpu::tex_stats().uploads; });
+    CHECK_MSG(up2 == up1, "the redundant dirty uploaded the texture again");
+    CHECK_MSG(!tp::standin_on_screen(t), "a stand-in replaced the uploaded result");
+    CHECK_MSG(read_back_tight(*r.dev, t, want_full.level, 1, got), "final readback failed");
+    const long d1 = first_diff(got, want_full.data);
+    CHECK_MSG(d1 < 0, ("the final image differs from the full transcode at byte " + std::to_string(d1)).c_str());
+    teardown(r);
+}
+
     using nxrt::nvn::be::MemoryPool;
     using nxrt::nvn::be::texture_gather_virtual;
     using nxrt::nvn::be::texture_hash_virtual;

@@ -728,6 +728,7 @@ bool hash_storage(const Texture& t, uint64_t& h) { return hash_guarded(t, h); }
 
 bool wants_provisional(Texture* t) {
     if (!t || !enabled() || !gpu::active() || !eligible(t, async_standin_cfg()) || !t->fmt->astc) return false;
+    if (final_on_screen(t)) return false;   // the real data is already in the image: a stand-in would put coarser blocks over it
     const uint32_t mark = t->prep_gen.load(std::memory_order_acquire) | 0x80000000u;
     return t->prep_prov.load(std::memory_order_acquire) != mark;
 }
@@ -738,6 +739,7 @@ void provisional_uploaded(Texture* t) {
     std::lock_guard<std::mutex> lk(s.mu);
     const uint32_t gen = t->prep_gen.load(std::memory_order_acquire);
     t->prep_prov.store(gen | 0x80000000u, std::memory_order_release);
+    t->prep_final.store(0xFFFFFFFFu, std::memory_order_release);   // a stand-in is not the final data: its job's result must still be taken
     s_provisional.fetch_add(1, std::memory_order_relaxed);
     auto it = s.map.find(t);
     if (it != s.map.end()) {
@@ -787,7 +789,16 @@ void standin_kept(Texture* t) {
 }
 
 void final_uploaded(Texture* t) {
-    if (t && t->prep_prov.load(std::memory_order_relaxed)) t->prep_prov.store(0, std::memory_order_release);
+    if (!t) return;
+    // Which generation this image now holds in full. A dirty flag without a newer one (a notification, not a write) has nothing to upload; before,
+    // the next ensure saw prep_prov cleared, decided the texture had no stand-in yet and prepared one over the final image.
+    t->prep_final.store(t->prep_gen.load(std::memory_order_acquire), std::memory_order_release);
+    if (t->prep_prov.load(std::memory_order_relaxed)) t->prep_prov.store(0, std::memory_order_release);
+}
+
+bool final_on_screen(Texture* t) {
+    if (!t || !enabled()) return false;
+    return t->prep_final.load(std::memory_order_acquire) == t->prep_gen.load(std::memory_order_acquire);
 }
 
 void wait_idle_for_test() {
