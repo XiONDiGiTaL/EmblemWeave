@@ -9,13 +9,18 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include "nxrt/diag.h"
@@ -105,8 +110,9 @@ struct Node {
 
 std::string shown(const Node& n) { return n.path.empty() ? std::string("/") : n.path; }
 
-// Fills dir.kids from the host folder dir.host, recursively. False with msg set at the first entry that cannot be described.
-bool scan(Node& dir, std::string& msg) {
+// Fills dir.kids with the direct children of the host folder dir.host (sorted by name bytes); scan() walks the folders below.
+// False with msg set at the first entry that cannot be described.
+bool scan_dir_entries(Node& dir, std::string& msg) {
     std::error_code ec;
     std::filesystem::directory_iterator it(fs_path(dir.host), ec);
     if (ec) {
@@ -146,7 +152,6 @@ bool scan(Node& dir, std::string& msg) {
         }
         if (std::filesystem::is_directory(st)) {
             k.is_dir = true;
-            if (!scan(k, msg)) return false;
         } else if (std::filesystem::is_regular_file(st)) {
             k.size = e.file_size(sec);
             if (sec) {
@@ -162,6 +167,66 @@ bool scan(Node& dir, std::string& msg) {
     }
     // std::string's operator< compares unsigned char values, which is the byte order the RomFS hash tables expect.
     std::sort(dir.kids.begin(), dir.kids.end(), [](const Node& a, const Node& b) { return a.name < b.name; });
+    return true;
+}
+
+// Fills root.kids from the host folder root.host, recursively. The folders are read by a bounded pool of threads so that their
+// enumeration overlaps the I/O latency (a large win on Wine, FUSE, network and hard drives with 20k+ folders), and diag_progress() is
+// called as folders finish so a slow scan that is still moving never trips the freeze watchdog. Port of fefw-recomp 6698bf2 (issue
+// #44) onto the portable std::filesystem walk. False with msg set at the first entry that cannot be described.
+bool scan(Node& root, std::string& msg) {
+    if (!scan_dir_entries(root, msg)) return false;
+    std::deque<Node*> queue;
+    for (Node& k : root.kids)
+        if (k.is_dir) queue.push_back(&k);
+    if (queue.empty()) return true;
+
+    constexpr size_t kMaxWorkers = 8;
+    const unsigned hw = std::thread::hardware_concurrency();
+    const size_t total_threads = std::min<size_t>(kMaxWorkers, std::max<size_t>(2, hw ? hw : 4));
+    std::mutex mu;
+    std::condition_variable cv;
+    size_t active = 0;
+    bool failed = false;
+    std::atomic<uint32_t> dirs_done{1};
+    std::string err_msg;
+    // A Node* stays valid because a folder's kids are filled once, by the one worker that took it, before pointers into them are queued.
+    auto worker = [&] {
+        for (;;) {
+            Node* cur = nullptr;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [&] { return failed || !queue.empty() || active == 0; });
+                if (failed || queue.empty()) return;   // an empty queue here means nothing is active either: the walk is done
+                cur = queue.front();
+                queue.pop_front();
+                ++active;
+            }
+            std::string local_err;
+            const bool ok = scan_dir_entries(*cur, local_err);
+            if ((dirs_done.fetch_add(1, std::memory_order_relaxed) & 63u) == 0) diag_progress();
+            std::lock_guard<std::mutex> lk(mu);
+            --active;
+            if (!ok) {
+                if (!failed) err_msg = std::move(local_err);
+                failed = true;
+                cv.notify_all();
+                return;
+            }
+            for (Node& k : cur->kids)
+                if (k.is_dir) queue.push_back(&k);
+            cv.notify_all();
+        }
+    };
+    std::vector<std::thread> helpers;
+    helpers.reserve(total_threads - 1);
+    for (size_t i = 1; i < total_threads; ++i) helpers.emplace_back(worker);
+    worker();
+    for (std::thread& t : helpers) t.join();
+    if (failed) {
+        msg = std::move(err_msg);
+        return false;
+    }
     return true;
 }
 
@@ -426,11 +491,229 @@ struct Layout {
     std::map<std::string, uint32_t> by_path;
     std::string package;                // the .nup or .nx, when the files come from one
     std::shared_ptr<nx::Reader> archive;  // the .nx reader the files are read through
+    std::string cache_file;             // set when the base tree came from the tree cache: removed on a host read error so the next start scans
 };
 
+// ---- base tree cache ------------------------------------------------------------------------------------------------------------
+// A loose RomFS folder holds about 250,000 files, and listing them is most of a cold start on a slow drive. The base tree (names,
+// folders, sizes) is kept in a file and reused while the folder's fingerprint (its path, its own modification time and its direct
+// entries with theirs) is unchanged. The base folder is taken as read-only: mods are laid over it fresh at every start. Port of
+// fefw-recomp 516c360 / c89f4c7 (issue #44) onto std::filesystem, so it works wherever the runtime does.
+constexpr char kCacheMagic[8] = {'N', 'X', 'R', 'C', '0', '0', '0', '1'};
+constexpr uint64_t kMaxCacheBytes = 256ull << 20;
+constexpr uint64_t kFnvBasis = 14695981039346656037ull;
+
+uint64_t fnv1a_update(uint64_t h, const void* p, size_t n) {
+    const auto* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
+struct TopFingerprint {
+    std::string root_utf8;
+    uint64_t root_mtime = 0;
+    uint64_t top_hash = 0;
+};
+
+bool compute_top_fingerprint(const std::string& root_host, TopFingerprint& fp) {
+    fp.root_utf8 = root_host;
+    std::error_code ec;
+    const std::filesystem::path root = fs_path(root_host);
+    const auto rt = std::filesystem::last_write_time(root, ec);
+    if (ec) return false;
+    fp.root_mtime = static_cast<uint64_t>(rt.time_since_epoch().count());
+    struct Entry {
+        std::string name;
+        uint8_t is_dir = 0;
+        uint64_t size = 0;
+        uint64_t mtime = 0;
+    };
+    std::vector<Entry> top;
+    std::filesystem::directory_iterator it(root, ec);
+    const std::filesystem::directory_iterator end;
+    if (ec) return false;
+    for (; it != end; it.increment(ec)) {
+        if (ec) return false;
+        const std::filesystem::directory_entry& e = *it;
+        Entry x;
+        x.name = u8_of(e.path().filename());
+        std::error_code sec;
+        x.is_dir = e.is_directory(sec) ? 1 : 0;
+        if (!x.is_dir) x.size = e.file_size(sec);
+        if (sec) return false;
+        const auto t = e.last_write_time(sec);
+        if (sec) return false;
+        x.mtime = static_cast<uint64_t>(t.time_since_epoch().count());
+        top.push_back(std::move(x));
+    }
+    if (ec) return false;
+    std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) { return a.name < b.name; });
+    uint64_t hash = kFnvBasis;
+    const uint64_t count = top.size();
+    hash = fnv1a_update(hash, &count, sizeof count);
+    for (const Entry& e : top) {
+        const uint32_t nl = static_cast<uint32_t>(e.name.size());
+        hash = fnv1a_update(hash, &nl, sizeof nl);
+        hash = fnv1a_update(hash, e.name.data(), e.name.size());
+        hash = fnv1a_update(hash, &e.is_dir, sizeof e.is_dir);
+        hash = fnv1a_update(hash, &e.size, sizeof e.size);
+        hash = fnv1a_update(hash, &e.mtime, sizeof e.mtime);
+    }
+    fp.top_hash = hash;
+    return true;
+}
+
+// The host path of `name` in the folder `dir_host`, spelled the way scan() spells it (the iterator's path of the entry).
+std::string child_host(const std::string& dir_host, const std::string& name) {
+    return u8_of(fs_path(dir_host) / std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(name.data()), name.size())));
+}
+
+bool load_tree_cache(const std::string& cache_path, const TopFingerprint& want, Node& root) {
+    std::ifstream in(fs_path(cache_path), std::ios::binary);
+    if (!in) return false;
+    in.seekg(0, std::ios::end);
+    const std::streamoff fsz = in.tellg();
+    if (fsz < 32 || static_cast<uint64_t>(fsz) > kMaxCacheBytes) return false;
+    in.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(static_cast<size_t>(fsz));
+    if (!in.read(reinterpret_cast<char*>(buf.data()), fsz)) return false;
+    if (std::memcmp(buf.data(), kCacheMagic, 8) != 0) return false;
+    const size_t payload = buf.size() - 8;
+    uint64_t stored = 0;
+    std::memcpy(&stored, buf.data() + payload, 8);
+    if (stored != fnv1a_update(kFnvBasis, buf.data(), payload)) return false;
+    size_t pos = 8;
+    auto rd = [&](void* dst, size_t n) -> bool {
+        if (pos + n > payload) return false;
+        std::memcpy(dst, buf.data() + pos, n);
+        pos += n;
+        return true;
+    };
+    uint32_t root_len = 0;
+    if (!rd(&root_len, 4) || root_len != want.root_utf8.size() || pos + root_len > payload) return false;
+    if (std::memcmp(buf.data() + pos, want.root_utf8.data(), root_len) != 0) return false;
+    pos += root_len;
+    uint64_t root_mtime = 0, top_hash = 0;
+    uint32_t dir_count = 0, file_count = 0;
+    if (!rd(&root_mtime, 8) || !rd(&top_hash, 8) || !rd(&dir_count, 4) || !rd(&file_count, 4)) return false;
+    if (root_mtime != want.root_mtime || top_hash != want.top_hash || dir_count == 0) return false;
+    std::vector<Node> dnodes(dir_count);
+    std::vector<uint32_t> dparent(dir_count, 0);
+    dnodes[0].is_dir = true;
+    dnodes[0].host = root.host;
+    for (uint32_t i = 1; i < dir_count; i++) {
+        uint32_t parent = 0;
+        uint16_t nlen = 0;
+        if (!rd(&parent, 4) || !rd(&nlen, 2) || parent >= i || nlen == 0 || nlen > kMaxName || pos + nlen > payload) return false;
+        std::string name(reinterpret_cast<const char*>(buf.data() + pos), nlen);
+        pos += nlen;
+        dparent[i] = parent;
+        dnodes[i].is_dir = true;
+        dnodes[i].path = dnodes[parent].path + "/" + name;
+        if (dnodes[i].path.size() > kMaxPath) return false;
+        dnodes[i].host = child_host(dnodes[parent].host, name);
+        dnodes[i].name = std::move(name);
+    }
+    for (uint32_t j = 0; j < file_count; j++) {
+        uint32_t parent = 0;
+        uint64_t sz = 0;
+        uint16_t nlen = 0;
+        if (!rd(&parent, 4) || !rd(&sz, 8) || !rd(&nlen, 2) || parent >= dir_count || nlen == 0 || nlen > kMaxName || pos + nlen > payload)
+            return false;
+        std::string name(reinterpret_cast<const char*>(buf.data() + pos), nlen);
+        pos += nlen;
+        Node f;
+        f.path = dnodes[parent].path + "/" + name;
+        if (f.path.size() > kMaxPath) return false;
+        f.host = child_host(dnodes[parent].host, name);
+        f.name = std::move(name);
+        f.size = sz;
+        dnodes[parent].kids.push_back(std::move(f));
+    }
+    if (pos != payload) return false;
+    // a folder's id is above its parent's (preorder), so moving from the last id down never moves a folder whose kids are still to come
+    for (uint32_t i = dir_count; --i > 0;) dnodes[dparent[i]].kids.push_back(std::move(dnodes[i]));
+    sort_tree(dnodes[0]);
+    root = std::move(dnodes[0]);
+    NXLOG_I("fs", "RomFS tree loaded from cache (%u files, %u directories)", file_count, dir_count);
+    return true;
+}
+
+void save_tree_cache(const std::string& cache_path, const TopFingerprint& fp, const Node& root) {
+    struct FlatDir {
+        uint32_t parent;
+        const std::string* name;
+    };
+    struct FlatFile {
+        uint32_t parent;
+        uint64_t size;
+        const std::string* name;
+    };
+    std::vector<FlatDir> dirs;
+    std::vector<FlatFile> files;
+    std::vector<std::pair<const Node*, uint32_t>> stack{{&root, 0u}};
+    uint32_t next_dir_id = 1;
+    while (!stack.empty()) {   // preorder: a folder's id is always above its parent's
+        const auto [cur, cur_id] = stack.back();
+        stack.pop_back();
+        for (const Node& k : cur->kids) {
+            if (k.is_dir) {
+                dirs.push_back({cur_id, &k.name});
+                stack.push_back({&k, next_dir_id++});
+            } else {
+                files.push_back({cur_id, k.size, &k.name});
+            }
+        }
+    }
+    std::vector<uint8_t> buf;
+    buf.reserve(64 + fp.root_utf8.size() + dirs.size() * 24 + files.size() * 40);
+    auto wr = [&](const void* src, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(src);
+        buf.insert(buf.end(), b, b + n);
+    };
+    wr(kCacheMagic, 8);
+    const uint32_t rlen = static_cast<uint32_t>(fp.root_utf8.size());
+    wr(&rlen, 4);
+    wr(fp.root_utf8.data(), rlen);
+    wr(&fp.root_mtime, 8);
+    wr(&fp.top_hash, 8);
+    const uint32_t dcount = static_cast<uint32_t>(dirs.size() + 1);
+    const uint32_t fcount = static_cast<uint32_t>(files.size());
+    wr(&dcount, 4);
+    wr(&fcount, 4);
+    for (const FlatDir& d : dirs) {
+        const uint16_t nl = static_cast<uint16_t>(d.name->size());
+        wr(&d.parent, 4);
+        wr(&nl, 2);
+        wr(d.name->data(), nl);
+    }
+    for (const FlatFile& f : files) {
+        const uint16_t nl = static_cast<uint16_t>(f.name->size());
+        wr(&f.parent, 4);
+        wr(&f.size, 8);
+        wr(&nl, 2);
+        wr(f.name->data(), nl);
+    }
+    const uint64_t sum = fnv1a_update(kFnvBasis, buf.data(), buf.size());
+    wr(&sum, 8);
+    const std::filesystem::path dst = fs_path(cache_path);
+    std::filesystem::path tmp = dst;
+    tmp += ".tmp";
+    std::error_code ec;
+    bool ok = false;
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return;
+        out.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+        ok = static_cast<bool>(out.flush());
+    }
+    if (ok) std::filesystem::rename(tmp, dst, ec);   // replaces an older cache
+    if (!ok || ec) std::filesystem::remove(tmp, ec);
+}
+
 // Lays out the host folder: entries sorted by full path in each table, file data in that order, 16-byte aligned.
-bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits, Layout& L,
-                 std::string* err) {
+bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits,
+                 const std::string& cache_path, Layout& L, std::string* err) {
     std::string msg;
     const bool packaged = nup::is_nup(host_dir);
     const bool archived = !packaged && nx::is_nx(host_dir);
@@ -450,7 +733,23 @@ bool make_layout(const std::string& host_dir, const std::vector<RomfsOverlay>& o
     root.host = u8_of(abs);
     if (packaged || archived) L.package = host_dir;
     std::shared_ptr<nx::Reader> archive;
-    const bool scanned = archived ? scan_nx(host_dir, root, msg, archive) : packaged ? scan_nup(host_dir, root, msg) : scan(root, msg);
+    bool scanned = false;
+    if (archived) {
+        scanned = scan_nx(host_dir, root, msg, archive);
+    } else if (packaged) {
+        scanned = scan_nup(host_dir, root, msg);
+    } else {
+        TopFingerprint fp;
+        const bool use_cache = !cache_path.empty() && compute_top_fingerprint(root.host, fp);
+        if (use_cache && load_tree_cache(cache_path, fp, root)) {
+            L.cache_file = cache_path;
+            scanned = true;
+        } else {
+            root.kids.clear();
+            scanned = scan(root, msg);
+            if (scanned && use_cache) save_tree_cache(cache_path, fp, root);
+        }
+    }
     if (!scanned) {
         if (err) *err = msg;
         return false;
@@ -808,29 +1107,53 @@ struct RomfsImage::Impl {
             return true;
         }
         std::shared_ptr<HandleBox> box = acquire(idx);
-        if (!box) return false;
+        if (!box) {
+            invalidate_tree_cache();
+            return false;
+        }
         const mem::ww::OsWriteScope ws(out, n);   // reading into a page the write tracker made read-only
         std::size_t got = 0;
         // A short read means the file shrank since build(): an error, not zeros.
-        if (!nxrt::platform::file_read_at(box->f, static_cast<int64_t>(ofs), out, static_cast<std::size_t>(n), &got) || got != n) return false;
+        if (!nxrt::platform::file_read_at(box->f, static_cast<int64_t>(ofs), out, static_cast<std::size_t>(n), &got) || got != n) {
+            invalidate_tree_cache();
+            return false;
+        }
         return true;
+    }
+
+    // A base file the tree cache listed could not be read: the folder changed under the cache. Remove the cache so the next start scans
+    // the folder again (this run keeps its tree).
+    mutable bool cache_invalidated = false;   // guarded by mu
+    void invalidate_tree_cache() const {
+        if (l.cache_file.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (cache_invalidated) return;
+            cache_invalidated = true;
+        }
+        std::error_code ec;
+        std::filesystem::remove(fs_path(l.cache_file), ec);
+        NXLOG_W("fs", "romfs: a file the RomFS tree cache lists could not be read; the cache is removed so the next start scans again");
     }
 };
 
 RomfsImage::RomfsImage() : p_(std::make_unique<Impl>()) {}
 RomfsImage::~RomfsImage() = default;
 
-bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays, const RomfsEdits* edits) {
+bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<std::string>& overlays, const RomfsEdits* edits,
+                       const std::string& cache_path) {
     std::vector<RomfsOverlay> layers;
     layers.reserve(overlays.size());
     for (const std::string& path : overlays) layers.emplace_back(path, std::string(), false);
-    return build(host_dir, err, layers, edits);
+    return build(host_dir, err, layers, edits, cache_path);
 }
 
-bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits) {
+bool RomfsImage::build(const std::string& host_dir, std::string* err, const std::vector<RomfsOverlay>& overlays, const RomfsEdits* edits,
+                       const std::string& cache_path) {
     Layout fresh;
-    const bool ok = make_layout(host_dir, overlays, edits, fresh, err);
+    const bool ok = make_layout(host_dir, overlays, edits, cache_path, fresh, err);
     std::lock_guard<std::mutex> lk(p_->mu);
+    p_->cache_invalidated = false;
     p_->cache.clear();
     p_->packed_cache.clear();
     p_->l = ok ? std::move(fresh) : Layout{};

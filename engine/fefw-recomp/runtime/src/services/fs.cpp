@@ -30,6 +30,7 @@
 #include "nxrt/game.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/platform.h"
 #include "nxrt/services_api.h"
 #include "services_internal.h"
 
@@ -510,7 +511,14 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     fs::RomfsEdits edits;
     edits.wants = &modapi::file_edit_wanted;
     edits.edit = &modapi::file_edit_run;
-    if (!img->build(dir, &err, overlays, modapi::file_edits_close() ? &edits : nullptr)) {
+    // [fs] romfs_cache: the base tree of a loose RomFS folder is kept in romfs_cache.bin beside the executable (fefw-recomp #44).
+    std::string cache_path;
+    if (!nup::is_nup(dir) && config_get_bool("fs", "romfs_cache", true)) {
+        const std::string exe = nxrt::platform::module_path();
+        const size_t slash = exe.find_last_of("/\\");
+        if (slash != std::string::npos) cache_path = exe.substr(0, slash + 1) + "romfs_cache.bin";
+    }
+    if (!img->build(dir, &err, overlays, modapi::file_edits_close() ? &edits : nullptr, cache_path)) {
         NXLOG_E("fs", "RomFS folder '%s' cannot be served: %s (set [fs] romfs)", dir.c_str(), err.c_str());
         st().rom_failed = true;
         return nullptr;
