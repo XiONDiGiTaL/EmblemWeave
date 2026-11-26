@@ -5247,6 +5247,34 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
                 ));
             }
         }
+        // A slot moved back from the backups folder by hand keeps the
+        // timestamp prefix the launcher gave it (`1795325701-Auto`), and the
+        // game opens only `Auto`, so it starts a new game (#79). Put a copy
+        // under the game's name and keep the stamped file as it was.
+        match crate::saves::repair_backup_named_slots(&save_dir) {
+            Ok(repaired) if !repaired.is_empty() => {
+                let names = repaired
+                    .iter()
+                    .map(|r| {
+                        r.to.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "Found {} save file(s) under a backup name ({}). The game cannot open those, so each one was copied to the name it reads; the original files are untouched. Press Play again to continue from them.",
+                    repaired.len(),
+                    names
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!(
+                    "A save file under a backup name could not be restored: {e}. The game was not started; nothing was deleted."
+                ));
+            }
+        }
     }
     // The account folder can be absent or empty while profiles/backups still
     // hold the playthrough. Starting then makes the game create a fresh save

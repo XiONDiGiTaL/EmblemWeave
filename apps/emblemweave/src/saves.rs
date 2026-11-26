@@ -2370,6 +2370,73 @@ pub fn quarantine_damaged_autosave(
     Ok(Some(DamagedAutosave { reason, kept }))
 }
 
+/// A slot the game could not open because its file carried the backups
+/// folder's timestamp prefix, and the name it was copied to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairedSlot {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+/// Restore the game's name to a slot that was moved back from the backups
+/// folder by hand. `archive_slot` and `backup_slot` name their files
+/// `<stamp>-<slot>` (for example `1795325701-Auto`), and the game opens only
+/// `Auto`: a file copied back out of `backups/` under that name is never read,
+/// so the game starts a new one (#79). Each readable slot is copied to its own
+/// name and the stamped file is left untouched, so nothing is renamed or lost;
+/// an existing file of the target name always wins, and a file the runtime
+/// cannot parse is left alone. `Global` and the game's non-slot files are not
+/// touched.
+pub fn repair_backup_named_slots(save_dir: &Path) -> Result<Vec<RepairedSlot>, String> {
+    let dir = account_dir(save_dir).join("000");
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(out);
+    };
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some((stamp, slot_name)) = name.split_once('-') else {
+            continue;
+        };
+        if stamp.len() < 9 || !stamp.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // Only a name the game itself opens: Auto and the manual chapter
+        // saves. Global has a different header and Route_* is not a slot.
+        if !matches!(kind_of(slot_name), SlotKind::Auto | SlotKind::Manual)
+            || !is_slot_candidate(Path::new(slot_name))
+        {
+            continue;
+        }
+        let target = dir.join(slot_name);
+        if target.exists() {
+            continue;
+        }
+        if crate::savefile::Slot::open(&path).is_err() {
+            continue;
+        }
+        found.push((slot_name.to_string(), path));
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    for (slot_name, from) in found {
+        let to = dir.join(&slot_name);
+        if to.exists() {
+            continue;
+        }
+        std::fs::copy(&from, &to)
+            .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))?;
+        out.push(RepairedSlot { from, to });
+    }
+    Ok(out)
+}
+
 /// A slot in the current save, with the size the page shows beside it.
 pub fn slots_with_sizes(save_dir: &Path) -> Vec<(PathBuf, Option<std::time::SystemTime>, u64)> {
     slots(save_dir)
@@ -3304,6 +3371,50 @@ mod tests {
 
     fn valid_slot(payload: &[u8]) -> Vec<u8> {
         slot_with_frame(payload, raw_zstd_frame(payload))
+    }
+
+    #[test]
+    fn a_slot_moved_back_from_the_backups_is_copied_to_the_games_name() {
+        let root = temp("stamped-slot");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let stamped = dir.join("1795325701-Auto");
+        let bytes = valid_slot(b"playthrough");
+        write_bytes(&stamped, &bytes);
+
+        let repaired = repair_backup_named_slots(&save).unwrap();
+        assert_eq!(repaired.len(), 1, "the stamped autosave is reported");
+        assert_eq!(repaired[0].to, dir.join("Auto"));
+        assert_eq!(std::fs::read(dir.join("Auto")).unwrap(), bytes, "the game gets the same bytes");
+        assert_eq!(std::fs::read(&stamped).unwrap(), bytes, "the stamped file is left in place");
+
+        assert!(
+            repair_backup_named_slots(&save).unwrap().is_empty(),
+            "a second Play finds nothing left to repair"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_slot_repair_never_overwrites_a_slot_or_promotes_other_files() {
+        let root = temp("stamped-slot-guards");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        write_bytes(&dir.join("Auto"), &valid_slot(b"current"));
+        write_bytes(&dir.join("1795325701-Auto"), &valid_slot(b"older"));
+        // Not a slot the game opens: left alone even though it parses.
+        write_bytes(&dir.join("1795325701-Route_Ism"), &valid_slot(b"route"));
+        // A stamped file that does not parse is not promoted either.
+        write_bytes(&dir.join("1795325702-Auto"), b"not a save");
+
+        assert!(repair_backup_named_slots(&save).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("Auto")).unwrap(),
+            valid_slot(b"current"),
+            "the current autosave is kept"
+        );
+        assert!(!dir.join("Route_Ism").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
