@@ -29,9 +29,17 @@ pub struct Info {
     pub version: String,
     #[serde(default)]
     pub gamebanana_id: Option<u64>,
+    /// The GameBanana file this copy came from, as uploaded. A page can hold
+    /// two mods; their files' names keep them apart (`family`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file_name: String,
     /// The variant picked when the download offered several (one per platform, say).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub variant: String,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +322,10 @@ pub struct Installed {
     /// that exclude each other (`Prepared::exclusive`): every one is
     /// switched on.
     pub parts: bool,
+    /// The new copy was installed switched off because this mod, already on,
+    /// is the same one (the same GameBanana mod, or a code mod with a DLL of
+    /// the same name): two copies switched on would both load.
+    pub off_for: Option<String>,
 }
 
 /// One thing a download can install: a `romfs` and/or an `exefs` from one
@@ -595,6 +607,10 @@ fn labels(parts: &[Vec<String>]) -> Vec<String> {
     out
 }
 
+/// Installs run on worker threads; this keeps two of them from
+/// picking the same folder name at once.
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn free_name(mods: &Path, want: &str) -> String {
     let mut name = want.to_string();
     let mut n = 1;
@@ -603,6 +619,72 @@ fn free_name(mods: &Path, want: &str) -> String {
         name = format!("{want} ({n})");
     }
     name
+}
+
+/// The DLL file names in an `exefs` folder, lowercase. Two code mods that
+/// ship the same one are most likely two copies of one mod.
+fn dll_names(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| kind(e).is_some_and(|t| t.is_file()))
+                .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                .filter(|n| n.ends_with(".dll"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A switched-on mod in `mods` that a new copy would load beside: the same
+/// file of the same GameBanana mod, else a code mod with a DLL of the same
+/// name. Its title. The page id alone is not enough, as a page can hold two
+/// mods: the file names must be of one family too (`family`), unless either
+/// copy's file is not known.
+fn already_on(mods: &Path, gb: Option<u64>, file_name: &str, dlls: &[String]) -> Option<String> {
+    let fam = family(file_name);
+    let mut same_code = None;
+    for e in std::fs::read_dir(mods).ok()?.flatten() {
+        let folder = e.file_name().to_string_lossy().into_owned();
+        if !kind(&e).is_some_and(|t| t.is_dir()) || folder.starts_with(['.', '_', '-']) {
+            continue;
+        }
+        let path = e.path();
+        let info: Option<Info> = std::fs::read_to_string(path.join("emblemweave.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+        let same_mod = gb.is_some()
+            && info.as_ref().is_some_and(|i| {
+                let theirs = family(&i.file_name);
+                i.gamebanana_id == gb && (fam.is_empty() || theirs.is_empty() || theirs == fam)
+            });
+        let same_dll = !dlls.is_empty() && exefs_dirs(&path).iter().any(|x| dll_names(x).iter().any(|n| dlls.contains(n)));
+        let title = || info.clone().map(|i| i.title).filter(|t| !t.is_empty()).unwrap_or(folder.clone());
+        if same_mod {
+            return Some(title());
+        }
+        if same_dll && same_code.is_none() {
+            same_code = Some(title());
+        }
+    }
+    same_code
+}
+
+/// Code mods switched on together that ship a DLL of the same name: both
+/// load, most likely two copies of one mod. One entry per DLL, as
+/// `exefs/<name>.dll`.
+pub fn code_clashes(list: &[Mod]) -> Vec<Conflict> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for m in list.iter().filter(|m| m.enabled && m.has_code) {
+        let mut names: Vec<String> = exefs_dirs(&m.path).iter().flat_map(|x| dll_names(x)).collect();
+        names.sort();
+        names.dedup();
+        for n in names {
+            seen.entry(n).or_default().push(m.info.title.clone());
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, mods)| mods.len() > 1)
+        .map(|(dll, mods)| Conflict { file: format!("exefs/{dll}"), mods })
+        .collect()
 }
 
 fn build_folder(c: &Choice, folder: &Path) -> Result<bool, String> {
@@ -633,7 +715,7 @@ fn build_folder(c: &Choice, folder: &Path) -> Result<bool, String> {
 /// made is removed again.
 pub fn finish(p: &Prepared, picks: &[usize], mods: &Path) -> Result<Installed, String> {
     if p.unusable_exefs {
-        return Ok(Installed { mods: Vec::new(), exefs_only: true, patch_only: false, needs_build: false, parts: false });
+        return Ok(Installed { mods: Vec::new(), exefs_only: true, patch_only: false, needs_build: false, parts: false, off_for: None });
     }
     std::fs::create_dir_all(mods).map_err(|e| e.to_string())?;
     let mut partials: Vec<PathBuf> = Vec::new();
@@ -672,11 +754,18 @@ fn finish_into(p: &Prepared, picks: &[usize], mods: &Path, partials: &mut Vec<Pa
         needs_build |= build_folder(c, &partial)?;
         built.push((c, partial));
     }
+    // Only naming and the renames need the lock: two installs never pick one name.
+    let _w = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    // A second copy of a mod that is on (Install again, the same link, another file of its family)
+    // comes in switched off. Only mods there before this install count: the variants it places
+    // below share its page and file, and never switch each other off.
+    let dlls = built.first().map(|(_, partial)| dll_names(&partial.join("exefs"))).unwrap_or_default();
+    let off_for = already_on(mods, p.info.gamebanana_id, &p.info.file_name, &dlls);
     let mut names = Vec::new();
     for (n, (c, partial)) in built.into_iter().enumerate() {
         let want = if c.label.is_empty() || p.choices.len() < 2 { base.clone() } else { clean_name(&format!("{base} - {}", c.label)) };
         let name = free_name(mods, &want);
-        let folder = mods.join(if n == 0 || parts { name.clone() } else { format!("_{name}") });
+        let folder = mods.join(if (n == 0 || parts) && off_for.is_none() { name.clone() } else { format!("_{name}") });
         let mut info = p.info.clone();
         info.title = name.clone();
         info.variant = c.label.clone();
@@ -687,7 +776,7 @@ fn finish_into(p: &Prepared, picks: &[usize], mods: &Path, partials: &mut Vec<Pa
         placed.push(folder);
         names.push(name);
     }
-    Ok(Installed { mods: names, exefs_only: p.exefs_only, patch_only: p.patch_only, needs_build, parts })
+    Ok(Installed { mods: names, exefs_only: p.exefs_only, patch_only: p.patch_only, needs_build, parts, off_for })
 }
 
 /// A rename, tried a few times: on Windows an indexer or a virus scanner can
@@ -725,11 +814,91 @@ fn prepare_dir(dir: &Path, stage: Option<PathBuf>, info: Info) -> Result<Prepare
 }
 
 fn staging() -> Result<PathBuf, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let base = crate::engine::run_dir().ok_or(crate::platform::NO_DATA_DIR)?.join("mods-incoming");
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let d = base.join(stamp.to_string());
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    Ok(d)
+    // Unique per download, even for several started in the same instant
+    // or by two copies of the launcher.
+    loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = base.join(format!("{stamp}-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&d) {
+            Ok(()) => return Ok(d),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Mark an unpacked download as still wanted, so `clean_incoming` in another
+/// copy of the launcher leaves it alone while its question waits.
+pub fn keep_stage(p: &Prepared) {
+    if let Some(s) = &p.stage {
+        let _ = std::fs::write(s.join("waiting"), now().to_string());
+    }
+}
+
+/// Remove unpacked downloads left in `mods-incoming` by a launcher that was
+/// closed while it waited for a choice, and `.partial-…` installs left in
+/// the mods folder by one that was closed mid-copy. Only folders older than
+/// an hour go, so a download in progress in another copy of the launcher is
+/// left alone; a `.partial-…` install is kept for a day. A folder whose
+/// name carries the id of a launcher still running (another copy, whose
+/// question may wait for days) is never removed; when the process list
+/// cannot be read, no folder carrying another launcher's id is. It walks
+/// folders and reads the process list: call it off the UI thread.
+pub fn clean_incoming() {
+    let Some(run) = crate::engine::run_dir() else { return };
+    let own = std::process::id();
+    let live = crate::cheats::process::pids().map(|mut l| {
+        l.push(own);
+        l
+    });
+    clean_in(&run, std::time::SystemTime::now(), live.as_deref(), own);
+}
+
+/// The launcher process that made a stage or `.partial-…` folder: its names
+/// are `<stamp>-<pid>-<n>`.
+fn stage_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(".partial-").unwrap_or(name);
+    rest.split('-').nth(1)?.parse().ok()
+}
+
+/// `live` is the running processes, `None` when they are unknown: then
+/// every folder made by another launcher (`own` is this one) is kept, and
+/// only folders without an id, or with this launcher's, follow the age rule.
+fn clean_in(run: &Path, now: std::time::SystemTime, live: Option<&[u32]>, own: u32) {
+    let alive = |e: &std::fs::DirEntry| {
+        stage_pid(&e.file_name().to_string_lossy()).is_some_and(|pid| match live {
+            Some(live) => live.contains(&pid),
+            None => pid != own,
+        })
+    };
+    let hour_ago = now - std::time::Duration::from_secs(3600);
+    let day_ago = now - std::time::Duration::from_secs(24 * 3600);
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if let Ok(entries) = std::fs::read_dir(run.join("mods-incoming")) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !kind(&e).is_some_and(|t| t.is_dir()) || alive(&e) {
+                continue;
+            }
+            let newest = [modified(&p), modified(&p.join("waiting"))].into_iter().flatten().max();
+            if newest.is_some_and(|t| t < hour_ago) {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(run.join("mods")) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let partial = e.file_name().to_string_lossy().starts_with(".partial-");
+            if partial && kind(&e).is_some_and(|t| t.is_dir()) && !alive(&e) && modified(&p).is_some_and(|t| t < day_ago) {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
 }
 
 /// Unpack an archive (.zip, .7z, .rar) or look at a folder, ready for `finish`.
@@ -958,6 +1127,7 @@ pub fn gb_prepare(m: &GbMod, file: &GbFile) -> Result<Prepared, String> {
             author: m.author.clone(),
             version: if file.version.is_empty() { m.version.clone() } else { file.version.clone() },
             gamebanana_id: Some(m.id),
+            file_name: file.name.clone(),
             ..Info::default()
         };
         prepare_dir(&unpacked, Some(stage.clone()), info)
@@ -1120,22 +1290,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Several files picked from one page are installed one after another,
-    /// each into its own folder, each switched on.
+    /// Several files picked from one page each go into their own folder:
+    /// switched on when their families differ, the second of one family off
+    /// (a second copy). The variants of one install share its page and file
+    /// and never switch each other off.
     #[test]
-    fn two_files_of_one_page_install_into_their_own_folders() {
+    fn several_files_of_one_page_and_their_variants() {
         let root = temp("twofiles");
         let mods = root.join("mods");
-        let info = Info { title: "Turn Control".into(), gamebanana_id: Some(742827), ..Info::default() };
-        for (i, dll) in ["turn_control.dll", "turn_control_emu.dll"].into_iter().enumerate() {
+        let fetch = |i: usize, dll: &str, file: &str| {
             let d = root.join(format!("dl{i}"));
             write(&d.join("TurnControl/exefs").join(dll));
-            let p = prepare_dir(&d, None, info.clone()).unwrap();
-            finish(&p, &[0], &mods).unwrap();
-        }
+            let info = Info { title: "Turn Control".into(), gamebanana_id: Some(742827), file_name: file.into(), ..Info::default() };
+            prepare_dir(&d, None, info).unwrap()
+        };
+        let r = finish(&fetch(0, "turn_control.dll", "turncontrol-030-emblemweave.zip"), &[0], &mods).unwrap();
+        assert_eq!(r.off_for, None);
+        let r = finish(&fetch(1, "speed_up.dll", "speedup-v1.zip"), &[0], &mods).unwrap();
+        assert_eq!(r.off_for, None, "another family from the same page comes in on: {r:?}");
+        let r = finish(&fetch(2, "turn_control_emu.dll", "turncontrol-030-emulator.zip"), &[0], &mods).unwrap();
+        assert_eq!(r.off_for.as_deref(), Some("Turn Control"), "the same family again is a second copy: {r:?}");
         let mut l: Vec<(String, bool)> = list(&mods).into_iter().map(|m| (m.name, m.enabled)).collect();
         l.sort();
-        assert_eq!(l, vec![("Turn Control".to_string(), true), ("Turn Control (2)".to_string(), true)]);
+        assert_eq!(l, vec![("Turn Control".to_string(), true), ("Turn Control (2)".to_string(), true), ("Turn Control (3)".to_string(), false)]);
+        // Optional parts of one file, all picked: all on, though they share the page and the file.
+        let parts = root.join("parts");
+        write(&parts.join("Main/romfs/Msg/a"));
+        write(&parts.join("Extra portraits/romfs/Character/b"));
+        let info = Info { title: "Portraits".into(), gamebanana_id: Some(5), file_name: "portraits-v1.zip".into(), ..Info::default() };
+        let p = prepare_dir(&parts, None, info).unwrap();
+        let r = finish(&p, &[0, 1], &mods).unwrap();
+        assert!(r.parts && r.off_for.is_none(), "{r:?}");
+        assert_eq!(list(&mods).iter().filter(|m| m.enabled && m.name.starts_with("Portraits")).count(), 2);
+        // Installed again: a second copy, every part off.
+        let r = finish(&p, &[0, 1], &mods).unwrap();
+        assert_eq!(r.off_for.as_deref().map(|t| t.starts_with("Portraits")), Some(true), "{r:?}");
+        assert_eq!(list(&mods).iter().filter(|m| m.enabled && m.name.starts_with("Portraits")).count(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1156,6 +1346,87 @@ mod tests {
         let mut who = c[0].mods.clone();
         who.sort();
         assert_eq!(who, vec!["Alpha".to_string(), "Beta".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A second copy of a mod that is on, by GameBanana id or by a code mod's
+    /// DLL name, is installed switched off and says which copy is on; the
+    /// Conflicts card lists code mods with the same DLL switched on together.
+    #[test]
+    fn a_second_copy_of_an_on_mod_comes_in_off() {
+        let root = temp("second-copy");
+        let mods = root.join("mods");
+        write(&mods.join("Turn Control/exefs/turn_control.dll"));
+        let info = Info { title: "Turn Control".into(), gamebanana_id: Some(7), ..Info::default() };
+        std::fs::write(mods.join("Turn Control/emblemweave.json"), serde_json::to_string(&info).unwrap()).unwrap();
+        // The same GameBanana mod, though its DLL has another name.
+        let a = root.join("a");
+        write(&a.join("TC/exefs/turn_control_v2.dll"));
+        let r = install_from(&a, &mods, &info).unwrap();
+        assert_eq!(r.off_for.as_deref(), Some("Turn Control"), "{r:?}");
+        assert!(mods.join("_Turn Control (2)/exefs/turn_control_v2.dll").is_file());
+        // Another copy of the same GameBanana mod is named before a code mod that only shares the DLL.
+        write(&mods.join("A Local Build/exefs/turn_control_v2.dll"));
+        let r = install_from(&a, &mods, &info).unwrap();
+        assert_eq!(r.off_for.as_deref(), Some("Turn Control"), "{r:?}");
+        std::fs::remove_dir_all(mods.join("A Local Build")).unwrap();
+        std::fs::remove_dir_all(mods.join("_Turn Control (3)")).unwrap();
+        // A code mod from elsewhere with the same DLL name.
+        let b = root.join("b");
+        write(&b.join("Copy/exefs/Turn_Control.dll"));
+        let r = install_from(&b, &mods, &Info { title: "Copy".into(), ..Info::default() }).unwrap();
+        assert_eq!(r.off_for.as_deref(), Some("Turn Control"));
+        assert!(mods.join("_Copy/exefs/Turn_Control.dll").is_file());
+        // Anything else still comes in switched on.
+        let c = root.join("c");
+        write(&c.join("Other/exefs/other.dll"));
+        let r = install_from(&c, &mods, &Info { title: "Other".into(), gamebanana_id: Some(8), ..Info::default() }).unwrap();
+        assert_eq!(r.off_for, None);
+        assert!(mods.join("Other/exefs/other.dll").is_file());
+        // Nothing clashes while the copies are off; switched on, they do.
+        assert!(code_clashes(&list(&mods)).is_empty());
+        let copy = list(&mods).into_iter().find(|m| m.name == "Copy").unwrap();
+        set_enabled(&copy, true).unwrap();
+        let c = code_clashes(&list(&mods));
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].file, "exefs/turn_control.dll");
+        let mut who = c[0].mods.clone();
+        who.sort();
+        assert_eq!(who, vec!["Copy".to_string(), "Turn Control".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A page can hold two mods: a download from the page of a mod that is on
+    /// only comes in switched off when it is a copy of the same file family,
+    /// or ships a DLL of the same name.
+    #[test]
+    fn a_second_copy_is_told_apart_by_its_file() {
+        let root = temp("second-copy-family");
+        let mods = root.join("mods");
+        write(&mods.join("Turn Control/exefs/turn_control.dll"));
+        let on = Info { title: "Turn Control".into(), gamebanana_id: Some(7), file_name: "turncontrol-v100.zip".into(), ..Info::default() };
+        std::fs::write(mods.join("Turn Control/emblemweave.json"), serde_json::to_string(&on).unwrap()).unwrap();
+        // Same page, another family: a mod of its own, switched on.
+        let a = root.join("a");
+        write(&a.join("Speed/exefs/speed.dll"));
+        let info = Info { title: "Speed".into(), gamebanana_id: Some(7), file_name: "speedup-v1.zip".into(), ..Info::default() };
+        let r = install_from(&a, &mods, &info).unwrap();
+        assert_eq!(r.off_for, None, "{r:?}");
+        assert!(mods.join("Speed/exefs/speed.dll").is_file());
+        // Same page, same family (a newer upload): a second copy, off.
+        let b = root.join("b");
+        write(&b.join("TC/exefs/turn_control_v2.dll"));
+        let info = Info { title: "Turn Control".into(), gamebanana_id: Some(7), file_name: "turncontrol-v110_6e177.zip".into(), ..Info::default() };
+        let r = install_from(&b, &mods, &info).unwrap();
+        assert_eq!(r.off_for.as_deref(), Some("Turn Control"), "{r:?}");
+        assert!(mods.join("_Turn Control (2)/exefs/turn_control_v2.dll").is_file());
+        // Same page, another family, but the same DLL: still a copy, off.
+        let c = root.join("c");
+        write(&c.join("Fork/exefs/Turn_Control.dll"));
+        let info = Info { title: "Fork".into(), gamebanana_id: Some(7), file_name: "tcfork-v1.zip".into(), ..Info::default() };
+        let r = install_from(&c, &mods, &info).unwrap();
+        assert_eq!(r.off_for.as_deref(), Some("Turn Control"), "{r:?}");
+        assert!(mods.join("_Fork/exefs/Turn_Control.dll").is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1313,6 +1584,44 @@ mod tests {
         write(&root.join("game").join("Graphics").join("a.bin"));
         link(&bare.join("only"), &root.join("game"));
         assert!(analyse(&bare).is_err(), "{:?}", analyse(&bare));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Old stages and `.partial-…` folders go, unless the launcher that made them still runs.
+    #[test]
+    fn cleaning_leaves_a_running_launchers_folders() {
+        let root = temp("clean");
+        for d in ["mods-incoming/100-4242-0", "mods-incoming/100-777-1", "mods/.partial-100-4242-0", "mods/.partial-100-777-0", "mods/Keep"] {
+            write(&root.join(d).join("x"));
+        }
+        assert_eq!(stage_pid("100-4242-3"), Some(4242));
+        assert_eq!(stage_pid(".partial-100-4242-3"), Some(4242));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 24 * 3600);
+        clean_in(&root, later, Some(&[4242, 1]), 1);
+        assert!(root.join("mods-incoming/100-4242-0").is_dir(), "a live launcher's waiting download stays");
+        assert!(root.join("mods/.partial-100-4242-0").is_dir());
+        assert!(!root.join("mods-incoming/100-777-1").exists(), "a closed launcher's old download goes");
+        assert!(!root.join("mods/.partial-100-777-0").exists());
+        assert!(root.join("mods/Keep").is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Without a process list every other launcher's folder is kept; unnamed ones and this launcher's still age out.
+    #[test]
+    fn cleaning_keeps_other_launchers_folders_when_the_process_list_is_unknown() {
+        let root = temp("clean-unknown");
+        for d in ["mods-incoming/100-4242-0", "mods-incoming/100-1-0", "mods-incoming/old-download", "mods/.partial-100-4242-0", "mods/.partial-100-1-0", "mods/.partial-x", "mods/Keep"] {
+            write(&root.join(d).join("x"));
+        }
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 24 * 3600);
+        clean_in(&root, later, None, 1);
+        assert!(root.join("mods-incoming/100-4242-0").is_dir(), "another launcher's download may still be wanted");
+        assert!(root.join("mods/.partial-100-4242-0").is_dir());
+        assert!(!root.join("mods-incoming/100-1-0").exists(), "this launcher's own old folder follows the age rule");
+        assert!(!root.join("mods/.partial-100-1-0").exists());
+        assert!(!root.join("mods-incoming/old-download").exists(), "a name without an id follows the age rule");
+        assert!(!root.join("mods/.partial-x").exists());
+        assert!(root.join("mods/Keep").is_dir());
         let _ = std::fs::remove_dir_all(root);
     }
 
