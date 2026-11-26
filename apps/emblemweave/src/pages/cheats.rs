@@ -704,6 +704,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                             completed_pieces: 0,
                             units_found: 0,
                             elapsed_secs: 0.0,
+                            remaining_secs: 0.0,
                             cancelled: false,
                             timed_out: false,
                         }));
