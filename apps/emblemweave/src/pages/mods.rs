@@ -105,6 +105,15 @@ pub struct Ui {
     /// the page.
     scan: Option<Scan>,
     deep: Option<Deep>,
+    /// The periodic rescan running off the UI thread, with the generation it
+    /// was started in: an action on the page bumps `scan_gen`, so a rescan
+    /// that began before it is thrown away rather than shown. `Err` is a
+    /// rescan that panicked.
+    rescan: Option<(u64, Slot<(Scan, Deep)>)>,
+    scan_gen: u64,
+    /// A periodic rescan panicked: no more until the next synchronous scan,
+    /// so a scan that always panics does not write a crash report every second.
+    rescan_failed: bool,
 }
 
 /// A pending Install again: which mod, and how much background work had
@@ -209,67 +218,122 @@ impl Ui {
         self.removing.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(&m.name))
     }
 
-    fn refresh_scan(&mut self, dir: &std::path::Path) {
-        if self
-            .scan
-            .as_ref()
-            .is_some_and(|scan| scan.at.elapsed() < SCAN_TTL)
-        {
-            return;
+    /// Keep the scan fresh. The first scan, the one after an action on the
+    /// page (`invalidate_scan`) and the one on coming back to the page run
+    /// here, so the page never draws an empty or out-of-date list; the
+    /// periodic rescan every `SCAN_TTL` runs on a thread, because walking
+    /// every mod on the UI thread showed as a hitch once a second while
+    /// scrolling. `pass` is the frame number, as in `forget_again`.
+    fn refresh_scan(&mut self, dir: &std::path::Path, ctx: &egui::Context, pass: u64) {
+        // Back from another page: a build, the game starting or a folder
+        // changed in Explorer may have changed what the scan says.
+        if pass > self.drawn + 1 && self.scan.is_some() {
+            self.invalidate_scan();
         }
-        let installed = mods::list(dir);
-        let conflicts = mods::conflicts(&installed);
-        let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-        let mut key: Vec<_> = installed.iter().map(|m| (m.path.clone(), modified(&m.path), modified(&m.path.join("exefs")))).collect();
-        key.sort();
-        if !matches!(&self.deep, Some(d) if d.key == key) {
+        if let Some((gen, slot)) = &self.rescan {
+            let done = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(r) = done {
+                let current = *gen == self.scan_gen;
+                self.rescan = None;
+                match r {
+                    // Started before an action on the page: out of date.
+                    _ if !current => {}
+                    Ok((scan, deep)) => {
+                        self.scan = Some(scan);
+                        self.deep = Some(deep);
+                    }
+                    // Panicked (the crash hook saved a report): keep showing the
+                    // last scan, and rescan only after the next action on the
+                    // page or the next visit to it.
+                    Err(_) => self.rescan_failed = true,
+                }
+            }
+        }
+        match &self.scan {
+            None => {
+                let (scan, deep) = compute_scan(dir, self.deep.take());
+                self.scan = Some(scan);
+                self.deep = Some(deep);
+                self.rescan_failed = false;
+            }
+            Some(s) if s.at.elapsed() >= SCAN_TTL && self.rescan.is_none() && !self.rescan_failed => {
+                // Not `spawn`: that counts as work started (`STARTED`), which
+                // would drop a pending Install again every second.
+                let slot: Slot<(Scan, Deep)> = Arc::new(Mutex::new(None));
+                let out = slot.clone();
+                let (dir, deep, ctx) = (dir.to_path_buf(), self.deep.take(), ctx.clone());
+                std::thread::spawn(move || {
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute_scan(&dir, deep))).map_err(|_| "the scan panicked".to_string());
+                    *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    ctx.request_repaint();
+                });
+                self.rescan = Some((self.scan_gen, slot));
+            }
+            _ => {}
+        }
+    }
+
+    fn invalidate_scan(&mut self) {
+        self.scan = None;
+        self.deep = None;
+        self.scan_gen += 1;
+    }
+}
+
+/// One scan of the mods folder: the installed list, its conflicts, the code
+/// mods' hook-site state and each mod's settings files. `deep` is the last
+/// scan's per-folder part, reused while the mod folders are unchanged.
+fn compute_scan(dir: &std::path::Path, deep: Option<Deep>) -> (Scan, Deep) {
+    let installed = mods::list(dir);
+    let conflicts = mods::conflicts(&installed);
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut key: Vec<_> = installed.iter().map(|m| (m.path.clone(), modified(&m.path), modified(&m.path.join("exefs")))).collect();
+    key.sort();
+    let deep = match deep {
+        Some(d) if d.key == key => d,
+        _ => {
             let code_clashes = mods::code_clashes(&installed);
             let settings = installed
                 .iter()
                 .map(|m| (m.path.clone(), mods::settings_of(&m.path)))
                 .filter(|(_, files)| !files.is_empty())
                 .collect();
-            self.deep = Some(Deep { key, code_clashes, settings });
+            Deep { key, code_clashes, settings }
         }
-        let deep = self.deep.as_ref().expect("filled just above");
-        let (code_clashes, settings) = (deep.code_clashes.clone(), deep.settings.clone());
-        let engine = crate::engine::root();
-        let code = installed.iter().any(|m| m.has_code);
-        let site_problem = code
-            .then(|| engine.as_deref().and_then(|root| crate::sites::problem_for(root, &installed)))
-            .flatten();
-        let site_stale = code
-            && engine
+    };
+    let (code_clashes, settings) = (deep.code_clashes.clone(), deep.settings.clone());
+    let engine = crate::engine::root();
+    let code = installed.iter().any(|m| m.has_code);
+    let site_problem = code
+        .then(|| engine.as_deref().and_then(|root| crate::sites::problem_for(root, &installed)))
+        .flatten();
+    let site_stale = code
+        && engine
+            .as_deref()
+            .and_then(|root| crate::sites::stale_for(root, &installed))
+            == Some(true);
+    let missing_code = installed
+        .iter()
+        .filter(|m| m.has_code)
+        .filter(|m| {
+            engine
                 .as_deref()
-                .and_then(|root| crate::sites::stale_for(root, &installed))
-                == Some(true);
-        let missing_code = installed
-            .iter()
-            .filter(|m| m.has_code)
-            .filter(|m| {
-                engine
-                    .as_deref()
-                    .is_some_and(|root| crate::sites::mod_missing(root, &m.path))
-            })
-            .map(|m| m.name.clone())
-            .collect();
-        self.scan = Some(Scan {
-            at: std::time::Instant::now(),
-            installed,
-            conflicts,
-            code_clashes,
-            site_problem,
-            site_stale,
-            missing_code,
-            settings,
-            running: crate::platform::game_running(),
-        });
-    }
-
-    fn invalidate_scan(&mut self) {
-        self.scan = None;
-        self.deep = None;
-    }
+                .is_some_and(|root| crate::sites::mod_missing(root, &m.path))
+        })
+        .map(|m| m.name.clone())
+        .collect();
+    let scan = Scan {
+        at: std::time::Instant::now(),
+        installed,
+        conflicts,
+        code_clashes,
+        site_problem,
+        site_stale,
+        missing_code,
+        settings,
+        running: crate::platform::game_running(),
+    };
+    (scan, deep)
 }
 
 fn spawn<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Slot<T> {
@@ -967,7 +1031,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     widgets::page_header(ui, &p, "Mods", "RomFS and code mods for the game, from an archive, a folder or GameBanana, kept up to date from GameBanana.");
     let Some(dir) = mods::dir() else { return };
     let mut messages: Vec<(String, Tone)> = Vec::new();
-    app.mods_ui.refresh_scan(&dir);
+    app.mods_ui.refresh_scan(&dir, ui.ctx(), ui.ctx().cumulative_pass_nr());
     let installed = app
         .mods_ui
         .scan
