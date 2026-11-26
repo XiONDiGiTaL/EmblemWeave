@@ -116,6 +116,49 @@ if(NXRT_LTO)
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-flto=thin>)
 endif()
 message(STATUS "nxrt: ThinLTO ${NXRT_LTO} (linker ${CMAKE_LINKER})")
+# Profile-guided builds of the runtime (docs/PGO.md). Release builds with clang 23 or newer use the committed profile,
+# pgo/fefw_rt.profdata; a function whose source changed since it was recorded is built without it. NXRT_PGO_PROFILE names
+# another profile, or "off" none. NXRT_PGO_GENERATE builds the instrumented runtime that records a new one (a scripted test run
+# writes the counters when it ends: games/fefw/fefw_play.cpp).
+option(NXRT_PGO_GENERATE "Instrumented runtime that records an LLVM profile (never for a release)" OFF)
+set(NXRT_PGO_PROFILE "auto" CACHE STRING "LLVM profile of the runtime: auto (pgo/fefw_rt.profdata), off, or a .profdata file")
+set(NXRT_PGO_RUNTIME_DIR "" CACHE PATH "Folder of clang_rt.profile.lib for NXRT_PGO_GENERATE, where the linker does not find it itself")
+set(_nxrt_pgo "${NXRT_PGO_PROFILE}")
+if(_nxrt_pgo STREQUAL "auto")
+    set(_nxrt_pgo "")
+    if(NOT NXRT_PGO_GENERATE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+       AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 23 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pgo/fefw_rt.profdata")
+        set(_nxrt_pgo "${CMAKE_CURRENT_SOURCE_DIR}/pgo/fefw_rt.profdata")
+    endif()
+elseif(_nxrt_pgo STREQUAL "off")
+    set(_nxrt_pgo "")
+endif()
+if((NXRT_PGO_GENERATE OR _nxrt_pgo) AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "NXRT_PGO_GENERATE and NXRT_PGO_PROFILE need clang-cl")
+endif()
+if(NXRT_PGO_GENERATE AND _nxrt_pgo)
+    message(FATAL_ERROR "NXRT_PGO_GENERATE records a profile and NXRT_PGO_PROFILE uses one: set only one of them")
+endif()
+if(NXRT_PGO_GENERATE)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>)
+    message(WARNING "nxrt: instrumented runtime (NXRT_PGO_GENERATE): for recording a profile only, not for a release")
+elseif(_nxrt_pgo)
+    if(NOT EXISTS "${_nxrt_pgo}")
+        message(FATAL_ERROR "NXRT_PGO_PROFILE: no such file: ${_nxrt_pgo}")
+    endif()
+    # the file's hash in the command line: a new profile under the same name recompiles everything (stale objects would not link
+    # together under ThinLTO), and a change of the file configures again
+    file(MD5 "${_nxrt_pgo}" _nxrt_pgo_id)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_nxrt_pgo}")
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-use=${_nxrt_pgo}>"
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-profile-instr-out-of-date>
+                        $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-profile-instr-unprofiled>)
+    add_compile_definitions($<$<COMPILE_LANGUAGE:C,CXX>:NXRT_PGO_PROFILE_ID_${_nxrt_pgo_id}>)
+    message(STATUS "nxrt: profile ${_nxrt_pgo} (id ${_nxrt_pgo_id})")
+else()
+    message(STATUS "nxrt: no profile")
+endif()
+add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
 
 # Build performance options
 option(NXRT_UNITY_BUILD "Enable unity (jumbo) builds for faster compilation" OFF)

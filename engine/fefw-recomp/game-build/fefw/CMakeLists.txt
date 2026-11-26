@@ -91,6 +91,9 @@ if(FEFW_RT_DLL)
     # Low host allocations as for fefw.exe (the guest ranges at 0x71_0000_0000 stay free).
     target_link_options(fefw_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG /PDBALTPATH:fefw_rt.pdb /OPT:REF /OPT:ICF /INCREMENTAL:NO /Brepro)
     target_compile_options(fefw_rt PRIVATE "-clang:-ffile-prefix-map=${FEFW_ROOT}=.")
+    if(NXRT_PGO_GENERATE AND NXRT_PGO_RUNTIME_DIR)      # set by runtime/CMakeLists.txt, added above
+        target_link_directories(fefw_rt PRIVATE "${NXRT_PGO_RUNTIME_DIR}")
+    endif()
     add_custom_command(TARGET fefw_rt POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${FEFW_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:fefw_rt>/fonts/DejaVuSans.ttf"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
