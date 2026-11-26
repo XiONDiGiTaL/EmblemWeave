@@ -20,6 +20,7 @@ mod gpu;
 #[cfg(windows)]
 mod exe_icon;
 mod gamedata;
+mod headless;
 mod i18n;
 mod ingame;
 mod jobs;
@@ -1882,12 +1883,18 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
+    // The launcher's jobs without the window (src/headless.rs): status, check-update, update, rebuild, play. A front end
+    // such as a Steam Deck plugin drives these; they run after the portable-data adoption below, so they read the same settings.
+    let headless = headless::command(&args);
     // Before anything reads the settings: a fresh copy keeps its data beside the program, so the first run writes its config there.
     platform::adopt_portable_on_first_run();
     // Prime the tool_path cache with the correct PATH (including portable tools) before any
     // background thread or CLI command calls it. This ensures --check-toolchain and --build-engine
     // see the same CMake discovery as the build (issue #35).
     let _ = crate::toolchain::tool_path();
+    if let Some(cmd) = headless {
+        std::process::exit(headless::run(&cmd, args.iter().any(|a| a == "--json")));
+    }
     // A copy without `tools\bin` carries the missing toolchain pieces into it on first run, in the background; the
     // Requirements page reports them as Carried once they land. Pieces the PC already has are not downloaded. `--fetch-tools`
     // forces all four in the foreground, so do not start the background fetch as well: both would download the same archives.

@@ -611,7 +611,28 @@ pub fn install(
         keep_previous,
         release_tag,
     )?;
-    swap_script(&staged, &target, &update_log(), failure_marker().as_deref())
+    swap_script(&staged, &target, &update_log(), failure_marker().as_deref(), true)
+}
+
+/// [`install`] for `--headless update`: the same staging and swap, but the new launcher is not opened afterwards; whoever
+/// ran the command (a Decky plugin, a script) decides what runs next.
+pub fn install_without_restart(
+    new_exe: &Path,
+    engine_root: Option<&Path>,
+    keep_previous: bool,
+    release_tag: &str,
+) -> Result<(), String> {
+    let target = current_exe().ok_or("the launcher's own path is unknown")?;
+    let staged = install_into(
+        new_exe,
+        &target,
+        &old_versions_dir(&target),
+        crate::engine::run_dir().as_deref(),
+        engine_root,
+        keep_previous,
+        release_tag,
+    )?;
+    swap_script(&staged, &target, &update_log(), failure_marker().as_deref(), false)
 }
 
 /// The part of [`install`] that runs before the restart, with the running launcher's paths passed in so a test can drive
@@ -701,7 +722,7 @@ pub fn restore_previous() -> Result<(), String> {
     let target = current_exe().ok_or("the launcher's own path is unknown")?;
     let tmp = std::env::temp_dir().join(format!("emblemweave-rollback-{}.exe", std::process::id()));
     std::fs::copy(backup, &tmp).map_err(|e| format!("reading the previous version: {e}"))?;
-    swap_script(&tmp, &target, &update_log(), failure_marker().as_deref())
+    swap_script(&tmp, &target, &update_log(), failure_marker().as_deref(), true)
 }
 
 /// The release's files that are not generated on this PC. The build folder, the engine's work folder, the Python
@@ -820,6 +841,7 @@ fn swap_script(
     target: &Path,
     log: &Path,
     failed: Option<&Path>,
+    restart: bool,
 ) -> Result<(), String> {
     let script =
         std::env::temp_dir().join(format!("emblemweave-update-{}.cmd", std::process::id()));
@@ -842,16 +864,17 @@ fn swap_script(
          goto again\r\n\
          :installed\r\n\
          if not \"%FAIL%\"==\"\" if exist \"%FAIL%\" del \"%FAIL%\" >nul 2>&1\r\n\
-         start \"\" \"%TARGET%\"\r\n\
+         {start}\
          goto done\r\n\
          :failed\r\n\
          if not \"%FAIL%\"==\"\" echo The update could not replace EmblemWeave.exe. The previous launcher was started. See \"%LOG%\". > \"%FAIL%\"\r\n\
-         start \"\" \"%TARGET%\"\r\n\
+         {start}\
          :done\r\n\
          del \"%~f0\"\r\n",
         new = new_exe.display(),
         target = target.display(),
         log = log.display(),
+        start = if restart { "start \"\" \"%TARGET%\"\r\n" } else { "" },
     );
     std::fs::write(&script, text).map_err(|e| format!("writing the update script: {e}"))?;
     hidden(Command::new("cmd").arg("/c").arg(&script))
