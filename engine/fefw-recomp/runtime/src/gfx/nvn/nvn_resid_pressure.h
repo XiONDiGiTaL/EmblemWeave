@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// [gfx] residency: when memory use calls for demoting idle textures. Pure, so the tests can call it.
+// [gfx] residency: what memory use means for demoting idle textures and for restoring them. Pure, so the tests can call it.
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 
 namespace nxrt::nvn {
 
@@ -28,6 +29,37 @@ inline ResidPressure resid_pressure(int live_pct, int os_pct, int sysram_pct, in
     if (os || sysram) p.pct = std::max(p.pct, os_pct);
     if (sysram) p.pct = std::max(p.pct, sysram_pct);
     return p;
+}
+
+struct ResidRestore {
+    bool hold = false;      // none this present: try again later
+    bool catchup = false;   // four times the usual budget
+    int max_n = 0;          // textures this present at most
+    uint64_t max_bytes = 0; // bytes of whole images this present at most
+};
+
+// How much a present may restore. video_pct: the OS's figure for video memory (-1: not known). Host RAM is no input: a draw wants these
+// textures, and on a handheld host RAM stays high for reasons a held restore does not change (#114). restore_max, restore_mb: the ini
+// keys; backlog: a texture has waited residency_restore_catchup_ms.
+inline ResidRestore resid_restore(int video_pct, int residency_percent, int restore_max, int restore_mb, bool backlog) {
+    ResidRestore r;
+    if (video_pct >= 96) {   // near out of memory
+        r.hold = true;
+        return r;
+    }
+    const int warn = std::min(100, std::max(residency_percent + 5, 85));
+    // no catch-up burst under pressure: bursts at 92%+ made a demote -> restore -> GPU ASTC transcode loop and WDDM paging spikes
+    r.catchup = backlog && video_pct < warn;
+    r.max_n = restore_max * (r.catchup ? 4 : 1);
+    r.max_bytes = (static_cast<uint64_t>(restore_mb) << 20) * (r.catchup ? 4 : 1);
+    if (video_pct >= std::max(residency_percent, 92)) {
+        r.max_n = std::min(r.max_n, 1);
+        r.max_bytes = std::min<uint64_t>(r.max_bytes, 2ull << 20);
+    } else if (video_pct >= warn) {
+        r.max_n = std::min(r.max_n, 2);
+        r.max_bytes = std::min<uint64_t>(r.max_bytes, 4ull << 20);
+    }
+    return r;
 }
 
 }  // namespace nxrt::nvn

@@ -2343,31 +2343,18 @@ void tex_residency_restore(Frame& f) {
                 os_pct = static_cast<int>(real_budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
             }
         }
-        // video memory only: a draw wants these textures, and on a handheld host RAM stays high for reasons a held restore does not change
-        const int os_warn = std::min(100, std::max(cfg.percent + 5, 85));
-        if (os_pct >= 96) {
-            // Near-OOM territory: hold off promoting demoted textures until VRAM drops below 96%.
+        const ResidRestore budget = resid_restore(os_pct, cfg.percent, cfg.restore_max, cfg.restore_mb,
+                                                  longest >= static_cast<uint32_t>(cfg.catchup_ms));
+        if (budget.hold) {
             hold_until = now + 1000;
         } else {
             std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return static_cast<int32_t>(a.first - b.first) > 0; });
-            // Disable 4x catch-up burst under VRAM pressure: bursting restores at 92%+ VRAM triggers a
-            // demote -> restore -> GPU ASTC transcode thrash loop and WDDM paging spikes.
-            const bool catchup = (os_pct < os_warn) && (longest >= static_cast<uint32_t>(cfg.catchup_ms));
-            int max_n = cfg.restore_max * (catchup ? 4 : 1);
-            uint64_t max_bytes = (static_cast<uint64_t>(cfg.restore_mb) << 20) * (catchup ? 4 : 1);
-            if (os_pct >= cfg.urgent_percent) {
-                max_n = std::min(max_n, 1);
-                max_bytes = std::min<uint64_t>(max_bytes, 2ull << 20);
-            } else if (os_pct >= os_warn) {
-                max_n = std::min(max_n, 2);
-                max_bytes = std::min<uint64_t>(max_bytes, 4ull << 20);
-            }
             const auto t0 = std::chrono::steady_clock::now();
             std::vector<size_t> done;
             uint64_t bytes = 0;
             for (const auto& [seen, i] : want) {
                 Demoted& d = g_demoted[i];
-                if (static_cast<int>(done.size()) >= max_n || (!done.empty() && bytes + d.full > max_bytes)) break;
+                if (static_cast<int>(done.size()) >= budget.max_n || (!done.empty() && bytes + d.full > budget.max_bytes)) break;
                 if (!tex_promote(d.t.get(), f)) {
                     hold_until = now + 1000;
                     break;
@@ -2386,7 +2373,7 @@ void tex_residency_restore(Frame& f) {
                 st_us += us;
                 st_worst_us = std::max(st_worst_us, us);
                 ++st_frames;
-                st_catchup += catchup ? 1 : 0;
+                st_catchup += budget.catchup ? 1 : 0;
             }
             waiting -= done.size();
             std::sort(done.begin(), done.end(), std::greater<size_t>());   // swap-remove from the back first: the indexes stay valid
