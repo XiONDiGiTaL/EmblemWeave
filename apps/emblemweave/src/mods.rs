@@ -29,17 +29,69 @@ pub struct Info {
     pub version: String,
     #[serde(default)]
     pub gamebanana_id: Option<u64>,
-    /// The GameBanana file this copy came from, as uploaded. A page can hold
-    /// two mods; their files' names keep them apart (`family`).
+    /// The GameBanana file this copy came from, so an update check can tell
+    /// a newer upload from the one installed (authors often re-upload under
+    /// the same version number).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<u64>,
+    /// That file's name as uploaded. A page can hold two mods; their files'
+    /// names keep them apart (`family`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file_name: String,
+    /// When GameBanana received that file (Unix seconds).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub file_date: u64,
+    /// When the launcher installed this copy (Unix seconds).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub installed: u64,
     /// The variant picked when the download offered several (one per platform, say).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub variant: String,
+    /// The newest upload the user chose to skip (its GameBanana date): no
+    /// update is offered until a newer one appears.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skip_update: u64,
+    /// Never offer updates for this copy: a personal port or a mod edited
+    /// by hand that shares a GameBanana page with the original.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_updates: bool,
+    /// The settings-looking files the download shipped (path in lower case →
+    /// SHA-256), so an update can tell a default the user never touched from
+    /// one they changed. `None` for a copy installed before this was
+    /// recorded; an empty map for a download that shipped no settings files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipped: Option<std::collections::BTreeMap<String, String>>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Write `info` into a mod's `emblemweave.json`, keeping any keys an author
+/// or another tool put there that this launcher does not know.
+pub fn write_info(folder: &Path, info: &Info) -> Result<(), String> {
+    let file = folder.join("emblemweave.json");
+    let mut v: serde_json::Value = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let ours = serde_json::to_value(info).map_err(|e| e.to_string())?;
+    let obj = v.as_object_mut().expect("an object");
+    // Fields that are now empty are dropped, so a cleared skip really clears.
+    for k in ["file_id", "file_name", "file_date", "installed", "variant", "skip_update", "no_updates", "shipped"] {
+        obj.remove(k);
+    }
+    if let Some(o) = ours.as_object() {
+        for (k, x) in o {
+            obj.insert(k.clone(), x.clone());
+        }
+    }
+    std::fs::write(&file, serde_json::to_string_pretty(&v).unwrap_or_default()).map_err(|e| format!("writing {}: {e}", file.display()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +107,9 @@ pub struct Mod {
     pub has_code: bool,
     /// `exefs/` holds `.ips` / `.ips32` / `.pchtxt` patches.
     pub has_patches: bool,
+    /// When this copy was installed: the recorded time, else the time its
+    /// `emblemweave.json` was written (mods installed before it was recorded).
+    pub installed_at: u64,
 }
 
 /// The `exefs` folders of a mod (up to three folders deep).
@@ -143,6 +198,13 @@ pub fn list(mods: &Path) -> Vec<Mod> {
         find_named(&path, "exefs", 3, &mut x);
         let has_code = x.iter().any(|d| is_code_exefs(d));
         let has_patches = x.iter().any(|d| exefs_has_patches(d));
+        let written = std::fs::metadata(path.join("emblemweave.json"))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let installed_at = if info.installed > 0 { info.installed } else { written };
         out.push(Mod {
             files: crate::saves::summary(&path).0,
             path,
@@ -153,6 +215,7 @@ pub fn list(mods: &Path) -> Vec<Mod> {
             has_exefs: !x.is_empty(),
             has_code,
             has_patches,
+            installed_at,
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -172,15 +235,31 @@ pub fn set_enabled(m: &Mod, on: bool) -> Result<PathBuf, String> {
 /// Move a mod out of the mods folder into `mods-removed`.
 pub fn remove(m: &Mod) -> Result<PathBuf, String> {
     let bin = removed_dir().ok_or(crate::platform::NO_DATA_DIR)?;
-    std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
-    let mut to = bin.join(&m.name);
+    move_aside(&m.path, &bin, &m.name)
+}
+
+/// Move `folder` into `bin` as `name`, or `name (2)`, `name (3)`… when taken.
+fn move_aside(folder: &Path, bin: &Path, name: &str) -> Result<PathBuf, String> {
+    move_aside_io(folder, bin, name).map_err(|e| format!("moving {}: {e}", folder.display()))
+}
+
+fn move_aside_io(folder: &Path, bin: &Path, name: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(bin)?;
+    let mut to = bin.join(name);
     let mut n = 1;
     while to.exists() {
         n += 1;
-        to = bin.join(format!("{} ({n})", m.name));
+        to = bin.join(format!("{name} ({n})"));
     }
-    std::fs::rename(&m.path, &to).map_err(|e| format!("moving {}: {e}", m.path.display()))?;
+    rename_retry(folder, &to)?;
     Ok(to)
+}
+
+/// Another process may have a file in the folder open: Windows' sharing
+/// violation (32), or access denied (5), which a rename of a folder whose
+/// files are open also gives.
+fn in_use(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(32) | Some(5))
 }
 
 /// A file that two or more switched-on mods each replace.
@@ -234,17 +313,21 @@ pub fn conflicts(list: &[Mod]) -> Vec<Conflict> {
 }
 
 /// Switch mods on or off so the set that is on matches `want` (mod names
-/// without the `_` a switched-off one carries). Returns how many changed.
-pub fn apply_profile(list: &[Mod], want: &[String]) -> Result<usize, String> {
+/// without the `_` a switched-off one carries). One that cannot be renamed
+/// does not stop the rest. Returns how many changed and what failed.
+pub fn apply_profile(list: &[Mod], want: &[String]) -> (usize, Vec<String>) {
     let mut changed = 0;
+    let mut failed = Vec::new();
     for m in list {
         let on = want.iter().any(|w| w.eq_ignore_ascii_case(&m.name));
         if on != m.enabled {
-            set_enabled(m, on)?;
-            changed += 1;
+            match set_enabled(m, on) {
+                Ok(_) => changed += 1,
+                Err(e) => failed.push(e),
+            }
         }
     }
-    Ok(changed)
+    (changed, failed)
 }
 
 /// A folder name safe on Windows.
@@ -322,6 +405,20 @@ pub struct Installed {
     /// that exclude each other (`Prepared::exclusive`): every one is
     /// switched on.
     pub parts: bool,
+    /// An update: where the copy it replaced was moved, and how many of
+    /// that copy's settings files were carried over.
+    pub replaced: Option<(PathBuf, usize)>,
+    /// `.ini` settings files kept as the user had them, with the sections
+    /// and keys the new version added merged in with their defaults: the
+    /// file (path inside the mod) and what was added (`Section/key`).
+    pub merged: Vec<(String, Vec<String>)>,
+    /// Other settings files kept as the user had them where the new version
+    /// ships its own: its default is beside the user's as `<name>.new`.
+    pub new_beside: Vec<String>,
+    /// Settings files the old download shipped and the user changed that
+    /// the new version no longer ships (renamed or dropped): the user's
+    /// copy was kept in the mod folder, where the mod may not read it.
+    pub dropped: Vec<String>,
     /// The new copy was installed switched off because this mod, already on,
     /// is the same one (the same GameBanana mod, or a code mod with a DLL of
     /// the same name): two copies switched on would both load.
@@ -378,6 +475,27 @@ impl Prepared {
             }
         }
         best
+    }
+
+    /// The choice an update should take: the variant installed before, or
+    /// the only one. A copy installed before variants were recorded is
+    /// matched by its name, which carried the variant's folder. `None` means
+    /// the user has to choose.
+    pub fn same_variant(&self, info: &Info) -> Option<usize> {
+        if self.choices.len() == 1 {
+            return Some(0);
+        }
+        if !info.variant.is_empty() {
+            return self.choices.iter().position(|c| c.label.eq_ignore_ascii_case(&info.variant));
+        }
+        // Installed by this launcher with no variant: the download had one, now several. An
+        // install time alone does not say so: Skip records one on a copy from an older launcher.
+        if info.installed > 0 && (info.file_id.is_some() || info.shipped.is_some()) {
+            return None;
+        }
+        let t = info.title.to_lowercase();
+        let hits: Vec<usize> = (0..self.choices.len()).filter(|&i| !self.choices[i].label.is_empty() && t.contains(&self.choices[i].label.to_lowercase())).collect();
+        if hits.len() == 1 { Some(hits[0]) } else { None }
     }
 
     /// The download's variants are builds of one mod for different platforms
@@ -607,7 +725,7 @@ fn labels(parts: &[Vec<String>]) -> Vec<String> {
     out
 }
 
-/// Installs run on worker threads; this keeps two of them from
+/// Installs and updates run on worker threads; this keeps two of them from
 /// picking the same folder name at once.
 static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -715,7 +833,7 @@ fn build_folder(c: &Choice, folder: &Path) -> Result<bool, String> {
 /// made is removed again.
 pub fn finish(p: &Prepared, picks: &[usize], mods: &Path) -> Result<Installed, String> {
     if p.unusable_exefs {
-        return Ok(Installed { mods: Vec::new(), exefs_only: true, patch_only: false, needs_build: false, parts: false, off_for: None });
+        return Ok(Installed { mods: Vec::new(), exefs_only: true, patch_only: false, needs_build: false, parts: false, replaced: None, merged: Vec::new(), new_beside: Vec::new(), dropped: Vec::new(), off_for: None });
     }
     std::fs::create_dir_all(mods).map_err(|e| e.to_string())?;
     let mut partials: Vec<PathBuf> = Vec::new();
@@ -769,6 +887,8 @@ fn finish_into(p: &Prepared, picks: &[usize], mods: &Path, partials: &mut Vec<Pa
         let mut info = p.info.clone();
         info.title = name.clone();
         info.variant = c.label.clone();
+        info.installed = now();
+        info.shipped = Some(shipped_settings(&partial));
         let json = partial.join("emblemweave.json");
         std::fs::write(&json, serde_json::to_string_pretty(&info).map_err(|e| e.to_string())?).map_err(|e| format!("writing {}: {e}", json.display()))?;
         rename_retry(&partial, &folder).map_err(|e| format!("moving {} into place: {e}", folder.display()))?;
@@ -776,7 +896,356 @@ fn finish_into(p: &Prepared, picks: &[usize], mods: &Path, partials: &mut Vec<Pa
         placed.push(folder);
         names.push(name);
     }
-    Ok(Installed { mods: names, exefs_only: p.exefs_only, patch_only: p.patch_only, needs_build, parts, off_for })
+    Ok(Installed { mods: names, exefs_only: p.exefs_only, patch_only: p.patch_only, needs_build, parts, replaced: None, merged: Vec::new(), new_beside: Vec::new(), dropped: Vec::new(), off_for })
+}
+
+/// Files a mod keeps its settings in. An update carries them over from the
+/// copy it replaces, so the user's choices survive. Code, game data and
+/// manifests never count, whatever they are called.
+fn is_settings(rel: &str) -> bool {
+    let l = rel.to_lowercase();
+    let name = l.rsplit('/').next().unwrap_or(&l);
+    // A mod's description of itself, in whatever format: the new version's is the right one. A
+    // `.new` / `.old` copy beside a settings file is not the one the mod reads.
+    if name.ends_with(".new") || name.ends_with(".old") {
+        return false;
+    }
+    if matches!(name, "emblemweave.json" | "mod.toml") || name.starts_with("plugin.") || name.starts_with("manifest.") {
+        return false;
+    }
+    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    if matches!(ext, "dll" | "sites" | "ips" | "ips32" | "pchtxt" | "nro" | "nso" | "exe" | "pdb" | "bin" | "zst" | "msbt" | "bfres" | "zip" | "md" | "lua" | "py" | "js" | "dat" | "pak" | "so" | "wasm" | "cpp" | "h") {
+        return false;
+    }
+    let named = name.contains("settings") || name.contains("config") || name.contains("favorite");
+    match ext {
+        "ini" | "cfg" | "toml" | "conf" | "settings" => true,
+        "json" | "txt" | "yaml" | "yml" | "tsv" | "csv" => named,
+        // `native_appearance.settings.favorite-characters` and the like.
+        _ => named && (ext.contains('-') || ext.len() > 5),
+    }
+}
+
+/// The settings files a mod folder could carry over: settings-looking, and
+/// not game data (`romfs/`) or source code (`src/`). Paths as written.
+fn settings_files(folder: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    walk_rel_cased(folder, folder, &mut files);
+    files
+        .into_iter()
+        .filter(|rel| {
+            let lower = rel.to_lowercase();
+            !lower.starts_with("romfs/") && !lower.starts_with("src/") && is_settings(rel)
+        })
+        .collect()
+}
+
+fn sha256_file(path: &Path) -> Option<String> {
+    std::fs::read(path).ok().map(|b| sha256_bytes(&b))
+}
+
+fn sha256_bytes(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(b))
+}
+
+/// What a freshly built copy shipped of its settings files, for `Info::shipped`.
+fn shipped_settings(folder: &Path) -> std::collections::BTreeMap<String, String> {
+    settings_files(folder).into_iter().filter_map(|rel| Some((rel.to_lowercase(), sha256_file(&folder.join(&rel))?))).collect()
+}
+
+/// Carry the old copy's settings into the new one. `shipped` is what the
+/// old copy's download shipped (`Info::shipped`): a file is carried when the
+/// download did not ship it (the mod wrote it at run time) or the user
+/// changed it; an untouched default gives way to the new version's. With no
+/// record (a copy installed before they were kept) every settings file is
+/// carried. A carried file the new version ships with other contents is
+/// never just copied over it, or its new options would be lost: an `.ini` is
+/// merged (`merge_ini`), any other file stays the user's with the new
+/// default beside it as `<name>.new`. A file the old download shipped, the
+/// user changed and the new one no longer ships (renamed or dropped) is
+/// carried too, but listed apart: the new version may not read it.
+fn carry_settings(old: &Path, new: &Path, shipped: Option<&std::collections::BTreeMap<String, String>>) -> Result<Carried, String> {
+    let mut c = Carried::default();
+    for rel in settings_files(old) {
+        let mine = std::fs::read(old.join(&rel)).map_err(|e| format!("keeping {rel}: {e}"))?;
+        let to = new.join(&rel);
+        let theirs = std::fs::read(&to).ok();
+        if theirs.as_ref() == Some(&mine) {
+            continue;
+        }
+        let was = shipped.and_then(|s| s.get(&rel.to_lowercase()));
+        if was.is_some_and(|h| sha256_bytes(&mine) == *h) {
+            continue;
+        }
+        let write = |to: &Path, bytes: &[u8]| -> Result<(), String> {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(to, bytes).map_err(|e| format!("keeping {rel}: {e}"))
+        };
+        let Some(theirs) = theirs else {
+            if was.is_some() {
+                c.dropped.push(rel.clone());
+            } else {
+                c.kept += 1;
+            }
+            write(&to, &mine)?;
+            continue;
+        };
+        c.kept += 1;
+        let ini = rel.to_lowercase().ends_with(".ini");
+        match ini.then(|| merge_ini(&mine, &theirs)).flatten() {
+            Some((text, added)) => {
+                write(&to, &text)?;
+                if !added.is_empty() {
+                    c.merged.push((rel.clone(), added));
+                }
+            }
+            None => {
+                write(&new.join(format!("{rel}.new")), &theirs)?;
+                write(&to, &mine)?;
+                c.new_beside.push(rel.clone());
+            }
+        }
+    }
+    Ok(c)
+}
+
+/// What `carry_settings` carried over.
+#[derive(Debug, Default)]
+struct Carried {
+    kept: usize,
+    merged: Vec<(String, Vec<String>)>,
+    new_beside: Vec<String>,
+    dropped: Vec<String>,
+}
+
+/// One line of an `.ini`, as `merge_ini` reads it.
+#[derive(Debug, PartialEq, Eq)]
+enum IniLine {
+    /// `[Name]`: the name as written (never empty).
+    Section(String),
+    /// `key = value`: the key as written.
+    Key(String),
+    /// `;` or `#`.
+    Comment,
+    Blank,
+    /// Anything else, kept as it is.
+    Other,
+}
+
+fn ini_line(line: &str) -> IniLine {
+    let t = line.trim_start_matches('\u{feff}').trim();
+    if t.is_empty() {
+        IniLine::Blank
+    } else if t.starts_with(';') || t.starts_with('#') {
+        IniLine::Comment
+    } else if let Some(name) = t.strip_prefix('[').and_then(|r| r.find(']').map(|i| r[..i].trim())) {
+        // `[]` names no section: a malformed line, kept as it is.
+        if name.is_empty() {
+            IniLine::Other
+        } else {
+            IniLine::Section(name.to_string())
+        }
+    } else if let Some((k, _)) = t.split_once('=').filter(|(k, _)| !k.trim().is_empty()) {
+        IniLine::Key(k.trim().to_string())
+    } else {
+        IniLine::Other
+    }
+}
+
+/// A section of the new version's `.ini`: its name as written ("" before the
+/// first header), the comment lines above its header and the header, and the
+/// lines after the header.
+struct IniSection {
+    name: String,
+    head: Vec<String>,
+    body: Vec<String>,
+}
+
+/// Merge the new version's `.ini` into the user's. The user's file stays as
+/// it is (values, comments, order, keys they added or the new version
+/// removed, each line's own line ending); every key only the new file has is
+/// added with its default at the end of its section, with the comment lines
+/// just above it in the new file, and every section only the new file has
+/// goes at the end of the file with the comment lines just above its header.
+/// Names match in any case (Unicode lower case), keys before the first
+/// header form a section of their own, and `[]` is no header. Added lines
+/// take the line ending most of the user's file uses; the user's byte order
+/// mark stays at the start, the new file's is dropped. Returns the merged
+/// file and what was added (`Section/key`, or `Section` for a section with
+/// no keys), or `None` when either file is not UTF-8 text or ends a line
+/// with a carriage return alone.
+fn merge_ini(mine: &[u8], theirs: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
+    let utf16 = |b: &[u8]| b.starts_with(&[0xff, 0xfe]) || b.starts_with(&[0xfe, 0xff]);
+    if utf16(mine) || utf16(theirs) {
+        return None;
+    }
+    let original = mine;
+    let (mine, theirs) = (std::str::from_utf8(mine).ok()?, std::str::from_utf8(theirs).ok()?);
+    let lone_cr = |t: &str| t.match_indices('\r').any(|(i, _)| !t[i + 1..].starts_with('\n'));
+    if lone_cr(mine) || lone_cr(theirs) {
+        return None;
+    }
+    let bom = mine.starts_with('\u{feff}');
+    let mine = mine.strip_prefix('\u{feff}').unwrap_or(mine);
+    let theirs = theirs.strip_prefix('\u{feff}').unwrap_or(theirs);
+    // The user's lines, each with its own line ending ("" for a last line without one).
+    let lines: Vec<(&str, &str)> = mine
+        .split_inclusive('\n')
+        .map(|l| match l.strip_suffix("\r\n") {
+            Some(t) => (t, "\r\n"),
+            None => l.strip_suffix('\n').map_or((l, ""), |t| (t, "\n")),
+        })
+        .collect();
+    let crlf = lines.iter().filter(|(_, e)| *e == "\r\n").count();
+    let eol = if crlf * 2 > lines.iter().filter(|(_, e)| !e.is_empty()).count() { "\r\n" } else { "\n" };
+
+    // The user's sections, by lower-case name: their keys, and the line new keys go after.
+    let mut keys: std::collections::HashMap<String, std::collections::HashSet<String>> = Default::default();
+    let mut after: std::collections::HashMap<String, usize> = Default::default();
+    let mut comments: std::collections::HashSet<&str> = Default::default();
+    let mut first_header = None;
+    let mut current = String::new();
+    keys.insert(String::new(), Default::default());
+    for (i, (l, _)) in lines.iter().enumerate() {
+        match ini_line(l) {
+            IniLine::Section(name) => {
+                first_header.get_or_insert(i);
+                current = name.to_lowercase();
+                keys.entry(current.clone()).or_default();
+                after.insert(current.clone(), i);
+            }
+            IniLine::Key(k) => {
+                keys.entry(current.clone()).or_default().insert(k.to_lowercase());
+                after.insert(current.clone(), i);
+            }
+            IniLine::Comment => {
+                comments.insert(l.trim());
+            }
+            _ => {}
+        }
+    }
+    // Keys before the first header with none in the user's file go above the comments over that header.
+    let top = {
+        let mut at = first_header.unwrap_or(lines.len());
+        while at > 0 && ini_line(lines[at - 1].0) == IniLine::Comment {
+            at -= 1;
+        }
+        at
+    };
+
+    // The new file, section by section; a name that comes back joins its first section.
+    let mut sections: Vec<IniSection> = vec![IniSection { name: String::new(), head: Vec::new(), body: Vec::new() }];
+    for l in theirs.lines() {
+        let l = l.to_string();
+        match ini_line(&l) {
+            IniLine::Section(name) => {
+                let last = sections.last_mut().expect("the section before the first header");
+                let mut head = Vec::new();
+                while last.body.last().is_some_and(|b| ini_line(b) == IniLine::Comment) {
+                    head.insert(0, last.body.pop().expect("a comment line"));
+                }
+                head.push(l);
+                sections.push(IniSection { name, head, body: Vec::new() });
+            }
+            _ => sections.last_mut().expect("a section").body.push(l),
+        }
+    }
+    let mut merged: Vec<IniSection> = Vec::new();
+    for s in sections {
+        match merged.iter_mut().find(|m| m.name.to_lowercase() == s.name.to_lowercase()) {
+            Some(m) => m.body.extend(s.body),
+            None => merged.push(s),
+        }
+    }
+
+    let mut added = Vec::new();
+    // Lines to add before user line `i` (`lines.len()`: at the end of the file).
+    let mut inserts: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+    let mut tail: Vec<String> = Vec::new();
+    let label = |section: &str, key: &str| if section.is_empty() { key.to_string() } else { format!("{section}/{key}") };
+    for s in merged {
+        let lower = s.name.to_lowercase();
+        if let Some(have) = keys.get_mut(&lower) {
+            for (j, l) in s.body.iter().enumerate() {
+                if let IniLine::Key(k) = ini_line(l) {
+                    if have.insert(k.to_lowercase()) {
+                        added.push(label(&s.name, &k));
+                        let at = after.get(&lower).map(|a| a + 1).unwrap_or(top);
+                        let to = inserts.entry(at).or_default();
+                        // The comment lines right above the key describe it: they come along,
+                        // unless the user's file has them all already (they deleted only the key).
+                        let mut from = j;
+                        while from > 0 && ini_line(&s.body[from - 1]) == IniLine::Comment {
+                            from -= 1;
+                        }
+                        if !s.body[from..j].iter().all(|c| comments.contains(c.trim())) {
+                            to.extend(s.body[from..j].iter().cloned());
+                        }
+                        to.push(l.clone());
+                    }
+                }
+            }
+            continue;
+        }
+        // A section the user's file does not have: as the new file writes it, each key once.
+        let mut seen = std::collections::HashSet::new();
+        let mut body: Vec<String> = s
+            .body
+            .into_iter()
+            .filter(|l| match ini_line(l) {
+                IniLine::Key(k) => seen.insert(k.to_lowercase()),
+                _ => true,
+            })
+            .collect();
+        while body.last().is_some_and(|l| ini_line(l) == IniLine::Blank) {
+            body.pop();
+        }
+        let named: Vec<String> = body.iter().filter_map(|l| if let IniLine::Key(k) = ini_line(l) { Some(label(&s.name, &k)) } else { None }).collect();
+        if named.is_empty() {
+            added.push(s.name.clone());
+        }
+        added.extend(named);
+        let last = tail.last().map(String::as_str).or(lines.last().map(|l| l.0));
+        if last.is_some_and(|l| ini_line(l) != IniLine::Blank) {
+            tail.push(String::new());
+        }
+        tail.extend(s.head);
+        tail.extend(body);
+    }
+    if added.is_empty() {
+        return Some((original.to_vec(), added));
+    }
+    let mut out: Vec<(String, &str)> = Vec::with_capacity(lines.len() + tail.len() + added.len());
+    for (i, (l, e)) in lines.iter().enumerate() {
+        if let Some(v) = inserts.remove(&i) {
+            out.extend(v.into_iter().map(|x| (x, eol)));
+        }
+        out.push((l.to_string(), e));
+    }
+    if let Some(v) = inserts.remove(&lines.len()) {
+        out.extend(v.into_iter().map(|x| (x, eol)));
+    }
+    out.extend(tail.into_iter().map(|x| (x, eol)));
+    // A last line without a line ending gets one once lines follow it; the file still ends as the user's did.
+    let open_end = !mine.is_empty() && !mine.ends_with('\n');
+    let mut text = String::from(if bom { "\u{feff}" } else { "" });
+    let n = out.len();
+    for (i, (l, e)) in out.into_iter().enumerate() {
+        text.push_str(&l);
+        if i + 1 < n || !open_end {
+            text.push_str(if e.is_empty() { eol } else { e });
+        }
+    }
+    Some((text.into_bytes(), added))
+}
+
+/// The game is running: its mods' DLLs are locked and their files in use.
+/// Tests never ask the real process list.
+fn game_running() -> bool {
+    !cfg!(test) && crate::platform::game_running()
 }
 
 /// A rename, tried a few times: on Windows an indexer or a virus scanner can
@@ -791,6 +1260,144 @@ fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
     Err(last.expect("tried at least once"))
+}
+
+fn walk_rel_cased(dir: &Path, base: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let Some(t) = kind(&e) else { continue };
+        if t.is_dir() {
+            walk_rel_cased(&p, base, out);
+        } else if let Ok(rel) = p.strip_prefix(base) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// Replace an installed mod with choice `pick` of a newer download. The
+/// folder keeps its name (and so its place in the load order and whether it
+/// is on), the mod's settings files are carried over, and the old copy is
+/// moved to `mods-removed` rather than deleted.
+pub fn finish_update(p: &Prepared, pick: usize, old: &Mod) -> Result<Installed, String> {
+    let bin = removed_dir().ok_or(crate::platform::NO_DATA_DIR)?;
+    finish_update_into(p, pick, old, &bin)
+}
+
+fn finish_update_into(p: &Prepared, pick: usize, old: &Mod, bin: &Path) -> Result<Installed, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if p.unusable_exefs {
+        return Err("the new download has nothing this engine can use".into());
+    }
+    let c = p.choices.get(pick).ok_or("that choice is not in the download")?;
+    let mods = old.path.parent().ok_or("no parent folder")?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Built in the mods folder beside the copy it replaces, so the final rename stays in one folder;
+    // the engine and `list` skip dot folders.
+    let fresh = mods.join(format!(".partial-update-{stamp}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fresh);
+    let mut keep = false;
+    let r = place_update(p, c, old, bin, &fresh, &mut keep);
+    if r.is_err() && !keep {
+        let _ = std::fs::remove_dir_all(&fresh);
+    }
+    r
+}
+
+/// Where the installed copy is now: it may have been switched on or off since the update started.
+fn current_path(old: &Mod) -> Result<PathBuf, String> {
+    [old.name.clone(), format!("_{}", old.name), format!("-{}", old.name)]
+        .iter()
+        .map(|n| old.path.with_file_name(n))
+        .find(|p| p.is_dir())
+        .ok_or_else(|| format!("{} is no longer in the mods folder", old.name))
+}
+
+/// The installed copy is still at `was`, where its settings and
+/// emblemweave.json were read from: switched on or off in the meantime, the
+/// new copy would carry what it read from a folder that has moved.
+fn still_at(old: &Mod, was: &Path) -> Result<PathBuf, String> {
+    let now = current_path(old)?;
+    if now != was {
+        return Err(format!("{} was switched on or off during the update; try again", old.name));
+    }
+    Ok(now)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run by `place_update` just before it takes WRITING, so a test can change the mods folder there.
+    static BEFORE_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+fn place_update(p: &Prepared, c: &Choice, old: &Mod, bin: &Path, fresh: &Path, keep: &mut bool) -> Result<Installed, String> {
+    let needs_build = build_folder(c, fresh)?;
+    // Recorded before the old settings come over: what this download itself ships.
+    let shipped = shipped_settings(fresh);
+    let path = current_path(old)?;
+    let carried = carry_settings(&path, fresh, old.info.shipped.as_ref())?;
+    // Keys an author or the user put in emblemweave.json survive.
+    let _ = std::fs::copy(path.join("emblemweave.json"), fresh.join("emblemweave.json"));
+    let mut info = p.info.clone();
+    // The installed name stays: profiles and the load order refer to it.
+    info.title = old.info.title.clone();
+    info.variant = c.label.clone();
+    info.installed = now();
+    info.skip_update = 0;
+    info.no_updates = false;
+    info.shipped = Some(shipped);
+    write_info(fresh, &info)?;
+    // The game may have started while the download ran: its DLLs would be locked half way through the move.
+    if game_running() {
+        return Err("Close the game to update".into());
+    }
+    let hint = |e: &std::io::Error| {
+        if in_use(e) || game_running() { ". If the game is running, close it first: Windows keeps a running mod's DLL locked" } else { "" }
+    };
+    #[cfg(test)]
+    if let Some(f) = BEFORE_LOCK.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+    // Only finding the folder and the renames need the lock: two jobs never move one folder at once.
+    let _w = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    // It may have started while this job waited for the lock, too.
+    if game_running() {
+        return Err("Close the game to update".into());
+    }
+    let path = still_at(old, &path)?;
+    let label = if old.info.version.is_empty() { format!("{} (before update)", old.name) } else { format!("{} {} (before update)", old.name, clean_name(&old.info.version)) };
+    let backup = move_aside_io(&path, bin, &label).map_err(|e| format!("moving {}: {e}{}", path.display(), hint(&e)))?;
+    if let Err(e) = rename_retry(fresh, &path) {
+        // Put the old copy back so the mod is not lost.
+        return Err(match rename_retry(&backup, &path) {
+            Ok(()) => format!("could not put the new copy in place ({e}); the old copy is back{}", hint(&e)),
+            Err(_) => {
+                // Neither copy is in place: keep both where the user can find them, not in a hidden folder.
+                let label = if p.info.version.is_empty() { format!("{} (new, not installed)", old.name) } else { format!("{} {} (new, not installed)", old.name, clean_name(&p.info.version)) };
+                let new = match move_aside_io(fresh, bin, &label) {
+                    Ok(to) => to,
+                    Err(_) => {
+                        *keep = true;
+                        fresh.to_path_buf()
+                    }
+                };
+                format!("could not put the new copy in place ({e}); the new copy is in {} and the old copy is in {}{}", new.display(), backup.display(), hint(&e))
+            }
+        });
+    }
+    Ok(Installed {
+        mods: vec![old.info.title.clone()],
+        exefs_only: p.exefs_only,
+        patch_only: p.patch_only,
+        needs_build,
+        parts: false,
+        replaced: Some((backup, carried.kept)),
+        merged: carried.merged,
+        new_beside: carried.new_beside,
+        dropped: carried.dropped,
+        off_for: None,
+    })
 }
 
 /// Install the mod in `staged` (an unpacked archive or a folder) into `mods`.
@@ -819,7 +1426,7 @@ fn staging() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     // Unique per download, even for several started in the same instant
-    // or by two copies of the launcher.
+    // (Update all) or by two copies of the launcher.
     loop {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let d = base.join(format!("{stamp}-{}-{n}", std::process::id()));
@@ -843,7 +1450,7 @@ pub fn keep_stage(p: &Prepared) {
 /// closed while it waited for a choice, and `.partial-…` installs left in
 /// the mods folder by one that was closed mid-copy. Only folders older than
 /// an hour go, so a download in progress in another copy of the launcher is
-/// left alone; a `.partial-…` install is kept for a day. A folder whose
+/// left alone; a `.partial-…` install or update is kept for a day. A folder whose
 /// name carries the id of a launcher still running (another copy, whose
 /// question may wait for days) is never removed; when the process list
 /// cannot be read, no folder carrying another launcher's id is. It walks
@@ -859,9 +1466,10 @@ pub fn clean_incoming() {
 }
 
 /// The launcher process that made a stage or `.partial-…` folder: its names
-/// are `<stamp>-<pid>-<n>`.
+/// are `<stamp>-<pid>-<n>` (`.partial-update-…` for an update).
 fn stage_pid(name: &str) -> Option<u32> {
     let rest = name.strip_prefix(".partial-").unwrap_or(name);
+    let rest = rest.strip_prefix("update-").unwrap_or(rest);
     rest.split('-').nth(1)?.parse().ok()
 }
 
@@ -1016,6 +1624,82 @@ pub fn pick(files: &[GbFile], like: &str) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// A newer upload of an installed mod, if GameBanana has one: a current
+/// download uploaded after the installed one (or, for a mod installed
+/// before files were recorded, after it was installed), from the same file
+/// family when that is known, and not skipped by the user. Console and
+/// emulator builds are only offered when there is nothing else.
+pub fn update_for(m: &Mod, files: &[GbFile]) -> Option<GbFile> {
+    newer_uploads(m, files).into_iter().max_by_key(|f| (f.fit().signum(), f.date))
+}
+
+/// The current uploads newer than the installed copy that could be its
+/// update. Only the installed file's family while that family is still on
+/// the page (a page can hold two mods), and no console / emulator build in
+/// place of a PC one.
+fn newer_uploads(m: &Mod, files: &[GbFile]) -> Vec<GbFile> {
+    let since = if m.info.file_date > 0 { m.info.file_date } else { m.installed_at };
+    if since == 0 || m.info.no_updates {
+        return Vec::new();
+    }
+    let fam = family(&m.info.file_name);
+    let fam_alive = !fam.is_empty() && files.iter().any(|f| f.playable() && family(&f.name) == fam);
+    let pc = m.info.file_name.is_empty() || fit(&m.info.file_name) >= 0;
+    let any_pc = files.iter().any(|g| g.playable() && g.fit() >= 0);
+    files
+        .iter()
+        .filter(|f| f.playable() && f.date > since && Some(f.id) != m.info.file_id && f.date > m.info.skip_update)
+        .filter(|f| !fam_alive || family(&f.name) == fam)
+        .filter(|f| !(pc && any_pc && f.fit() < 0))
+        .cloned()
+        .collect()
+}
+
+/// What sets a file apart from others of its family once the version is
+/// gone: `mymod-v2-optional-addon.zip` is `optional addon`, the main file
+/// `main mod`, `quicksave-100_33510.zip` nothing.
+fn file_kind(file_name: &str) -> String {
+    let l = file_name.to_lowercase();
+    let mut stem = l.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or(l.clone());
+    if let Some((head, tail)) = stem.rsplit_once('_') {
+        if tail.len() == 5 && tail.chars().all(|c| c.is_ascii_hexdigit()) && tail.chars().any(|c| c.is_ascii_digit()) {
+            stem = head.to_string();
+        }
+    }
+    let fam = family(file_name);
+    let rest = stem.strip_prefix(&fam).unwrap_or(&stem);
+    rest.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()) && !(w.starts_with('v') && w[1..].chars().all(|c| c.is_ascii_digit())))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The launcher can't tell which newer upload is this mod's update, so the
+/// user picks the file: the installed file is unknown (installed before
+/// files were recorded) or gone from the page while the page holds more
+/// than one mod, or several newer uploads of the family differ in what they
+/// are (the main mod and an add-on).
+pub fn update_needs_choice(m: &Mod, files: &[GbFile]) -> bool {
+    let newer = newer_uploads(m, files);
+    if newer.is_empty() {
+        return false;
+    }
+    let fam = family(&m.info.file_name);
+    let fam_alive = !fam.is_empty() && files.iter().any(|f| f.playable() && family(&f.name) == fam);
+    if !fam_alive {
+        let mut fams: Vec<String> = files.iter().filter(|f| f.playable()).map(|f| family(&f.name)).collect();
+        fams.sort();
+        fams.dedup();
+        if fams.len() > 1 {
+            return true;
+        }
+    }
+    let mut kinds: Vec<String> = newer.iter().map(|f| file_kind(&f.name)).collect();
+    kinds.sort();
+    kinds.dedup();
+    kinds.len() > 1
+}
+
 fn fetch(url: &str) -> Result<Vec<u8>, String> {
     fetch_within(url, 600)
 }
@@ -1127,7 +1811,9 @@ pub fn gb_prepare(m: &GbMod, file: &GbFile) -> Result<Prepared, String> {
             author: m.author.clone(),
             version: if file.version.is_empty() { m.version.clone() } else { file.version.clone() },
             gamebanana_id: Some(m.id),
+            file_id: Some(file.id).filter(|&i| i > 0),
             file_name: file.name.clone(),
+            file_date: file.date,
             ..Info::default()
         };
         prepare_dir(&unpacked, Some(stage.clone()), info)
@@ -1438,9 +2124,15 @@ mod tests {
         write(&mods.join("Alpha/romfs/a.bin"));
         write(&mods.join("_Beta/romfs/b.bin"));
         write(&mods.join("Gamma/romfs/c.bin"));
-        let installed = list(&mods);
-        let changed = apply_profile(&installed, &["Beta".to_string()]).unwrap();
+        let mut installed = list(&mods);
+        // A mod removed since the list was read fails; the rest still switch.
+        let mut gone = installed[0].clone();
+        gone.name = "Aardvark".into();
+        gone.path = mods.join("Aardvark");
+        installed.insert(0, gone);
+        let (changed, failed) = apply_profile(&installed, &["Beta".to_string()]);
         assert_eq!(changed, 3, "Alpha and Gamma off, Beta on");
+        assert_eq!(failed.len(), 1, "{failed:?}");
         let after = list(&mods);
         let on = |n: &str| after.iter().find(|m| m.name == n).unwrap().enabled;
         assert!(!on("Alpha"));
@@ -1464,6 +2156,14 @@ mod tests {
         labels.sort();
         assert_eq!(labels, vec!["Emulators", "Obelisk Chamber (PC recomp)", "Switch (LayeredFS)"]);
         assert_eq!(p.choices[p.recommended()].label, "Obelisk Chamber (PC recomp)");
+        let was = |variant: &str, title: &str, installed: u64, file_id: Option<u64>| Info { variant: variant.into(), title: title.into(), installed, file_id, ..Info::default() };
+        assert_eq!(p.same_variant(&was("obelisk chamber (pc recomp)", "", 1, Some(3))), Some(p.recommended()));
+        assert_eq!(p.same_variant(&was("", "Gift Guide", 0, None)), None);
+        // Installed by an older launcher, the variant only in the name.
+        assert_eq!(p.same_variant(&was("", "Gift Guide - Obelisk Chamber (PC recomp)_mods", 0, None)), Some(p.recommended()));
+        assert_eq!(p.same_variant(&was("", "Gift Guide - Obelisk Chamber (PC recomp)_mods", 5, Some(3))), None, "a recorded install without a variant asks");
+        // Skip wrote an install time on an older copy: still matched by its name.
+        assert_eq!(p.same_variant(&was("", "Gift Guide - Obelisk Chamber (PC recomp)_mods", 5, None)), Some(p.recommended()));
         // Only the picked one is installed, and it is on.
         let mods = root.join("mods");
         let r = finish(&p, &[p.recommended()], &mods).unwrap();
@@ -1472,6 +2172,7 @@ mod tests {
         assert_eq!(l.len(), 1);
         assert!(l[0].enabled);
         assert_eq!(l[0].info.variant, "Obelisk Chamber (PC recomp)");
+        assert!(l[0].installed_at > 0);
         // A single mod needs no name of its own.
         let one = root.join("one");
         write(&one.join("TurnControl/exefs/turn_control.dll"));
@@ -1527,6 +2228,52 @@ mod tests {
         assert!(file(9, "mod-src.zip", "", 1, false).source_only());
     }
 
+    /// Settings travel with an update; code never does.
+    #[test]
+    fn only_settings_files_are_carried() {
+        for keep in ["settings.ini", "exefs/turn.cfg", "native_appearance.settings.favorite-characters", "config.json", "exefs/x.toml"] {
+            assert!(is_settings(keep), "{keep}");
+        }
+        for skip in ["plugin.toml", "exefs/plugin.ini", "manifest.cfg", "exefs/manifest.toml", "mod.toml", "plugin.json", "exefs/config_loader.lua", "config.dat", "settings.py", "exefs/config_menu.dll", "exefs/settings_ui.sites", "configpatch.ips", "README.md", "emblemweave.json", "manifest.json", "names.tsv", "LICENSE", "settings.ini.new", "exefs/turn.cfg.old", "config.json.new"] {
+            assert!(!is_settings(skip), "{skip}");
+        }
+    }
+
+    /// A newer upload of the other mod on a shared page is not an update.
+    #[test]
+    fn an_update_stays_in_its_family() {
+        let files = vec![
+            file(1, "pleasenomoreclicking-v200-main-mod.zip", "MAIN MOD", 100, false),
+            file(2, "manualstacking-v120-main-mod.zip", "MAIN MOD", 300, false),
+            file(3, "thirdmod-v1.zip", "MAIN MOD", 300, false),
+            file(4, "gg-v2-switch.zip", "atmosphere for emus", 400, false),
+        ];
+        let nmc = installed(Some(1), "pleasenomoreclicking-v200-main-mod.zip", 100, 150);
+        assert_eq!(update_for(&nmc, &files), None);
+        // Installed before files were recorded on a page with several mods: the user picks.
+        let legacy = installed(None, "", 0, 150);
+        assert!(update_needs_choice(&legacy, &files));
+        assert!(!update_needs_choice(&nmc, &files));
+        let only_a = vec![file(1, "amod-v1.zip", "", 100, false), file(2, "bmod-v1.zip", "", 50, false), file(5, "amod-v2.zip", "", 300, false)];
+        assert!(update_needs_choice(&installed(None, "", 0, 150), &only_a), "a legacy copy of B must not take A's upload silently");
+        // The installed file was renamed away on a page with two mods.
+        let renamed = installed(Some(7), "bmod-old-v1.zip", 100, 150);
+        assert!(update_needs_choice(&renamed, &only_a));
+        // A main file and an add-on of one family.
+        let addon = vec![file(1, "mymod-v1-main.zip", "", 100, false), file(2, "mymod-v2-main.zip", "", 300, false), file(3, "mymod-v2-optional-addon.zip", "", 301, false)];
+        assert!(update_needs_choice(&installed(Some(1), "mymod-v1-main.zip", 100, 150), &addon));
+        assert_eq!(file_kind("quicksave-100_33510.zip"), "");
+        // One family, one kind: no question.
+        let qs = vec![file(1, "quicksave-100_6e177.zip", "", 100, true), file(2, "quicksave-100_33510.zip", "", 200, false)];
+        assert!(!update_needs_choice(&installed(Some(1), "quicksave-100_6e177.zip", 100, 150), &qs));
+        assert!(fit("Hotkey for switching units") == 0 && fit("(Weapon Switch)") == 0 && fit("New (windowskin") == 0);
+        assert!(!file(9, "x.zip", "Recompiled from source; only works on PC", 1, false).source_only());
+        assert_eq!(family("facade_added.zip"), "facade_added");
+        // A console build is never offered in place of a PC one.
+        let gg = installed(Some(9), "gg-v1.zip", 100, 150);
+        assert_eq!(update_for(&gg, &files), None);
+    }
+
     /// A bare RomFS folder with an exefs inside is one mod, its code out of romfs.
     #[test]
     fn a_bare_romfs_folder_keeps_its_exefs_together() {
@@ -1543,6 +2290,319 @@ mod tests {
         finish(&p, &[0], &mods).unwrap();
         assert!(mods.join("Bare/exefs/x.dll").is_file());
         assert!(!mods.join("Bare/romfs/exefs").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn installed(file_id: Option<u64>, file_name: &str, file_date: u64, installed_at: u64) -> Mod {
+        Mod {
+            path: PathBuf::new(),
+            name: "x".into(),
+            enabled: true,
+            info: Info { title: "x".into(), file_id, file_name: file_name.into(), file_date, gamebanana_id: Some(1), ..Info::default() },
+            files: 1,
+            has_romfs: false,
+            has_exefs: true,
+            has_code: true,
+            has_patches: false,
+            installed_at,
+        }
+    }
+
+    /// An update is a newer current upload, even under the same version.
+    #[test]
+    fn finds_updates() {
+        let files = vec![
+            file(1, "quicksave-100_6e177.zip", "for recomps only", 100, true),
+            file(2, "quicksave-100_33510.zip", "recomps only", 200, false),
+        ];
+        let old = installed(Some(1), "quicksave-100_6e177.zip", 100, 150);
+        assert_eq!(update_for(&old, &files).map(|f| f.id), Some(2));
+        let current = installed(Some(2), "quicksave-100_33510.zip", 200, 250);
+        assert_eq!(update_for(&current, &files), None);
+        // Installed before files were recorded: newer than the install time.
+        assert_eq!(update_for(&installed(None, "", 0, 150), &files).map(|f| f.id), Some(2));
+        assert_eq!(update_for(&installed(None, "", 0, 250), &files), None);
+        // Skipped.
+        let mut skipped = installed(Some(1), "quicksave-100_6e177.zip", 100, 150);
+        skipped.info.skip_update = 200;
+        assert_eq!(update_for(&skipped, &files), None);
+        let mut port = installed(None, "", 0, 150);
+        port.info.no_updates = true;
+        assert_eq!(update_for(&port, &files), None);
+        // Source code uploads are not updates.
+        let src = vec![file(3, "x-v2-source-only.zip", "SOURCE CODE ONLY", 900, false)];
+        assert_eq!(update_for(&old, &src), None);
+    }
+
+    /// An update keeps the folder (and so on/off and the load order), keeps
+    /// the user's settings, and moves the old copy aside.
+    #[test]
+    fn an_update_replaces_in_place_and_keeps_settings() {
+        let root = temp("update");
+        let mods = root.join("mods");
+        write(&mods.join("_Quick Save/exefs/quick_save.dll"));
+        std::fs::write(mods.join("_Quick Save/settings.ini"), "slot=3").unwrap();
+        std::fs::write(mods.join("_Quick Save/exefs/turn.cfg"), "t=5").unwrap();
+        std::fs::write(mods.join("_Quick Save/exefs/quick.ini"), "a=5\n").unwrap();
+        write(&mods.join("_Quick Save/exefs/old_only.dll"));
+        write_info(&mods.join("_Quick Save"), &Info { title: "Quick Save".into(), version: "1.0.0".into(), ..Info::default() }).unwrap();
+        let old = list(&mods).remove(0);
+        let new = root.join("new");
+        std::fs::create_dir_all(new.join("QuickSave/exefs")).unwrap();
+        std::fs::write(new.join("QuickSave/exefs/quick_save.dll"), "new").unwrap();
+        std::fs::write(new.join("QuickSave/settings.ini"), "slot=1").unwrap();
+        std::fs::write(new.join("QuickSave/exefs/turn.cfg"), "t=2").unwrap();
+        std::fs::write(new.join("QuickSave/exefs/quick.ini"), "a=1\nb=2\n").unwrap();
+        let p = prepare_dir(&new, None, Info { title: "Quicksave".into(), version: "1.0.1".into(), file_id: Some(7), ..Info::default() }).unwrap();
+        let r = finish_update_into(&p, 0, &old, &root.join("bin")).unwrap();
+        let (backup, kept) = r.replaced.clone().unwrap();
+        // No record of what 1.0.0 shipped: every settings file is the user's. The .ini 1.0.1 ships too
+        // is merged; turn.cfg keeps the user's copy, with the new default beside it.
+        assert_eq!(kept, 3);
+        assert_eq!(r.merged, vec![("exefs/quick.ini".to_string(), vec!["b".to_string()])]);
+        assert_eq!(r.new_beside, vec!["exefs/turn.cfg".to_string()]);
+        assert!(backup.join("exefs/old_only.dll").is_file(), "the old copy is kept aside");
+        let l = list(&mods);
+        assert_eq!(l.len(), 1);
+        assert!(!l[0].enabled, "a switched-off mod stays off");
+        assert_eq!(l[0].info.title, "Quick Save", "the installed name stays");
+        assert_eq!(l[0].info.version, "1.0.1");
+        assert_eq!(l[0].info.file_id, Some(7));
+        assert_eq!(std::fs::read_to_string(mods.join("_Quick Save/exefs/quick_save.dll")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(mods.join("_Quick Save/settings.ini")).unwrap(), "slot=3", "the user's settings survive");
+        assert_eq!(std::fs::read_to_string(mods.join("_Quick Save/exefs/turn.cfg")).unwrap(), "t=5", "the user's copy stays");
+        assert_eq!(std::fs::read_to_string(mods.join("_Quick Save/exefs/turn.cfg.new")).unwrap(), "t=2", "the new default is beside it");
+        assert!(!mods.join("_Quick Save/exefs/turn.cfg.old").exists());
+        assert_eq!(std::fs::read_to_string(mods.join("_Quick Save/exefs/quick.ini")).unwrap(), "a=5\nb=2\n", "a legacy .ini is merged");
+        assert_eq!(l[0].info.shipped.as_ref().unwrap().keys().cloned().collect::<Vec<_>>(), vec!["exefs/quick.ini".to_string(), "exefs/turn.cfg".to_string()], "the update records what it shipped");
+        assert!(!mods.join("_Quick Save/exefs/old_only.dll").exists(), "files the new version dropped go");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With a record of what the download shipped, an update keeps what the
+    /// user changed or the mod wrote, and lets an untouched default go.
+    #[test]
+    fn an_update_carries_only_changed_or_created_settings() {
+        let root = temp("carry");
+        let mods = root.join("mods");
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(v1.join("M/exefs")).unwrap();
+        std::fs::write(v1.join("M/exefs/m.dll"), "1").unwrap();
+        std::fs::write(v1.join("M/exefs/settings.ini"), "a=1").unwrap();
+        std::fs::write(v1.join("M/exefs/turn.cfg"), "t=1").unwrap();
+        let p = prepare_dir(&v1, None, Info { title: "M".into(), ..Info::default() }).unwrap();
+        finish(&p, &[0], &mods).unwrap();
+        let old = list(&mods).remove(0);
+        assert_eq!(old.info.shipped.as_ref().map(|s| s.len()), Some(2), "{:?}", old.info.shipped);
+        // The user edits one file and the mod writes another at run time; settings.ini stays as shipped.
+        std::fs::write(mods.join("M/exefs/turn.cfg"), "t=9").unwrap();
+        std::fs::write(mods.join("M/exefs/native_appearance.settings.favorite-characters"), "lyn").unwrap();
+        let v2 = root.join("v2");
+        std::fs::create_dir_all(v2.join("M/exefs")).unwrap();
+        std::fs::write(v2.join("M/exefs/m.dll"), "2").unwrap();
+        std::fs::write(v2.join("M/exefs/settings.ini"), "a=2").unwrap();
+        std::fs::write(v2.join("M/exefs/turn.cfg"), "t=2").unwrap();
+        let p = prepare_dir(&v2, None, Info { title: "M".into(), version: "2".into(), ..Info::default() }).unwrap();
+        let r = finish_update_into(&p, 0, &old, &root.join("bin")).unwrap();
+        assert_eq!(r.replaced.as_ref().unwrap().1, 2);
+        assert_eq!(r.new_beside, vec!["exefs/turn.cfg".to_string()], "the changed file the new version ships differently");
+        assert!(r.merged.is_empty());
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/settings.ini")).unwrap(), "a=2", "an untouched default gives way to the new one");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/turn.cfg")).unwrap(), "t=9", "the user's edit is carried");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/turn.cfg.new")).unwrap(), "t=2", "with the new default beside it");
+        assert!(!mods.join("M/exefs/settings.ini.new").exists(), "an untouched default has nothing beside it");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/native_appearance.settings.favorite-characters")).unwrap(), "lyn", "a file made at run time is carried");
+        assert!(!mods.join("M/exefs/settings.ini.old").exists());
+        let now = list(&mods).remove(0);
+        assert_eq!(now.info.shipped.as_ref().and_then(|s| s.get("exefs/settings.ini")), sha256_file(&v2.join("M/exefs/settings.ini")).as_ref(), "the record is the new download's");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A download that shipped no settings files still records that (an empty
+    /// record, not none): a settings.ini the mod wrote at run time is the
+    /// user's, kept over the one the next version ships.
+    #[test]
+    fn an_empty_record_still_counts_as_a_record() {
+        let root = temp("empty-record");
+        let mods = root.join("mods");
+        let v1 = root.join("v1");
+        write(&v1.join("M/exefs/m.dll"));
+        let p = prepare_dir(&v1, None, Info { title: "M".into(), ..Info::default() }).unwrap();
+        finish(&p, &[0], &mods).unwrap();
+        let old = list(&mods).remove(0);
+        assert_eq!(old.info.shipped, Some(Default::default()), "an empty record is written");
+        std::fs::write(mods.join("M/exefs/settings.ini"), "mine").unwrap();
+        let v2 = root.join("v2");
+        write(&v2.join("M/exefs/m.dll"));
+        std::fs::write(v2.join("M/exefs/settings.ini"), "default").unwrap();
+        let p = prepare_dir(&v2, None, Info { title: "M".into(), version: "2".into(), ..Info::default() }).unwrap();
+        let r = finish_update_into(&p, 0, &old, &root.join("bin")).unwrap();
+        assert_eq!(r.replaced.as_ref().unwrap().1, 1);
+        assert!(r.merged.is_empty() && r.new_beside.is_empty() && r.dropped.is_empty(), "{r:?}");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/settings.ini")).unwrap(), "mine", "no key to add: the user's file as it was");
+        assert!(!mods.join("M/exefs/settings.ini.old").exists() && !mods.join("M/exefs/settings.ini.new").exists());
+        // Nothing of the update is left beside the mod, and a failed one leaves nothing either.
+        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 1);
+        let mut gone = list(&mods).remove(0);
+        gone.name = "Elsewhere".into();
+        gone.path = mods.join("Elsewhere");
+        assert!(finish_update_into(&p, 0, &gone, &root.join("bin")).is_err());
+        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 1, "no .partial-update folder is left");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The new version's `.ini` is merged into the user's: their values,
+    /// comments, order and extra keys stay, new keys and sections are added.
+    #[test]
+    fn an_ini_merge_adds_what_the_new_version_has() {
+        let mine = "; my comment\r\ntop=1\r\n[Controls]\r\nHold_Key = F5   ; mine\r\nmy_key=1\r\nold_key=2\r\n[UI]\r\n; ui comment\r\ntheme=dark\r\n";
+        let theirs = "top=0\nglob_new=7\n[controls]\nhold_key=F1\nnew_key=3\n[Ui]\ntheme=light\nscale=2\n; Audio settings\n[Audio]\nvolume=5\nvolume=6\n[Empty]\n";
+        let (text, added) = merge_ini(mine.as_bytes(), theirs.as_bytes()).unwrap();
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            "; my comment\r\ntop=1\r\nglob_new=7\r\n[Controls]\r\nHold_Key = F5   ; mine\r\nmy_key=1\r\nold_key=2\r\nnew_key=3\r\n[UI]\r\n; ui comment\r\ntheme=dark\r\nscale=2\r\n\r\n; Audio settings\r\n[Audio]\r\nvolume=5\r\n\r\n[Empty]\r\n"
+        );
+        assert_eq!(added, vec!["glob_new", "controls/new_key", "Ui/scale", "Audio/volume", "Empty"]);
+        // Nothing new: the user's file, byte for byte.
+        let (same, none) = merge_ini(mine.as_bytes(), "[CONTROLS]\nHOLD_KEY=1\n".as_bytes()).unwrap();
+        assert_eq!((same.as_slice(), none.len()), (mine.as_bytes(), 0));
+        // A byte order mark and a missing last line ending stay; a global key goes above the comments over the first section.
+        let (text, _) = merge_ini("\u{feff}a=1".as_bytes(), b"a=2\nb=3\n").unwrap();
+        assert_eq!(String::from_utf8(text).unwrap(), "\u{feff}a=1\nb=3");
+        let (text, _) = merge_ini(b"; head\n[S]\nx=1\nodd line\n", b"g=1\n[S]\nx=2\ny=2\n").unwrap();
+        assert_eq!(String::from_utf8(text).unwrap(), "g=1\n; head\n[S]\nx=1\ny=2\nodd line\n");
+        // Not UTF-8, or UTF-16: no merge.
+        assert!(merge_ini(b"a=\xff\n", b"a=1\nb=2\n").is_none());
+        assert!(merge_ini(b"\xff\xfea\x00=\x001\x00", b"a=1\nb=2\n").is_none());
+        assert!(merge_ini(b"a=1\n", b"\xfe\xff\x00a").is_none());
+    }
+
+    /// Merging keeps the user's byte order mark first and drops the new
+    /// file's, keeps each line's own line ending (added lines take the one
+    /// most of the file uses), matches section names in any case and brings a
+    /// new key's comment lines along.
+    #[test]
+    fn an_ini_merge_keeps_boms_line_endings_and_comments() {
+        let merge = |mine: &str, theirs: &str| merge_ini(mine.as_bytes(), theirs.as_bytes()).map(|(t, a)| (String::from_utf8(t).unwrap(), a));
+        // The user's byte order mark stays first, above a global key added at the top.
+        assert_eq!(merge("\u{feff}[S]\nk=1\n", "g=1\n[S]\nk=1\n"), Some(("\u{feff}g=1\n[S]\nk=1\n".to_string(), vec!["g".to_string()])));
+        // The new file's goes nowhere, whether its first line is a new key or a new section.
+        assert_eq!(merge("a=1\n", "\u{feff}b=2\na=1\n").unwrap().0, "a=1\nb=2\n");
+        assert_eq!(merge("a=1\n", "\u{feff}[New]\nx=1\n"), Some(("a=1\n\n[New]\nx=1\n".to_string(), vec!["New/x".to_string()])));
+        assert_eq!(merge("\u{feff}a=1\n", "\u{feff}[New]\nx=1\n").unwrap().0, "\u{feff}a=1\n\n[New]\nx=1\n");
+        assert_eq!(merge("\u{feff}[S]\na=1\n", "\u{feff}[S]\na=1\nb=2\n").unwrap().0, "\u{feff}[S]\na=1\nb=2\n");
+        // Mixed line endings: each line keeps its own, added ones take the most used.
+        assert_eq!(merge("a=1\r\n[S]\nx=1\r\ny=1\n[T]\r\nz=1\r\n", "a=1\nb=2\n[S]\nx=1\nw=2\n[T]\nz=1\n").unwrap().0, "a=1\r\nb=2\r\n[S]\nx=1\r\ny=1\nw=2\r\n[T]\r\nz=1\r\n");
+        assert_eq!(merge("a=1\n[S]\nx=1\r\n", "[S]\nx=1\r\ny=2\r\n").unwrap().0, "a=1\n[S]\nx=1\r\ny=2\n");
+        // A carriage return alone: not merged (the new default goes beside it).
+        assert_eq!(merge("a=1\rb=1\n", "a=1\nc=2\n"), None);
+        assert_eq!(merge("a=1\n", "a=1\rc=2\n"), None);
+        // Section names in any case, beyond ASCII too; `[]` is no header.
+        assert_eq!(merge("[Ö]\na=1\n", "[ö]\na=1\nb=2\n"), Some(("[Ö]\na=1\nb=2\n".to_string(), vec!["ö/b".to_string()])));
+        assert_eq!(merge("x=1\n", "[Ö]\na=1\n[ö]\nb=2\n"), Some(("x=1\n\n[Ö]\na=1\nb=2\n".to_string(), vec!["Ö/a".to_string(), "Ö/b".to_string()])));
+        assert_eq!(merge("[S]\nx=1\n[]\ny=1\n", "z=1\n[S]\nx=1\ny=1\n").unwrap().0, "z=1\n[S]\nx=1\n[]\ny=1\n");
+        // The comment lines right above a new key come with it; not across a blank line, and not twice.
+        assert_eq!(
+            merge("[S]\nx=1\n", "[S]\nx=1\n; speed, 1 to 4\n; 2 is the default\nspeed=2\nother=1\n").unwrap().0,
+            "[S]\nx=1\n; speed, 1 to 4\n; 2 is the default\nspeed=2\nother=1\n"
+        );
+        assert_eq!(merge("[S]\nx=1\n", "[S]\nx=1\n; about x\n\nfar=1\n").unwrap().0, "[S]\nx=1\nfar=1\n");
+        assert_eq!(merge("[S]\n; speed, 1 to 4\nx=1\n", "[S]\n; speed, 1 to 4\nspeed=2\nx=1\n").unwrap().0, "[S]\n; speed, 1 to 4\nx=1\nspeed=2\n");
+        assert_eq!(merge("a=1\n[S]\n", "# b help\nb=2\n[S]\n").unwrap().0, "a=1\n# b help\nb=2\n[S]\n");
+    }
+
+    /// An update merges a changed `.ini`, puts the new default of any other
+    /// changed file beside it, and records the new version's shipped files,
+    /// so the next update still sees the user's changes.
+    #[test]
+    fn an_update_merges_ini_and_puts_other_defaults_beside() {
+        let root = temp("merge");
+        let mods = root.join("mods");
+        let version = |n: &str, ini: &str, json: &str| {
+            let d = root.join(format!("v{n}"));
+            std::fs::create_dir_all(d.join("M/exefs")).unwrap();
+            std::fs::write(d.join("M/exefs/m.dll"), n).unwrap();
+            std::fs::write(d.join("M/exefs/settings.ini"), ini).unwrap();
+            std::fs::write(d.join("M/exefs/config.json"), json).unwrap();
+            prepare_dir(&d, None, Info { title: "M".into(), version: n.into(), ..Info::default() }).unwrap()
+        };
+        finish(&version("1", "[A]\nk=1\n", "{\"a\":1}"), &[0], &mods).unwrap();
+        std::fs::write(mods.join("M/exefs/settings.ini"), "[A]\nk=9\nmy_key=1\n").unwrap();
+        std::fs::write(mods.join("M/exefs/config.json"), "{\"a\":5}").unwrap();
+        let v2 = version("2", "[A]\nk=1\nnew=2\n[B]\nz=0\n", "{\"a\":2}");
+        let r = finish_update_into(&v2, 0, &list(&mods).remove(0), &root.join("bin")).unwrap();
+        assert_eq!(r.replaced.as_ref().unwrap().1, 2);
+        assert_eq!(r.merged, vec![("exefs/settings.ini".to_string(), vec!["A/new".to_string(), "B/z".to_string()])]);
+        assert_eq!(r.new_beside, vec!["exefs/config.json".to_string()]);
+        let ini = mods.join("M/exefs/settings.ini");
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), "[A]\nk=9\nmy_key=1\nnew=2\n\n[B]\nz=0\n");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/config.json")).unwrap(), "{\"a\":5}");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/config.json.new")).unwrap(), "{\"a\":2}");
+        let now = list(&mods).remove(0);
+        let shipped = now.info.shipped.clone().unwrap();
+        assert_eq!(shipped.get("exefs/settings.ini"), sha256_file(&root.join("v2/M/exefs/settings.ini")).as_ref(), "the record is the new download's");
+        assert_ne!(shipped.get("exefs/settings.ini"), sha256_file(&ini).as_ref());
+        assert!(!shipped.contains_key("exefs/config.json.new"), "a .new copy is not a settings file");
+        // The same files again: the merged file is still the user's.
+        let r = finish_update_into(&version("3", "[A]\nk=1\nnew=2\n[B]\nz=0\n", "{\"a\":2}"), 0, &now, &root.join("bin")).unwrap();
+        assert!(r.merged.is_empty(), "nothing new to add");
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), "[A]\nk=9\nmy_key=1\nnew=2\n\n[B]\nz=0\n");
+        // An .ini that is not UTF-8 is not merged: the new default goes beside it.
+        std::fs::write(&ini, b"[A]\nk=\xff\n").unwrap();
+        let r = finish_update_into(&version("4", "[A]\nk=1\nnew=3\n", "{\"a\":2}"), 0, &list(&mods).remove(0), &root.join("bin")).unwrap();
+        assert_eq!(r.new_beside, vec!["exefs/config.json".to_string(), "exefs/settings.ini".to_string()]);
+        assert_eq!(std::fs::read(&ini).unwrap(), b"[A]\nk=\xff\n");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/settings.ini.new")).unwrap(), "[A]\nk=1\nnew=3\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A mod switched off while its update was being built is not replaced:
+    /// the settings came from the folder it had before.
+    #[test]
+    fn an_update_stops_when_the_mod_was_switched_during_it() {
+        let root = temp("switched");
+        let mods = root.join("mods");
+        let v1 = root.join("v1");
+        write(&v1.join("M/exefs/m.dll"));
+        let p = prepare_dir(&v1, None, Info { title: "M".into(), version: "1".into(), ..Info::default() }).unwrap();
+        finish(&p, &[0], &mods).unwrap();
+        let old = list(&mods).remove(0);
+        let v2 = root.join("v2");
+        write(&v2.join("M/exefs/m.dll"));
+        let p = prepare_dir(&v2, None, Info { title: "M".into(), version: "2".into(), ..Info::default() }).unwrap();
+        let (from, to) = (mods.join("M"), mods.join("_M"));
+        BEFORE_LOCK.with(|h| *h.borrow_mut() = Some(Box::new(move || std::fs::rename(from, to).unwrap())));
+        let e = finish_update_into(&p, 0, &old, &root.join("bin")).unwrap_err();
+        assert_eq!(e, "M was switched on or off during the update; try again");
+        assert!(mods.join("_M/exefs/m.dll").is_file(), "the switched-off copy stays");
+        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 1, "the new copy is cleaned up");
+        assert!(!root.join("bin").exists(), "nothing was set aside");
+        assert!(still_at(&old, &mods.join("_M")).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A settings file the user changed that the new version no longer ships
+    /// is kept, and named apart from the settings carried over.
+    #[test]
+    fn a_settings_file_the_new_version_dropped_is_named() {
+        let root = temp("dropped");
+        let mods = root.join("mods");
+        let v1 = root.join("v1");
+        write(&v1.join("M/exefs/m.dll"));
+        std::fs::write(v1.join("M/exefs/turn.cfg"), "t=1").unwrap();
+        let p = prepare_dir(&v1, None, Info { title: "M".into(), ..Info::default() }).unwrap();
+        finish(&p, &[0], &mods).unwrap();
+        let old = list(&mods).remove(0);
+        std::fs::write(mods.join("M/exefs/turn.cfg"), "t=9").unwrap();
+        std::fs::write(mods.join("M/exefs/favorites.settings"), "lyn").unwrap();
+        let v2 = root.join("v2");
+        write(&v2.join("M/exefs/m.dll"));
+        std::fs::write(v2.join("M/exefs/turn_control.toml"), "t=2").unwrap();
+        let p = prepare_dir(&v2, None, Info { title: "M".into(), version: "2".into(), ..Info::default() }).unwrap();
+        let r = finish_update_into(&p, 0, &old, &root.join("bin")).unwrap();
+        assert_eq!(r.dropped, vec!["exefs/turn.cfg".to_string()]);
+        assert_eq!(r.replaced.as_ref().unwrap().1, 1, "only the file the mod wrote counts as kept settings");
+        assert_eq!(std::fs::read_to_string(mods.join("M/exefs/turn.cfg")).unwrap(), "t=9", "the user's copy stays in the mod folder");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1596,6 +2656,7 @@ mod tests {
         }
         assert_eq!(stage_pid("100-4242-3"), Some(4242));
         assert_eq!(stage_pid(".partial-100-4242-3"), Some(4242));
+        assert_eq!(stage_pid(".partial-update-100-4242-3"), Some(4242));
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 24 * 3600);
         clean_in(&root, later, Some(&[4242, 1]), 1);
         assert!(root.join("mods-incoming/100-4242-0").is_dir(), "a live launcher's waiting download stays");
@@ -1637,6 +2698,18 @@ mod tests {
         assert_eq!(clean_name(" ... "), "mod");
     }
 
+    /// Unknown keys in emblemweave.json survive a rewrite.
+    #[test]
+    fn write_info_keeps_unknown_keys() {
+        let root = temp("info");
+        std::fs::write(root.join("emblemweave.json"), r#"{"title":"T","description":"keep me","skip_update":5}"#).unwrap();
+        write_info(&root, &Info { title: "T".into(), ..Info::default() }).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join("emblemweave.json")).unwrap()).unwrap();
+        assert_eq!(v["description"], "keep me");
+        assert!(v.get("skip_update").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn reads_gamebanana_links() {
         assert_eq!(gb_id("https://gamebanana.com/mods/738457"), Some(738457));
@@ -1666,6 +2739,42 @@ mod tests {
                 let _ = std::fs::remove_dir_all(root);
             }
         }
+    }
+
+    /// A real update (network): an old Quick Save upload installed, the
+    /// newer one found and put in its place with the settings kept.
+    #[test]
+    #[ignore]
+    fn live_gamebanana_update() {
+        let root = temp("live-update");
+        let mods = root.join("mods");
+        let (m, files) = gb_mod(745602).unwrap();
+        let old = files.iter().filter(|f| f.archived).min_by_key(|f| f.date).unwrap().clone();
+        let stage = root.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("a.zip"), fetch(&old.url).unwrap()).unwrap();
+        unpack(&stage.join("a.zip"), &stage.join("u")).unwrap();
+        let info = Info { title: m.name.clone(), gamebanana_id: Some(m.id), file_id: Some(old.id), file_name: old.name.clone(), file_date: old.date, version: old.version.clone(), ..Info::default() };
+        let p = prepare_dir(&stage.join("u"), None, info).unwrap();
+        finish(&p, &[0], &mods).unwrap();
+        let installed = list(&mods).remove(0);
+        std::fs::write(installed.path.join("settings.ini"), "mine").unwrap();
+        let f = update_for(&installed, &files).expect("a newer upload");
+        println!("installed {} -> update {}", old.name, f.name);
+        let root2 = root.join("stage2");
+        std::fs::create_dir_all(&root2).unwrap();
+        std::fs::write(root2.join("b.zip"), fetch(&f.url).unwrap()).unwrap();
+        unpack(&root2.join("b.zip"), &root2.join("u")).unwrap();
+        let info = Info { title: m.name.clone(), gamebanana_id: Some(m.id), file_id: Some(f.id), file_name: f.name.clone(), file_date: f.date, ..Info::default() };
+        let p = prepare_dir(&root2.join("u"), Some(root2.clone()), info).unwrap();
+        let i = p.same_variant(&installed.info).unwrap();
+        let r = finish_update_into(&p, i, &installed, &root.join("bin")).unwrap();
+        println!("{r:?}");
+        let after = list(&mods).remove(0);
+        assert_eq!(after.info.file_id, Some(f.id));
+        assert_eq!(std::fs::read_to_string(after.path.join("settings.ini")).unwrap(), "mine");
+        assert_eq!(update_for(&after, &files), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Installs a real mod from GameBanana (network).

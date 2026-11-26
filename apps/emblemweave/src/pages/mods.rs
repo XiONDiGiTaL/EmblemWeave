@@ -1,5 +1,5 @@
 //! Mods: the installed RomFS mods, importing archives and folders, and
-//! browsing and installing from GameBanana.
+//! browsing, installing and updating from GameBanana.
 
 use crate::mods::{self, GbFile, GbMod, Installed, Mod, Prepared};
 use crate::theme;
@@ -19,11 +19,15 @@ enum Step {
     Choose(Prepared),
 }
 
-/// A download or install running in the background.
+/// A download, install or update running in the background.
 struct Job {
     name: String,
     /// The GameBanana mod it is for, so that mod's buttons wait for it.
     gb: Option<u64>,
+    /// The installed mod it replaces, for an update.
+    update: Option<Mod>,
+    /// The GameBanana file an update is downloading: one download of a file at a time.
+    file: Option<u64>,
     slot: Slot<Step>,
     /// Files of the same mod (one family) ticked with this one, started
     /// one after another once it has ended (`start_next`).
@@ -34,15 +38,19 @@ struct Job {
 /// install goes by, its mod and file.
 type Later = Vec<(String, GbMod, GbFile)>;
 
+/// Updates that download at once; the rest wait in `Ui::queued`.
+const UPDATES_AT_ONCE: usize = 3;
+
 /// A question for the user. They come one at a time, oldest first, so
 /// answering one never throws another away.
 enum Ask {
     /// Which of a GameBanana mod's files to download: any number, each
     /// installed by its own job into its own folder. `installed` marks the
-    /// files whose family is installed already.
-    File { m: GbMod, files: Vec<GbFile>, all: bool, picked: Vec<bool>, installed: Vec<bool> },
+    /// files whose family is installed already. For an update (`update`)
+    /// exactly one, the upload that replaces the installed copy.
+    File { m: GbMod, files: Vec<GbFile>, all: bool, picked: Vec<bool>, installed: Vec<bool>, update: Option<Mod> },
     /// Which variants of a download to install; `then` waits for the install.
-    Variant { name: String, p: Prepared, picked: Vec<bool>, then: Later },
+    Variant { name: String, p: Prepared, picked: Vec<bool>, update: Option<Mod>, then: Later },
 }
 
 impl Ask {
@@ -53,6 +61,8 @@ impl Ask {
         }
     }
 }
+
+type Remote = HashMap<u64, (GbMod, Vec<GbFile>)>;
 
 #[derive(Default)]
 pub struct Ui {
@@ -73,10 +83,22 @@ pub struct Ui {
     /// carries no files.
     pages: HashMap<u64, (GbMod, Vec<GbFile>)>,
     jobs: Vec<Job>,
+    /// Mods being moved to mods-removed (name, title, where to), off the UI
+    /// thread: a held folder is retried for a moment.
+    removing: Vec<(String, String, Slot<PathBuf>)>,
+    /// Updates waiting for a free download slot (Update all), oldest first.
+    queued: VecDeque<(Mod, GbMod, GbFile)>,
     asks: VecDeque<Ask>,
     /// The name typed into the save-as-profile box.
     profile_name: String,
-    /// The page has been shown once: old downloads cleaned.
+    /// The installed mods' GameBanana pages, from the last update check.
+    remote: Remote,
+    /// The check running: the ids it reads, what it found, what failed.
+    checking: Option<Slot<(Vec<u64>, Remote, Vec<String>)>>,
+    checked: Option<std::time::SystemTime>,
+    /// Mods the last check could not read.
+    check_failed: Vec<String>,
+    /// The page has been shown once: old downloads cleaned, updates checked.
     started: bool,
     /// The installed list and its conflict scan, kept briefly. Both walk every
     /// mod tree; recomputing them on every scroll frame cost more than drawing
@@ -108,6 +130,9 @@ struct Scan {
     site_problem: Option<String>,
     site_stale: bool,
     missing_code: Vec<String>,
+    /// The game is running (read with the scan, not on every frame): updates
+    /// wait, and code mods, whose DLLs it holds, stay as they are.
+    running: bool,
 }
 
 /// Long enough that a scroll does not rescan, short enough that a folder
@@ -126,6 +151,20 @@ impl Ui {
         self.fetching.iter().any(|(i, _)| *i == id) || self.jobs.iter().any(|j| j.gb == Some(id)) || self.asks.iter().any(|a| a.gb() == Some(id))
     }
 
+    /// The update check's result: what was checked is replaced, so a mod that
+    /// failed this time shows no stale update, and the file lists it read
+    /// replace the pages read before (`pages`), which may be older.
+    fn take_check(&mut self, checked: &[u64], remote: Remote, failed: Vec<String>) {
+        for id in checked {
+            self.remote.remove(id);
+        }
+        for (id, page) in &remote {
+            self.pages.insert(*id, page.clone());
+        }
+        self.remote.extend(remote);
+        self.check_failed = failed;
+    }
+
     /// Forget a pending Install again once the rows may have moved under it:
     /// the page was left (`pass` does not follow the last one drawn), work
     /// started since (`started`: a fetch, an install, a list reload), or that
@@ -136,6 +175,22 @@ impl Ui {
         if self.again.is_some_and(|a| left || a.started != started || !installed.iter().any(|m| m.info.gamebanana_id == Some(a.id))) {
             self.again = None;
         }
+    }
+
+    /// An update of this mod is running or waiting for an answer. Matched by
+    /// name: switching the mod on or off renames its folder.
+    fn updating(&self, m: &Mod) -> bool {
+        self.jobs.iter().any(|j| j.update.as_ref().is_some_and(|u| u.name.eq_ignore_ascii_case(&m.name)))
+            || self.queued.iter().any(|(u, _, _)| u.name.eq_ignore_ascii_case(&m.name))
+            || self.asks.iter().any(|a| match a {
+                Ask::Variant { update: Some(u), .. } | Ask::File { update: Some(u), .. } => u.name.eq_ignore_ascii_case(&m.name),
+                _ => false,
+            })
+    }
+
+    /// This mod is being moved to mods-removed.
+    fn removing(&self, m: &Mod) -> bool {
+        self.removing.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(&m.name))
     }
 
     fn refresh_scan(&mut self, dir: &std::path::Path) {
@@ -177,6 +232,7 @@ impl Ui {
             site_problem,
             site_stale,
             missing_code,
+            running: crate::platform::game_running(),
         });
     }
 
@@ -207,6 +263,35 @@ fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone)
             format!("{what} only patches the game's code (exefs), which cannot apply to a recompiled game. Nothing was installed."),
             Tone::Warn,
         ),
+        Ok(Installed { replaced: Some((old, kept)), ref mods, needs_build, ref merged, ref new_beside, ref dropped, .. }) => {
+            let i = Installed { mods: mods.clone(), exefs_only: false, patch_only: false, needs_build, parts: false, replaced: None, merged: Vec::new(), new_beside: Vec::new(), dropped: Vec::new(), off_for: None };
+            let mut kept = if kept == 0 { String::new() } else { format!(" Your settings were kept ({kept} file{}).", if kept == 1 { "" } else { "s" }) };
+            for (file, added) in merged {
+                kept.push_str(&format!(
+                    " {file}: {} new entr{} added ({}).",
+                    added.len(),
+                    if added.len() == 1 { "y" } else { "ies" },
+                    added.join(", ")
+                ));
+            }
+            for file in new_beside {
+                let name = file.rsplit('/').next().unwrap_or(file);
+                kept.push_str(&format!(" {file}: the new version's default is beside it as {name}.new."));
+            }
+            if !dropped.is_empty() {
+                kept.push_str(&format!(
+                    " {} no longer ships {}; your cop{} kept in the mod folder.",
+                    mods.join(", "),
+                    dropped.join(", "),
+                    if dropped.len() == 1 { "y was" } else { "ies were" }
+                ));
+            }
+            let build = if i.needs_build { " It brings hook sites: press Build the game before playing." } else { "" };
+            (
+                format!("Updated {}.{kept}{build} The old copy is in {}.", i.mods.join(", "), old.display()),
+                if i.needs_build { Tone::Warn } else { Tone::Ok },
+            )
+        }
         Ok(Installed { off_for: Some(on), ref mods, needs_build, .. }) => {
             let build = if needs_build { " It adds hook sites to the game's code: press Build the game before playing it." } else { "" };
             (
@@ -225,6 +310,13 @@ fn installed_message(what: &str, r: Result<Installed, String>) -> (String, Tone)
     }
 }
 
+/// A launcher button's hover text. `widgets::button` drawn disabled is still
+/// enabled for egui, so `on_disabled_hover_text` never shows on it: the text
+/// is picked here by the state the button is drawn in.
+fn hover(b: egui::Response, enabled: bool, on: &str, off: &str) -> egui::Response {
+    b.on_hover_text(if enabled { on } else { off })
+}
+
 fn day(ts: u64) -> String {
     chrono::DateTime::from_timestamp(ts as i64, 0)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
@@ -235,6 +327,61 @@ fn day(ts: u64) -> String {
 pub fn load_gamebanana(app: &mut App) {
     app.mods_ui.page = 1;
     app.mods_ui.listing = Some(spawn(|| mods::gb_list(1)));
+}
+
+/// Read the GameBanana page of every installed mod that came from there.
+fn check_updates(ui: &mut Ui, installed: &[Mod]) {
+    let mut ids: Vec<(u64, String)> = installed.iter().filter(|m| !m.info.no_updates).filter_map(|m| Some((m.info.gamebanana_id?, m.info.title.clone()))).collect();
+    ids.sort();
+    ids.dedup_by_key(|x| x.0);
+    let checked: Vec<u64> = ids.iter().map(|x| x.0).collect();
+    ui.checking = Some(spawn(move || {
+        let found = Mutex::new((Remote::new(), Vec::new()));
+        // A few at a time: one slow page should not hold up the rest.
+        for chunk in ids.chunks(4) {
+            std::thread::scope(|s| {
+                for (id, title) in chunk {
+                    let found = &found;
+                    s.spawn(move || {
+                        let r = std::panic::catch_unwind(|| mods::gb_mod(*id)).unwrap_or_else(|_| Err("internal error".into()));
+                        let mut f = found.lock().unwrap_or_else(|e| e.into_inner());
+                        match r {
+                            Ok(x) => {
+                                f.0.insert(*id, x);
+                            }
+                            Err(e) => f.1.push((title.clone(), e)),
+                        }
+                    });
+                }
+            });
+        }
+        let (remote, failed) = found.into_inner().unwrap_or_else(|e| e.into_inner());
+        // Every mod failed (offline, or GameBanana down): say it once.
+        let failed: Vec<String> = if !failed.is_empty() && remote.is_empty() {
+            vec!["GameBanana could not be reached".to_string()]
+        } else {
+            failed.into_iter().map(|(t, e)| format!("{t}: {e}")).collect()
+        };
+        Ok((checked, remote, failed))
+    }));
+}
+
+/// The newer upload for an installed mod, from the last check.
+fn update_of<'a>(remote: &'a Remote, m: &Mod) -> Option<(&'a GbMod, GbFile)> {
+    let (gm, files) = remote.get(&m.info.gamebanana_id?)?;
+    mods::update_for(m, files).map(|f| (gm, f))
+}
+
+fn update_label(m: &Mod, gm: &GbMod, f: &GbFile) -> String {
+    let to = if !f.version.is_empty() { f.version.clone() } else { gm.version.clone() };
+    let from = &m.info.version;
+    if !to.is_empty() && !from.is_empty() && !to.eq_ignore_ascii_case(from) {
+        format!("Update: {from} → {to}")
+    } else if !to.is_empty() && from.is_empty() {
+        format!("Update: {to}")
+    } else {
+        format!("Update: new upload {}", day(f.date))
+    }
 }
 
 fn start_install(ui: &mut Ui, name: String, m: GbMod, f: GbFile, dir: PathBuf, then: Later) {
@@ -249,7 +396,7 @@ fn start_install(ui: &mut Ui, name: String, m: GbMod, f: GbFile, dir: PathBuf, t
         p.discard();
         r.map(Step::Done)
     });
-    ui.jobs.push(Job { name, gb: Some(id), slot, then });
+    ui.jobs.push(Job { name, gb: Some(id), update: None, file: None, slot, then });
 }
 
 /// Start the first of the files that waited for an install of the same mod,
@@ -260,6 +407,64 @@ fn start_next(ui: &mut Ui, mut then: Later, dir: &std::path::Path) {
     if !then.is_empty() {
         let (name, m, f) = then.remove(0);
         start_install(ui, name, m, f, dir.to_path_buf(), then);
+    }
+}
+
+/// Update an installed mod: straight to the new file, or ask which file when
+/// the page holds more than one mod and the installed file is unknown.
+fn request_update(ui: &mut Ui, old: Mod, m: GbMod, f: GbFile) {
+    let files = ui.remote.get(&m.id).map(|(_, f)| f.clone()).unwrap_or_default();
+    if mods::update_needs_choice(&old, &files) {
+        // One file: an update replaces one copy, so nothing is ticked and nothing marked.
+        let n = files.len();
+        ui.asks.push_back(Ask::File { m, files, all: false, picked: vec![false; n], installed: vec![false; n], update: Some(old) });
+    } else {
+        start_update(ui, old, m, f);
+    }
+}
+
+/// Queue an update; `pump_updates` starts it when a download slot is free.
+fn start_update(ui: &mut Ui, old: Mod, m: GbMod, f: GbFile) {
+    ui.queued.push_back((old, m, f));
+}
+
+/// Start queued updates: at most `UPDATES_AT_ONCE` downloads at a time, and
+/// one at a time per GameBanana file, so two variants installed from one
+/// file do not download it twice at once.
+fn pump_updates(ui: &mut Ui) {
+    let mut i = 0;
+    while i < ui.queued.len() {
+        if ui.jobs.iter().filter(|j| j.file.is_some()).count() >= UPDATES_AT_ONCE {
+            return;
+        }
+        let file = ui.queued[i].2.id;
+        if ui.jobs.iter().any(|j| j.file == Some(file)) {
+            i += 1;
+            continue;
+        }
+        let (old, m, f) = ui.queued.remove(i).expect("in range");
+        let (name, id) = (old.info.title.clone(), m.id);
+        let target = old.clone();
+        let slot = spawn(move || {
+            // The game holds its code mods' DLLs: nothing can be replaced while it runs.
+            if crate::platform::game_running() {
+                return Err("Close the game to update".into());
+            }
+            let p = mods::gb_prepare(&m, &f)?;
+            if p.choices.is_empty() {
+                p.discard();
+                return Err("the new download has nothing this engine can use".into());
+            }
+            match p.same_variant(&target.info) {
+                Some(i) => {
+                    let r = mods::finish_update(&p, i, &target);
+                    p.discard();
+                    r.map(Step::Done)
+                }
+                None => Ok(Step::Choose(p)),
+            }
+        });
+        ui.jobs.push(Job { name, gb: Some(id), update: Some(old), file: Some(file), slot, then: Vec::new() });
     }
 }
 
@@ -300,7 +505,7 @@ fn file_ask(m: GbMod, files: Vec<GbFile>, installed: &[Mod]) -> Ask {
     let rec = mods::pick(&files, "");
     let picked = (0..files.len()).map(|i| Some(i) == rec && !marks[i]).collect();
     let all = !files.iter().any(|f| f.playable());
-    Ask::File { m, files, all, picked, installed: marks }
+    Ask::File { m, files, all, picked, installed: marks, update: None }
 }
 
 /// The ticked files in `install_order`, by family: each family is one job
@@ -424,17 +629,23 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
     let mut done = false;
     let mut after: Later = Vec::new();
     match app.mods_ui.asks.front_mut()? {
-        Ask::File { m, files, all, picked, installed } => {
-            let rec = mods::pick(files, "");
+        Ask::File { m, files, all, picked, installed, update } => {
+            // An update recommends the file that follows the installed one.
+            let rec = mods::pick(files, update.as_ref().map(|u| u.info.file_name.as_str()).unwrap_or(""));
             let hidden = files.iter().filter(|f| !f.playable()).count();
             let n_picked = picked.iter().filter(|x| **x).count();
             let mut go = false;
+            let mut chosen: Option<GbFile> = None;
             let modal = widgets::modal(
                 ctx,
                 &p,
                 "mods-pick-file",
-                &format!("Which files of {}?", m.name),
-                "The mod's page offers several downloads. Old versions and source code are hidden; the recommended one fits this PC build. Each file you tick is installed into its own folder.",
+                &if update.is_some() { format!("Which file updates {}?", m.name) } else { format!("Which files of {}?", m.name) },
+                if update.is_some() {
+                    "The mod's page offers several downloads. Old versions and source code are hidden; the recommended one fits this PC build."
+                } else {
+                    "The mod's page offers several downloads. Old versions and source code are hidden; the recommended one fits this PC build. Each file you tick is installed into its own folder."
+                },
                 640.0,
                 |ui| {
                     for (i, f) in files.iter().enumerate() {
@@ -443,13 +654,16 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                         }
                         ui.horizontal(|ui| {
                             let mut on = picked[i];
-                            if widgets::toggle(ui, &p, &mut on).changed() {
+                            if update.is_none() && widgets::toggle(ui, &p, &mut on).changed() {
                                 picked[i] = on;
                             }
                             ui.vertical(|ui| {
+                                if update.is_some() {
+                                    ui.set_width((ui.available_width() - 110.0).max(200.0));
+                                }
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(RichText::new(&f.name).font(theme::mono(13.0)).color(if f.playable() { p.ink } else { p.muted }));
-                                    if installed[i] {
+                                    if installed[i] && update.is_none() {
                                         ui.label(RichText::new("(installed)").size(12.5).color(p.muted));
                                     }
                                     if Some(i) == rec {
@@ -466,6 +680,15 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                                 });
                                 ui.label(RichText::new(file_meta(f)).size(12.0).color(p.muted));
                             });
+                            // An update replaces one copy: one file, by its own button.
+                            if update.is_some() {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let b = if Some(i) == rec { widgets::primary_button(ui, &p, "Update", true) } else { widgets::button(ui, &p, "Update", true) };
+                                    if b.clicked() {
+                                        chosen = Some(f.clone());
+                                    }
+                                });
+                            }
                         });
                         ui.add_space(6.0);
                     }
@@ -475,10 +698,10 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                             *all = !*all;
                         }
                     }
-                    for w in same_mod_warning(files, picked, installed) {
+                    for w in if update.is_none() { same_mod_warning(files, picked, installed) } else { Vec::new() } {
                         ui.label(RichText::new(w).size(12.0).color(p.warn));
                     }
-                    if (0..files.len()).any(|i| picked[i] && installed[i]) {
+                    if update.is_none() && (0..files.len()).any(|i| picked[i] && installed[i]) {
                         ui.label(
                             RichText::new("A file marked (installed) is of a mod you have: it comes in as a second copy, switched off while the other is on.")
                                 .size(12.0)
@@ -489,7 +712,7 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                 |ui| {
                     ui.horizontal(|ui| {
                         let label = if n_picked > 1 { format!("Install {n_picked}") } else { "Install".to_string() };
-                        if widgets::primary_button(ui, &p, &label, n_picked > 0).clicked() {
+                        if update.is_none() && widgets::primary_button(ui, &p, &label, n_picked > 0).clicked() {
                             go = true;
                         }
                         if widgets::button(ui, &p, "Cancel", true).clicked() {
@@ -502,7 +725,18 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                     });
                 },
             );
-            if go && n_picked > 0 {
+            // Cancelled or closed: an update says it did not happen.
+            if chosen.is_none() && (done || modal.close) {
+                if let Some(u) = update.as_ref() {
+                    message = Some((format!("{} was not updated", u.info.title), Tone::Neutral));
+                }
+            }
+            if let (Some(f), Some(old)) = (chosen, update.clone()) {
+                let m = m.clone();
+                done = true;
+                // The front is still this question; it goes below.
+                start_update(&mut app.mods_ui, old, m, f);
+            } else if go && n_picked > 0 && update.is_none() {
                 done = true;
                 // Each family is its own job, side by side; the front is still this question, it goes below.
                 let have = app.mods_ui.scan.as_ref().map(|s| installed_families(&s.installed, m.id)).unwrap_or_default();
@@ -513,11 +747,14 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                 done = true;
             }
         }
-        Ask::Variant { name, p: prep, picked, then } => {
+        Ask::Variant { name, p: prep, picked, update, then } => {
+            let single = update.is_some();
             let mut go = false;
-            let title = format!("What to install from {name}?");
+            let title = if single { format!("Which version of {name} to update to?") } else { format!("What to install from {name}?") };
             let builds = prep.platform_builds();
-            let sub = if builds {
+            let sub = if single {
+                "The new download holds several versions; pick the one that replaces your copy."
+            } else if builds {
                 "The download holds several versions of the mod, one per platform. Only the ones you pick are installed; the recommended one fits this PC build."
             } else {
                 "The download holds several parts of the mod. Only the ones you pick are installed."
@@ -536,6 +773,10 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                         ui.horizontal(|ui| {
                             let mut on = picked[i];
                             if widgets::toggle(ui, &p, &mut on).changed() {
+                                // An update takes exactly one.
+                                if single && on {
+                                    picked.iter_mut().for_each(|x| *x = false);
+                                }
                                 picked[i] = on;
                             }
                             ui.vertical(|ui| {
@@ -562,7 +803,7 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                     }
                     let n = picked.iter().filter(|x| **x).count();
                     let ticked: Vec<usize> = (0..picked.len()).filter(|&i| picked[i]).collect();
-                    if n > 1 && prep.exclusive(&ticked) {
+                    if !single && n > 1 && prep.exclusive(&ticked) {
                         // As `mods::finish` decides: the recommended one when picked, else the first picked.
                         let on = if picked[rec] { rec } else { picked.iter().position(|x| *x).unwrap_or(0) };
                         let why = if on != rec { ", the first picked," } else if prep.choices[rec].fit > 0 { ", the recommended one," } else { "" };
@@ -576,7 +817,7 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                 |ui| {
                     ui.horizontal(|ui| {
                         let n = n_picked;
-                        let label = if n > 1 { format!("Install {n}") } else { "Install".to_string() };
+                        let label = if single { "Update".to_string() } else if n > 1 { format!("Install {n}") } else { "Install".to_string() };
                         if widgets::primary_button(ui, &p, &label, n > 0).clicked() {
                             go = true;
                         }
@@ -596,15 +837,19 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                 }
                 let prep = prep.clone();
                 let d = dir.to_path_buf();
+                let target = update.clone();
                 let name = name.clone();
                 let gb = prep.info.gamebanana_id;
                 let then = std::mem::take(then);
                 let slot = spawn(move || {
-                    let r = mods::finish(&prep, &picks, &d);
+                    let r = match &target {
+                        Some(old) => mods::finish_update(&prep, picks[0], old),
+                        None => mods::finish(&prep, &picks, &d),
+                    };
                     prep.discard();
                     r.map(Step::Done)
                 });
-                app.mods_ui.jobs.push(Job { name, gb, slot, then });
+                app.mods_ui.jobs.push(Job { name, gb, update: update.clone(), file: None, slot, then });
                 // The job owns the unpacked copy now: drop the question without discarding it.
                 app.mods_ui.asks.pop_front();
                 return None;
@@ -615,7 +860,7 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
                 done = true;
                 // Nothing of it installed: the files of the same mod waiting for it go ahead.
                 after = std::mem::take(then);
-                message = Some((format!("Nothing installed from {name}"), Tone::Neutral));
+                message = Some(if single { (format!("{name} was not updated"), Tone::Neutral) } else { (format!("Nothing installed from {name}"), Tone::Neutral) });
             }
         }
     }
@@ -628,7 +873,7 @@ fn ask_modal(app: &mut App, ctx: &egui::Context, dir: &std::path::Path) -> Optio
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let p = app.config.theme.palette();
-    widgets::page_header(ui, &p, "Mods", "RomFS mods laid over the game's files when it starts, from an archive, a folder or GameBanana.");
+    widgets::page_header(ui, &p, "Mods", "RomFS and code mods for the game, from an archive, a folder or GameBanana, kept up to date from GameBanana.");
     let Some(dir) = mods::dir() else { return };
     let mut messages: Vec<(String, Tone)> = Vec::new();
     app.mods_ui.refresh_scan(&dir);
@@ -671,8 +916,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.mods_ui.started = true;
         // It walks folders: never on the UI thread.
         std::thread::spawn(mods::clean_incoming);
+        if app.config.updates.mods && installed.iter().any(|m| m.info.gamebanana_id.is_some()) {
+            check_updates(&mut app.mods_ui, &installed);
+        }
     }
-    let busy = !app.mods_ui.jobs.is_empty() || !app.mods_ui.fetching.is_empty() || app.mods_ui.listing.is_some();
+    let running = app.mods_ui.scan.as_ref().is_some_and(|scan| scan.running);
+    let busy = !app.mods_ui.jobs.is_empty() || !app.mods_ui.removing.is_empty() || !app.mods_ui.queued.is_empty() || !app.mods_ui.fetching.is_empty() || app.mods_ui.listing.is_some() || app.mods_ui.checking.is_some();
     if busy {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
@@ -724,16 +973,33 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut finished = Vec::new();
     app.mods_ui.jobs.retain_mut(|j| match j.slot.lock().unwrap().take() {
         Some(r) => {
-            finished.push((j.name.clone(), r, std::mem::take(&mut j.then)));
+            finished.push((j.name.clone(), j.update.clone(), r, std::mem::take(&mut j.then)));
             false
         }
         None => true,
     });
     if !finished.is_empty() {
-        // An install changed the mods folder, even one that failed partway.
+        // An install or update changed the mods folder, even one that failed partway.
         app.mods_ui.invalidate_scan();
     }
-    for (name, r, then) in finished {
+    let mut removed = Vec::new();
+    app.mods_ui.removing.retain(|(_, title, slot)| match slot.lock().unwrap().take() {
+        Some(r) => {
+            removed.push((title.clone(), r));
+            false
+        }
+        None => true,
+    });
+    if !removed.is_empty() {
+        app.mods_ui.invalidate_scan();
+    }
+    for (title, r) in removed {
+        messages.push(match r {
+            Ok(to) => (format!("Moved {title} to {}", to.display()), Tone::Ok),
+            Err(e) => (e, Tone::Bad),
+        });
+    }
+    for (name, update, r, then) in finished {
         match r {
             Ok(Step::Done(i)) => {
                 messages.push(installed_message(&name, Ok(i)));
@@ -744,23 +1010,94 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let picked = (0..prep.choices.len()).map(|i| i == rec).collect();
                 mods::keep_stage(&prep);
                 // The files waiting for it wait for the variant question too.
-                app.mods_ui.asks.push_back(Ask::Variant { name, p: prep, picked, then });
+                app.mods_ui.asks.push_back(Ask::Variant { name, p: prep, picked, update, then });
             }
+            Err(e) if update.is_some() => messages.push((format!("Could not update {name}: {e}"), Tone::Bad)),
             Err(e) => {
                 messages.push(installed_message(&name, Err(e)));
                 start_next(&mut app.mods_ui, then, &dir);
             }
         }
     }
+    if let Some(r) = take(&app.mods_ui.checking) {
+        app.mods_ui.checking = None;
+        app.mods_ui.checked = Some(std::time::SystemTime::now());
+        match r {
+            Ok((checked, remote, failed)) => app.mods_ui.take_check(&checked, remote, failed),
+            Err(e) => app.mods_ui.check_failed = vec![e],
+        }
+    }
     let ctx = ui.ctx().clone();
     if let Some(m) = ask_modal(app, &ctx, &dir) {
         messages.push(m);
     }
+    pump_updates(&mut app.mods_ui);
 
     widgets::section(ui, &p, "Installed", |ui| {
         let list = &installed;
         if list.is_empty() {
             ui.label(RichText::new("No mods installed.").color(p.muted));
+        }
+        // Updates from GameBanana: the check, and the button that takes them all.
+        let updates: Vec<(Mod, GbMod, GbFile)> = list
+            .iter()
+            .filter(|m| !app.mods_ui.updating(m))
+            .filter_map(|m| update_of(&app.mods_ui.remote, m).map(|(g, f)| (m.clone(), g.clone(), f)))
+            .collect();
+        let from_gb = list.iter().filter(|m| m.info.gamebanana_id.is_some() && !m.info.no_updates).count();
+        if from_gb > 0 {
+            ui.horizontal(|ui| {
+                if app.mods_ui.checking.is_some() {
+                    ui.spinner();
+                    ui.label(RichText::new("Checking GameBanana for updates…").size(12.5).color(p.muted));
+                } else {
+                    let (tone, label) = match updates.len() {
+                        0 => (Tone::Ok, "Up to date".to_string()),
+                        1 => (Tone::Accent, "1 update".to_string()),
+                        n => (Tone::Accent, format!("{n} updates")),
+                    };
+                    if app.mods_ui.checked.is_some() {
+                        widgets::status_line(
+                            ui,
+                            &p,
+                            tone,
+                            &label,
+                            &format!("{from_gb} mods from GameBanana, checked {}.", crate::pages::saves::ago(app.mods_ui.checked)),
+                        );
+                    } else {
+                        widgets::status_line(ui, &p, Tone::Neutral, "Not checked", &format!("{from_gb} mods from GameBanana. Press Check for updates to ask GameBanana."));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if updates.len() > 1
+                        && hover(
+                            widgets::primary_button(ui, &p, &format!("Update all ({})", updates.len()), !running),
+                            !running,
+                            "Updates every mod listed with an update, three downloads at a time",
+                            "Close the game to update",
+                        )
+                        .clicked()
+                    {
+                        for (m, g, f) in updates.clone() {
+                            request_update(&mut app.mods_ui, m, g, f);
+                        }
+                    }
+                    if widgets::button(ui, &p, "Check for updates", app.mods_ui.checking.is_none()).clicked() {
+                        check_updates(&mut app.mods_ui, list);
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                let mut auto = app.config.updates.mods;
+                if widgets::toggle(ui, &p, &mut auto).changed() {
+                    app.config.updates.mods = auto;
+                }
+                ui.label(RichText::new("Check automatically when this page opens (asks GameBanana once per launcher start)").size(12.5).color(p.muted));
+            });
+            if !app.mods_ui.check_failed.is_empty() && app.mods_ui.checking.is_none() {
+                ui.label(RichText::new(format!("Could not read: {}", app.mods_ui.check_failed.join("; "))).size(12.0).color(p.warn));
+            }
+            ui.add_space(theme::SPACE_S);
         }
         // Code mods whose hook sites the built game lacks (installed or updated since the last build).
         // A problem in a .sites file stops the build: say which file and line before it is pressed.
@@ -780,17 +1117,43 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         }
+        let mut do_update: Option<(Mod, GbMod, GbFile)> = None;
+        let mut skip: Option<(Mod, u64)> = None;
         for m in list {
+            let update = updates.iter().find(|(u, _, _)| u.path == m.path);
+            let updating = app.mods_ui.updating(m);
+            let removing = app.mods_ui.removing(m);
             ui.horizontal(|ui| {
                 let mut on = m.enabled;
-                if widgets::toggle(ui, &p, &mut on).changed() {
+                // The running game holds a switched-on code mod's DLL: its folder cannot be renamed or
+                // moved. One switched on now would only load when the game starts again.
+                let held = running && m.has_code;
+                let toggled = ui
+                    .add_enabled_ui(!updating && !removing && !held, |ui| widgets::toggle(ui, &p, &mut on))
+                    .inner
+                    .on_disabled_hover_text(if updating {
+                        "Wait for the update to finish"
+                    } else if removing {
+                        "It is being moved to mods-removed"
+                    } else if m.enabled {
+                        "Close the game first: it holds this code mod's DLL"
+                    } else {
+                        "Close the game first: code mods load when the game starts"
+                    })
+                    .changed();
+                if toggled && !updating && !removing && !held {
                     match mods::set_enabled(m, on) {
                         Ok(_) => app.mods_ui.invalidate_scan(),
                         Err(e) => messages.push((e, Tone::Bad)),
                     }
                 }
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(&m.info.title).font(theme::semibold(14.0)).color(if m.enabled { p.ink } else { p.muted }));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&m.info.title).font(theme::semibold(14.0)).color(if m.enabled { p.ink } else { p.muted }));
+                        if let Some((_, g, f)) = update {
+                            widgets::pill(ui, &p, &update_label(m, g, f), Tone::Accent).on_hover_text(format!("{}\n{}", f.name, file_meta(f)));
+                        }
+                    });
                     let mut bits = vec![format!("{} files", m.files)];
                     if !m.info.author.is_empty() {
                         bits.push(format!("by {}", m.info.author));
@@ -800,6 +1163,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                     if !m.info.variant.is_empty() {
                         bits.push(m.info.variant.clone());
+                    }
+                    if m.info.gamebanana_id.is_some() && m.installed_at > 0 {
+                        bits.push(format!("installed {}", day(m.installed_at)));
+                    }
+                    if m.info.no_updates && m.info.gamebanana_id.is_some() {
+                        bits.push("updates not checked".into());
                     }
                     if !m.has_romfs && !m.has_exefs {
                         bits.push("no romfs folder: the game will not see it".into());
@@ -814,14 +1183,27 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::button(ui, &p, "Remove", true).on_hover_text("Moves the mod to the mods-removed folder").clicked() {
-                        messages.push(match mods::remove(m) {
-                            Ok(to) => {
-                                app.mods_ui.invalidate_scan();
-                                (format!("Moved {} to {}", m.info.title, to.display()), Tone::Ok)
-                            }
-                            Err(e) => (e, Tone::Bad),
-                        });
+                    // A switched-off code mod is not loaded, so it can go while the game runs.
+                    let locked = held && m.enabled;
+                    let can_remove = !updating && !removing && !locked;
+                    if hover(
+                        widgets::button(ui, &p, "Remove", can_remove),
+                        can_remove,
+                        "Moves the mod to the mods-removed folder",
+                        if updating {
+                            "Wait for the update to finish"
+                        } else if removing {
+                            "It is being moved to mods-removed"
+                        } else {
+                            "Close the game first: it holds this code mod's DLL"
+                        },
+                    )
+                    .clicked()
+                    {
+                        // A held folder is retried for a moment: never on the UI thread.
+                        let gone = m.clone();
+                        let slot = spawn(move || mods::remove(&gone));
+                        app.mods_ui.removing.push((m.name.clone(), m.info.title.clone(), slot));
                     }
                     if widgets::button(ui, &p, "Folder", true).clicked() {
                         let _ = std::process::Command::new("explorer").arg(&m.path).spawn();
@@ -829,12 +1211,52 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if !m.info.source.is_empty() && m.info.source.starts_with("http") {
                         ui.hyperlink_to("Page", &m.info.source);
                     }
+                    if removing {
+                        ui.spinner();
+                        ui.label(RichText::new("Removing…").size(12.5).color(p.muted));
+                    } else if updating {
+                        ui.spinner();
+                        ui.label(RichText::new("Updating…").size(12.5).color(p.muted));
+                    } else if let Some((_, g, f)) = update {
+                        if widgets::button(ui, &p, "Skip", true)
+                            .on_hover_text("Don't offer this upload again; a newer one will still be offered")
+                            .clicked()
+                        {
+                            skip = Some((m.clone(), f.date));
+                        }
+                        if hover(
+                            widgets::primary_button(ui, &p, "Update", !running),
+                            !running,
+                            "Downloads the new version and puts it in this mod's place. Your settings files are kept and the old copy goes to mods-removed.",
+                            "Close the game to update",
+                        )
+                        .clicked()
+                        {
+                            do_update = Some((m.clone(), g.clone(), f.clone()));
+                        }
+                    }
                 });
             });
             ui.add_space(4.0);
         }
+        if let Some((m, g, f)) = do_update {
+            request_update(&mut app.mods_ui, m, g, f);
+        }
+        if let Some((m, date)) = skip {
+            let mut info = m.info.clone();
+            info.skip_update = date;
+            // Keep the install date: an old copy is dated by this file, which is about to change.
+            if info.installed == 0 {
+                info.installed = m.installed_at;
+            }
+            match mods::write_info(&m.path, &info) {
+                // The skipped upload must stop showing as an update.
+                Ok(_) => app.mods_ui.invalidate_scan(),
+                Err(e) => messages.push((e, Tone::Bad)),
+            }
+        }
         ui.add_space(6.0);
-        ui.label(RichText::new("Changes apply the next time the game starts. When two mods change the same file, the one later in the list wins. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust.").size(12.5).color(p.muted));
+        ui.label(RichText::new("Changes apply the next time the game starts. When two mods change the same file, the one later in the list wins. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust. Close the game before updating a code mod: Windows keeps a running mod's DLL locked.").size(12.5).color(p.muted));
     });
 
     widgets::section(ui, &p, "Conflicts", |ui| {
@@ -936,13 +1358,33 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
         if let Some(i) = apply {
             let want = app.config.profiles[i].enabled.clone();
-            match mods::apply_profile(&installed, &want) {
-                Ok(n) => {
-                    app.config.profile = app.config.profiles[i].name.clone();
-                    app.mods_ui.invalidate_scan();
-                    messages.push((format!("Applied {}: {n} mods changed", app.config.profiles[i].name), Tone::Ok));
-                }
-                Err(e) => messages.push((e, Tone::Bad)),
+            let wanted = |m: &Mod| want.iter().any(|w| w.eq_ignore_ascii_case(&m.name));
+            // A mod being updated or removed keeps its state until that is done, and while the
+            // game runs no code mod is switched: it holds a switched-on one's DLL, and one
+            // switched on would only load when the game starts again.
+            let busy = |m: &Mod| app.mods_ui.updating(m) || app.mods_ui.removing(m);
+            let updating = installed.iter().filter(|m| busy(m) && wanted(m) != m.enabled).count();
+            let held = installed.iter().filter(|m| !busy(m) && running && m.has_code && wanted(m) != m.enabled).count();
+            let free: Vec<Mod> = installed.iter().filter(|m| !busy(m) && !(running && m.has_code)).cloned().collect();
+            let (n, failed) = mods::apply_profile(&free, &want);
+            app.mods_ui.invalidate_scan();
+            let mut left = Vec::new();
+            if updating > 0 {
+                left.push(format!("{updating} being updated or removed"));
+            }
+            if held > 0 {
+                left.push(format!("{held} code mod{} (close the game first)", if held == 1 { "" } else { "s" }));
+            }
+            let partial = !left.is_empty() || !failed.is_empty();
+            let left = if left.is_empty() { String::new() } else { format!(" ({} left as they are)", left.join(", ")) };
+            let name = app.config.profiles[i].name.clone();
+            if !partial {
+                app.config.profile = name.clone();
+                messages.push((format!("Applied {name}: {n} mods changed"), Tone::Ok));
+            } else {
+                // Only a profile that is wholly on is shown as applied.
+                let failed = if failed.is_empty() { String::new() } else { format!("; could not switch: {}", failed.join("; ")) };
+                messages.push((format!("{name} applied in part, so it is not marked as applied: {n} mods changed{left}{failed}"), Tone::Warn));
             }
         }
         if let Some(i) = overwrite {
@@ -975,7 +1417,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         p.discard();
                         r.map(Step::Done)
                     });
-                    app.mods_ui.jobs.push(Job { name, gb: None, slot, then: Vec::new() });
+                    app.mods_ui.jobs.push(Job { name, gb: None, update: None, file: None, slot, then: Vec::new() });
                 }
             }
             if widgets::button(ui, &p, "From folder…", true).clicked() {
@@ -991,7 +1433,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         let picks: Vec<usize> = (0..p.choices.len()).collect();
                         mods::finish(&p, &picks, &d).map(Step::Done)
                     });
-                    app.mods_ui.jobs.push(Job { name, gb: None, slot, then: Vec::new() });
+                    app.mods_ui.jobs.push(Job { name, gb: None, update: None, file: None, slot, then: Vec::new() });
                 }
             }
             if widgets::button(ui, &p, "Open mods folder", true).clicked() {
@@ -1020,7 +1462,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         for j in &app.mods_ui.jobs {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(format!("Installing {}…", j.name));
+                ui.label(if j.update.is_some() { format!("Updating {}…", j.name) } else { format!("Installing {}…", j.name) });
+            });
+        }
+        for (m, _, _) in &app.mods_ui.queued {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(format!("Waiting to update {}…", m.info.title)).color(p.muted));
             });
         }
         if !app.mods_ui.asks.is_empty() {
@@ -1043,6 +1491,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.spinner();
         }
         let mut fetch: Option<u64> = None;
+        let mut update: Option<(Mod, GbMod, GbFile)> = None;
         let mut another: Option<u64> = None;
         let mut again = app.mods_ui.again;
         egui::Grid::new("gb").num_columns(4).spacing([14.0, 6.0]).striped(true).show(ui, |ui| {
@@ -1054,14 +1503,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
                 ui.label(RichText::new(format!("♥ {}", m.likes)).color(p.muted));
                 let mine: Vec<&Mod> = installed.iter().filter(|x| x.info.gamebanana_id == Some(m.id)).collect();
+                let newer = mine.iter().filter(|x| !app.mods_ui.updating(x)).find_map(|x| update_of(&app.mods_ui.remote, x).map(|(g, f)| ((*x).clone(), g.clone(), f)));
                 let working = app.mods_ui.working_on(m.id);
-                if !mine.is_empty() {
+                if newer.is_some() {
+                    widgets::pill(ui, &p, "Update available", Tone::Accent);
+                } else if !mine.is_empty() {
                     widgets::pill(ui, &p, "Installed", Tone::Ok);
                 } else {
                     ui.label("");
                 }
                 if working {
                     ui.spinner();
+                } else if let Some(u) = newer {
+                    if hover(widgets::primary_button(ui, &p, "Update", !running), !running, "Downloads the new version and puts it in the installed copy's place", "Close the game to update").clicked() {
+                        update = Some(u);
+                    }
                 } else if m.kind == "Mod" {
                     let row = Row::of(app.mods_ui.pages.get(&m.id).map(|(_, f)| f.as_slice()));
                     if mine.is_empty() {
@@ -1113,6 +1569,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let Some(id) = fetch {
             app.mods_ui.fetching.push((id, spawn(move || mods::gb_mod(id))));
         }
+        if let Some((m, g, f)) = update {
+            request_update(&mut app.mods_ui, m, g, f);
+        }
         if app.mods_ui.more && widgets::button(ui, &p, "More", app.mods_ui.listing.is_none()).clicked() {
             app.mods_ui.page += 1;
             let n = app.mods_ui.page;
@@ -1142,6 +1601,7 @@ mod tests {
             has_exefs: false,
             has_code: false,
             has_patches: false,
+            installed_at: 0,
         }
     }
 
@@ -1164,6 +1624,28 @@ mod tests {
         ui.again = Some(Again { id: 7, started: 4 });
         ui.forget_again(21, 4, &[installed(8)]);
         assert_eq!(ui.again, None);
+    }
+
+    /// The update message names the entries a merge added and the defaults put beside the user's files.
+    #[test]
+    fn an_update_message_lists_merges_and_new_defaults() {
+        let i = Installed {
+            mods: vec!["Turn Control".into()],
+            exefs_only: false,
+            patch_only: false,
+            needs_build: false,
+            parts: false,
+            replaced: Some((PathBuf::from("bin/Turn Control (before update)"), 2)),
+            merged: vec![("exefs/settings.ini".into(), vec!["Controls/hold_key".into(), "Ui/scale".into()])],
+            new_beside: vec!["exefs/config.json".into()],
+            dropped: Vec::new(),
+            off_for: None,
+        };
+        let (text, tone) = installed_message("Turn Control", Ok(i));
+        assert!(matches!(tone, Tone::Ok));
+        assert!(text.starts_with("Updated Turn Control. Your settings were kept (2 files)."), "{text}");
+        assert!(text.contains(" exefs/settings.ini: 2 new entries added (Controls/hold_key, Ui/scale)."), "{text}");
+        assert!(text.contains(" exefs/config.json: the new version's default is beside it as config.json.new."), "{text}");
     }
 
     fn gfile(id: u64, name: &str, desc: &str, date: u64) -> GbFile {
@@ -1264,6 +1746,30 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The file picker of an update stays a single choice: an update
+    /// replaces one copy, so nothing is ticked, nothing is marked installed,
+    /// and each file has its own Update button.
+    #[test]
+    fn the_update_file_picker_stays_single() {
+        let mut old = with_file(9, "mymod-v1-main-mod.zip");
+        old.info.file_date = 100;
+        let files = vec![gfile(1, "mymod-v2-main-mod.zip", "", 200), gfile(2, "mymod-v2-optional-addon.zip", "", 200)];
+        let gm = gbmod(9, "My Mod");
+        let mut ui = Ui::default();
+        ui.remote.insert(9, (gm.clone(), files.clone()));
+        request_update(&mut ui, old, gm.clone(), files[0].clone());
+        assert_eq!(ui.asks.len(), 1, "the launcher can't tell main mod from add-on: it asks");
+        let Some(Ask::File { picked, installed: marks, update, .. }) = ui.asks.front() else { panic!() };
+        assert!(update.is_some());
+        assert!(!picked.contains(&true) && !marks.contains(&true));
+        // The installed page's files are known from the check: the row offers Install another file.
+        let mut ui = Ui::default();
+        ui.pages.insert(9, (gm.clone(), vec![files[0].clone()]));
+        ui.take_check(&[9], Remote::from([(9, (gm.clone(), files.clone()))]), Vec::new());
+        assert_eq!(Row::of(ui.pages.get(&9).map(|(_, f)| f.as_slice())), Row::Another, "the check's newer list replaces the page read before");
+        assert_eq!(ui.remote.get(&9).map(|(_, f)| f.len()), Some(2));
     }
 
     /// Install another file only once the page is known to hold several
