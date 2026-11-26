@@ -430,6 +430,9 @@ impl Default for Input {
 pub struct Updates {
     /// Ask GitHub for a newer release when the launcher starts.
     pub check: bool,
+    /// Ask GameBanana for newer uploads of installed mods when the Mods page
+    /// opens. Off by default: the page's Check for updates button asks on demand.
+    pub mods: bool,
     /// The tag the user turned down, so a dismissed update is not offered
     /// again on every start.
     pub skipped: String,
@@ -439,6 +442,7 @@ impl Default for Updates {
     fn default() -> Self {
         Updates {
             check: true,
+            mods: false,
             skipped: String::new(),
         }
     }

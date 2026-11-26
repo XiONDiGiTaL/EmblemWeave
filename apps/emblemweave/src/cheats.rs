@@ -84,6 +84,27 @@ pub mod process {
         }
     }
 
+    /// The ids of every running process, from one snapshot; `None` when
+    /// the snapshot cannot be taken.
+    pub fn pids() -> Option<Vec<u32>> {
+        let mut out = Vec::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap as isize == -1 {
+                return None;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                out.push(e.th32ProcessID);
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+        }
+        Some(out)
+    }
+
     impl Process {
         pub fn open(pid: u32) -> Option<Process> {
             let h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, 0, pid) };
@@ -145,6 +166,11 @@ pub mod process {
 
     /// No process list on this platform, so no game is found.
     pub fn find(_exe: &str) -> Option<u32> {
+        None
+    }
+
+    /// No process list on this platform.
+    pub fn pids() -> Option<Vec<u32>> {
         None
     }
 
