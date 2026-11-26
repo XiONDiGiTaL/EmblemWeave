@@ -107,7 +107,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | --- | --- |
 | 👑 **Creator** |  |
 | [XiØN](https://github.com/XiONDiGiTaL) | Creator, Project Lead, Architecture, Design & Direction. |
-| 🛠️ **Contributors** | People who have directly contributed code, fixes, features, or other development work to EmblemWeave. |
+| 🛠️ **Assists** | People who have directly contributed code, fixes, features, or other development work to EmblemWeave. |
 | [ranbinrang-rgb](https://github.com/ranbinrang-rgb) | Code Mods API and loader. |
 | [Mi-Kel](https://github.com/Mi-Kel) | Code Mods API V4 and F1 Mods interface. |
 | [moistman7](https://github.com/moistman7) | HDR, engine integration and rendering improvements. |
