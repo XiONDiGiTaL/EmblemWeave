@@ -45,6 +45,13 @@
  *     which is called as soon as the DLL is loaded. The game is not in memory yet: only log, edit_file and the version 3 helpers
  *     (mod folders, host files, zstd, memory) may be used there. Nonzero = the mod declines, as for nxmod_init.
  *
+ *   - (version 6) ask for a named interface table (get_interface): a lookup by name and version, so a feature is discovered
+ *     instead of inferred from the API version. Interface tables start with size and version and grow only at the end; names
+ *     are ASCII, case-sensitive and owned by a project prefix ("nxp.ui", "obeliskchamber.list"). Version 0 asks for any
+ *     compatible version. The shared name "nxp.nxmod" (version 1) answers with this table itself, so a plugin built on a
+ *     shared layer reaches hooks, guest calls, memory and file edits on every host that has version 6. Interface names and
+ *     registration rules: docs/MOD_INTERFACES.md.
+ *
  * Loading can be turned off with [fs] dll_mods = false. A DLL runs with the same rights as the game: install only mods you trust.
  */
 #ifndef NXRT_MOD_API_H
@@ -58,12 +65,18 @@
 extern "C" {
 #endif
 
-#define NXMOD_API_VERSION 4u
+#define NXMOD_API_VERSION 6u
 
 typedef void (*NxModInlineFn)(Ctx* c, uint64_t addr, void* user);
 typedef int (*NxModSiteFn)(Ctx* c, uint64_t addr, void* user);   /* midhook / entry hook: nonzero = handled (nxrt/hooks.h) */
 typedef void (*NxModFrameFn)(Ctx* c, void* user);
 typedef void (*NxModFunctionFn)(Ctx* c, void* user);   /* a function the game calls: arguments in c->x[0..7], the result goes in c->x[0] */
+
+/* (version 6) Looks up a named interface table. `version` is the interface version the caller was written for; 0 asks for any
+ * compatible version. Answers the table (at the requested version or a compatible later one), or NULL when this runtime does
+ * not provide that name at a compatible version. Names are ASCII and case-sensitive; tables start with size and version and
+ * grow only at the end (docs/MOD_INTERFACES.md). */
+typedef const void* (*NxModGetInterfaceFn)(const struct NxModApi* api, const char* name, uint32_t version);
 
 
 /* A game data file being set up (version 3, edit_file). data/size is the content as it stands: the game's file, or the file an
@@ -187,6 +200,15 @@ typedef struct NxModApi {
 
     /* 1 while the Mods tab is on screen (the game gets no input meanwhile). Any thread. */
     int (*panel_visible)(void);
+
+    /* ---- version 6 (check api->version >= 6 before use) ---- */
+
+    /* The interface table named `name` (docs/MOD_INTERFACES.md), or NULL. Version 0 asks for any compatible version; a version
+     * newer than the table this runtime provides is NULL. `get_interface(api, name, 0) != NULL` is how a mod asks whether an
+     * interface exists. The shared name "nxp.nxmod" (version 1) answers `api` itself: this table, not a copy, so its own
+     * `version` and `size` fields apply (this table keeps its version-then-size order; it is the one bridged table, not a new
+     * interface structure). May be called from nxmod_early and from any thread; a returned table stays valid for the run. */
+    NxModGetInterfaceFn get_interface;
 } NxModApi;
 
 typedef int (*NxModInitFn)(const NxModApi* api, const char* mod_dir);

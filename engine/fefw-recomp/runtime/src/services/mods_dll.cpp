@@ -27,6 +27,7 @@
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/mod_api.h"
+#include "nxrt/mod_interfaces.h"
 #include "nxrt/mod_panels.h"
 #include "nxrt/services_api.h"
 #include "services_internal.h"
@@ -474,32 +475,7 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
     Mod* m = new Mod;
     m->name = name;
     m->dll = dll;
-    m->api.version = NXMOD_API_VERSION;
-    m->api.size = sizeof(NxModApi);
-    m->api.game_id = game::info().id;
-    m->api.main_base = base;
-    m->api.log = &api_log;
-    m->api.hook_inline = &api_hook_inline;
-    m->api.hook_mid = &api_hook_mid;
-    m->api.hook_entry = &api_hook_entry;
-    m->api.hook_remove = &api_hook_remove;
-    m->api.call_guest = &api_call_guest;
-    m->api.is_mapped = &api_is_mapped;
-    m->api.on_frame = &api_on_frame;
-    m->api.is_function = &api_is_function;
-    m->api.make_function = &api_make_function;
-    m->api.make_writable = &api_make_writable;
-    m->api.edit_file = &api_edit_file;
-    m->api.mod_count = &api_mod_count;
-    m->api.mod_folder = &api_mod_folder;
-    m->api.read_file = &api_read_file;
-    m->api.write_file = &api_write_file;
-    m->api.zstd_decompress = &api_zstd_decompress;
-    m->api.zstd_compress = &api_zstd_compress;
-    m->api.alloc = &api_alloc;
-    m->api.free_mem = &api_free;
-    m->api.add_panel = &api_add_panel;
-    m->api.panel_visible = &api_panel_visible;
+    make_mod_api(&m->api, base);
     m->init = init;
     m->dir = u8(mod_dir);
     {
@@ -521,6 +497,39 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
 }
 
 }  // namespace
+
+void make_mod_api(::NxModApi* out, uint64_t base) {
+    if (!out) return;
+    ::NxModApi api{};
+    api.version = NXMOD_API_VERSION;
+    api.size = sizeof(::NxModApi);
+    api.game_id = game::info().id;
+    api.main_base = base;
+    api.log = &api_log;
+    api.hook_inline = &api_hook_inline;
+    api.hook_mid = &api_hook_mid;
+    api.hook_entry = &api_hook_entry;
+    api.hook_remove = &api_hook_remove;
+    api.call_guest = &api_call_guest;
+    api.is_mapped = &api_is_mapped;
+    api.on_frame = &api_on_frame;
+    api.is_function = &api_is_function;
+    api.make_function = &api_make_function;
+    api.make_writable = &api_make_writable;
+    api.edit_file = &api_edit_file;
+    api.mod_count = &api_mod_count;
+    api.mod_folder = &api_mod_folder;
+    api.read_file = &api_read_file;
+    api.write_file = &api_write_file;
+    api.zstd_decompress = &api_zstd_decompress;
+    api.zstd_compress = &api_zstd_compress;
+    api.alloc = &api_alloc;
+    api.free_mem = &api_free;
+    api.add_panel = &api_add_panel;
+    api.panel_visible = &api_panel_visible;
+    api.get_interface = &::nxrt::nxmod::get_interface;
+    *out = api;
+}
 
 bool site_list_known() { return lifted_sites().known; }
 

@@ -7,6 +7,7 @@
 #include <vector>
 
 struct NxModFile;    // nxrt/mod_api.h
+struct NxModApi;     // nxrt/mod_api.h
 
 namespace nxrt::services {
 
@@ -60,6 +61,9 @@ uint32_t display_vsync_handle();
 
 // ---- code mods (mods_dll.cpp, nxrt/mod_api.h) ------------------------------------------------------------------------------------
 namespace modapi {
+// The table a code mod is given (version 6, every function pointer): what load_dll_mods passes to nxmod_init and nxmod_early.
+// main_base is main's guest address. Exposed so tests can build the loader's exact table without a game running.
+void make_mod_api(::NxModApi* api, uint64_t main_base);
 // Loads the exefs/*.dll of the installed mods and calls their nxmod_init (once; later calls do nothing). base = main's guest address,
 // frame_update = the game's frame boundary relative to base (GamePlay::frame_update; 0 = no frame calls). Play mode start, main thread.
 void load_dll_mods(uint64_t base, uint64_t frame_update);
