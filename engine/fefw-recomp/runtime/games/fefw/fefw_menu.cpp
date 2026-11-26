@@ -17,7 +17,6 @@
 // frame generation are set up once, the frame-rate hooks are installed at start) says "restart", and the row shows the value in force until
 // then; nothing pretends to be live. A key set by an environment variable (NXRT_...) wins over the file: the row says so and is locked.
 #include "fefw_game.h"
-#include "nxrt/display_override.h"
 #include "fefw_presets.h"
 
 #include <algorithm>
@@ -707,12 +706,6 @@ constexpr const char* kHdrFormatNames[] = {"Auto", "HDR10", "scRGB"};
 
 // The output size an [fefw] output value means (0 x 0: the config's own), as fefw_res.cpp works it out: a window is fitted to 16:9 unless
 // it is wider and ultrawide is on; with ultrawide on a narrower size gets 16:9 inside it.
-// [vi] buffer_max_resolution leaves the game its 2160p display (fefw_res.cpp wide_native); handheld mode can't be known here.
-bool vi_2160p_allowed() {
-    const int64_t vi = config_get_int("vi", "buffer_max_resolution", -1);
-    return vi < 0 || vi > 2;
-}
-
 void output_size(const std::string& v, bool wide, bool wide_tex, int* w, int* h) {
     *w = *h = 0;
     const std::string o = lower(v);
@@ -729,14 +722,9 @@ void output_size(const std::string& v, bool wide, bool wide_tex, int* w, int* h)
         }
     } else std::sscanf(o.c_str(), "%dx%d", w, h);
     if (wide && *w > 0 && *h > 0 && static_cast<double>(*w) * 9.0 * 1.01 < static_cast<double>(*h) * 16.0) *h = (*w * 9 / 16) & ~1;
-    const bool native = wide && wide_tex && *w > 3840 && *w <= 7680 && *h > 0 && *h <= 2160 && wide_aspect(*w, *h) &&
-                        *w % 2 == 0 && *h % 2 == 0 && (static_cast<long long>(*h) * 3840) % *w == 0 &&
-                        static_cast<long long>(*h) * 3840 / *w >= 256 && vi_2160p_allowed();   // fefw_res.cpp wide_native
-    if (wide && wide_aspect(*w, *h) && (*w > 3840 || *h > 2160) && !native) {   // the shape within the 3840x2160 window textures
-        const double s = std::min(3840.0 / *w, 2160.0 / *h);
-        *w = 2 * static_cast<int>(std::lround(*w * s / 2));
-        *h = 2 * static_cast<int>(std::lround(*h * s / 2));
-    }
+    // fefw_res.cpp: up to 7680 / 5120 wide when the pool has room, else 3840 (fefw.ini's room and vi values)
+    res_fit_output_next(w, h, wide, wide_tex, std::clamp<int64_t>(config_get_int("fefw", "rt_pool_overflow_mb", 3072), 0, 3072),
+                        config_get_int("vi", "buffer_max_resolution", -1));
 }
 
 void resolution_group(Menu& m) {
@@ -768,7 +756,10 @@ void resolution_group(Menu& m) {
                       kWideNames, kWideVals, 2);
         ini_combo_row(m, *ini_key("fefw", "wide_textures"), "Ultrawide above 3840",
                       "With Ultrawide on, an output wider than the game's 3840 x 2160 display (5120 x 1440, 5120 x 2160, 7680 x 2160; up to 2160 "
-                      "high) is drawn at its own size. Off: it is drawn 3840 wide (5120 x 1440 at 3840 x 1080) and the window scales it up.",
+                      "high) is drawn at its own size: the game makes its window textures that wide when it starts. It needs the 2160p display "
+                      "(docked) and room past the render-target pool ([fefw] rt_pool_overflow_mb: 2048 MiB at least, about 2500 for "
+                      "7680 x 2160; the render is lowered when it would not fit). Off: it is drawn "
+                      "3840 wide (5120 x 1440 at 3840 x 1080) and the window scales it up.",
                       kWideTexNames, kWideVals, 2);
         ini_combo_row(m, *ini_key("fefw", "render_ratio"), "Render scale",
                       "The 3D render size per side as a share of the output; the game's upscaler (Graphics > Upscaler) fills the rest. "
@@ -803,12 +794,16 @@ void resolution_group(Menu& m) {
     if (ow > 0 && oh > 0) {
         int rw = ratio > 0 ? 2 * static_cast<int>(std::lround(ow * std::clamp(ratio, 0.25, 1.0) / 2)) : (ow + 1) / 2;
         int rh = ratio > 0 ? 2 * static_cast<int>(std::lround(oh * std::clamp(ratio, 0.25, 1.0) / 2)) : (oh + 1) / 2;
-        const bool capped = !res_rt_pool_extended() && static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2);
+        const int64_t room_ini = std::clamp<int64_t>(config_get_int("fefw", "rt_pool_overflow_mb", 3072), 0, 3072);
+        const bool capped = room_ini == 0 && static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2);
         if (capped) rw = (ow + 1) / 2, rh = (oh + 1) / 2;
-        if (wide_next && ow > 3840)   // fefw_res.cpp apply: kept apart from the sizes the back end widens
-            rh = nxrt::display_override::keep_apart_h(ow, oh, rw, rh);
+        int w34 = rw, h34 = rh;   // fefw_res.cpp apply: an output wider than 3840 keeps its render within the room past the pool
+        if (ow > 3840) res_fit_render(ow, oh, &w34, &h34, room_ini);
+        const bool capped34 = w34 != rw || h34 != rh;
+        rw = w34, rh = h34;
         ImGui::TextDisabled(tr("Next start: %d x %d rendered into %d x %d%s%s"), rw, rh, ow, oh,
-                            capped ? " (above 1440p the game's render-target pool holds half per side at most)" : "",
+                            capped ? " (above 1440p the game's render-target pool holds half per side at most)"
+                                   : capped34 ? " (held down to fit the room past the render-target pool)" : "",
                             wide_next && wide_aspect(ow, oh) ? (ow > 3840 ? ", ultrawide at its own size" : ", ultrawide") : "");
     }
     const WideInfo wi = wide_info();

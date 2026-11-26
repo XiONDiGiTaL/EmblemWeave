@@ -103,28 +103,35 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 
 ## Credits
 
-- **[XiØN](https://github.com/XiONDiGiTaL)**: Creator, Project Lead, Architecture & Design
-- [Goldoire](https://github.com/Goldoire): Creator of fefw-recomp, the baseline engine, and everyone who contributed to that project. Its repository is no longer online; EmblemWeave continues from the snapshot in `engine/`
-- [Obersteinn](https://github.com/Obersteinn): preserved the final fefw-recomp 0.2.0 release and its files after the original repository was removed, keeping the reference build, its build tools and its tested-dump manifest available ([docs/UPSTREAM.md](docs/UPSTREAM.md))
-- [ranbinrang-rgb](https://github.com/ranbinrang-rgb): code mods, the DLL interface (`nxrt/mod_api.h`), the mod hook-site format and the loader (issue #31, PR #32)
-- [Mi-Kel](https://github.com/Mi-Kel): Code Mods API V4 (the F1 menu's Mods tab and the panel widgets; PR #71)
-- [moistman7](https://github.com/moistman7): the GT tone-curve HDR patch for Fortune's Weave's `ImageProcessing` shader (PR #40), the fefw-recomp 0.2.3/0.2.4 engine integration (PR #52), and the replay/HDR/sampler improvements (PRs #53–#55)
-- [mmkzer0](https://github.com/mmkzer0): the build_game.cmd parse error, the overlay path spelling, the
-  dependency report, the loading card, the Vulkan device scan and the build PATH (PRs #81, #83, #85, #87, #89, #91)
-- [metrist38](https://github.com/metrist38/fefw-recomp): maintains the fefw-recomp fork that supplies updates beyond the original 0.2.0
-- [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) (MIT): shader translator
-- [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber): another fork based on fefw-recomp, with updates beyond 0.2.0. We are in full support of others extending the life of the original beyond its development
-- [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause) and [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause): the host video decoders the baseline build links
-- [FFmpeg](https://ffmpeg.org/) (GPL shared build): the optional AV1 movie decoder, shipped as `upscalers\ffmpeg` with its GPL text, hashes and source links
-- [roxmltree](https://github.com/RazrFalcon/roxmltree) (MIT / Apache-2.0) reads Cheat Engine tables; [windows-sys](https://github.com/microsoft/windows-rs) (MIT / Apache-2.0) reaches the game's memory and the controller
-- [GameBanana](https://gamebanana.com/mods/games/26274) hosts the mods the Mods page lists; each mod belongs to its author
-- [egui](https://github.com/emilk/egui): the launcher interface
-- [libm](https://github.com/rust-lang/libm): musl's math library in Rust
-- [lz4_flex](https://github.com/PSeitz/lz4_flex) and [ruzstd](https://github.com/KillingSpark/zstd-rs): decompression
-- [Unicorn](https://www.unicorn-engine.org): the independent CPU model used in development
-- [zbic](https://github.com/kinnay/zbic): the ZBIC decoder used by the decode helper
+| | |
+| --- | --- |
+| 👑 **Creator** |  |
+| [XiØN](https://github.com/XiONDiGiTaL) | Creator, Project Lead, Architecture, Design & Direction. |
+| 🛠️ **Assists** | People who have directly contributed code, fixes, features, or other development work to EmblemWeave. |
+| [ranbinrang-rgb](https://github.com/ranbinrang-rgb) | Code Mods API and loader. |
+| [Mi-Kel](https://github.com/Mi-Kel) | Code Mods API V4 and F1 Mods interface. |
+| [moistman7](https://github.com/moistman7) | HDR, engine integration and rendering improvements. |
+| [mmkzer0](https://github.com/mmkzer0) | Launcher fixes, build improvements and Vulkan integration. |
+| 🤝 **Kudos** | Individuals whose work, preservation efforts, or continued development helped make EmblemWeave possible. |
+| [Goldoire](https://github.com/Goldoire) | Original creator of fefw-recomp. |
+| [Obersteinn](https://github.com/Obersteinn) | Preserved the final original fefw-recomp release and its supporting files. |
+| [metrist38](https://github.com/metrist38/fefw-recomp) | [fefw-recomp](https://github.com/metrist38/fefw-recomp), A continuation of the original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
+| [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber) | [ObeliskChamber](https://github.com/xinthefreefallxai/ObeliskChamber), based on the same original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
+| 🧩 **Resources** | Projects, libraries, frameworks and tools that make EmblemWeave possible. |
+| [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) | Shader translation. |
+| [egui](https://github.com/emilk/egui) | Launcher interface. |
+| [dav1d](https://code.videolan.org/videolan/dav1d) | AV1 video decoding. |
+| [libvpx](https://chromium.googlesource.com/webm/libvpx) | Video decoding support. |
+| [FFmpeg](https://ffmpeg.org/) | Optional AV1 movie decoding. |
+| [Unicorn](https://www.unicorn-engine.org) | Independent CPU emulation for development verification. |
+| [roxmltree](https://github.com/RazrFalcon/roxmltree) | XML parsing. |
+| [windows-sys](https://github.com/microsoft/windows-rs) | Windows API bindings. |
+| [lz4_flex](https://github.com/PSeitz/lz4_flex) / [ruzstd](https://github.com/KillingSpark/zstd-rs) | Decompression. |
+| [libm](https://github.com/rust-lang/libm) | Mathematical functions. |
+| [zbic](https://github.com/kinnay/zbic) | ZBIC decoding. |
+| [GameBanana](https://gamebanana.com/mods/games/26274) | Mod discovery and hosting. |
 
-
+Goldoire's original fefw-recomp repository is no longer online; EmblemWeave continues from the snapshot in `engine/`. See [docs/UPSTREAM.md](docs/UPSTREAM.md).
 Copyright © 2026 [XiØN](https://github.com/XiONDiGiTaL). EmblemWeave is free software under the GNU General Public License,
 version 3 ([LICENSE](LICENSE)). Third-party code
 keeps its own licence; [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) lists it.

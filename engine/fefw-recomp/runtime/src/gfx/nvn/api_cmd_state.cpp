@@ -15,7 +15,6 @@
 //     subpixel precision bias.
 //   * BindCoverageModulationTable has no fields of its own: its record carries a zero P_U32 payload and the 16 floats as blob.
 // The layouts of the state objects are not read here, so no smo-recomp file was consulted for this family.
-#include "nxrt/display_override.h"
 #include <algorithm>
 #include <cstring>
 
@@ -208,85 +207,29 @@ void nvnCommandBufferSetSamplerPool(NVNcommandBuffer* c, const NVNsamplerPool* p
 }
 
 // ---- viewports, scissors, depth ranges ----------------------------------------------------------------------------------------
-// nxrt/display_override.h: while a target made wider than the game asked is bound, a rect from (0, 0) that covers the game's size of
-// it, or a fitted size, or the game's width, is widened to match. Other rects and other targets are recorded as given.
-static bool widen_rect(const CommandBuffer& cb, int x, int y, int* w, int* h) {
-    if (!cb.wide_gw || x != 0 || y != 0) return false;
-    if (*w == cb.wide_gw && *h == cb.wide_gh) {
-        *w = cb.wide_tw;
-        *h = cb.wide_th;
-        return true;
-    }
-    if (nxrt::display_override::widen_fitted(w, h)) return true;
-    if (*w == cb.wide_gw) {
-        *w = cb.wide_tw;
-        return true;
-    }
-    return false;
-}
-// The same for float rects; only rects of whole pixels are considered.
-static bool widen_rectf(const CommandBuffer& cb, float* r) {
-    int x = static_cast<int>(r[0]), y = static_cast<int>(r[1]), w = static_cast<int>(r[2]), h = static_cast<int>(r[3]);
-    if (static_cast<float>(x) != r[0] || static_cast<float>(y) != r[1] || static_cast<float>(w) != r[2] || static_cast<float>(h) != r[3])
-        return false;
-    if (!widen_rect(cb, x, y, &w, &h)) return false;
-    r[2] = static_cast<float>(w);
-    r[3] = static_cast<float>(h);
-    return true;
-}
-constexpr int kMaxRects = 16;   // NVN's viewport / scissor count
-
 void nvnCommandBufferSetViewport(NVNcommandBuffer* c, int x, int y, int w, int h) {
+    const float r[4] = {static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)};
     const P_Rects p{0, 1};
-    CommandBuffer* cb = cb_of(c);
-    with_rec(c, [&](CmdList& l) {
-        widen_rect(*cb, x, y, &w, &h);
-        const float r[4] = {static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h)};
-        l.emit(Op::SetViewports, p, r, static_cast<uint32_t>(sizeof r));
-    });
+    with_rec(c, [&](CmdList& l) { l.emit(Op::SetViewports, p, r, static_cast<uint32_t>(sizeof r)); });
 }
 void nvnCommandBufferSetViewports(NVNcommandBuffer* c, int first, int count, const float* rects) {
     if (count <= 0 || !rects) return;
     const P_Rects p{static_cast<uint32_t>(first), static_cast<uint32_t>(count)};
     const uint32_t bytes = static_cast<uint32_t>(count) * 16u;
-    CommandBuffer* cb = cb_of(c);
-    with_rec(c, [&](CmdList& l) {
-        float wr[kMaxRects * 4];
-        const float* out = rects;
-        if (cb->wide_gw && count <= kMaxRects) {
-            std::memcpy(wr, rects, bytes);
-            for (int i = 0; i < count; ++i) widen_rectf(*cb, &wr[i * 4]);
-            out = wr;
-        }
-        l.emit(Op::SetViewports, p, out, bytes);
-    });
+    with_rec(c, [&](CmdList& l) { l.emit(Op::SetViewports, p, rects, bytes); });
 }
 void nvnCommandBufferSetViewportSwizzles(NVNcommandBuffer*, int, int, const NVNviewportSwizzle*) {}   // not recorded
 
 void nvnCommandBufferSetScissor(NVNcommandBuffer* c, int x, int y, int w, int h) {
+    const int32_t r[4] = {x, y, w, h};
     const P_Rects p{0, 1};
-    CommandBuffer* cb = cb_of(c);
-    with_rec(c, [&](CmdList& l) {
-        widen_rect(*cb, x, y, &w, &h);
-        const int32_t r[4] = {x, y, w, h};
-        l.emit(Op::SetScissors, p, r, static_cast<uint32_t>(sizeof r));
-    });
+    with_rec(c, [&](CmdList& l) { l.emit(Op::SetScissors, p, r, static_cast<uint32_t>(sizeof r)); });
 }
 void nvnCommandBufferSetScissors(NVNcommandBuffer* c, int first, int count, const int* rects) {
     if (count <= 0 || !rects) return;
     const P_Rects p{static_cast<uint32_t>(first), static_cast<uint32_t>(count)};
     const uint32_t bytes = static_cast<uint32_t>(count) * 16u;
-    CommandBuffer* cb = cb_of(c);
-    with_rec(c, [&](CmdList& l) {
-        int32_t wr[kMaxRects * 4];
-        const int* out = rects;
-        if (cb->wide_gw && count <= kMaxRects) {
-            std::memcpy(wr, rects, bytes);
-            for (int i = 0; i < count; ++i) widen_rect(*cb, wr[i * 4], wr[i * 4 + 1], &wr[i * 4 + 2], &wr[i * 4 + 3]);
-            out = wr;
-        }
-        l.emit(Op::SetScissors, p, out, bytes);
-    });
+    with_rec(c, [&](CmdList& l) { l.emit(Op::SetScissors, p, rects, bytes); });
 }
 
 void nvnCommandBufferSetDepthRange(NVNcommandBuffer* c, float near_, float far_) {
@@ -382,19 +325,10 @@ void nvnCommandBufferSetRenderTargets(NVNcommandBuffer* c, int count, const NVNt
     }
     p.depth.tex = host_of<Texture>(depth);
     set_view(p.depth, depth_view);
-    CommandBuffer* cb = cb_of(c);
     with_rec(c, [&](CmdList& l) {
         for (uint32_t i = 0; i < p.count; ++i) l.hold(p.color[i].tex);
         l.hold(p.depth.tex);
         l.emit(Op::SetRenderTargets, p);
-        // nxrt/display_override.h: remember a widened target for the viewports and scissors that follow
-        const Texture* t = p.depth.tex;
-        for (uint32_t i = p.count; i-- > 0;)
-            if (p.color[i].tex) t = p.color[i].tex;   // the first colour target, else the depth target
-        cb->wide_gw = t ? t->wide_from_w : 0;
-        cb->wide_gh = t ? t->wide_from_h : 0;
-        cb->wide_tw = t && t->wide_from_w ? t->b.width : 0;
-        cb->wide_th = t && t->wide_from_w ? t->b.height : 0;
     });
 }
 
