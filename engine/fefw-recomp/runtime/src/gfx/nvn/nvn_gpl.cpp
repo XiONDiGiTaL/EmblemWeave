@@ -95,6 +95,7 @@ std::unordered_map<std::string, Entry> g_libs;             // node based: a refe
 std::deque<std::function<void()>> g_exact_q;   // [nvn] gpl_async: parts a deferred draw needs, exactly as it needs them (first in line)
 std::unordered_set<std::string> g_exact_pending;
 std::atomic<int64_t> g_frame_seen_ns{0};      // when the replay last saw the present count move
+std::atomic<uint64_t> g_frame_seen_presents{0};
 std::deque<std::function<void()>> g_pre_q;     // parts of the key file's pipelines (gpl_prebuild): after the hot programs, before the cold ones
 int g_pre_urgent = 0;                          // the first this many of g_pre_q were put in front because the game set their program (a draw is near)
 std::deque<std::function<void()>> g_task_q;    // gpl_queue_task (compute pipelines): after the exact parts, before the hot programs
@@ -852,9 +853,8 @@ void gpl_program_bound(const ShaderInfo* const stages[6]) {
 }
 
 void gpl_note_presents(uint64_t presents) {
-    static uint64_t last = 0;
-    if (presents == last) return;
-    last = presents;
+    if (presents == g_frame_seen_presents.load(std::memory_order_relaxed)) return;
+    g_frame_seen_presents.store(presents, std::memory_order_relaxed);
     g_frame_seen_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(), std::memory_order_relaxed);
 }
 
@@ -1347,6 +1347,8 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
 
 void gpl_shutdown() {
     gpl_stop();
+    g_frame_seen_ns.store(0, std::memory_order_relaxed);
+    g_frame_seen_presents.store(0, std::memory_order_relaxed);
     GplStats s;
     size_t n_rasters = 0, n_programs_seen = 0;
     {
