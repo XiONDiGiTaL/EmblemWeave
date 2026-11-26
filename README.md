@@ -109,7 +109,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | [XiØN](https://github.com/XiONDiGiTaL) | Creator, Project Lead, Architecture, Design & Direction. |
 | 🛠️ **Assists** | People who have directly contributed code, fixes, features, or other development work to EmblemWeave. |
 | [ranbinrang-rgb](https://github.com/ranbinrang-rgb) | Code Mods API and loader. |
-| [Mi-Kel](https://github.com/Mi-Kel) | Code Mods API V4 and F1 Mods interface. |
+| [Mi-Kel](https://github.com/Mi-Kel) | Code Mods API V4, F1 Mods interface & various PR additions/fixes. |
 | [moistman7](https://github.com/moistman7) | HDR, engine integration and rendering improvements. |
 | [mmkzer0](https://github.com/mmkzer0) | Launcher fixes, build improvements and Vulkan integration. |
 | 🤝 **Kudos** | Individuals whose work, preservation efforts, or continued development helped make EmblemWeave possible. |
@@ -117,6 +117,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | [Obersteinn](https://github.com/Obersteinn) | Preserved the final original fefw-recomp release and its supporting files. |
 | [metrist38](https://github.com/metrist38/fefw-recomp) | [fefw-recomp](https://github.com/metrist38/fefw-recomp), A continuation of the original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
 | [xinthefreefallxai](https://github.com/xinthefreefallxai/ObeliskChamber) | [ObeliskChamber](https://github.com/xinthefreefallxai/ObeliskChamber), based on the same original source with further improvements. [Trinity](https://github.com/XiONDiGiTaL/Trinity) collaborative partner. |
+| [Xarishark](https://github.com/Xarishark) | [RecompLauncher](https://recomplauncher.com/game/emblemweave) integration. |
 | 🧩 **Resources** | Projects, libraries, frameworks and tools that make EmblemWeave possible. |
 | [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) | Shader translation. |
 | [egui](https://github.com/emilk/egui) | Launcher interface. |
