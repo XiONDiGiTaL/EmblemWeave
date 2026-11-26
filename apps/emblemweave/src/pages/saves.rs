@@ -52,6 +52,10 @@ pub struct Ui {
     /// from `sources` so nothing offers them for import; the page names them so
     /// an empty profile is not mistaken for "no emulator was found".
     pub empty_sources: Vec<PathBuf>,
+    /// What the page last recovered from a backup-named slot. Kept on the page
+    /// until dismissed, so the note is still readable after the notification
+    /// has gone; Play only reports it in the launch message.
+    pub recovered: Option<String>,
     pub sources_title: Option<u64>,
     pub sources_at: f64,
     ids: Option<Arc<Ids>>,
@@ -156,6 +160,38 @@ fn megabytes(bytes: u64) -> String {
         format!("{} KB", bytes.div_ceil(1024).max(1))
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// A slot file that still carries the launcher's backups stamp
+/// (`1795325701-Auto`), with the slot the game would open, when that name is
+/// still free. Play recovers these before launching (#79); the page offers the
+/// same recovery where the file is listed.
+fn stamped_slot_of(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let slot = crate::saves::stamped_slot_name(name)?;
+    (!path.with_file_name(slot).exists()).then(|| slot.to_string())
+}
+
+/// Copy a stamped slot to the name the game opens and say what happened.
+fn recover_stamped(app: &mut App, path: &Path, name: &str, slot_name: &str) -> (String, Tone) {
+    match crate::saves::recover_stamped_slot(path) {
+        Ok(Some(_)) => {
+            app.saves_ui.editor = None;
+            app.saves_ui.profile_cache = None;
+            let note = format!(
+                "{name} is now {slot_name}; the original is untouched and the game can open it now."
+            );
+            app.saves_ui.recovered = Some(note.clone());
+            (note, Tone::Ok)
+        }
+        Ok(None) => (
+            format!(
+                "{name} was not recovered: {slot_name} already exists, or the file is not a save the game can open."
+            ),
+            Tone::Warn,
+        ),
+        Err(e) => (format!("Could not recover {name}: {e}"), Tone::Bad),
     }
 }
 
@@ -1683,6 +1719,16 @@ fn current_slots(
     running: bool,
 ) {
     widgets::section(ui, p, "Slots in the current save", |ui| {
+        // What the last recovery did, still on the page after the notification
+        // has gone: a stamped file fixed here must leave a trace beside the
+        // slots it was fixed for.
+        if let Some(note) = app.saves_ui.recovered.clone() {
+            widgets::status_line(ui, p, Tone::Ok, "Recovered a backup-named save", &note);
+            if widgets::button(ui, p, "Dismiss", true).clicked() {
+                app.saves_ui.recovered = None;
+            }
+            ui.add_space(6.0);
+        }
         let account = crate::saves::account_dir(save_dir);
         let slots = crate::saves::slots_with_sizes(save_dir);
         let account_text = format!("The save the game reads is {}:", account.display());
@@ -1715,12 +1761,27 @@ fn current_slots(
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 ui.label(crate::i18n::text(&name).font(theme::mono(13.0)).color(p.ink));
                 ui.label(crate::i18n::text(format!("{}, {}", megabytes(*size), ago(*when))).color(p.muted));
-                let open = app.saves_ui.editor.as_ref().is_some_and(|e| &e.slot.path == path);
-                if widgets::button(ui, p, if open { "Editing" } else { "Edit" }, !open).clicked() {
-                    if let Err(e) = open_slot(app, path) {
-                        *message = Some((format!("{name}: {e}"), Tone::Bad));
+                ui.horizontal(|ui| {
+                    let open = app.saves_ui.editor.as_ref().is_some_and(|e| &e.slot.path == path);
+                    if widgets::button(ui, p, if open { "Editing" } else { "Edit" }, !open).clicked() {
+                        if let Err(e) = open_slot(app, path) {
+                            *message = Some((format!("{name}: {e}"), Tone::Bad));
+                        }
                     }
-                }
+                    // A slot copied back out of Backups keeps the stamp, and
+                    // the game never opens it: offer the recovery Play does,
+                    // here, next to the file that needs it.
+                    if let Some(slot_name) = stamped_slot_of(path) {
+                        if widgets::button(ui, p, "Recover", !running)
+                            .on_hover_text(format!(
+                                "Copies this file to {slot_name}, the name the game opens; the original is left in place"
+                            ))
+                            .clicked()
+                        {
+                            *message = Some(recover_stamped(app, path, &name, &slot_name));
+                        }
+                    }
+                });
                 if widgets::button(ui, p, "Move to backups", !running)
                     .on_hover_text(crate::i18n::tr("The game offers a new game in this slot again; the file is kept in the backups folder"))
                     .clicked()
@@ -2263,6 +2324,7 @@ fn manage_dialog(
     let mut restore_slot: Option<PathBuf> = None;
     let mut export_slot: Option<PathBuf> = None;
     let mut archive_slot: Option<PathBuf> = None;
+    let mut recover_slot: Option<PathBuf> = None;
     let mut dismissed = false;
     let explicit_portrait = app.config.profile_portraits.get(&profile.name).cloned();
     let mut portrait_choice: Option<Option<String>> = None;
@@ -2410,6 +2472,16 @@ fn manage_dialog(
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(slot_name) = stamped_slot_of(&slot.path) {
+                                if widgets::button(ui, p, "Recover", !running)
+                                    .on_hover_text(format!(
+                                        "Copies this file to {slot_name}, the name the game opens; the original is left in place"
+                                    ))
+                                    .clicked()
+                                {
+                                    recover_slot = Some(slot.path.clone());
+                                }
+                            }
                             if widgets::button(ui, p, "Remove", true).clicked() {
                                 m.pending_delete = Some(slot.path.clone());
                             }
@@ -2554,6 +2626,16 @@ fn manage_dialog(
             }
             Err(e) => m.notice = Some((e, Tone::Bad)),
         }
+    }
+    if let Some(path) = recover_slot {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let slot_name = stamped_slot_of(&path).unwrap_or_default();
+        let (text, tone) = recover_stamped(app, &path, &name, &slot_name);
+        m.slots = None;
+        m.notice = Some((text, tone));
     }
     let dismissed = close || dismissed;
     app.config

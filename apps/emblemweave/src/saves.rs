@@ -1375,8 +1375,20 @@ fn is_slot_candidate(path: &Path) -> bool {
             .is_some_and(|n| !is_metadata_file(n) && !is_global_save_file(n))
 }
 
+/// A file the launcher named `<stamp>-<slot>`: what `archive_slot` and
+/// `backup_slot` write into `backups/`, and what a slot copied back out of
+/// that folder by hand keeps. The game opens only `<slot>`, so such a file is
+/// the slot it names, not an unknown one.
+pub fn stamped_slot_name(name: &str) -> Option<&str> {
+    let (stamp, slot) = name.split_once('-')?;
+    if stamp.len() < 9 || !stamp.bytes().all(|b| b.is_ascii_digit()) || slot.is_empty() {
+        return None;
+    }
+    Some(slot)
+}
+
 fn kind_of(name: &str) -> SlotKind {
-    let n = name.to_ascii_lowercase();
+    let n = stamped_slot_name(name).unwrap_or(name).to_ascii_lowercase();
     if n.starts_with("auto") {
         SlotKind::Auto
     } else if n.starts_with("chapter") || n.starts_with("manual") || n.starts_with("save") {
@@ -2322,6 +2334,21 @@ pub fn restore_profile(save_dir: &Path, backup_name: &str) -> Result<Profile, St
     })
 }
 
+/// Why a parsed slot must not be opened by the game, empty when it is intact:
+/// its own header and payload checksums, then the native zstd decode the game
+/// itself performs. The guard before Play and the recovery of a stamped slot
+/// both run exactly this, so a file that would crash the game (#77) is never
+/// promoted to a name it opens.
+fn slot_problems(slot: &crate::savefile::Slot) -> Vec<String> {
+    let mut problems = slot.verify();
+    if problems.is_empty() {
+        if let Err(e) = slot.native_check() {
+            problems.push(e);
+        }
+    }
+    problems
+}
+
 /// An autosave that could not be read, and where it was kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DamagedAutosave {
@@ -2346,12 +2373,7 @@ pub fn quarantine_damaged_autosave(
     }
     let reason = match crate::savefile::Slot::open(&slot) {
         Ok(parsed) => {
-            let mut problems = parsed.verify();
-            if problems.is_empty() {
-                if let Err(e) = parsed.native_check() {
-                    problems.push(e);
-                }
-            }
+            let problems = slot_problems(&parsed);
             if problems.is_empty() {
                 return Ok(None);
             }
@@ -2402,12 +2424,9 @@ pub fn repair_backup_named_slots(save_dir: &Path) -> Result<Vec<RepairedSlot>, S
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let Some((stamp, slot_name)) = name.split_once('-') else {
+        let Some(slot_name) = stamped_slot_name(name) else {
             continue;
         };
-        if stamp.len() < 9 || !stamp.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
         // Only a name the game itself opens: Auto and the manual chapter
         // saves. Global has a different header and Route_* is not a slot.
         if !matches!(kind_of(slot_name), SlotKind::Auto | SlotKind::Manual)
@@ -2415,26 +2434,54 @@ pub fn repair_backup_named_slots(save_dir: &Path) -> Result<Vec<RepairedSlot>, S
         {
             continue;
         }
-        let target = dir.join(slot_name);
-        if target.exists() {
-            continue;
-        }
-        if crate::savefile::Slot::open(&path).is_err() {
-            continue;
-        }
         found.push((slot_name.to_string(), path));
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    for (slot_name, from) in found {
-        let to = dir.join(&slot_name);
-        if to.exists() {
-            continue;
+    for (_, from) in found {
+        if let Some(to) = recover_stamped_slot(&from)? {
+            out.push(RepairedSlot { from, to });
         }
-        std::fs::copy(&from, &to)
-            .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))?;
-        out.push(RepairedSlot { from, to });
     }
     Ok(out)
+}
+
+/// Copy one `<stamp>-<slot>` file to the name the game opens, in the same
+/// folder. The Saves page offers this on a stamped slot where it is listed,
+/// and Play does the same for every stamped slot in the account folder (#79).
+/// Returns `None` when the file is not a stamped slot, is not a save the game
+/// can open (it must parse, pass its checksums and decode with the native zstd
+/// the game uses), or its game name already exists: an existing slot always
+/// wins, and the stamped original is never renamed or removed.
+pub fn recover_stamped_slot(path: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Ok(None);
+    };
+    let Some(slot_name) = stamped_slot_name(name) else {
+        return Ok(None);
+    };
+    if !matches!(kind_of(slot_name), SlotKind::Auto | SlotKind::Manual)
+        || !is_slot_candidate(Path::new(slot_name))
+    {
+        return Ok(None);
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let to = dir.join(slot_name);
+    if to.exists() {
+        return Ok(None);
+    }
+    // Only a copy the game could actually open is worth promoting: a file that
+    // parses but fails its checksums or the native zstd decode is the #77 crash
+    // the guard before Play moves aside, and copying it into `Auto` after that
+    // guard has run would hand the game the same bad frame under a new name.
+    let Ok(parsed) = crate::savefile::Slot::open(path) else {
+        return Ok(None);
+    };
+    if !slot_problems(&parsed).is_empty() {
+        return Ok(None);
+    }
+    std::fs::copy(path, &to)
+        .map_err(|e| format!("copying {} to {}: {e}", path.display(), to.display()))?;
+    Ok(Some(to))
 }
 
 /// What the launcher says when it recovers slots before Play: which file it
@@ -3444,6 +3491,208 @@ mod tests {
             repair_backup_named_slots(&save).unwrap().is_empty(),
             "a second Play finds nothing left to repair"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_slot_stamped_with_the_launcher_prefix_is_the_slot_it_names() {
+        assert_eq!(kind_of("Auto"), SlotKind::Auto);
+        assert_eq!(kind_of("1795325701-Auto"), SlotKind::Auto);
+        assert_eq!(kind_of("1795325701-Chapter_Ism_0_2"), SlotKind::Manual);
+        // A name the game does not open stays unknown, stamped or not.
+        assert_eq!(kind_of("1795325701-Route_Ism"), SlotKind::Other);
+        assert_eq!(kind_of("7-Auto"), SlotKind::Other, "not a launcher stamp");
+    }
+
+    #[test]
+    fn the_saves_page_recovers_a_stamped_slot_the_same_way_play_does() {
+        let root = temp("recover-stamped-page");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let stamped = dir.join("1795325701-Auto");
+        let bytes = valid_slot(b"recovered");
+        write_bytes(&stamped, &bytes);
+
+        let to = recover_stamped_slot(&stamped)
+            .unwrap()
+            .expect("the stamped slot is recovered");
+        assert_eq!(to, dir.join("Auto"));
+        assert_eq!(std::fs::read(&to).unwrap(), bytes, "the game reads the same bytes");
+        assert_eq!(std::fs::read(&stamped).unwrap(), bytes, "the original is left in place");
+        assert!(
+            recover_stamped_slot(&stamped).unwrap().is_none(),
+            "an existing slot always wins"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_stamped_slot_the_native_decoder_rejects_is_not_promoted() {
+        let root = temp("stamped-native-bad");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let payload = b"payload whose contents still decode";
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+        encoder.include_checksum(true).unwrap();
+        std::io::Write::write_all(&mut encoder, payload).unwrap();
+        let mut frame = encoder.finish().unwrap();
+        let checksum = frame.len() - 4;
+        frame[checksum] ^= 0xFF;
+        let stamped = dir.join("1795325701-Auto");
+        write_bytes(&stamped, &slot_with_frame(payload, frame));
+
+        // It parses and its own checksums pass: only the native decode, the
+        // one the guard before Play runs, sees the damage.
+        let parsed = crate::savefile::Slot::open(&stamped).unwrap();
+        assert!(parsed.verify().is_empty());
+        assert!(parsed.native_check().is_err());
+
+        assert!(repair_backup_named_slots(&save).unwrap().is_empty());
+        assert!(!dir.join("Auto").exists(), "a corrupt backup must not become Auto");
+        assert!(stamped.is_file(), "the stamped file is left where it was");
+        assert!(recover_stamped_slot(&stamped).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_stamped_slot_with_a_bad_payload_checksum_is_not_promoted() {
+        let root = temp("stamped-sum-bad");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let mut raw = slot_with_frame(b"payload", raw_zstd_frame(b"payload"));
+        raw[0x10C] ^= 0xFF;
+        let stamped = dir.join("1795325701-Manual");
+        write_bytes(&stamped, &raw);
+        assert_eq!(
+            crate::savefile::Slot::open(&stamped).unwrap().verify(),
+            vec!["payload checksum mismatch".to_string()]
+        );
+
+        assert!(repair_backup_named_slots(&save).unwrap().is_empty());
+        assert!(!dir.join("Manual").exists(), "a corrupt backup must not become Manual");
+        assert!(stamped.is_file(), "the stamped file is left where it was");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The exact sequence from issue #79 (KalHawke): the autosave is moved to
+    /// the backups folder from the Saves page, the player copies it back into
+    /// `000` by hand, closes the launcher and comes back. The move back keeps
+    /// the launcher's timestamp, so before the Play repair the game sees no
+    /// `Auto` at all; after it the same bytes are at `Auto`, and the stamped
+    /// file, the chapters, `Global` and the account metadata are untouched.
+    #[test]
+    fn an_autosave_moved_to_backups_and_back_by_hand_opens_after_a_restart() {
+        let root = temp("kalhawke-cycle");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let auto = dir.join("Auto");
+        let chapter = dir.join("Chapter_Ism_0_2");
+        let global = dir.join("Global");
+        let auto_bytes = valid_slot(b"four hours in");
+        let chapter_bytes = valid_slot(b"chapter two");
+        write_bytes(&auto, &auto_bytes);
+        write_bytes(&chapter, &chapter_bytes);
+        write_bytes(&global, b"global data");
+        let meta = account_meta_path(&save);
+        let meta_bytes = meta_text(FALLBACK_TITLE_ID, DEFAULT_USER).unwrap().into_bytes();
+        write_bytes(&meta, &meta_bytes);
+
+        // Saves page: "Move to backups" renames the file with the stamp.
+        let kept = archive_slot(&save, &auto, "1795325701").unwrap();
+        assert_eq!(kept, save.join("backups").join("1795325701-Auto"));
+        assert!(!auto.exists(), "the game would offer a new game now");
+
+        // The player copies it back into 000 by hand; Explorer keeps the name.
+        write_bytes(&dir.join("1795325701-Auto"), &std::fs::read(&kept).unwrap());
+        assert!(!auto.exists(), "the game still opens no autosave");
+        assert!(
+            slots(&save).iter().any(|(p, _)| p == &dir.join("1795325701-Auto")),
+            "the launcher lists the file it has to offer to recover"
+        );
+
+        // Play (or the page's Recover) repairs it before the game starts.
+        let repaired = repair_backup_named_slots(&save).unwrap();
+        assert_eq!(repaired.len(), 1, "the moved-back autosave is recovered");
+        assert_eq!(std::fs::read(&auto).unwrap(), auto_bytes, "the same playthrough opens");
+        assert_eq!(
+            std::fs::read(dir.join("1795325701-Auto")).unwrap(),
+            auto_bytes,
+            "the moved-back file is left in place"
+        );
+        assert_eq!(std::fs::read(&chapter).unwrap(), chapter_bytes, "the chapters are untouched");
+        assert_eq!(std::fs::read(&global).unwrap(), b"global data", "Global is untouched");
+        assert_eq!(std::fs::read(&meta).unwrap(), meta_bytes, "the account metadata is untouched");
+        assert_eq!(std::fs::read(&kept).unwrap(), auto_bytes, "the backups copy is not consumed");
+        assert!(
+            repair_backup_named_slots(&save).unwrap().is_empty(),
+            "a restart finds nothing left to repair"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The shape of msalgadob's `otherdata.zip` (#79): the account save holds
+    /// only `1795325701-Auto`, while the four-hour playthrough's chapters and
+    /// `Global` sit in a whole-save backup (`backups/<stamp>/000`). Restoring
+    /// that backup through the normal import, putting the moved-back autosave
+    /// back and running the Play repair yields one save with Auto, its
+    /// chapters and Global; the archive folder is read, never changed.
+    #[test]
+    fn a_stamped_autosave_beside_a_whole_save_backup_recovers_the_playthrough() {
+        let root = temp("msalgadob-shape");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let auto_bytes = valid_slot(b"the moved-back autosave");
+        write_bytes(&dir.join("1795325701-Auto"), &auto_bytes);
+        let meta = account_meta_path(&save);
+        write_bytes(
+            &meta,
+            meta_text(FALLBACK_TITLE_ID, DEFAULT_USER).unwrap().as_bytes(),
+        );
+
+        let backup = save.join("backups").join("1795393583");
+        let chapter_bytes = valid_slot(b"chapter saved after four hours");
+        write_bytes(&backup.join("000").join("Chapter_Ism_0_2"), &chapter_bytes);
+        write_bytes(&backup.join("000").join("Global"), b"global data");
+        let backup_chapter = std::fs::read(backup.join("000").join("Chapter_Ism_0_2")).unwrap();
+
+        // Saves page: "Restore" the whole-save backup. The stamped account save
+        // is moved aside, not deleted.
+        let b = Backup {
+            name: "1795393583".into(),
+            path: backup.clone(),
+            files: 2,
+            modified: None,
+        };
+        let restored = restore_backup_verified(&save, &b, FALLBACK_TITLE_ID, "1795394000").unwrap();
+        let kept = restored.backup.expect("the stamped account save is kept in backups");
+        assert_eq!(
+            std::fs::read(kept.join("000").join("1795325701-Auto")).unwrap(),
+            auto_bytes
+        );
+        assert_eq!(
+            std::fs::read(dir.join("Chapter_Ism_0_2")).unwrap(),
+            chapter_bytes,
+            "the chapters are installed where the game reads them"
+        );
+        assert_eq!(std::fs::read(dir.join("Global")).unwrap(), b"global data");
+
+        // The reporter's moved-back autosave goes into 000 again, then the Play
+        // repair copies it to `Auto` because the game opens only that name.
+        write_bytes(&dir.join("1795325701-Auto"), &auto_bytes);
+        assert_eq!(repair_backup_named_slots(&save).unwrap().len(), 1);
+        assert_eq!(std::fs::read(dir.join("Auto")).unwrap(), auto_bytes);
+        assert!(
+            empty_namespace_blocker(&save).is_none(),
+            "the recovered save is no longer an empty namespace"
+        );
+
+        assert_eq!(
+            std::fs::read(backup.join("000").join("Chapter_Ism_0_2")).unwrap(),
+            backup_chapter,
+            "the restored backup is read, never changed"
+        );
+        assert!(backup.join("000").join("Global").is_file());
+        assert!(meta.is_file(), "the account metadata is still there");
         let _ = std::fs::remove_dir_all(root);
     }
 

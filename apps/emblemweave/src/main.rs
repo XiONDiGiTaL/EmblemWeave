@@ -1602,6 +1602,35 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
     }
 }
 
+/// `--recover-saves`: copy every `<stamp>-<slot>` file in the game's account
+/// save to the name the game opens, the same repair Play runs before it starts
+/// the game (#79), and print what was recovered. It runs without the window so
+/// a save moved back out of `backups/` can be fixed when the launcher cannot
+/// open; nothing is renamed, deleted or overwritten.
+fn recover_saves_cli() -> i32 {
+    let Some(save_dir) = config::Config::save_dir() else {
+        eprintln!("APPDATA is not set");
+        return 1;
+    };
+    match saves::repair_backup_named_slots(&save_dir) {
+        Ok(repaired) if repaired.is_empty() => {
+            println!(
+                "no backup-named slot needed recovery in {}",
+                saves::account_dir(&save_dir).display()
+            );
+            0
+        }
+        Ok(repaired) => {
+            println!("{}", saves::repair_note(&repaired));
+            0
+        }
+        Err(e) => {
+            eprintln!("recover-saves: {e}");
+            1
+        }
+    }
+}
+
 /// `--verify-log [path]`: read an engine build log — the newest one, or the one
 /// named — and print the error that explains a failed build, the repair the
 /// launcher would try, and nothing else. It runs without the window, so a log
@@ -1983,6 +2012,9 @@ fn main() -> eframe::Result<()> {
         } else {
             1
         });
+    }
+    if args.iter().any(|a| a == "--recover-saves") {
+        std::process::exit(recover_saves_cli());
     }
     if let Some(i) = args.iter().position(|a| a == "--verify-log") {
         let path = args.get(i + 1).map(|s| s.as_str());
