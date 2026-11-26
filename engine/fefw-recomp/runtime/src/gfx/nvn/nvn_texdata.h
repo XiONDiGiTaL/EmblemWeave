@@ -66,6 +66,7 @@ struct PreparedTexture {
     bool from_cache = false;             // the data came from the BC7 disk cache
     bool provisional = false;            // a quick stand-in (TexCaps::provisional): replaced when the background job has the real data
     bool compact = false;                // some levels are given as rows (PreparedLevel::rows; TexCaps::compact_standin)
+    bool bc5_unavailable = false;        // the image is BC5, and this content has no readable BC5 cache entry: remake the image in another format
     // TexCaps::gpu_astc: data holds the untiled ASTC blocks, not `format`. level[] then describes the source (offset and size of a level's blocks in
     // data, all layers; row_blocks = ASTC blocks per row); format / block_w / block_h / block_bytes say what the GPU layer is to make of it.
     bool gpu_astc = false;
@@ -96,7 +97,8 @@ constexpr int kGpuEncoderVersion = 1;
 // no_disk ([nvn] tex_async = standin, render thread): no file is opened; only the entries this process has already read, peeked or written count
 // (an unseen RGBA8 / BC5 entry then gets a BC7 image, and its texture a BC7 transcode in the background: a little less exact, never a stall). With
 // bc1 the BC1 answer then comes from the alpha scan alone (a BC1 entry is only made for a texture the scan proves opaque).
-VkFormat cache_entry_format(const Texture& t, bool bc1 = false, bool no_disk = false);
+// allow_bc5 = false: skip BC5 entries (used when remaking a BC5 image whose content has no readable BC5 cache entry).
+VkFormat cache_entry_format(const Texture& t, bool bc1 = false, bool no_disk = false, bool allow_bc5 = true);
 // The calling thread's prepare_texture tells `fn(ctx, format)` the format the image needs as soon as it knows it, before reading the entry's data:
 // the entry's format when it is RGBA8 or BC5, VK_FORMAT_UNDEFINED for BC7 or no entry (the background job sets it; the render thread making the
 // texture's image then need not wait for the whole job, texprep::peek_entry_format). Null: off. Thread-local.
