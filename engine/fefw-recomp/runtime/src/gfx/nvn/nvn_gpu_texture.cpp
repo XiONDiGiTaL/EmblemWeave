@@ -2606,7 +2606,6 @@ bool gpu_untile_impl(Texture* t, TexGpu& g, Frame& f, const char** why, bool may
     e.serial = f.serial;
     return true;
 }
-}  // namespace
 
 // Remakes a transcoded BC5 image in place when its storage content no longer has a usable BC5 cache entry (#177).
 // Chooses the new format from the new content (RGBA8 entry, BC1 if active and opaque, or BC7) without BC5. Mutating
@@ -2690,6 +2689,7 @@ bool tex_remake_from_bc5(Texture* t, TexGpu* g) {
             t->id, static_cast<int>(chosen), is.base.width, is.base.height, is.levels, is.layers);
     return true;
 }
+}  // namespace
 
 // The caller copies or clears the image, so it needs the real content now: a stand-in would end up in the copy ([nvn] tex_async).
 void tex_ensure_exact(Texture* t, Frame& f) {
@@ -2707,6 +2707,9 @@ void tex_ensure_current(Texture* t, Frame& f) {
     NXFT_MIN("tex.ensure", 30000);
     TexGpu* g = tex_or_null(t);
     if (!g || g->depth) return;
+    // Keep image_format in sync if another live alias sharing this TexGpu remade the image in place.
+    if (t->image_format.load(std::memory_order_relaxed) != static_cast<uint32_t>(g->format))
+        t->image_format.store(static_cast<uint32_t>(g->format), std::memory_order_release);
     if (t->b.samples > 1 || target_is_multisample(t->b.target)) return;   // multisampled images are only ever rendered
     if (t->overflow) {   // host-backed storage (nvn_core.h): no bytes in the game's memory; the image starts cleared, then only the GPU writes it
         t->cpu_dirty.store(false);
