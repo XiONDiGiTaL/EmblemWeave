@@ -1108,7 +1108,7 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     if (!pg->viewed) { pg->mirror_tried = true; return nullptr; }
     const uint64_t budget = mirror_cap_bytes();
     if (budget == 0) { pg->mirror_tried = true; return nullptr; }
-    if (!nxrt::frame_limiter_unpaced()) {
+    if (!nxrt::frame_limiter_loading()) {
         static const int cap = static_cast<int>(std::max<int64_t>(0, config_get_int("nvn", "mirror_new_per_present", 4)));
         mirror_present_budget_tick();
         if (cap > 0 && g_mirror_new_count >= cap) return nullptr;   // defer to a later present without setting mirror_tried
@@ -1368,7 +1368,7 @@ VkBuffer mirror_chunk(Mirror& m, uint64_t page) {
             return c.buffer;
         }
     }
-    if (!nxrt::frame_limiter_unpaced()) {
+    if (!nxrt::frame_limiter_loading()) {
         static const int cap = static_cast<int>(std::max<int64_t>(0, config_get_int("nvn", "mirror_chunks_per_present", 4)));
         mirror_present_budget_tick();
         if (cap > 0 && g_mirror_chunks_new_count >= cap) return VK_NULL_HANDLE;

@@ -27,6 +27,9 @@ constexpr double kMaxMarginNs = 3000000.0;  // 3 ms: the spin never covers more 
 constexpr double kMaxCarryPeriods = 0.1;    // a late frame is made up for by at most this fraction of a period (no bursts)
 constexpr double kResyncPeriods = 4.0;      // a schedule more than this many periods behind restarts from now
 constexpr std::size_t kRing = 8192;         // frame intervals kept for stats()
+std::atomic<bool> g_loading{false};
+std::atomic<double> g_interval_hz{0.0};
+std::atomic<double> g_cap_floor{0.0};
 }  // namespace
 
 struct FrameLimiter::Impl {
@@ -144,13 +147,8 @@ uint64_t FrameLimiter::begin_frame() {
     return begin_frame_nohook();
 }
 
-namespace {
-std::atomic<bool> g_unpaced{false};
-std::atomic<double> g_interval_hz{0.0};
-std::atomic<double> g_cap_floor{0.0};
-}
-void frame_limiter_set_unpaced(bool on) { g_unpaced.store(on, std::memory_order_relaxed); }
-bool frame_limiter_unpaced() { return g_unpaced.load(std::memory_order_relaxed); }
+void frame_limiter_set_loading(bool on) { g_loading.store(on, std::memory_order_relaxed); }
+bool frame_limiter_loading() { return g_loading.load(std::memory_order_relaxed); }
 void set_present_interval_hz(double hz) { g_interval_hz.store(hz > 0.0 ? hz : 0.0, std::memory_order_relaxed); }
 double present_interval_hz_override() { return g_interval_hz.load(std::memory_order_relaxed); }
 void set_frame_cap_floor(double fps) { g_cap_floor.store(fps > 0.0 ? fps : 0.0, std::memory_order_relaxed); }
@@ -161,7 +159,7 @@ uint64_t FrameLimiter::begin_frame_nohook() {
     const uint64_t entry = now_ns();
     const double fps = effective_fps();
 
-    if (!(fps > 0.0) || g_unpaced.load(std::memory_order_relaxed)) {
+    if (!(fps > 0.0)) {
         std::lock_guard<std::mutex> lk(s.mu);
         s.has_sched = false;
         s.last_wait = 0;

@@ -1020,7 +1020,7 @@ double budget_now() {
     double b = s.budget_ms * s.frame_ms / (1000.0 / 30.0);
     // During paced gameplay (not loading), don't let slow frames inflate the ASTC GPU budget and compound GPU overload;
     // under high OS VRAM pressure (>= 92%), cap further so WDDM paging doesn't turn a pass into a 30-50 ms stall.
-    if (!nxrt::frame_limiter_unpaced()) {
+    if (!nxrt::frame_limiter_loading()) {
         b = std::min(b, std::min(s.budget_ms, 4.0));
         const int os_pct = nxrt::gfx::video_usage_percent();
         if (os_pct >= 92) b = std::min(b, 2.0);
