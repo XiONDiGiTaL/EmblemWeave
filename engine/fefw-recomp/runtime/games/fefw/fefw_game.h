@@ -79,6 +79,15 @@ void detail_install();
 std::string detail_summary();      // "" when nothing is changed
 // The render-target pool's allocator was given room past the pool ([fefw] rt_pool_overflow_mb): renders above half of a 2160p output fit.
 bool res_rt_pool_extended();
+// Shrinks an output size to what the runtime draws. wide ([fefw] ultrawide on) and wider than 16:9: the same shape, within 7680x2160 or
+// 5120x2160 when the render-target pool has room past it for that size, [fefw] wide_textures is not off and raising the window size has
+// not failed, else within 3840x2160. Any other size: each side within the game's 3840x2160. Sizes that fit are left as they are.
+void res_fit_output(int* w, int* h, bool wide);
+// The same for the next start (the F1 menu): native = [fefw] wide_textures != off, room_mb = [fefw] rt_pool_overflow_mb, vi_buffer_max =
+// [vi] buffer_max_resolution (-1 unset); this run's failures are not carried over.
+void res_fit_output_next(int* w, int* h, bool wide, bool native, int64_t room_mb, int64_t vi_buffer_max);
+// A render size for an output wider than 3840 that fits the room past the pool (room_mb): 3/4 per side, then half, if needed.
+void res_fit_render(int ow, int oh, int* rw, int* rh, int64_t room_mb);
 // fefw_crowd.cpp: [display] npc_distance (controls file; [fefw] npc_distance in the ini wins) scales the hub crowd's NPC model limit,
 // display distance and draw budget. Installed from play_install.
 void crowd_install(uint64_t base, double npc_distance);
@@ -90,6 +99,7 @@ std::string wide_mode();                             // [fefw] ultrawide: "auto"
 bool wide_aspect(int w, int h);                      // wider than 16:9 (by more than 1 %)
 void wide_install(uint64_t base, int out_w, int out_h);
 void wide_remove();
+void wide_output_fitted(int out_w, int out_h);       // the output was shrunk after wide_install, the same shape: what wide_info reports
 struct WideInfo {
     bool active = false;
     int out_w = 0, out_h = 0;
@@ -99,11 +109,6 @@ struct WideInfo {
     const char* names[kCounters] = {};
 };
 WideInfo wide_info();
-// fefw_res.cpp: [fefw] wide_textures = auto | off. An ultrawide output wider than the game's 3840x2160 display (up to 7680 wide and 2160
-// high, wider than 16:9, with h * 3840 / w a whole number: 5120x1440, 5120x2160, 7680x2160, 5760x1080, ...) is drawn at its own size
-// instead of scaled into 3840 wide, when the game gets the 2160p display (docked, [vi] buffer_max_resolution unset or 3).
-std::string wide_textures_mode();                    // "auto" or "off"
-bool wide_native(int w, int h);                      // with [fefw] ultrawide and wide_textures on: (w, h) is drawn at its own size
 
 // fefw_mouse.cpp: the game's own Joy-Con 2 mouse controls, read for the log, the tests and the F1 menu
 struct MouseInfo {

@@ -35,8 +35,8 @@
 //   movies       the movie draw (0x1904aa0) clears the target to opaque black and draws into the centred 16:9 viewport; a midhook in
 //                front of its tail-called draw draws, puts the viewport back to the whole target and returns.
 // Outputs narrower than 16:9 are not widened: fefw_res.cpp fits the output to 16:9 inside them and the window letterboxes it. Wider than
-// 3840 (the game's window textures) fefw_res.cpp draws it at its own size up to 7680x2160 ([fefw] wide_textures), else keeps the shape
-// at 3840 wide and the window scales it up.
+// 3840 (the game's window textures; 5120x1440) fefw_res.cpp raises their size, up to 7680x2160 ([fefw] wide_textures; 5120 or
+// 3840 wide when the room past the render-target pool is smaller or the raise fails, the window scaling it up).
 #include "fefw_game.h"
 
 #include <algorithm>
@@ -559,6 +559,13 @@ void wide_install(uint64_t base, int out_w, int out_h) {
     NXLOG_I(kTag, "ultrawide: output %dx%d (%.3f:1, %.4fx 16:9): wider camera, UI / movies / 2D effects in the centred %dx%d, %zu hooks "
                   "(sites after Kompas9's ultrawide patch)",
             out_w, out_h, static_cast<double>(out_w) / out_h, w.k, static_cast<int>(std::lround(out_h * 16.0 / 9.0)), out_h, w.hooks.size());
+}
+
+void wide_output_fitted(int out_w, int out_h) {
+    Wide& w = ws();
+    if (!w.active) return;
+    w.out_w = out_w;   // k and the camera aspect stay: the shape is the same
+    w.out_h = out_h;
 }
 
 void wide_remove() {

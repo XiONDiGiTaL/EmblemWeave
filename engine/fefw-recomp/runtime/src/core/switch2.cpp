@@ -5,7 +5,6 @@
 // remote-memory path (CanBootWithRemoteMemory returns 1): nn::gsv (the GraphicsSupervisor TIPC session), nn::nvsrv and
 // nn::gpu::sdk boot the console GPU driver. nxrt implements NVN on the host (nvnBootstrapLoader), so no driver is needed: the
 // boot calls answer on the host and return, and the guest's graphics allocator registration still runs as game code.
-#include "nxrt/display_override.h"
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -22,8 +21,6 @@
 #include "nxrt/video_codec.h"
 
 namespace nxrt {
-
-void (*g_vi_buffer_answer_hook)(uint32_t answer) = nullptr;   // nxrt/display_override.h
 
 namespace {
 
@@ -172,7 +169,6 @@ void vi_query_buffer_max_resolution(::Ctx* c) {
     const uint32_t v = forced >= 0 && forced <= 3 ? static_cast<uint32_t>(forced) : (services::amctl::docked() ? 3u : 1u);
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true)) NXLOG_I("switch2", "nn::vi::QueryDisplayBufferMaxResolution -> %u (%s)", v, v == 3 ? "2160p" : v == 2 ? "1440p" : v == 1 ? "1080p" : "720p");
-    if (g_vi_buffer_answer_hook) g_vi_buffer_answer_hook(v);
     if (c->x[0]) *reinterpret_cast<uint32_t*>(c->x[0]) = v;
     c->x[0] = 0;
 }

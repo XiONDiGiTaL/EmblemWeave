@@ -366,7 +366,6 @@ void nvnCommandBufferBeginRecording(NVNcommandBuffer* c) {
     if (cb->held_hint) cb->rec->held.reserve(cb->held_hint + cb->held_hint / 8);
     cb->recording = true;
     cb->tpool = nullptr;
-    cb->wide_tw = cb->wide_th = cb->wide_gw = cb->wide_gh = 0;   // nxrt/display_override.h: no target bound yet in this recording
     cb->ctl_group = false;
     cb->seg_start = cb->command_used;
     cb->rec_start = cb->last_block_addr + cb->command_used;
