@@ -3175,6 +3175,10 @@ pub fn build(
             ));
         }
     }
+    // The game keeps the scanned RomFS tree in romfs_cache.bin beside fefw.exe ([fs]
+    // romfs_cache). Set up is where a new or re-dumped game comes in, so the next start
+    // scans fresh rather than trusting a tree read from the old files.
+    let _ = std::fs::remove_file(builds.join("release").join("romfs_cache.bin"));
     // The build writes the engine's own icon into fefw.exe; Windows draws the
     // taskbar button from that resource, so ours goes in before anything runs it.
     let _ = brand_game();
@@ -7184,6 +7188,41 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         let mut adopt_a = a;
         assert!(adopt_from(&mut adopt_g, &mut adopt_a, &desired, &desired, &file));
         assert!((adopt_a.master - 2.0).abs() < 0.001, "the engine's 200% is adopted, not clamped away");
+    }
+
+    #[test]
+    fn play_names_the_release_and_the_f1_language_and_the_menu_can_still_change_them() {
+        let dir = std::env::temp_dir().join(format!("ew-launcher-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fefw.ini"), "[log]
+path = fefw.log
+").unwrap();
+        std::fs::write(dir.join("controls.ini"), "[meta]
+defaults_rev = 1
+").unwrap();
+        let (g, a, p) = (
+            crate::config::Graphics::default(),
+            crate::config::Audio::default(),
+            crate::config::Performance::default(),
+        );
+        let keys = LauncherKeys { update_check: false, ui_language: "zh" };
+        let mut applied = Values::new();
+        assert!(write_settings(&dir, &g, &a, &p, &keys, &mut applied).unwrap());
+        let ini = ini_parse(&std::fs::read_to_string(dir.join("fefw.ini")).unwrap());
+        assert_eq!(ini.get("update.version").map(String::as_str), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(ini.get("update.repo").map(String::as_str), Some(crate::updater::REPO));
+        assert_eq!(ini.get("update.check").map(String::as_str), Some("0"));
+        assert_eq!(ini.get("gfx.ui_language").map(String::as_str), Some("zh"));
+        let controls = std::fs::read_to_string(dir.join("controls.ini")).unwrap();
+        assert!(!controls.contains("[update]"), "the release check lives in fefw.ini only");
+
+        // The F1 menu picks another language: the next Play keeps it while the launcher's own setting is unchanged.
+        let text = std::fs::read_to_string(dir.join("fefw.ini")).unwrap();
+        std::fs::write(dir.join("fefw.ini"), set_ini_key(&text, "gfx", "ui_language", "ja")).unwrap();
+        write_settings(&dir, &g, &a, &p, &keys, &mut applied).unwrap();
+        let ini = ini_parse(&std::fs::read_to_string(dir.join("fefw.ini")).unwrap());
+        assert_eq!(ini.get("gfx.ui_language").map(String::as_str), Some("ja"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
