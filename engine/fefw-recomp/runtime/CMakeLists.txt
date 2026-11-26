@@ -14,17 +14,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 
-# The host services behind nxrt/platform.h (memory, threads, sync, time, files). Windows builds the whole runtime;
-# the POSIX side builds and tests on its own, so phase 2 of docs/LINUX.md can be compiled and run on Linux while the
-# rest of nxrt (the graphics shell, the game module, the launcher) is still Windows-only.
+# The host services behind nxrt/platform.h (memory, threads, sync, time, files). Windows and POSIX (Linux, SteamOS) each
+# have a backend; only the host's is compiled. Both build the whole runtime and are expected to keep doing so (docs/LINUX.md).
+# NXRT_PLATFORM_ONLY builds just the layer and its self-test, which is how a new backend is brought up without the rest.
 set(NXRT_PLATFORM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32")
 if(NOT WIN32)
     set(NXRT_PLATFORM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/posix")
 endif()
-option(NXRT_PLATFORM_ONLY "Build only nxrt's platform layer and its self-test" OFF)
+# Default: Windows builds the whole runtime; Linux and SteamOS build the platform layer and its self-test, the part of the
+# runtime that has a POSIX backend and a passing test today. -DNXRT_PLATFORM_ONLY=OFF builds the rest of the runtime on
+# Linux, which is the port in progress (docs/LINUX.md has the exact state per subsystem).
 if(NOT WIN32)
-    set(NXRT_PLATFORM_ONLY ON)
+    set(_nxrt_platform_only_default ON)
+else()
+    set(_nxrt_platform_only_default OFF)
 endif()
+option(NXRT_PLATFORM_ONLY "Build only nxrt's platform layer and its self-test" ${_nxrt_platform_only_default})
 if(NXRT_PLATFORM_ONLY)
     file(GLOB NXRT_PLATFORM_SOURCES CONFIGURE_DEPENDS "${NXRT_PLATFORM_DIR}/*.cpp")
     add_library(nxrt_platform STATIC ${NXRT_PLATFORM_SOURCES})
@@ -45,7 +50,7 @@ if(NXRT_PLATFORM_ONLY)
     add_executable(nxrt_platform_tests tests/platform_selftest.cpp)
     target_link_libraries(nxrt_platform_tests PRIVATE nxrt_platform)
     add_test(NAME platform COMMAND nxrt_platform_tests)
-    message(STATUS "nxrt: platform layer only (${NXRT_PLATFORM_DIR}); the full runtime is Windows-only, see docs/LINUX.md")
+    message(STATUS "nxrt: platform layer only (${NXRT_PLATFORM_DIR})")
     return()
 endif()
 
@@ -71,12 +76,19 @@ if(NOT EXISTS "${NXRT_RECOMP_INCLUDE}/nxrecomp/ctx.h" AND EXISTS "${CMAKE_CURREN
     set(NXRT_RECOMP_INCLUDE "${_nxrt_ri}" CACHE PATH "Directory that holds nxrecomp/" FORCE)
 endif()
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    # /EHsc: host C++ (ipc.cpp's service call, crash.cpp's terminate path) uses try/throw. Guest exceptions have their own layer in src/eh.
+if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    # clang-cl and MSVC. /EHsc: host C++ (ipc.cpp's service call, crash.cpp's terminate path) uses try/throw. Guest exceptions
+    # have their own layer in src/eh.
     add_compile_options(/EHsc /W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
                         -Wno-cast-function-type-strict -Wno-language-extension-token)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # GCC and Clang on Linux. -Wno-* for the same reasons the clang-cl line has them: generated and third-party code.
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type)
+    add_compile_definitions(_GNU_SOURCE)
 endif()
-add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
+endif()
 
 # Build performance options
 option(NXRT_UNITY_BUILD "Enable unity (jumbo) builds for faster compilation" OFF)
@@ -86,7 +98,15 @@ if(NXRT_PCH AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(NXRT_PCH OFF)
 endif()
 
-option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, src/gfx, cmake/gfx.cmake)" ON)
+# The graphics shell is portable in its core (SDL3 window/input, Vulkan, ImGui) but still carries Windows-only pieces
+# (DLSS/FFX/XeSS backends, the Win32 display-mode helper, the crash shortcut), so a Linux configure turns it off until those
+# are ported. Windows keeps it on, which is the regression configuration.
+if(WIN32)
+    set(_nxrt_gfx_default ON)
+else()
+    set(_nxrt_gfx_default OFF)
+endif()
+option(NXRT_BUILD_GFX "Build the graphics shell (SDL3 + Vulkan + NVN front end, src/gfx, cmake/gfx.cmake)" ${_nxrt_gfx_default})
 # Game modules (games/<id>/, docs/GAME_BOUNDARY.md): the title-specific code a game exe links. The test executables register one of them, so
 # the tests of the base run against that game's tables (title facts, sites, probes, hooks) as the game exe does.
 option(NXRT_BUILD_GAMES "Build the game modules in games/" ON)
@@ -99,6 +119,27 @@ endif()
 file(GLOB_RECURSE NXRT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER NXRT_SOURCES EXCLUDE REGEX "/src/gfx/")   # the graphics shell is its own library (cmake/gfx.cmake)
 list(FILTER NXRT_SOURCES EXCLUDE REGEX "/src/platform/")   # both backends live there; only this host's is compiled
+
+# Subsystems that are Windows-only today: they call Win32 APIs that have no POSIX backend yet, not portable features
+# that happen to include windows.h. A Linux build leaves them out, and docs/LINUX.md lists them with the replacement each
+# one needs. Anything not on this list is expected to compile and run on both platforms, and a Windows-only call added to
+# one of those files is a portability bug, not a configuration choice.
+if(NOT WIN32)
+    set(_nxrt_windows_only_sources
+        src/diag/crash.cpp src/diag/ftrace.cpp src/diag/memguard.cpp src/diag/registry.cpp src/diag/sampler.cpp
+        src/diag/symbols.cpp src/diag/watchdog.cpp src/diag/cpu_info.cpp src/diag/gauge.cpp src/diag/stackwalk.cpp
+        src/media/movie_mf.cpp src/media/movie_ffmpeg.cpp
+        src/services/album.cpp src/services/audio_devices.cpp src/services/audio_xaudio2.cpp
+        src/services/logfault.cpp src/services/mods_dll.cpp
+        src/eh/unwind.cpp
+        src/testtools/tt_core.cpp src/testtools/tt_game.cpp src/testtools/tt_runner.cpp src/testtools/tt_script.cpp
+    )
+    foreach(_s ${_nxrt_windows_only_sources})
+        list(FILTER NXRT_SOURCES EXCLUDE REGEX "/${_s}$")
+    endforeach()
+    list(LENGTH _nxrt_windows_only_sources _nxrt_excluded)
+    message(STATUS "nxrt: ${_nxrt_excluded} Windows-only source files are not part of this build (docs/LINUX.md)")
+endif()
 file(GLOB NXRT_PLATFORM_SOURCES CONFIGURE_DEPENDS "${NXRT_PLATFORM_DIR}/*.cpp")
 list(APPEND NXRT_SOURCES ${NXRT_PLATFORM_SOURCES})
 include(cmake/zstd_deps.cmake)   # zstd for the shader pack and the .nx RomFS reader
@@ -138,7 +179,13 @@ target_include_directories(nxrt PUBLIC include)
 if(EXISTS "${NXRT_RECOMP_INCLUDE}")
     target_include_directories(nxrt PUBLIC "${NXRT_RECOMP_INCLUDE}")
 endif()
-target_link_libraries(nxrt PUBLIC psapi nxrt_zstd)
+target_link_libraries(nxrt PUBLIC nxrt_zstd)
+if(WIN32)
+    target_link_libraries(nxrt PUBLIC psapi)
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(nxrt PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+endif()
 # Convert ON/OFF option() values to 1/0 for C++ #if expressions
 if(NXRT_UPSCALER_FSR)
     set(_nxrt_upscaler_fsr 1)
@@ -203,7 +250,9 @@ if(NXRT_BUILD_TESTS)
     endif()
     # A linker map next to the exe: the crash handler and the watchdog name host code from it. Keep host allocations low
     # (HIGHENTROPYVA:NO) so the guest ranges at 0x71_0000_0000 and up are free; a 64 MiB main stack.
-    target_link_options(nxrt_tests PRIVATE /MAP /STACK:67108864 /HIGHENTROPYVA:NO /DEBUG)
+    if(WIN32)
+        target_link_options(nxrt_tests PRIVATE /MAP /STACK:67108864 /HIGHENTROPYVA:NO /DEBUG)
+    endif()
 
     # One CTest entry per test group; the group names are listed by `nxrt_tests --list`. The list is read at configure
     # time from the NXTEST_GROUP lines of the test sources so that CMake needs no edit when a group is added.

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <set>
 
@@ -17,13 +18,15 @@
 #include "nxrt/services.h"
 #include "services_internal.h"
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
+#include <windows.h>   // LANGID and the language ids of host_language()
+#endif
 
 namespace nxrt::services {
 
@@ -187,8 +190,9 @@ int parse_region(const std::string& s, int def) {
     return def;
 }
 
-// The Windows display language as the closest Switch language, or false when Windows uses a language the Switch has none for.
-bool windows_language(Language& out) {
+// The host's display language as the closest Switch language, or false when it uses one the Switch has none for.
+#ifdef _WIN32
+bool host_language(Language& out) {
     const LANGID id = GetUserDefaultUILanguage();
     const WORD sub = SUBLANGID(id);
     switch (PRIMARYLANGID(id)) {
@@ -213,6 +217,36 @@ bool windows_language(Language& out) {
     default: return false;
     }
 }
+#else
+bool host_language(Language& out) {
+    // POSIX has no user-interface language call: the process locale decides (LC_ALL, then LC_MESSAGES, then LANG).
+    // "C"/"POSIX" and an empty environment mean no language rather than English.
+    const char* loc = std::getenv("LC_ALL");
+    if (!loc || !*loc) loc = std::getenv("LC_MESSAGES");
+    if (!loc || !*loc) loc = std::getenv("LANG");
+    if (!loc || !*loc) return false;
+    std::string l = lower(loc);
+    if (const size_t dot = l.find('.'); dot != std::string::npos) l.resize(dot);   // en_US.UTF-8 -> en_US
+    if (const size_t at = l.find('@'); at != std::string::npos) l.resize(at);      // sr_RS@latin -> sr_RS
+    if (l == "c" || l == "posix") return false;
+    const size_t us = l.find('_');
+    const std::string lang = l.substr(0, us);
+    const std::string terr = us == std::string::npos ? std::string() : l.substr(us + 1);
+    if (lang == "ja") out = Language::Japanese;
+    else if (lang == "en") out = (terr == "us" || terr == "ca") ? Language::AmericanEnglish : Language::BritishEnglish;
+    else if (lang == "fr") out = terr == "ca" ? Language::CanadianFrench : Language::French;
+    else if (lang == "de") out = Language::German;
+    else if (lang == "it") out = Language::Italian;
+    else if (lang == "es") out = (terr.empty() || terr == "es") ? Language::Spanish : Language::LatinAmericanSpanish;
+    else if (lang == "ko") out = Language::Korean;
+    else if (lang == "nl") out = Language::Dutch;
+    else if (lang == "pt") out = terr == "br" ? Language::BrazilianPortuguese : Language::Portuguese;
+    else if (lang == "ru") out = Language::Russian;
+    else if (lang == "zh") out = (terr == "tw" || terr == "hk" || terr == "mo") ? Language::TraditionalChinese : Language::SimplifiedChinese;
+    else return false;
+    return true;
+}
+#endif
 
 // A language the title supports: the wanted one, else its nearest sibling the title has (British for American English and so on), else
 // false.
@@ -243,11 +277,25 @@ bool supported_or_sibling(Language want, uint32_t mask, Language& out) {
 // here with the plain ini reader so the language is known before the play-mode settings are loaded.
 std::string controls_language() {
     const std::string rel = config_get_str("play", "controls", "controls.ini");
-    char full[MAX_PATH];
-    if (!GetFullPathNameA(rel.c_str(), MAX_PATH, full, nullptr)) return {};
-    char buf[64] = {};
-    GetPrivateProfileStringA("tweaks", "language", "", buf, sizeof buf, full);
-    return trim(buf);
+    std::error_code ec;
+    const std::filesystem::path path = std::filesystem::absolute(rel, ec);
+    if (ec) return {};
+    std::ifstream f(path);
+    if (!f) return {};
+    // The ini reader the Windows build used is GetPrivateProfileStringA; this is the same [tweaks] language lookup without Win32.
+    std::string line, section;
+    while (std::getline(f, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (line.front() == '[' && line.back() == ']') {
+            section = lower(trim(line.substr(1, line.size() - 2)));
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        if (section == "tweaks" && lower(trim(line.substr(0, eq))) == "language") return trim(line.substr(eq + 1));
+    }
+    return {};
 }
 
 uint32_t parse_language_mask(const std::string& s, uint32_t def) {
@@ -313,7 +361,7 @@ TitleProfile load_profile() {
         if (want.empty() || lower(want) == "auto") want = controls_language(), from = "controls.ini [tweaks] language";
         Language l = Language::AmericanEnglish, pick;
         bool named = !want.empty() && lower(want) != "auto" && parse_language(want, l);
-        if (!named) from = windows_language(l) ? "Windows" : "default";
+        if (!named) from = host_language(l) ? "host display language" : "default";
         if (supported_or_sibling(l, p.supported_languages, pick)) p.language = pick;
         else p.language = Language::AmericanEnglish;
         if (!named && !want.empty() && lower(want) != "auto") NXLOG_W("services", "language '%s' is not a language name; using %s", want.c_str(), from.c_str());
@@ -450,7 +498,10 @@ std::vector<RomfsMod> installed_mods() {
     }
     const std::filesystem::path abs = std::filesystem::absolute(root, ec);
     NXLOG_I("mods", "mods folder %s: %zu installed", u8str(ec ? root : abs).c_str(), out.size());
-    std::sort(out.begin(), out.end(), [](const RomfsMod& a, const RomfsMod& b) { return _stricmp(a.name.c_str(), b.name.c_str()) < 0; });
+    std::sort(out.begin(), out.end(), [](const RomfsMod& a, const RomfsMod& b) {   // case-insensitive, like _stricmp
+        return std::lexicographical_compare(a.name.begin(), a.name.end(), b.name.begin(), b.name.end(),
+                                            [](unsigned char x, unsigned char y) { return std::tolower(x) < std::tolower(y); });
+    });
     return out;
 }
 

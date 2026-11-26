@@ -2,6 +2,7 @@
 // The POSIX side of nxrt/platform.h, for the Linux port (docs/LINUX.md, phase 2). It answers the same contract as the
 // win32 file: mmap for the guest arenas, pthreads for threads, pthread mutexes and conditions for the runtime's short
 // critical sections, CLOCK_MONOTONIC for the tick and plain file descriptors for the file calls.
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
@@ -785,6 +786,13 @@ uint64_t tick_count_ms() {
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return static_cast<uint64_t>(ts.tv_sec) * 1000ull + static_cast<uint64_t>(ts.tv_nsec) / 1000000ull;
+}
+
+uintptr_t module_base() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&module_base), &info) != 0 && info.dli_fbase)
+        return reinterpret_cast<uintptr_t>(info.dli_fbase);
+    return 0;
 }
 
 [[noreturn]] void process_exit(int code) {

@@ -4,7 +4,6 @@
 // addressing is the lifter's ABI 2 (recomp/include/nxrecomp/ctx.h NX_IMPORT_ID).
 #include "nxrt/nxmodule.h"
 
-#include <windows.h>
 
 #include <atomic>
 #include <cstdarg>

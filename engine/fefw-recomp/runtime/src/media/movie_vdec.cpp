@@ -47,7 +47,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "nxrt/platform.h"
+#endif
 
 #include "nxrt/abi.h"
 #include "nxrt/config.h"
@@ -118,7 +122,11 @@ constexpr uint64_t kGameRunningFrames = 10;   // presented within kNoProgressLim
 bool g_log = false;
 int g_threads = 4;
 size_t g_ahead = 30;                        // decoded pictures held in host memory while no frame is free ([media] video_decode_ahead)
+#ifdef _WIN32
 int g_priority = THREAD_PRIORITY_ABOVE_NORMAL;   // of the decode worker and dav1d's task threads ([media] video_decoder_priority)
+#else
+int g_priority = 1;                             // > 0: raise them to the highest normal priority (nice -10 on Linux)
+#endif
 bool g_hwaccel = true;                      // FFmpeg's D3D11VA path ([media] movie_hwaccel)
 enum class Av1Backend { Dav1d, Ffmpeg };
 Av1Backend g_backend = Av1Backend::Dav1d;   // [media] movie_decoder
@@ -129,13 +137,18 @@ std::atomic<int> g_dav1d_threads{0};        // dav1d task threads alive (numbers
 void decoder_thread_begin(const char* name) {
     log_set_thread_name(name);
     diag_register_thread(name, nullptr);
-    if (g_priority == THREAD_PRIORITY_NORMAL) return;
+    if (g_priority <= 0) return;
+#ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), g_priority);
     THREAD_POWER_THROTTLING_STATE st = {};
     st.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
     st.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
     st.StateMask = 0;   // explicitly not throttled
     SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &st, sizeof st);
+#else
+    // No power throttling knob; the priority is the platform's (see docs/LINUX.md).
+    platform::thread_set_priority(platform::thread_self(), platform::ThreadPriority::Highest);
+#endif
 }
 
 void dav1d_thread_hook(int begin) {
@@ -592,12 +605,9 @@ void worker_main(Decoder* d) {
             out.emplace_back();
             out.back().eos = true;
         } else if (av1.dav1d || av1.ff) {
-            LARGE_INTEGER t0, t1, hz;
-            QueryPerformanceCounter(&t0);
+            const int64_t t0 = platform::now_ns();
             decode_packet(*d, av1, k, out);
-            QueryPerformanceCounter(&t1);
-            QueryPerformanceFrequency(&hz);
-            const uint64_t us = static_cast<uint64_t>((t1.QuadPart - t0.QuadPart) * 1000000 / hz.QuadPart);
+            const uint64_t us = static_cast<uint64_t>((platform::now_ns() - t0) / 1000);
             s_dec_us += us;
             s_dec_n++;
             for (uint64_t m = s_dec_max_us.load(); us > m && !s_dec_max_us.compare_exchange_weak(m, us);) {}

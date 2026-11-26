@@ -194,7 +194,7 @@ void install_thread_diag() {
     const std::string at = config_get_str("sched", "core_number_at", "");
     if (!at.empty()) {
         const size_t colon = at.find(':');
-        g_core_at_ret = _strtoui64(at.c_str(), nullptr, 16);
+        g_core_at_ret = std::strtoull(at.c_str(), nullptr, 16);
         g_core_at_val = colon == std::string::npos ? 0 : std::atoi(at.c_str() + colon + 1);
     }
     if (!g_log && !occupancy_wanted() && !g_core_at_ret && !g_names) return;

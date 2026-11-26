@@ -179,7 +179,7 @@ void init_locked() {
     std::string cpus = config_get_str("sched", "host_cpus", "");
     int slot = -1;
     if (!cpus.empty()) {
-        uint64_t want = _strtoui64(cpus.c_str(), nullptr, 16);
+        uint64_t want = std::strtoull(cpus.c_str(), nullptr, 16);
         if (want & usable) usable &= want;
         NXLOG_I("sched", "host_cpus %s: using processors %llx of %llx", cpus.c_str(), (unsigned long long)usable, (unsigned long long)proc);
     } else if (g_info.soft) {                   // soft: leave the physical core of processor 0 (DPCs, interrupts) out when enough remain

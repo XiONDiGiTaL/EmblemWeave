@@ -275,4 +275,8 @@ uint64_t tick_count_ms();
 // Exit the current process with the given exit code. Does not return.
 [[noreturn]] void process_exit(int code);
 
+// Base address of the running executable's image. The dispatch table stores code offsets relative to this anchor
+// (dispatch.cpp's flat table), so an address outside the image is recognised without a per-site lookup.
+uintptr_t module_base();
+
 }  // namespace nxrt::platform

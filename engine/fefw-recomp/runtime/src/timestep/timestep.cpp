@@ -6,7 +6,7 @@
 #include "nxrt/kernel.h"
 #include "nxrt/timestep.h"
 
-#include <windows.h>
+#include "nxrt/platform.h"
 
 #include <algorithm>
 #include <atomic>
@@ -119,16 +119,7 @@ namespace {
 
 constexpr const char* kTag = "timestep";
 
-double qpc_seconds() {
-    static const double inv = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        return 1.0 / static_cast<double>(f.QuadPart);
-    }();
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return static_cast<double>(t.QuadPart) * inv;
-}
+double qpc_seconds() { return static_cast<double>(platform::now_ns()) * 1e-9; }
 
 struct G {
     std::mutex mu;                      // statistics and the csv
@@ -188,26 +179,16 @@ double clock_now() {
 
 // Waits until the clock reaches target (seconds): a high-resolution timer for the bulk, a spin for the last part.
 void wait_until(double target) {
-    static HANDLE timer = [] {
-        HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        return h;
-    }();
     for (;;) {
         const double r = target - clock_now();
         if (r <= 0) return;
         if (r > 0.0012) {
-            const double sleep_s = r - 0.0008;
-            if (timer) {
-                LARGE_INTEGER due;
-                due.QuadPart = -static_cast<LONGLONG>(sleep_s * 1e7);
-                if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
-                    WaitForSingleObject(timer, 100);
-                    continue;
-                }
-            }
-            Sleep(static_cast<DWORD>(std::max(1.0, sleep_s * 1000.0)));
+            // The platform's wait is a real sleep (a high-resolution timer on Windows, clock_nanosleep on POSIX); the last
+            // ~1 ms is a yield loop, as before.
+            const int64_t ns = static_cast<int64_t>((r - 0.0008) * 1e9);
+            platform::sleep_ns(ns > 0 ? ns : 1);
         } else {
-            YieldProcessor();
+            platform::yield_cpu();
         }
     }
 }

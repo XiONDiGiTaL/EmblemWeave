@@ -6,7 +6,9 @@
 #include "nxrt/config.h"
 #include "nxrt/log.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -29,11 +31,16 @@ std::string lower_trimmed(std::string s) {
 // An SMBIOS string: HKLM\HARDWARE\DESCRIPTION\System\BIOS (Windows; Wine's wineboot fills it from SMBIOS), else the Linux DMI file
 // through Wine's Z: drive (on Windows that path does not exist).
 std::string smbios(const char* value, const char* dmi_file) {
+#ifdef _WIN32
     char buf[128] = {};
     DWORD n = sizeof buf;
     if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", value, RRF_RT_REG_SZ, nullptr, buf, &n) == ERROR_SUCCESS)
         return lower_trimmed(buf);
     std::ifstream f(std::string("Z:\\sys\\class\\dmi\\id\\") + dmi_file);
+#else
+    (void)value;   // the DMI files are the backend here; the registry key is Windows-only
+    std::ifstream f(std::string("/sys/class/dmi/id/") + dmi_file);
+#endif
     std::string s;
     if (f && std::getline(f, s)) return lower_trimmed(s);
     return {};
@@ -44,8 +51,12 @@ bool detect(std::string* why) {
     if (forced == "1" || forced == "on" || forced == "true" || forced == "yes") return *why = "[host] handheld = on", true;
     if (forced == "0" || forced == "off" || forced == "false" || forced == "no") return *why = "[host] handheld = off", false;
     char env[16] = {};
+#ifdef _WIN32
     const DWORD n = GetEnvironmentVariableA("SteamDeck", env, sizeof env);
     if (n > 0 && n < sizeof env && lower_trimmed(std::string(env, n)) == "1") return *why = "Steam's SteamDeck=1", true;
+#else
+    if (const char* env = std::getenv("SteamDeck"); env && lower_trimmed(env) == "1") return *why = "Steam's SteamDeck=1", true;
+#endif
     const std::string product = smbios("SystemProductName", "product_name"), family = smbios("SystemFamily", "product_family");
     // Steam Deck LCD / OLED. The Go S's product names are SKU codes (83N6, ...), its family names the model: "Legion Go S 8APU1".
     if (product == "jupiter" || product == "galileo" || family.rfind("legion go s", 0) == 0) return *why = "board " + product + " / " + family, true;

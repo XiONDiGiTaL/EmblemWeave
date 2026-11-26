@@ -4,7 +4,15 @@
 # build rather than next to the graphics shell.
 include(FetchContent)
 if(NOT DEFINED NXRT_DEPS_DIR)
-    set(NXRT_DEPS_DIR "$ENV{LOCALAPPDATA}/nxrt/deps" CACHE PATH "Where the pinned third-party sources are downloaded to")
+    # One cache per user, so a Windows and a Linux checkout of the same version share nothing but the URL and hash.
+    if(WIN32)
+        set(_nxrt_deps_default "$ENV{LOCALAPPDATA}/nxrt/deps")
+    elseif(DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
+        set(_nxrt_deps_default "$ENV{XDG_CACHE_HOME}/nxrt/deps")
+    else()
+        set(_nxrt_deps_default "$ENV{HOME}/.cache/nxrt/deps")
+    endif()
+    set(NXRT_DEPS_DIR "${_nxrt_deps_default}" CACHE PATH "Where the pinned third-party sources are downloaded to")
 endif()
 if(NOT COMMAND FetchContent_Declare)
     include(FetchContent)

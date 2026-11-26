@@ -3,7 +3,13 @@
 
 #include "nxrt/config.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+#include "nxrt/platform.h"
 
 #include <atomic>
 #include <cstdio>
@@ -34,8 +40,7 @@ bool g_to_stderr = true;
 bool g_stderr_all = false;
 uint64_t g_counts[kLevelCount] = {};
 unsigned g_since_flush = 0;
-long long g_freq = 1;
-long long g_t0 = 0;         // QueryPerformanceCounter at log_init
+int64_t g_t0 = 0;           // platform::now_ns() at log_init
 
 thread_local char t_name[64] = {};
 
@@ -94,11 +99,7 @@ void apply(const Resolved& r, bool only_if_uninit) {
     std::memset(g_counts, 0, sizeof g_counts);
     g_since_flush = 0;
 
-    LARGE_INTEGER freq{}, now{};
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&now);
-    g_freq = freq.QuadPart > 0 ? freq.QuadPart : 1;
-    g_t0 = now.QuadPart;
+    g_t0 = platform::now_ns();
 
     if (!r.path.empty()) {
         if (r.keep_previous) rotate_previous(r.path);
@@ -113,9 +114,7 @@ void apply(const Resolved& r, bool only_if_uninit) {
 }
 
 double seconds_since_init_locked() {
-    LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
-    return static_cast<double>(now.QuadPart - g_t0) / static_cast<double>(g_freq);
+    return static_cast<double>(platform::now_ns() - g_t0) * 1e-9;
 }
 
 }  // namespace
@@ -154,6 +153,7 @@ const char* log_path() {
 
 void log_set_thread_name(const char* name) {
     std::snprintf(t_name, sizeof t_name, "%s", name ? name : "");
+#ifdef _WIN32
     // Also the Windows thread description, so the [diag] budget thread table and external profilers see the runtime's worker names.
     using SetDescFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
     static const SetDescFn set_desc = reinterpret_cast<SetDescFn>(
@@ -165,6 +165,10 @@ void log_set_thread_name(const char* name) {
         w[i] = 0;
         set_desc(GetCurrentThread(), w);
     }
+#else
+    // The same name in the kernel's comm field, which top/htop and debuggers show (Linux keeps 15 characters).
+    if (t_name[0]) pthread_setname_np(pthread_self(), t_name);
+#endif
 }
 
 const char* log_thread_name() { return t_name; }
@@ -240,7 +244,7 @@ void logv(LogLevel l, const char* tag, const char* fmt, va_list ap) {
     std::lock_guard<std::recursive_mutex> g(g_mu);
     char prefix[256];
     std::snprintf(prefix, sizeof prefix, "[%10.6f %c t%lu %s] ", seconds_since_init_locked(), kLevelLetters[li],
-                  static_cast<unsigned long>(GetCurrentThreadId()), t_name[0] ? t_name : "-");
+                  static_cast<unsigned long>(platform::thread_id()), t_name[0] ? t_name : "-");
     std::string line = prefix;
     line += tag ? tag : "";
     line += ": ";

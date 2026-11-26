@@ -3,7 +3,11 @@
 // SuperMarioWonderRecomp runtime/src/loader.cpp (thunks, logging stub for unknown imports).
 #include "nxrt/dispatch.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
+
+#include "nxrt/platform.h"
 
 #include <algorithm>
 #include <bit>
@@ -71,9 +75,9 @@ inline uint64_t flat_index(uint64_t a) { return std::rotr(a - mem::kMainBase, 2)
 
 void flat_put(uint64_t guest_addr, GuestFn fn) {   // under g_write
     if (!nx_fn_flat) {
-        void* p = VirtualAlloc(nullptr, kFlatSpan, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (!p) return;
-        nx_fn_flat_host = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        void* p = platform::reserve(kFlatSpan);
+        if (!p || !platform::commit(p, kFlatSpan)) return;
+        nx_fn_flat_host = static_cast<uintptr_t>(platform::module_base());
         nx_fn_flat = static_cast<uint32_t*>(p);
         __atomic_store_n(&nx_fn_flat_n, kFlatSpan / 4, __ATOMIC_RELEASE);
     }
@@ -325,9 +329,10 @@ void host_callback_restore(uint32_t flags) { t_host_cb_flags = flags; }
 void trap(const char* what, uint64_t addr) {
     NXLOG_E("guest", "GUEST TRAP: %s (0x%llx)", what, static_cast<unsigned long long>(addr));
     log_flush();
+#ifdef _WIN32
     RaiseException(0xE0000001, EXCEPTION_NONCONTINUABLE, 0, nullptr);
-    TerminateProcess(GetCurrentProcess(), 2);
-    for (;;) {}
+#endif
+    platform::process_exit(2);
 }
 
 void dispatch_call(::Ctx* c, uint64_t addr) {

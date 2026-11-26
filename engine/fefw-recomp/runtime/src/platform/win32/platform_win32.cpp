@@ -568,6 +568,10 @@ uint64_t tick_count_ms() {
     return GetTickCount64();
 }
 
+uintptr_t module_base() {
+    return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+}
+
 [[noreturn]] void process_exit(int code) {
     ExitProcess(static_cast<UINT>(code));
 }
