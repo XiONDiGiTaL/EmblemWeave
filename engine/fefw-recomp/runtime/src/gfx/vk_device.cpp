@@ -62,9 +62,13 @@ VKAPI_ATTR VkResult VKAPI_CALL counted_allocate_memory(VkDevice d, const VkMemor
         uint64_t last = last_ms.load(std::memory_order_relaxed);
         if ((last == 0 || now - last >= 1000) && last_ms.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
             const uint64_t before = reported.exchange(n, std::memory_order_relaxed);
-            NXLOG_E("vk.memory", "allocation failed (%d), bytes %llu, live %lld (%llu failures since the last line, %llu in all)", int(r),
-                    (unsigned long long)info->allocationSize, (long long)vk_gauge_memory_allocs().get(), (unsigned long long)(n - before),
-                    (unsigned long long)n);
+            // The system's free commit tells a PC out of memory from full video memory (the launcher reads it: memory.rs).
+            MEMORYSTATUSEX ms{};
+            ms.dwLength = sizeof ms;
+            const double commit_free = GlobalMemoryStatusEx(&ms) ? static_cast<double>(ms.ullAvailPageFile) / 1073741824.0 : -1.0;
+            NXLOG_E("vk.memory", "allocation failed (%d), bytes %llu, live %lld (%llu failures since the last line, %llu in all); system commit free %.1f GB",
+                    int(r), (unsigned long long)info->allocationSize, (long long)vk_gauge_memory_allocs().get(), (unsigned long long)(n - before),
+                    (unsigned long long)n, commit_free);
         }
     }
     return r;
