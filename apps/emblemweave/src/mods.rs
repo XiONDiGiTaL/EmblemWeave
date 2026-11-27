@@ -3130,6 +3130,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A download with only notes in it is refused and says why; one whose
+    /// `exefs` holds nothing the engine can load is marked unusable instead of
+    /// being installed as an empty mod.
+    #[test]
+    fn refuses_a_download_with_nothing_to_install() {
+        let root = temp("incomplete");
+        let notes = root.join("Notes");
+        std::fs::create_dir_all(notes.join("Ultrawide 3440")).unwrap();
+        std::fs::write(notes.join("Ultrawide 3440/read me.txt"), b"hello").unwrap();
+        let e = prepare_dir(&notes, None, Info::default()).unwrap_err();
+        assert!(e.contains("no romfs folder, patches or game files"), "{e}");
+
+        let exefs = root.join("Exefs");
+        std::fs::create_dir_all(exefs.join("exefs")).unwrap();
+        std::fs::write(exefs.join("exefs/read me.txt"), b"hello").unwrap();
+        let p = prepare_dir(&exefs, None, Info::default()).unwrap();
+        assert!(p.unusable_exefs);
+        assert!(p.choices.is_empty(), "nothing to offer, not an empty mod");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A DLL with no manifest still counts as a code mod, and its API is
     /// unknown rather than assumed.
     #[test]
