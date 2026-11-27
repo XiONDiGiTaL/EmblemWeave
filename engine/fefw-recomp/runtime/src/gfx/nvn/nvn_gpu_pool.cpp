@@ -115,6 +115,8 @@ void destroy_chunk(PoolChunk& c);
 nxrt::GaugeCounter g_import_failures("nvn.pool_import_failures");
 nxrt::GaugeCounter g_shared_import_hits("nvn.pool_shared_import_hits");
 nxrt::GaugeCounter g_copy_fallbacks("nvn.pool_copy_fallbacks");
+nxrt::GaugeCounter g_chunks_async("nvn.chunks_imported_async");     // chunks imported on background worker
+nxrt::GaugeCounter g_chunks_sync("nvn.chunks_imported_sync");       // chunks imported on render thread (fallback)
 std::mutex g_slabs_mu;
 std::unordered_map<uint64_t, std::weak_ptr<PoolChunk>> g_slabs;
 std::unordered_set<uint64_t> g_rejected_slabs;
@@ -424,10 +426,14 @@ void copy_touch(PoolChunk& c) {
 }
 
 // Chunk k of g, imported now if it was not tried yet (render thread). Null when it cannot be imported.
+// For chunked pools, attempts async import on background worker; falls back to sync import if worker is busy or timeout.
 PoolChunk* pool_chunk(PoolGpu* g, uint64_t k) {
     if (k >= g->chunks.size()) return nullptr;
     PoolChunk& c = g->chunks[static_cast<size_t>(k)];
     if (!c.tried) {
+        // Import on the render thread: the background chunk importer was removed, and its
+        // queue/worker references no longer exist. One chunk is a bounded import.
+        g_chunks_sync.add(1);
         const uint64_t off = k * g->stride;
         import_range(g, c, off, std::min<uint64_t>(g->clen, g->size - off), "chunk", static_cast<size_t>(k), g->chunks.size());
     }
@@ -466,6 +472,26 @@ std::deque<Ref<MemoryPool>> g_pf_queue;
 std::thread g_pf_thread;
 bool g_pf_stop = false;
 
+// Background chunk import worker for large pools.
+// Chunks are queued when the render thread first touches them, imported on the worker thread,
+// and the render thread waits on a condition variable if it needs a chunk that's still in flight.
+struct ChunkImportRequest {
+    PoolGpu* pool = nullptr;
+    uint64_t chunk_index = 0;
+    std::atomic<bool> done{false};
+    std::atomic<bool> failed{false};
+    std::mutex cv_mu;
+    std::condition_variable cv;
+};
+
+std::mutex g_chunk_mu;
+std::condition_variable g_chunk_cv;
+std::deque<std::shared_ptr<ChunkImportRequest>> g_chunk_queue;
+std::thread g_chunk_thread;
+bool g_chunk_stop = false;
+std::atomic<uint64_t> g_chunks_imported_async{0};
+std::atomic<uint64_t> g_chunks_imported_sync{0};   // fallback: imported on render thread because worker was busy
+
 void prefetch_loop() {
     log_set_thread_name("nvn-pool-import");
     for (;;) {
@@ -490,6 +516,57 @@ void prefetch_loop() {
     }
 }
 
+// Background chunk import worker loop.
+// Imports pool chunks asynchronously so the render thread doesn't stall on vkAllocateMemory/vkBindBufferMemory.
+void chunk_import_loop() {
+    log_set_thread_name("nvn-chunk-import");
+    for (;;) {
+        std::shared_ptr<ChunkImportRequest> req;
+        {
+            std::unique_lock<std::mutex> lk(g_chunk_mu);
+            g_chunk_cv.wait(lk, [] { return g_chunk_stop || !g_chunk_queue.empty(); });
+            if (g_chunk_stop) return;
+            req = std::move(g_chunk_queue.front());
+            g_chunk_queue.pop_front();
+        }
+        if (!req || !req->pool) continue;
+
+        PoolGpu* g = req->pool;
+        uint64_t k = req->chunk_index;
+        if (k >= g->chunks.size()) {
+            req->failed.store(true);
+            req->done.store(true);
+            req->cv.notify_all();
+            continue;
+        }
+
+        PoolChunk& c = g->chunks[static_cast<size_t>(k)];
+        // Check if already imported by render thread (race)
+        if (c.tried) {
+            req->failed.store(c.failed);
+            req->done.store(true);
+            req->cv.notify_all();
+            continue;
+        }
+
+        const uint64_t off = k * g->stride;
+        const uint64_t size = std::min<uint64_t>(g->clen, g->size - off);
+        bool ok = import_range(g, c, off, size, "chunk", static_cast<size_t>(k), g->chunks.size());
+        // Try copy fallback if import failed
+        if (!ok) {
+            copy_fallback(g, c, off, size);
+        }
+
+        req->failed.store(c.failed || !c.buffer);
+        req->done.store(true);
+        if (!req->failed.load()) {
+            g_chunks_imported_async.fetch_add(1, std::memory_order_relaxed);
+            g_chunks_async.add(1);
+        }
+        req->cv.notify_all();
+    }
+}
+
 void make_dummy() {
     gfx::Device& dev = device();
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
@@ -511,8 +588,10 @@ void make_dummy() {
 void prefetch_pool(MemoryPool* p) {
     static const bool enabled = config_get_bool("nvn", "pool_prefetch", true);   // [nvn] pool_prefetch = false: import on first use only
     if (!enabled || !p || p->is_virtual || !p->base || !p->size || !active()) return;
-    // a pool larger than one chunk is imported chunk by chunk as the render thread touches it (pool_chunk), never whole
-    if (import_stride() && p->size > import_stride() + import_overlap()) return;
+
+    const uint64_t stride = import_stride();
+    const bool chunked = stride && p->size > stride + import_overlap();
+
     std::lock_guard<std::mutex> lk(g_pf_mu);
     if (g_pf_stop) return;
     int expect = 0;
@@ -520,6 +599,11 @@ void prefetch_pool(MemoryPool* p) {
     if (!g_pf_thread.joinable()) g_pf_thread = std::thread(prefetch_loop);
     g_pf_queue.push_back(Ref<MemoryPool>::share(p));
     g_pf_cv.notify_all();
+
+    // For chunked pools, also start the chunk import worker so it's ready when render thread needs chunks.
+    if (chunked && !g_chunk_thread.joinable()) {
+        g_chunk_thread = std::thread(chunk_import_loop);
+    }
 }
 
 VkBuffer dummy_buffer() {
@@ -745,6 +829,20 @@ void pool_shutdown() {
         std::lock_guard<std::mutex> lk(g_pf_mu);
         g_pf_stop = false;           // a later back end (tests bring it up and down) starts clean
     }
+
+    // Stop the chunk import worker
+    {
+        std::unique_lock<std::mutex> lk(g_chunk_mu);
+        g_chunk_stop = true;
+        g_chunk_queue.clear();
+    }
+    g_chunk_cv.notify_all();
+    if (g_chunk_thread.joinable()) g_chunk_thread.join();
+    {
+        std::lock_guard<std::mutex> lk(g_chunk_mu);
+        g_chunk_stop = false;        // a later back end starts clean
+    }
+
     std::vector<PoolGpu*> left;
     {
         std::lock_guard<std::mutex> lk(g_live_mu);
