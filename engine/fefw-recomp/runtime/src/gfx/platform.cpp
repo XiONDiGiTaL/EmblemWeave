@@ -28,6 +28,7 @@ constexpr Uint64 kFullscreenWaitMs = 2000;
 bool g_inited = false;
 bool g_quit = false;
 SDL_Window* g_window = nullptr;
+bool g_borderless_only = false;
 
 struct OpenPad {
     SDL_JoystickID id;
@@ -486,8 +487,15 @@ bool visible() { return g_window != nullptr && !window_flag(SDL_WINDOW_HIDDEN); 
 
 // ---- fullscreen ---------------------------------------------------------------------------------------------------
 
+void set_borderless_only(bool on) { g_borderless_only = on; }
+
+FullscreenMode allowed_mode(FullscreenMode mode) {
+    return g_borderless_only && mode == FullscreenMode::Windowed ? FullscreenMode::Borderless : mode;
+}
+
 bool set_fullscreen(FullscreenMode mode, int w, int h, float hz) {
     if (!g_window) return false;
+    mode = allowed_mode(mode);
     bool ok = false;
     switch (mode) {
         case FullscreenMode::Windowed:

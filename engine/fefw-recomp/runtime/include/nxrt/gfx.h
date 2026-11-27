@@ -144,7 +144,7 @@ struct DeviceFeatures {
     bool anti_lag = false;                // VK_AMD_anti_lag (AMD Anti-Lag 2)
 };
 
-// Video memory workarounds, decided once at device creation (vk_device.cpp; the "gfx: GPU quirks" log line names those in effect).
+// GPU workarounds, decided once at device creation (vk_device.cpp; the "gfx: GPU quirks" log line names those in effect).
 // Each key takes auto (the default: on for Intel GPUs, vendor 0x8086), 1 (on for any GPU) or 0 (off).
 struct GpuQuirks {
     bool intel = false, intel_integrated = false;   // vendor 0x8086; integrated (UHD, Iris Xe, Core Ultra graphics) or discrete (Arc)
@@ -160,6 +160,10 @@ struct GpuQuirks {
     // either of these two on alone was enough (#18), so turning off only one never helped (#5). The discrete Arc A770 and B580 lost
     // the device in the first scene the same way and ran with it on (#45). A key set in the ini or the environment still wins.
     bool igpu_compat = false;
+    // [gfx] borderless_only (auto: on for the AMD Radeon 8050S / 8060S, vendor 0x1002 device 0x1586, on Windows, not under Wine): windowed
+    // mode becomes borderless. On a Radeon 8060S the first frames of a windowed run never finished on the GPU (an amdkmdag.sys timeout),
+    // and so did a switch from borderless to windowed, with every GPU path switch tried (#81); borderless and fullscreen ran.
+    bool borderless_only = false;
 };
 const GpuQuirks& gpu_quirks();
 uint64_t video_budget_bytes();      // the OS's video memory budget for this process on the largest device-local heap (0: no device yet)

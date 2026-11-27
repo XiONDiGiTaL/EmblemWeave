@@ -1129,7 +1129,16 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         q.budget_detail = quirk_key("budget_detail", q.intel);
         q.pressure_detail = quirk_key("pressure_detail", q.intel) && x_membudget;   // needs the OS's figures, not VMA's estimate
         q.igpu_compat = quirk_key("igpu_compat", q.intel);                            // #5, #18; Arc A770 and B580 too (#45)
+        bool amd_windowed_hang = props_.vendorID == 0x1002 && props_.deviceID == 0x1586;
+#ifdef _WIN32
+        if (HMODULE nt = GetModuleHandleA("ntdll.dll"); nt && GetProcAddress(nt, "wine_get_version")) amd_windowed_hang = false;   // Windows' driver only
+#endif
+        q.borderless_only = quirk_key("borderless_only", amd_windowed_hang);         // #81
         g_quirks = q;
+        platform::set_borderless_only(q.borderless_only);
+        if (q.borderless_only)
+            NXLOG_W(kTag, "GPU quirks: windowed mode is replaced by borderless on this GPU: windowed runs lost the device (#81). "
+                          "[gfx] borderless_only = 0 allows windowed again");
         VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
         vmaGetHeapBudgets(vma_, b);
         const double budget_gib = static_cast<double>(b[device_local_heap(vma_)].budget) / (1024.0 * 1024.0 * 1024.0);

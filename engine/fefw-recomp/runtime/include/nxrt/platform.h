@@ -43,6 +43,10 @@ enum class FullscreenMode { Windowed, Borderless, Exclusive };
 // reports the new state or ~2 s.
 bool set_fullscreen(FullscreenMode mode, int w = 0, int h = 0, float hz = 0.f);
 FullscreenMode fullscreen_mode();
+// While on, windowed mode is not used (a GPU quirk, [gfx] borderless_only): set_fullscreen(Windowed) asks for Borderless instead.
+// A window that is already windowed stays so until the next set_fullscreen.
+void set_borderless_only(bool on);
+FullscreenMode allowed_mode(FullscreenMode mode);   // what set_fullscreen(mode) really asks for
 float display_refresh_hz();                   // refresh rate of the display the window is on (desktop mode), 0 if unknown
 
 // Displays (monitors), numbered 1.. in the system's order. display_name is "Name (1920x1080 @ 144 Hz)"-style text for menus, empty for a bad number.

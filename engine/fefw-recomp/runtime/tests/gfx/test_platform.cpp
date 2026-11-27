@@ -213,6 +213,21 @@ NXTEST(borderless_fullscreen_toggle) {
     CHECK(platform::fullscreen_mode() == platform::FullscreenMode::Windowed);
 }
 
+NXTEST(borderless_only_turns_windowed_into_borderless) {
+    Session s;
+    REQUIRE(s.ok);
+    REQUIRE(s.window);
+
+    platform::set_borderless_only(true);
+    CHECK(platform::allowed_mode(platform::FullscreenMode::Windowed) == platform::FullscreenMode::Borderless);
+    CHECK(platform::allowed_mode(platform::FullscreenMode::Exclusive) == platform::FullscreenMode::Exclusive);
+    CHECK(platform::set_fullscreen(platform::FullscreenMode::Windowed));
+    CHECK(platform::fullscreen_mode() == platform::FullscreenMode::Borderless);
+    platform::set_borderless_only(false);
+    CHECK(platform::set_fullscreen(platform::FullscreenMode::Windowed));
+    CHECK(platform::fullscreen_mode() == platform::FullscreenMode::Windowed);
+}
+
 // ---- (5) relative mouse and synthetic motion ------------------------------------------------------------------------
 
 NXTEST(relative_mouse_round_trip_and_motion) {
