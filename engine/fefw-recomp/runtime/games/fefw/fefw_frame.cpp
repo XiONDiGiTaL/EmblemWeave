@@ -41,6 +41,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "nxrt/config.h"
 #include "nxrt/dispatch.h"
@@ -460,9 +461,12 @@ void die_cb_wrap(::Ctx* c) {
         count(kAnim);
     }
     if (!g_voice_log) return;
-    static uint64_t last_closure = 0;   // main thread
-    const bool waits = static_cast<uint32_t>(c->x[0]) & 1, first = closure != last_closure;
-    last_closure = closure;
+    static std::unordered_set<uint64_t> active_waits;   // main thread
+    const bool waits = static_cast<uint32_t>(c->x[0]) & 1;
+    const bool done = !waits || t >= 0.999f;
+    if (active_waits.size() > 64) active_waits.clear();
+    const bool first = !done && active_waits.insert(closure).second;
+    if (done) active_waits.erase(closure);
     const char* end = !waits ? "asks for the voice" : t >= 0.999f ? "the wait ran out: no cry" : first ? "waits" : nullptr;
     if (!end) return;
     NXLOG_I(kTag, "voice: death cry, unit %u, t %.3f, unit clock step %.4f (the callback sees %.4f) -> %s%s", unit, t, step, seen, end, why.c_str());
