@@ -385,6 +385,54 @@ NXTEST(an_owed_eos_rides_the_next_released_frame) {
     CHECK(!d.eos_owed);
 }
 
+// #117: the player closed its panel and joined the handler thread while the handler sat in DecodeAsync. The player held all four frames and
+// asked for no more, so no release could ever make room: the feed thread waited out the 30 s guard and the game stood still for it. A player
+// that holds every registered frame and gives none back for kPlayerStallLimit is not slow, it is gone: the stream ends instead.
+NXTEST(a_player_that_holds_every_frame_and_stops_ends_the_stream) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 40);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[2];
+    const uint64_t list[] = {frames[0].addr(), frames[1].addr()};
+    vd::register_frames(d, list, 2);
+    Worker worker(d);
+
+    // The player takes both frames and never gives one back: from here it holds the whole pool.
+    for (int i = 0; i < 2; ++i) {
+        CHECK_EQ(vd::decode_async(d, packets[i].data(), packets[i].size(), i * 1000, false), 0u);
+        REQUIRE(wait_for_frame(d, 2s) != 0);
+    }
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(d.free_.empty());
+        CHECK(d.ready.empty());
+    }
+
+    // Keep feeding until the queue fills and the decoder has nothing to deliver. The call that cannot make room must come back in about a
+    // second, not after the stalled-game guard, and it must end the stream rather than leave the packet waiting.
+    const auto t0 = std::chrono::steady_clock::now();
+    uint32_t result = 0;
+    for (size_t i = 2; i < packets.size() && result == 0; ++i)
+        result = vd::decode_async(d, packets[i].data(), packets[i].size(), static_cast<int64_t>(i) * 1000, false);
+    const auto took = std::chrono::steady_clock::now() - t0;
+    CHECK_EQ(result, vd::kResultDecoderStalled);
+    CHECK(took < 5s);
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(d.failed);
+        CHECK(d.queue.empty());
+        CHECK(d.decoded.empty());
+        CHECK(d.eos_owed);   // every frame is held, so the end of stream rides the first one the player gives back
+    }
+
+    // The next feed call answers the failure at once instead of waiting again.
+    const auto again = std::chrono::steady_clock::now();
+    CHECK_EQ(vd::decode_async(d, packets[0].data(), packets[0].size(), 0, true), vd::kResultDecoderStalled);
+    CHECK(std::chrono::steady_clock::now() - again < 1s);
+}
+
 // A new stream must not inherit the previous one's owed end of stream.
 NXTEST(flush_drops_an_owed_eos) {
     vd::Decoder d;
