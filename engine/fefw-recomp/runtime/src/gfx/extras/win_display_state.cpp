@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Windows display state (win_display_state.cpp, Issue #78), see display_state.h. Capture reads each monitor through GDI
 // (EnumDisplayMonitors, EnumDisplaySettingsExW) and its HDR state through the CCD database (DisplayConfigGetDeviceInfo:
-// advanced colour and SDR white level). Restore writes a mode back with ChangeDisplaySettingsExW and HDR with
-// DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE (Windows 11 24H2 and later). Windows has no public setter for the SDR white level
-// (DISPLAYCONFIG_SDR_WHITE_LEVEL is read-only), so it is captured and logged but never written.
+// advanced colour and SDR white level). Restore writes a mode back with ChangeDisplaySettingsExW and HDR with the Windows 11
+// 24H2 SET_HDR_STATE request. That request and GET_ADVANCED_COLOR_INFO_2 are declared below instead of coming from wingdi.h,
+// whose declarations only exist from SDK 10.0.26100, so a build made with an older Windows SDK still compiles (issue #115).
+// Windows has no public setter for the SDR white level (DISPLAYCONFIG_SDR_WHITE_LEVEL is read-only), so it is captured and
+// logged but never written.
 #include <windows.h>
 #include <wingdi.h>
 
@@ -20,6 +22,33 @@ namespace nxrt::extras {
 namespace {
 
 constexpr const char* kTag = "display";
+
+// --- the Windows 11 24H2 display requests, declared here (issue #115) ----------------------------------------------------
+// DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 and DISPLAYCONFIG_SET_HDR_STATE first appear in the Windows 11 24H2 SDK
+// (10.0.26100); a build made with an older SDK (10.0.19041 and the like) did not have them and failed on these lines. The
+// request numbers and layouts are part of the API's ABI, so they are spelled out here under local names: every SDK builds the
+// file, and on a 24H2 or later machine the newer query and the HDR switch work as before. The bit order of each flags word is
+// wingdi.h's bitfield order. The request numbers stay plain integers: the 19041 SDK's DISPLAYCONFIG_DEVICE_INFO_TYPE ends at 11
+// (clang limits it to [-16, 15]), so a constant of the enum type cannot hold 16 on that SDK; the header field is set below.
+constexpr UINT32 kGetAdvancedColorInfo2 = 15;   // DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2
+constexpr UINT32 kSetHdrState = 16;             // DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE
+constexpr UINT32 kHdrSupported = 1u << 4;
+constexpr UINT32 kHdrUserEnabled = 1u << 5;
+
+struct AdvancedColorInfo2 {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    UINT32 flags;   // 0 advanced colour supported, 4 HDR supported, 5 HDR enabled by the user, 6/7 wide colour
+    DISPLAYCONFIG_COLOR_ENCODING color_encoding;
+    UINT32 bits_per_color_channel;
+    UINT32 active_color_mode;   // DISPLAYCONFIG_ADVANCED_COLOR_MODE: 0 SDR, 1 WCG, 2 HDR
+};
+static_assert(sizeof(AdvancedColorInfo2) == 36, "keep the DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 layout");
+
+struct SetHdrState {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    UINT32 flags;   // bit 0: HDR on
+};
+static_assert(sizeof(SetHdrState) == 24, "keep the DISPLAYCONFIG_SET_HDR_STATE layout");
 
 // --- CCD helpers (the same lookup win_display.cpp uses, kept here so capture and set share one path) -------------------
 
@@ -65,15 +94,15 @@ bool read_hdr(const std::string& device, bool* supported, bool* enabled, float* 
         return false;
     }
 
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info2{};
-    info2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
+    AdvancedColorInfo2 info2{};
+    info2.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(kGetAdvancedColorInfo2);
     info2.header.size = sizeof info2;
     info2.header.adapterId = adapter;
     info2.header.id = target;
     LONG rc = DisplayConfigGetDeviceInfo(&info2.header);
     if (rc == ERROR_SUCCESS) {
-        *supported = info2.highDynamicRangeSupported != 0;
-        *enabled = info2.highDynamicRangeUserEnabled != 0;
+        *supported = (info2.flags & kHdrSupported) != 0;
+        *enabled = (info2.flags & kHdrUserEnabled) != 0;
     } else {
         DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info{};
         info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
@@ -198,7 +227,7 @@ public:
     }
 
     bool apply_hdr(const std::string& device, bool enable, std::string* why) override {
-        // Needs a Windows 11 24H2 SDK (the type is in SDK 10.0.26100 and later; this build uses 10.0.28000).
+        // The OS answers this on Windows 11 24H2 and later; before that the call fails and the restore reports it.
         const std::wstring wide(device.begin(), device.end());
         LUID adapter{};
         UINT32 target = 0;
@@ -206,12 +235,12 @@ public:
             if (why) *why = "no active CCD path";
             return false;
         }
-        DISPLAYCONFIG_SET_HDR_STATE set{};
-        set.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;
+        SetHdrState set{};
+        set.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(kSetHdrState);
         set.header.size = sizeof set;
         set.header.adapterId = adapter;
         set.header.id = target;
-        set.enableHdr = enable ? 1 : 0;
+        set.flags = enable ? 1u : 0u;
         const LONG rc = DisplayConfigSetDeviceInfo(&set.header);
         if (rc != ERROR_SUCCESS) {
             if (why) *why = "SET_HDR_STATE " + std::to_string(rc);
