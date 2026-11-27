@@ -20,6 +20,7 @@ std::mutex gSinkMutex;
 std::shared_ptr<::nxrt::audio::AudioSink> gOpenSink;
 uint32_t gOpenRate = 0;
 uint32_t gOpenChannels = 0;
+bool gOpenOk = false;
 
 }  // namespace
 
@@ -64,19 +65,21 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
 
     if (sink != gOpenSink || _sampleRate != gOpenRate || _channelCount != gOpenChannels) {
         // A new sink object was installed with set_sink (it closes the previous one), or the stream format changed: (re)open.
-        if (gOpenSink != nullptr && sink == gOpenSink) {
+        if (gOpenOk && gOpenSink != nullptr && sink == gOpenSink) {
             gOpenSink->close();
-        }
-
-        if (!sink->open(_sampleRate, _channelCount)) {
-            NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels)", sink->name(), _sampleRate, _channelCount);
-            gOpenSink.reset();
-            return;
         }
 
         gOpenSink = sink;
         gOpenRate = _sampleRate;
         gOpenChannels = _channelCount;
+        gOpenOk = sink->open(_sampleRate, _channelCount);
+        if (!gOpenOk) {
+            NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels): playing without sound", sink->name(),
+                    _sampleRate, _channelCount);
+            return;
+        }
+    } else if (!gOpenOk) {
+        return;
     }
 
     sink->write(out.data(), static_cast<uint32_t>(frames));
@@ -86,7 +89,7 @@ int64_t HostAudioDevice::GetQueuedNanoseconds() {
     // Under the mutex AppendBuffer holds while it opens, closes and writes the sink: the sink cannot be reopened under this call.
     std::lock_guard<std::mutex> guard(gSinkMutex);
 
-    if (gOpenSink == nullptr || !gOpenSink->has_device_clock() || _sampleRate == 0) {
+    if (!gOpenOk || gOpenSink == nullptr || !gOpenSink->has_device_clock() || _sampleRate == 0) {
         return -1;   // nothing written yet, or a sink without a clock (the renderer paces itself by the host clock)
     }
 
