@@ -197,15 +197,21 @@ void burn_cpu(int ms) {
 }  // namespace
 
 NXTEST(info_thread_tick_count_pseudo_handle_counts_cpu) {
-    // A guest thread (adopted on a helper host thread) burns about 20 ms of CPU: its tick count is positive and never goes down.
+    // A guest thread (adopted on a helper host thread) burns CPU: its tick count becomes positive and never goes down. Windows
+    // counts a thread's CPU time in steps of about 15.6 ms, and on a busy machine a thread gets only part of the wall time it
+    // spins for, so it burns until the count shows something (a count stuck at zero fails after the limit).
     std::atomic<uint32_t> adopted{0};
     std::atomic<uint32_t> rc_ok{0xFFFF};
     std::atomic<uint64_t> first{0}, second{0}, third{0};
     std::thread th([&] {
         adopted = nxrt::kernel::main_thread_adopt(0x100000);
         Result a = call(kSvcGetInfo, kInfoThreadTickCount, kPseudoThread, kAllCores);
-        burn_cpu(20);
-        Result b = call(kSvcGetInfo, kInfoThreadTickCount, kPseudoThread, kAllCores);
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        Result b{};
+        do {
+            burn_cpu(20);
+            b = call(kSvcGetInfo, kInfoThreadTickCount, kPseudoThread, kAllCores);
+        } while (b.rc == 0 && b.x1 == 0 && std::chrono::steady_clock::now() < limit);
         Result c = call(kSvcGetInfo, kInfoThreadTickCount, kPseudoThread, kAllCores);
         rc_ok = (a.rc == 0 && b.rc == 0 && c.rc == 0) ? 0u : 1u;
         first = a.x1;
