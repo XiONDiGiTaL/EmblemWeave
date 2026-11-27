@@ -25,6 +25,8 @@ uint32_t gOpenChannels = 0;
 bool gOpenOk = false;
 std::chrono::steady_clock::time_point gNextRetry{};
 int gRetryDelaySec = 1;
+int gFailedRetries = 0;
+constexpr int kMaxOpenRetries = 3;
 
 }  // namespace
 
@@ -69,6 +71,9 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
 
     const bool changed = sink != gOpenSink || _sampleRate != gOpenRate || _channelCount != gOpenChannels;
     if (changed || !gOpenOk) {
+        if (!changed && gFailedRetries >= kMaxOpenRetries) {
+            return;
+        }
         const auto now = std::chrono::steady_clock::now();
         if (!changed && now < gNextRetry) {
             return;
@@ -85,15 +90,23 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
         if (!gOpenOk) {
             if (changed) {
                 gRetryDelaySec = 1;
+                gFailedRetries = 0;
                 NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels): playing without sound", sink->name(),
                         _sampleRate, _channelCount);
             } else {
+                gFailedRetries++;
                 gRetryDelaySec = std::min(gRetryDelaySec * 2, 30);
+                if (gFailedRetries >= kMaxOpenRetries) {
+                    NXLOG_W("AudioRenderer", "host audio sink %s still cannot open after %d retries; staying silent", sink->name(),
+                            gFailedRetries);
+                    return;
+                }
             }
             gNextRetry = now + std::chrono::seconds(gRetryDelaySec);
             return;
         }
         gRetryDelaySec = 1;
+        gFailedRetries = 0;
     }
 
     sink->write(out.data(), static_cast<uint32_t>(frames));
