@@ -78,11 +78,18 @@ pub fn bid_matches(text: &str, build_id: &str) -> bool {
     full.starts_with(&t) && full[t.len()..].chars().all(|c| c == '0')
 }
 
-/// Parses one `.sites` file: its `@nsobid` and its sites, checked for kind and address.
+/// Parses one `.sites` file: its `@nsobid` and its sites, checked for kind and address. A kind a mod cannot add here (one
+/// another port defines, or a later one) is skipped, as fefw-recomp and ObeliskChamber do (fefw-recomp issue #165).
 pub fn parse(text: &str, from: &str) -> Result<(Option<String>, Vec<Site>), String> {
+    parse_with_skipped(text, from).map(|(bid, sites, _)| (bid, sites))
+}
+
+/// [`parse`], also giving the skipped lines as `<file>:<line>` and their kind.
+fn parse_with_skipped(text: &str, from: &str) -> Result<(Option<String>, Vec<Site>, Vec<(String, String)>), String> {
     let mut bid = None;
     let mut out = Vec::new();
-    for (n, line) in text.lines().enumerate() {
+    let mut skipped = Vec::new();
+    for (n, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         let ln = n + 1;
         let t: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
         if t.is_empty() {
@@ -96,7 +103,8 @@ pub fn parse(text: &str, from: &str) -> Result<(Option<String>, Vec<Site>), Stri
             continue;
         }
         if !KINDS.contains(&t[0]) {
-            return Err(format!("{from}:{ln}: \"{}\" is not a site a mod can add ({})", t[0], KINDS.join(", ")));
+            skipped.push((format!("{from}:{ln}"), t[0].to_string()));
+            continue;
         }
         let addr = (t.len() == 2)
             .then(|| u64::from_str_radix(t[1].trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
@@ -107,7 +115,7 @@ pub fn parse(text: &str, from: &str) -> Result<(Option<String>, Vec<Site>), Stri
         }
         out.push(Site { from: format!("{from}:{ln}"), kind: t[0].to_string(), addr });
     }
-    Ok((bid, out))
+    Ok((bid, out, skipped))
 }
 
 /// The sites every mod in `mods` adds for main build `build_id`, switched-off mods included. A mod's `exefs` may sit up to
@@ -129,15 +137,27 @@ pub fn collect_from(installed: &[crate::mods::Mod], build_id: &str) -> Result<Ve
             for f in files {
                 let from = format!("{}/exefs/{}", m.name, f.file_name().unwrap_or_default().to_string_lossy());
                 let text = std::fs::read_to_string(&f).map_err(|e| format!("{from}: {e}"))?;
-                let (bid, sites) = parse(&text, &from)?;
+                let (bid, sites, skipped) = parse_with_skipped(&text, &from)?;
                 let bid = bid.ok_or_else(|| format!("{from} has no @nsobid line (the build ID of the main its sites are for)"))?;
                 if bid_matches(&bid, build_id) {
                     out.extend(sites);
+                    warn_skipped(&skipped);
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// Says once per run, on stderr, which site lines were skipped for an unknown kind (the Mods page reads the list often).
+fn warn_skipped(skipped: &[(String, String)]) {
+    static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let Ok(mut warned) = WARNED.lock() else { return };
+    for (at, kind) in skipped {
+        if warned.insert(at.clone()) {
+            eprintln!("{at}: \"{kind}\" is not a site a mod can add here ({}): skipped", KINDS.join(", "));
+        }
+    }
 }
 
 fn has_ext(p: &Path, ext: &str) -> bool {
@@ -352,8 +372,9 @@ mod tests {
         assert_eq!(problem(&root, &mods), None);
         std::fs::write(&f, "midhook 0x71016f21f4\n").unwrap();
         assert!(problem(&root, &mods).unwrap().contains("Some_Mod/exefs/a.sites has no @nsobid line"));
-        std::fs::write(&f, "@nsobid DB93B0125F485060\npatch 0x71016f21f4\n").unwrap();
-        assert!(problem(&root, &mods).unwrap().contains("a.sites:2: \"patch\" is not a site a mod can add"));
+        std::fs::write(&f, "\u{feff}@nsobid DB93B0125F485060\npatch 0x71016f21f4\nmidhook 0x71016f21f4\n").unwrap();
+        assert_eq!(problem(&root, &mods), None);
+        assert_eq!(collect(&mods, "DB93B0125F485060").unwrap().len(), 1, "the unknown kind is skipped, the BOM ignored");
         std::fs::write(&f, "@nsobid DB93B0125F485060\nmidhook 0x7104000000\n").unwrap();
         assert!(problem(&root, &mods).unwrap().contains("0x7104000000 is outside main's code"));
         let _ = std::fs::remove_dir_all(&root);
@@ -366,8 +387,9 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!((s[0].kind.as_str(), s[0].addr, s[0].from.as_str()), ("midhook", 0x7100e1d03c, "m/exefs/a.sites:3"));
         assert_eq!(s[1].addr, 0x7100db9700);
+        let (_, s, skipped) = parse_with_skipped("patch 0x7100e1d03c 1 2\nmidhook 0x7100e1d03c\n", "f").unwrap();
+        assert_eq!((s.len(), skipped), (1, vec![("f:1".to_string(), "patch".to_string())]), "another port's kind is skipped");
         for (bad, why) in [
-            ("patch 0x7100e1d03c 1 2", "not a site"),
             ("midhook 0x7100e1d03e", "not an instruction"),
             ("midhook 0x7500000000", "not an instruction"),
             ("midhook zz", "expected"),

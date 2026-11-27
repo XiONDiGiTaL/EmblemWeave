@@ -82,8 +82,9 @@ void set_codec(const ModCodec& c);
 bool file_edits_close();
 bool file_edit_wanted(const std::string& image_path);
 // Hook sites (a mod's exefs/*.sites, built in by Set up): how many sites the mod in mod_dir lists for this game build that the running
-// fefw.exe was not lifted with (0 = all there); -1 when the build's own list (<exe>.sites) is unknown. Any thread.
-int sites_missing(const std::string& mod_dir);
+// fefw.exe was not lifted with (0 = all there); -1 when the build's own list (<exe>.sites) is unknown. Any thread. Only the kinds a
+// mod can add count: any other (another port's) is skipped and, when unknown is given, named there (sorted, once each).
+int sites_missing(const std::string& mod_dir, std::vector<std::string>* unknown = nullptr);
 // The running game exe's own <exe>.sites: true when it was read. When false, site_in_build cannot answer (it says true).
 bool site_list_known();
 // Whether that list has a hook site of this kind ("inline", "midhook", "entryhook") at addr, a guest address in main. True when the list is

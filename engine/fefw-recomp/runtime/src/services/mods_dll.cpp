@@ -154,7 +154,12 @@ bool read_site_list(const std::filesystem::path& file, SiteList* out) {
     std::ifstream f(file);
     if (!f) return false;
     std::string line;
+    bool first = true;
     while (std::getline(f, line)) {
+        if (first) {
+            first = false;
+            if (line.size() >= 3 && line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);   // a UTF-8 BOM
+        }
         if (const size_t h = line.find('#'); h != std::string::npos) line.resize(h);
         char kind[32] = {}, arg[80] = {};
         if (std::sscanf(line.c_str(), "%31s %79s", kind, arg) != 2) continue;
@@ -558,18 +563,28 @@ bool site_in_build(uint64_t main_base, const char* kind, uint64_t addr) {
     return l.sites.count({kind, addr}) != 0;
 }
 
-int sites_missing(const std::string& mod_dir) {
+int sites_missing(const std::string& mod_dir, std::vector<std::string>* unknown) {
     namespace stdfs = std::filesystem;
     const SiteList& l = lifted_sites();
     if (!l.known || mod_dir.empty()) return -1;
     std::error_code ec;
     int missing = 0;
+    std::set<std::string> other;
     for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(mod_dir) / "exefs", ec)) {
         if (!e.is_regular_file(ec) || _wcsicmp(e.path().extension().c_str(), L".sites") != 0) continue;
         SiteList want;
         if (!read_site_list(e.path(), &want) || want.bid.empty() || !same_build(want.bid, l.bid)) continue;
-        for (const auto& s : want.sites) missing += l.sites.count(s) == 0;
+        for (const auto& s : want.sites) {
+            // only the kinds a mod can add: the launcher skips any other (another port's, fefw-recomp issue #165), so such a
+            // line would read as missing on every start
+            if (s.first != "inline" && s.first != "midhook" && s.first != "entryhook") {
+                other.insert(s.first);
+                continue;
+            }
+            missing += l.sites.count(s) == 0;
+        }
     }
+    if (unknown) unknown->assign(other.begin(), other.end());
     return missing;
 }
 
@@ -650,7 +665,16 @@ void load_dll_mods(uint64_t base, uint64_t frame_update) {
     // a mod whose hook sites this build was not lifted with: say so on screen as well as in the log, since its hooks would never run
     for (const RomfsMod& mod : installed_mods()) {
         if (mod.exefs.empty()) continue;
-        const int missing = sites_missing(u8(std::filesystem::u8path(mod.exefs).parent_path()));
+        std::vector<std::string> unknown;
+        const int missing = sites_missing(u8(std::filesystem::u8path(mod.exefs).parent_path()), &unknown);
+        if (!unknown.empty()) {
+            std::string kinds;
+            for (const std::string& k : unknown) kinds += (kinds.empty() ? "" : ", ") + k;
+            NXLOG_W(kTag, "%s: unknown hook site kind(s) in exefs/*.sites (this port knows inline, midhook, entryhook): %s, skipped",
+                    mod.name.c_str(), kinds.c_str());
+            std::lock_guard<std::mutex> lk(st().mu);
+            st().notices.push_back(mod.name + ": skipped unknown hook site kind(s): " + kinds);
+        }
         if (missing <= 0) continue;
         NXLOG_W(kTag, "%s: %d of its hook sites (exefs/*.sites) are not in this build: its hooks will not run. Run Set up.",
                 mod.name.c_str(), missing);
