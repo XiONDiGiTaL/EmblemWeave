@@ -1,10 +1,11 @@
 //! Trinity: the shared plugin layer across EmblemWeave, fefw-recomp and
-//! ObeliskChamber. This page reads the same catalog and prefix registry as the
-//! two Tauri launchers, but draws them with EmblemWeave's own widgets.
+//! ObeliskChamber. It lives inside the Mods page now (a folded "Trinity
+//! Installed" section) and reads the same catalog and prefix registry as the
+//! two Tauri launchers, drawn with EmblemWeave's own widgets.
 
+use crate::mods::{Api, Mod};
 use crate::theme::{self, alpha, Palette};
 use crate::widgets::{self, Tone};
-use crate::App;
 use eframe::egui::{self, Color32, RichText};
 use serde::Deserialize;
 use std::sync::Mutex;
@@ -74,21 +75,100 @@ struct PrefixEntry {
     prefix: String,
 }
 
-pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let p = app.config.theme.palette();
-    widgets::page_header(
-        ui,
-        &p,
-        "Trinity",
-        "One plugin layer for EmblemWeave, fefw-recomp and ObeliskChamber.",
-    );
+/// The folded section the Mods page draws under its installed list. Collapsed
+/// by default so the mods themselves stay the page's subject; the header states
+/// what is installed without being opened.
+///
+/// `installed` is the same scan the Mods page already made: the section never
+/// walks the mods folder again.
+pub fn section(ui: &mut egui::Ui, p: &Palette, installed: &[Mod]) {
+    ui.add_space(theme::SPACE_S);
+    let core = installed.iter().find(|m| m.is_trinity_core());
+    let state = match core {
+        Some(m) if !m.has_code => format!("{} · the DLL is missing", m.version()),
+        Some(m) if !m.enabled => format!("{} · switched off", m.version()),
+        Some(m) => format!("Trinity Core {}", m.version()),
+        None => "not installed".to_string(),
+    };
+    let tone = if core.is_some_and(|m| m.has_code && m.enabled) {
+        Tone::Ok
+    } else if core.is_some() {
+        Tone::Warn
+    } else {
+        Tone::Neutral
+    };
+    widgets::card_frame(p, egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::CollapsingHeader::new(
+            RichText::new("Trinity Installed")
+                .font(theme::semibold(15.0))
+                .color(p.ink),
+        )
+        .id_salt("trinity-installed")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                widgets::pill(ui, p, &state, tone);
+                widgets::pill(ui, p, "NXP plugin layer", Tone::Neutral);
+                let mods = installed.iter().filter(|m| m.has_code && !m.is_trinity_core()).count();
+                widgets::pill(ui, p, &format!("{mods} code mod{}", if mods == 1 { "" } else { "s" }), Tone::Neutral);
+            });
+            ui.add_space(6.0);
+            status(ui, p, core);
+            content(ui, p, installed);
+        });
+    });
+}
 
+/// The installed copy's state, in the words a repair needs.
+fn status(ui: &mut egui::Ui, p: &Palette, core: Option<&Mod>) {
+    let Some(core) = core else {
+        widgets::status_line(
+            ui,
+            p,
+            Tone::Warn,
+            "Trinity Core is not installed",
+            "EmblemWeave installs it when it starts. If this stays, the mods folder is not writable.",
+        );
+        return;
+    };
+    if !core.has_code {
+        widgets::status_line(
+            ui,
+            p,
+            Tone::Bad,
+            "Trinity Core's DLL is missing",
+            "The folder and its manifest are there, but exefs/Trinity.dll is not: the game cannot load it.\
+             EmblemWeave restores the bundled copy the next time it starts; restart the launcher if this stays.",
+        );
+    } else if !core.enabled {
+        widgets::status_line(
+            ui,
+            p,
+            Tone::Warn,
+            "Trinity Core is switched off",
+            "Code mods that need it will not start. Switch it back on in the installed list above.",
+        );
+    } else {
+        widgets::status_line(
+            ui,
+            p,
+            Tone::Ok,
+            "Trinity Core is installed and loaded",
+            "It ships with EmblemWeave and is managed by the launcher, not by the GameBanana browser.",
+        );
+    }
+}
+
+/// The old Trinity page's content, unchanged, now drawn inside the section.
+fn content(ui: &mut egui::Ui, p: &Palette, installed: &[Mod]) {
     let catalog = match serde_json::from_str::<Catalog>(CATALOG) {
         Ok(c) if !c.houses.is_empty() && !c.listings.is_empty() => c,
         _ => {
             widgets::empty_note(
                 ui,
-                &p,
+                p,
                 "The Trinity catalog could not be read",
                 "The embedded catalog is missing or invalid. Rebuild the launcher from a Trinity release.",
             );
@@ -97,17 +177,82 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     let prefixes = serde_json::from_str::<Prefixes>(PREFIXES).unwrap_or_default();
 
-    hero(
-        ui,
-        &p,
-        &catalog,
-        prefixes.neutral.len() + prefixes.hosts.len(),
-    );
-    metrics(ui, &p, &catalog, &prefixes);
-    houses(ui, &p, &catalog);
-    registry(ui, &p, &catalog);
-    capabilities(ui, &p, &catalog);
-    prefix_table(ui, &p, &catalog, &prefixes);
+    hero(ui, p, &catalog, prefixes.neutral.len() + prefixes.hosts.len());
+    metrics(ui, p, &catalog, &prefixes);
+    code_mods(ui, p, installed);
+    houses(ui, p, &catalog);
+    registry(ui, p, &catalog);
+    capabilities(ui, p, &catalog);
+    prefix_table(ui, p, &catalog, &prefixes);
+}
+
+/// The installed code mods that use Trinity or NxModApi, told apart from the
+/// core itself and from DLLs that declare nothing.
+fn code_mods(ui: &mut egui::Ui, p: &Palette, installed: &[Mod]) {
+    let core_ok = installed.iter().any(|m| m.is_trinity_core() && m.has_code);
+    let list: Vec<&Mod> = installed.iter().filter(|m| m.has_code && !m.is_trinity_core()).collect();
+    widgets::section(ui, p, "Code mods", |ui| {
+        if list.is_empty() {
+            ui.label(
+                RichText::new("No code mods are installed. Only Trinity Core is loaded.")
+                    .size(12.0)
+                    .color(p.muted),
+            );
+            return;
+        }
+        for m in list {
+            let (compat, tone) = match (m.api, m.enabled) {
+                (_, false) => ("switched off".to_string(), Tone::Neutral),
+                (Api::Trinity, true) if !core_ok => (
+                    "needs Trinity Core, which is not loaded".to_string(),
+                    Tone::Bad,
+                ),
+                (Api::Trinity, true) => {
+                    let abi = m
+                        .plugin
+                        .as_ref()
+                        .and_then(|p| p.abi)
+                        .map(|a| format!("declares NXP ABI {}–{}", a.min, a.max))
+                        .unwrap_or_else(|| "uses the NXP layer".to_string());
+                    if m.uses_trinity() {
+                        (format!("{abi}; Trinity Core is loaded"), Tone::Ok)
+                    } else {
+                        (abi, Tone::Ok)
+                    }
+                }
+                (Api::NxMod, true) => (
+                    "NxModApi: the runtime loads it directly, without Trinity".to_string(),
+                    Tone::Ok,
+                ),
+                (Api::Unknown, true) => (
+                    "its files do not declare an API: EmblemWeave cannot tell whether it uses Trinity".to_string(),
+                    Tone::Warn,
+                ),
+            };
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&m.info.title).font(theme::semibold(13.0)).color(p.ink));
+                        if !m.version().is_empty() {
+                            ui.label(RichText::new(m.version()).font(theme::mono(10.5)).color(p.muted));
+                        }
+                    });
+                    ui.label(RichText::new(format!("{}  ·  {compat}", m.api.label())).size(11.0).color(p.body));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    widgets::pill(ui, p, if m.enabled { "on" } else { "off" }, if m.enabled { tone } else { Tone::Neutral });
+                });
+            });
+            ui.separator();
+        }
+        ui.label(
+            RichText::new(
+                "Read from each mod's plugin.json and DLL exports. A DLL that declares neither is reported as unknown rather than guessed at.",
+            )
+            .size(11.0)
+            .color(p.muted),
+        );
+    });
 }
 
 fn logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
@@ -291,6 +436,9 @@ fn registry(ui: &mut egui::Ui, p: &Palette, catalog: &Catalog) {
                     ui.label(RichText::new(&listing.summary).size(11.0).color(p.body));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The row is as tall as its description; without a height of
+                    // its own the pill would be drawn down the whole row.
+                    ui.set_max_height(22.0);
                     widgets::pill(ui, p, &listing.status, tone);
                     let marks = listing
                         .hosts

@@ -1289,20 +1289,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 // The running game holds a switched-on code mod's DLL: its folder cannot be renamed or
                 // moved. One switched on now would only load when the game starts again.
                 let held = running && m.has_code;
+                // Trinity Core is the bundled runtime component: switching it off
+                // would break every mod that uses its bridge, so it is not an
+                // ordinary removable mod.
+                let runtime = m.kind == mods::Kind::Runtime;
                 let toggled = ui
-                    .add_enabled_ui(!updating && !removing && !held, |ui| widgets::toggle(ui, &p, &mut on))
+                    .add_enabled_ui(!updating && !removing && !held && !runtime, |ui| widgets::toggle(ui, &p, &mut on))
                     .inner
                     .on_disabled_hover_text(if updating {
                         "Wait for the update to finish"
                     } else if removing {
                         "It is being moved to mods-removed"
+                    } else if runtime {
+                        "Trinity Core ships with EmblemWeave and stays loaded for the code mods that use it"
                     } else if m.enabled {
                         "Close the game first: it holds this code mod's DLL"
                     } else {
                         "Close the game first: code mods load when the game starts"
                     })
                     .changed();
-                if toggled && !updating && !removing && !held {
+                if toggled && !updating && !removing && !held && !runtime {
                     match mods::set_enabled(m, on) {
                         Ok(_) => app.mods_ui.invalidate_scan(),
                         Err(e) => messages.push((e, Tone::Bad)),
@@ -1331,21 +1337,32 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if m.info.no_updates && m.info.gamebanana_id.is_some() {
                         bits.push("updates not checked".into());
                     }
-                    if !m.has_romfs && !m.has_exefs {
-                        bits.push("no romfs folder: the game will not see it".into());
+                    // What the folder actually holds, from its files. A code
+                    // mod needs no romfs folder, and a metadata-only or empty
+                    // folder gets its own words rather than a mod warning.
+                    let missing = missing_code.iter().any(|name| name == &m.name);
+                    match m.kind {
+                        mods::Kind::RomFs => {}
+                        mods::Kind::Code => bits.push(if missing { "code mod: needs Build the game".into() } else { "code mod".into() }),
+                        mods::Kind::Patch => bits.push("patch: applies when the game is built".into()),
+                        mods::Kind::Combined => {
+                            bits.push(if missing { "RomFS + code: needs Build the game".into() } else { "RomFS + code mod".into() });
+                            if m.has_patches {
+                                bits.push("patch: applies when the game is built".into());
+                            }
+                        }
+                        mods::Kind::Runtime => bits.push("bundled runtime component".into()),
+                        mods::Kind::MetadataOnly => bits.push("metadata only: no romfs, code or patch files".into()),
+                        mods::Kind::Empty => bits.push("empty folder: nothing for the game to load".into()),
                     }
-                    if m.has_code {
-                        let missing = missing_code.iter().any(|name| name == &m.name);
-                        bits.push(if missing { "code mod: needs Build the game".into() } else { "code mod".into() });
-                    }
-                    if m.has_patches {
-                        bits.push("its .ips / .pchtxt patches cannot apply".into());
+                    if m.has_code && !m.is_trinity_core() && m.api == mods::Api::Trinity {
+                        bits.push("Trinity / NXP".into());
                     }
                     ui.label(RichText::new(bits.join("  ·  ")).size(12.5).color(p.muted));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // A switched-off code mod is not loaded, so it can go while the game runs.
-                    let locked = held && m.enabled;
+                    let locked = (held && m.enabled) || runtime;
                     let can_remove = !updating && !removing && !locked;
                     if hover(
                         widgets::button(ui, &p, "Remove", can_remove),
@@ -1355,6 +1372,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             "Wait for the update to finish"
                         } else if removing {
                             "It is being moved to mods-removed"
+                        } else if runtime {
+                            "Trinity Core is part of EmblemWeave; it is restored on every start rather than removed"
                         } else {
                             "Close the game first: it holds this code mod's DLL"
                         },
@@ -1422,6 +1441,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.label(RichText::new("Changes apply the next time the game starts. When two mods change the same file, the one later in the list wins. A code mod is a DLL that runs inside the game with the game's own rights: install only mods you trust. Close the game before updating a code mod: Windows keeps a running mod's DLL locked.").size(12.5).color(p.muted));
     });
+
+    // Trinity's information belongs to the Mods page, not to a page of its own:
+    // folded, so the installed mods stay the subject of the page.
+    crate::pages::trinity::section(ui, &p, &installed);
 
     widgets::section(ui, &p, "Conflicts", |ui| {
         let on = installed.iter().filter(|m| m.enabled).count();
@@ -1509,7 +1532,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let named = !app.mods_ui.profile_name.trim().is_empty();
             if widgets::button(ui, &p, "Save the mods that are on", named).clicked() {
                 let name = app.mods_ui.profile_name.trim().to_string();
-                let enabled: Vec<String> = installed.iter().filter(|m| m.enabled).map(|m| m.name.clone()).collect();
+                // The bundled runtime component is always on; a profile does not
+                // need to name it (and loading an older profile must not switch it).
+                let enabled: Vec<String> = installed
+                    .iter()
+                    .filter(|m| m.enabled && m.kind != mods::Kind::Runtime)
+                    .map(|m| m.name.clone())
+                    .collect();
                 match app.config.profiles.iter_mut().find(|x| x.name.eq_ignore_ascii_case(&name)) {
                     Some(existing) => existing.enabled = enabled,
                     None => app.config.profiles.push(crate::config::ModProfile { name: name.clone(), enabled }),
@@ -1765,6 +1794,11 @@ mod tests {
             has_exefs: false,
             has_code: false,
             has_patches: false,
+            plugin: None,
+            kind: mods::Kind::RomFs,
+            api: mods::Api::Unknown,
+            has_plugin_manifest: false,
+            has_mod_manifest: false,
             installed_at: 0,
         }
     }

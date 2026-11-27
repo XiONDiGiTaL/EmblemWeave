@@ -42,13 +42,12 @@ pub enum Page {
     Log,
     About,
     Requirements,
-    Trinity,
 }
 
 impl Page {
     /// Shortcut order. Kept stable so Ctrl+1..9 keep opening the same pages
     /// even though the sidebar now groups them differently.
-    pub const ALL: [Page; 18] = [
+    pub const ALL: [Page; 17] = [
         Page::Overview,
         Page::Setup,
         Page::Saves,
@@ -66,7 +65,6 @@ impl Page {
         Page::Log,
         Page::About,
         Page::Requirements,
-        Page::Trinity,
     ];
 
     pub fn label(self) -> &'static str {
@@ -88,7 +86,6 @@ impl Page {
             Page::Log => "Game Log",
             Page::About => "About",
             Page::Requirements => "Requirements",
-            Page::Trinity => "Trinity",
         }
     }
 
@@ -213,12 +210,6 @@ impl Page {
                     painter.line_segment([p(2.0, y), p(3.6, y)], Stroke::new(1.0_f32, colour));
                 }
             }
-            Page::Trinity => {
-                painter.circle_stroke(c, 6.0, s);
-                painter.circle_stroke(p(0.0, 0.0), 3.0, Stroke::new(1.1_f32, colour));
-                painter.line_segment([p(-5.0, -5.0), p(5.0, 5.0)], Stroke::new(1.0_f32, colour));
-                painter.line_segment([p(5.0, -5.0), p(-5.0, 5.0)], Stroke::new(1.0_f32, colour));
-            }
         }
     }
 }
@@ -233,11 +224,10 @@ pub enum NavGroup {
     Runtime,
     System,
     Settings,
-    Trinity,
 }
 
 impl NavGroup {
-    pub const ALL: [NavGroup; 7] = [NavGroup::Home, NavGroup::Game, NavGroup::Library, NavGroup::Runtime, NavGroup::System, NavGroup::Settings, NavGroup::Trinity];
+    pub const ALL: [NavGroup; 6] = [NavGroup::Home, NavGroup::Game, NavGroup::Library, NavGroup::Runtime, NavGroup::System, NavGroup::Settings];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -247,7 +237,6 @@ impl NavGroup {
             NavGroup::Runtime => "Runtime",
             NavGroup::System => "System",
             NavGroup::Settings => "Settings",
-            NavGroup::Trinity => "Trinity",
         }
     }
 
@@ -259,7 +248,6 @@ impl NavGroup {
             NavGroup::Runtime => "runtime",
             NavGroup::System => "system",
             NavGroup::Settings => "settings",
-            NavGroup::Trinity => "trinity",
         }
     }
 
@@ -278,7 +266,6 @@ impl NavGroup {
             ],
             NavGroup::System => &[Page::Diagnostics, Page::Troubleshoot, Page::Log],
             NavGroup::Settings => &[Page::Appearance, Page::About],
-            NavGroup::Trinity => &[Page::Trinity],
         }
     }
 
@@ -309,7 +296,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Page::Log => log::show(app, ui),
         Page::About => about::show(app, ui),
         Page::Requirements => requirements::show(app, ui),
-        Page::Trinity => trinity::show(app, ui),
     }
 }
 
@@ -328,6 +314,19 @@ mod tests {
             assert_eq!(seen.iter().filter(|q| **q == page).count(), 1, "{} must appear exactly once", page.label());
             assert_eq!(page.group().pages().contains(&page), true, "{} is in the wrong group", page.label());
         }
+    }
+
+    /// Trinity is a section of the Mods page now: no sidebar entry, no empty
+    /// group left behind, and nothing to open by keyboard or by a saved page.
+    #[test]
+    fn trinity_has_no_sidebar_destination() {
+        assert!(!Page::ALL.iter().any(|page| page.label() == "Trinity"), "Trinity must not be a page");
+        assert!(
+            !NavGroup::ALL.iter().any(|group| group.label() == "Trinity" || group.key() == "trinity"),
+            "no Trinity navigation group may be left"
+        );
+        assert!(Page::Mods.available(InterfaceMode::Standard));
+        assert_eq!(Page::ALL.len(), 17);
     }
 
     #[test]

@@ -94,6 +94,105 @@ pub fn write_info(folder: &Path, info: &Info) -> Result<(), String> {
     std::fs::write(&file, serde_json::to_string_pretty(&v).unwrap_or_default()).map_err(|e| format!("writing {}: {e}", file.display()))
 }
 
+/// A `plugin.json`, as Trinity's plugin layer and the NXP loaders write it.
+/// Only the fields the Mods page can state as fact are kept: an unknown key
+/// is ignored rather than guessed at.
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Plugin {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    /// Present when the plugin is built against the NXP ABI (Trinity's plugin
+    /// layer): `{"min": 1, "max": 4}`.
+    pub abi: Option<Abi>,
+    pub hosts: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub dependencies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Abi {
+    pub min: u32,
+    pub max: u32,
+}
+
+/// What a folder under `mods/` actually holds. Derived from the files present,
+/// never from the folder's name or a GameBanana title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// RomFS content the engine lays over the game's files.
+    RomFs,
+    /// An ExeFS code mod: a DLL (and optionally `.sites`) the runtime loads.
+    Code,
+    /// `.ips` / `.ips32` / `.pchtxt` patches, applied when the game is built.
+    Patch,
+    /// More than one of the above in one folder.
+    Combined,
+    /// A component the launcher itself ships and the runtime needs: Trinity Core.
+    Runtime,
+    /// Manifests or loose files but no RomFS, code or patch payload.
+    MetadataOnly,
+    /// No files at all.
+    Empty,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::RomFs => "RomFS",
+            Kind::Code => "Code mod",
+            Kind::Patch => "Patch",
+            Kind::Combined => "RomFS + code",
+            Kind::Runtime => "Runtime component",
+            Kind::MetadataOnly => "Metadata only",
+            Kind::Empty => "Empty folder",
+        }
+    }
+
+    /// Whether the engine can load something from this folder.
+    pub fn playable(self) -> bool {
+        matches!(self, Kind::RomFs | Kind::Code | Kind::Patch | Kind::Combined | Kind::Runtime)
+    }
+
+    /// What a folder holds, from what the scanner found in it. A folder with
+    /// only manifests is metadata, not a broken mod: authors ship one beside a
+    /// RomFS tree, and an interrupted download can leave one behind.
+    pub fn of(romfs: bool, code: bool, patches: bool, manifests: bool) -> Kind {
+        match (romfs, code, patches) {
+            (true, false, false) => Kind::RomFs,
+            (false, true, false) => Kind::Code,
+            (false, false, true) => Kind::Patch,
+            (true, true, true) | (true, true, false) | (true, false, true) | (false, true, true) => Kind::Combined,
+            (false, false, false) if manifests => Kind::MetadataOnly,
+            (false, false, false) => Kind::Empty,
+        }
+    }
+}
+
+/// How a code mod talks to the runtime, when its own files say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Api {
+    /// The NXP layer: a `plugin.json` with an ABI, Trinity identities or `nxp.*` interfaces.
+    Trinity,
+    /// The runtime's own NxModApi: the DLL exports `nxmod_init` / `nxmod_early`.
+    NxMod,
+    /// A DLL whose API nothing in the folder declares.
+    Unknown,
+}
+
+impl Api {
+    pub fn label(self) -> &'static str {
+        match self {
+            Api::Trinity => "Trinity / NXP",
+            Api::NxMod => "NxModApi",
+            Api::Unknown => "API not declared",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mod {
     pub path: PathBuf,
@@ -107,9 +206,92 @@ pub struct Mod {
     pub has_code: bool,
     /// `exefs/` holds `.ips` / `.ips32` / `.pchtxt` patches.
     pub has_patches: bool,
+    /// The `plugin.json` found at the folder's top, when it has one.
+    pub plugin: Option<Plugin>,
+    /// What the folder contains, from its files.
+    pub kind: Kind,
+    /// How its DLL talks to the runtime, when it has one.
+    pub api: Api,
+    /// `plugin.json` at the top of the folder (metadata, not necessarily a plugin).
+    pub has_plugin_manifest: bool,
+    /// `emblemweave.json` at the top of the folder.
+    pub has_mod_manifest: bool,
     /// When this copy was installed: the recorded time, else the time its
     /// `emblemweave.json` was written (mods installed before it was recorded).
     pub installed_at: u64,
+}
+
+impl Mod {
+    /// Trinity Core itself, recognised by the manifest identity the bundle
+    /// installs (`org.xion.trinity.core`) or, for an older copy without the id,
+    /// by the name it declares. A third-party mod is never matched by its
+    /// folder name alone.
+    pub fn is_trinity_core(&self) -> bool {
+        let Some(p) = &self.plugin else { return false };
+        p.id.eq_ignore_ascii_case("org.xion.trinity.core")
+            || (p.name.eq_ignore_ascii_case("Trinity Core") && self.has_code)
+    }
+
+    /// A code mod that depends on Trinity Core's bridge rather than being it.
+    pub fn uses_trinity(&self) -> bool {
+        !self.is_trinity_core()
+            && self.has_code
+            && (self.api == Api::Trinity
+                || self
+                    .plugin
+                    .as_ref()
+                    .is_some_and(|p| p.dependencies.iter().any(|d| {
+                        let d = d.to_ascii_lowercase();
+                        d.contains("trinity") || d == "nxp" || d == "nxp.nxmod"
+                    })))
+    }
+
+    /// The version to show: the plugin manifest's, else the launcher's record.
+    pub fn version(&self) -> &str {
+        self.plugin
+            .as_ref()
+            .map(|p| p.version.as_str())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&self.info.version)
+    }
+}
+
+/// Whether the bytes of a DLL name the runtime's NxModApi entry points or an
+/// `nxp.*` interface. PE export names are stored as plain ASCII in the image,
+/// so this is evidence from the file itself, not a guess from its name.
+pub fn dll_api(bytes: &[u8]) -> (bool, bool) {
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    (
+        has(b"nxmod_init") || has(b"nxmod_early"),
+        has(b"nxp.") || has(b"trinity_plugin"),
+    )
+}
+
+fn read_dlls(exefs: &[PathBuf]) -> (bool, bool) {
+    const CAP: u64 = 8 * 1024 * 1024;
+    let mut nxmod = false;
+    let mut nxp = false;
+    for dir in exefs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !kind(&e).is_some_and(|t| t.is_file())
+                || !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll"))
+            {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            if meta.len() > CAP {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&p) {
+                let (n, x) = dll_api(&bytes);
+                nxmod |= n;
+                nxp |= x;
+            }
+        }
+    }
+    (nxmod, nxp)
 }
 
 /// The `exefs` folders of a mod (up to three folders deep).
@@ -198,6 +380,32 @@ pub fn list(mods: &Path) -> Vec<Mod> {
         find_named(&path, "exefs", 3, &mut x);
         let has_code = x.iter().any(|d| is_code_exefs(d));
         let has_patches = x.iter().any(|d| exefs_has_patches(d));
+        let has_plugin_manifest = path.join("plugin.json").is_file();
+        let has_mod_manifest = path.join("emblemweave.json").is_file();
+        let plugin = std::fs::read_to_string(path.join("plugin.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Plugin>(&t).ok())
+            .filter(|p| !p.id.is_empty() || !p.name.is_empty() || !p.version.is_empty());
+        let (nxmod, nxp) = if has_code { read_dlls(&x) } else { (false, false) };
+        let api = if plugin.as_ref().is_some_and(|p| {
+            p.abi.is_some()
+                || p.id.to_ascii_lowercase().contains("trinity")
+                || p.capabilities.iter().any(|c| c.to_ascii_lowercase().starts_with("nxp."))
+        }) || nxp
+        {
+            Api::Trinity
+        } else if nxmod {
+            Api::NxMod
+        } else {
+            Api::Unknown
+        };
+        let mut kind = Kind::of(!r.is_empty(), has_code, has_patches, has_plugin_manifest || has_mod_manifest);
+        if plugin.as_ref().is_some_and(|p| {
+            p.id.eq_ignore_ascii_case("org.xion.trinity.core")
+                || (p.name.eq_ignore_ascii_case("Trinity Core") && has_code)
+        }) {
+            kind = Kind::Runtime;
+        }
         let written = std::fs::metadata(path.join("emblemweave.json"))
             .and_then(|m| m.modified())
             .ok()
@@ -215,6 +423,11 @@ pub fn list(mods: &Path) -> Vec<Mod> {
             has_exefs: !x.is_empty(),
             has_code,
             has_patches,
+            plugin,
+            kind,
+            api,
+            has_plugin_manifest,
+            has_mod_manifest,
             installed_at,
         });
     }
@@ -319,6 +532,12 @@ pub fn apply_profile(list: &[Mod], want: &[String]) -> (usize, Vec<String>) {
     let mut changed = 0;
     let mut failed = Vec::new();
     for m in list {
+        // The bundled runtime component is not the player's to switch: a profile
+        // that does not name it (every profile saved before it shipped) would
+        // otherwise switch Trinity Core off and break the mods that need it.
+        if m.kind == Kind::Runtime {
+            continue;
+        }
         let on = want.iter().any(|w| w.eq_ignore_ascii_case(&m.name));
         if on != m.enabled {
             match set_enabled(m, on) {
@@ -2348,6 +2567,11 @@ mod tests {
             has_exefs: true,
             has_code: true,
             has_patches: false,
+            plugin: None,
+            kind: Kind::Code,
+            api: Api::Unknown,
+            has_plugin_manifest: false,
+            has_mod_manifest: false,
             installed_at,
         }
     }
@@ -2821,6 +3045,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The reported ultrawide mod (GameBanana 737498) is four `.pchtxt` code
+    /// patches, not RomFS content: EmblemWeave must install each pack as a patch
+    /// mod that applies when the game is built, not call it an empty folder.
+    #[test]
+    #[ignore]
+    fn live_gamebanana_ultrawide_patch_pack() {
+        let root = temp("uw-pack");
+        let mods = root.join("mods");
+        let (m, files) = gb_mod(737498).unwrap();
+        let f = files
+            .iter()
+            .find(|f| f.name.contains("43-18") && !f.archived)
+            .or_else(|| files.iter().find(|f| f.name.contains("43-18")))
+            .expect("the 21:9 pack")
+            .clone();
+        println!("{} file {} ({:?})", m.name, f.name, f.version);
+        let p = gb_prepare(&m, &f).unwrap();
+        assert_eq!(p.choices.len(), 4, "four folders: required, HUD, edges, dialogue");
+        let picks: Vec<usize> = (0..p.choices.len()).collect();
+        finish(&p, &picks, &mods).unwrap();
+        p.discard();
+        let l = list(&mods);
+        assert_eq!(l.len(), 4);
+        for m in &l {
+            assert!(m.has_patches, "{} holds only .pchtxt patches", m.name);
+            assert!(!m.has_romfs);
+            assert_eq!(m.kind, Kind::Patch, "{}: {:?}", m.name, m.kind);
+            assert!(m.kind.playable());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Installs a real mod from GameBanana (network).
     #[test]
     #[ignore]
@@ -2836,5 +3092,143 @@ mod tests {
         assert!(l[0].has_romfs && l[0].enabled);
         assert_eq!(l[0].info.gamebanana_id, Some(737235));
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    // --- classification ---------------------------------------------------------------------------------------------------------
+
+    /// Every layout the Mods page must tell apart, built with the real folder
+    /// shape each mod ships.
+    #[test]
+    fn classifies_real_package_layouts() {
+        let root = temp("kinds");
+        let mods = root.join("mods");
+        let put = |rel: &str| {
+            let p = mods.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        };
+        put("RomFS Mod/romfs/GameData/Job.bin");
+        put("Code Mod/exefs/quick_save.dll");
+        put("Patch Mod/exefs/patches/patch.pchtxt");
+        put("Both/romfs/a.bin");
+        put("Both/exefs/x.dll");
+        put("Manifest Only/plugin.json");
+        std::fs::create_dir_all(mods.join("Blank")).unwrap();
+        // A nested wrapper folder (the shape an archive with one top folder makes).
+        put("Wrapped/Wrapped Mod/romfs/a.bin");
+
+        let l = list(&mods);
+        let kind = |n: &str| l.iter().find(|m| m.name == n).unwrap().kind;
+        assert_eq!(kind("RomFS Mod"), Kind::RomFs);
+        assert_eq!(kind("Code Mod"), Kind::Code);
+        assert_eq!(kind("Patch Mod"), Kind::Patch);
+        assert_eq!(kind("Both"), Kind::Combined);
+        assert_eq!(kind("Manifest Only"), Kind::MetadataOnly);
+        assert_eq!(kind("Blank"), Kind::Empty);
+        assert_eq!(kind("Wrapped"), Kind::RomFs);
+        assert!(l.iter().all(|m| m.kind.playable() == !matches!(m.kind, Kind::MetadataOnly | Kind::Empty)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A DLL with no manifest still counts as a code mod, and its API is
+    /// unknown rather than assumed.
+    #[test]
+    fn a_bare_dll_is_code_with_an_unknown_api() {
+        let root = temp("bare-dll");
+        let mods = root.join("mods");
+        std::fs::create_dir_all(mods.join("Bare/exefs")).unwrap();
+        std::fs::write(mods.join("Bare/exefs/bare.dll"), b"MZ not really a dll").unwrap();
+        let m = list(&mods).remove(0);
+        assert_eq!(m.kind, Kind::Code);
+        assert_eq!(m.api, Api::Unknown);
+        assert!(!m.uses_trinity());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The bundled Trinity Core, recognised by the identity its manifest
+    /// carries, is a runtime component and not an ordinary content mod.
+    #[test]
+    fn recognises_the_bundled_trinity_core() {
+        let root = temp("trinity-core");
+        let mods = root.join("mods");
+        let folder = mods.join("TrinityCore");
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("exefs/Trinity.dll"), b"MZ").unwrap();
+        std::fs::write(
+            folder.join("plugin.json"),
+            r#"{"schema":1,"id":"org.xion.trinity.core","name":"Trinity Core","version":"0.2.0",
+                "abi":{"min":1,"max":1},"hosts":["emblemweave"],"capabilities":["nxp.ui"]}"#,
+        )
+        .unwrap();
+        let m = list(&mods).remove(0);
+        assert!(m.is_trinity_core());
+        assert_eq!(m.kind, Kind::Runtime);
+        assert_eq!(m.kind.label(), "Runtime component");
+        assert_eq!(m.version(), "0.2.0");
+        assert!(!m.uses_trinity(), "the core is not a dependent mod");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A third-party plugin on the NXP layer is told apart from the core, and
+    /// from a mod that merely sits in a folder called TrinityCore.
+    #[test]
+    fn a_third_party_nxp_plugin_is_not_the_core() {
+        let root = temp("nxp-mod");
+        let mods = root.join("mods");
+        let folder = mods.join("Turn Control");
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("exefs/turn.dll"), b"MZ").unwrap();
+        std::fs::write(
+            folder.join("plugin.json"),
+            r#"{"id":"org.example.turn","name":"Turn Control","version":"2.0.0","abi":{"min":1,"max":2},
+                "capabilities":["nxp.settings"],"dependencies":["trinity"]}"#,
+        )
+        .unwrap();
+        let m = list(&mods).remove(0);
+        assert!(!m.is_trinity_core());
+        assert!(m.uses_trinity());
+        assert_eq!(m.api, Api::Trinity);
+        assert_eq!(m.kind, Kind::Code);
+        // A folder named like the core, with a DLL, but no manifest identity is
+        // not the core: the name alone proves nothing.
+        let fake = mods.join("TrinityCore");
+        std::fs::create_dir_all(fake.join("exefs")).unwrap();
+        std::fs::write(fake.join("exefs/Trinity.dll"), b"MZ").unwrap();
+        let fake = list(&mods).into_iter().find(|m| m.name == "TrinityCore").unwrap();
+        assert!(!fake.is_trinity_core());
+        assert_eq!(fake.kind, Kind::Code);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Loading a mod profile never switches the bundled runtime component off.
+    #[test]
+    fn a_profile_leaves_the_runtime_component_alone() {
+        let root = temp("profile-runtime");
+        let mods = root.join("mods");
+        let core = mods.join("TrinityCore");
+        std::fs::create_dir_all(core.join("exefs")).unwrap();
+        std::fs::write(core.join("exefs/Trinity.dll"), b"MZ").unwrap();
+        std::fs::write(core.join("plugin.json"), r#"{"id":"org.xion.trinity.core","name":"Trinity Core"}"#).unwrap();
+        std::fs::create_dir_all(mods.join("Other/romfs")).unwrap();
+        std::fs::write(mods.join("Other/romfs/a.bin"), b"x").unwrap();
+        let before = list(&mods);
+        assert!(before.iter().any(|m| m.is_trinity_core() && m.enabled));
+        // A profile that names only the other mod.
+        let (changed, failed) = apply_profile(&before, &["Other".to_string()]);
+        assert_eq!((changed, failed.len()), (0, 0));
+        let after = list(&mods);
+        assert!(after.iter().any(|m| m.is_trinity_core() && m.enabled), "Trinity Core stays on");
+        assert!(after.iter().any(|m| m.name == "Other" && m.enabled));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A DLL's export names are read from its bytes: NxModApi entry points and
+    /// nxp interfaces are evidence, not a guess from the file name.
+    #[test]
+    fn reads_the_api_from_the_dll() {
+        assert_eq!(dll_api(b"text nxmod_init more"), (true, false));
+        assert_eq!(dll_api(b"nxp.nxmod"), (false, true));
+        assert_eq!(dll_api(b"nxmod_init nxp.ui"), (true, true));
+        assert_eq!(dll_api(b"MZ nothing here"), (false, false));
     }
 }
