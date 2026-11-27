@@ -87,11 +87,12 @@ std::shared_ptr<AudioSink> sink() {
             chosen = make_xaudio2_sink();
             if (!chosen) {
                 NXLOG_W("audio", "XAudio2 is not available: using the null sink (no sound)");
-            } else if (!chosen->open(48000, 2)) {   // the real open comes with the first frames; this only finds out whether a device is there
-                NXLOG_W("audio", "XAudio2 cannot open an output device: using the null sink (no sound)");
+            } else if (default_output_id().empty()) {
+                // No output endpoint at all. Asked through the device enumerator: building an XAudio2 engine just to find out and
+                // destroying it again crashes under Wine/Proton on hosts with a bogus device (issue #44), and the sink keeps its
+                // device from the first real open() on.
+                NXLOG_W("audio", "no audio output device: using the null sink (no sound)");
                 chosen.reset();
-            } else {
-                chosen->close();
             }
         } else if (want != "null") {
             NXLOG_W("audio", "[audio] sink = %s is not a sink name (auto, xaudio2, paced, null): using the null sink", want.c_str());
