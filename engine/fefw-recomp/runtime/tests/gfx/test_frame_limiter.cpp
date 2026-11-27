@@ -265,3 +265,29 @@ NXTEST(nohook_still_paces_at_target_rate) {
     std::printf("    6 begin_frame_nohook calls at 100 fps: first to last start %.3f ms\n", ns_to_ms(static_cast<double>(last - first)));
     CHECK_MSG(last - first >= 38000000ull, "begin_frame_nohook did not pace: 6 starts at 100 fps spanned less than 38 ms");
 }
+
+namespace {
+// The loading flag is process-wide: put it back for the cases that follow.
+struct ScopedLoading {
+    ScopedLoading() { nxrt::frame_limiter_set_loading(true); }
+    ~ScopedLoading() { nxrt::frame_limiter_set_loading(false); }
+};
+}  // namespace
+
+NXTEST(loading_stays_paced) {
+    ScopedBoost boost;
+    FrameLimiter l;
+    l.set_target_fps(120.0);
+    l.set_game_fps(60.0);
+    {
+        ScopedLoading loading;
+        CHECK_MSG(nxrt::frame_limiter_loading(), "loading flag was not set");
+        CHECK_MSG(l.effective_fps() == 60.0, "loading changed effective_fps");
+        l.set_game_fps(0.0);
+        const std::vector<uint64_t> starts = run_frames(l, 40, 120.0);
+        const double mean_ms = ns_to_ms(static_cast<double>(starts.back() - starts[10]) / static_cast<double>(starts.size() - 11));
+        std::printf("    loading with 120 fps target: mean interval %.4f ms (period 8.3333 ms)\n", mean_ms);
+        CHECK_MSG(std::fabs(mean_ms - 1000.0 / 120.0) / (1000.0 / 120.0) < 0.03, "loading did not pace at target rate");
+    }
+    CHECK_MSG(!nxrt::frame_limiter_loading(), "loading flag was not cleared");
+}

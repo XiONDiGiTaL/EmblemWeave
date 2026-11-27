@@ -1691,7 +1691,7 @@ void vol3d_prepare(const ProgLayout& pl) {
 }
 
 std::atomic<uint64_t> g_pool_uploads_deferred{0};
-std::atomic<uint64_t> g_pacing_on_present{0};   // the present at which pacing last came back on after a load (note_frame_for_pacing)
+std::atomic<uint64_t> g_pacing_on_present{0};   // the present at which the last loading interval ended (note_frame_for_pacing)
 const bool g_pool_deferred_hitch = (nxrt::hitch_add_counter("pool_uploads_deferred", []() -> uint64_t { return g_pool_uploads_deferred.load(std::memory_order_relaxed); }), true);
 
 VkFormat image_format_vk(uint32_t f);   // below
@@ -1809,13 +1809,13 @@ void prepare_textures(const ProgLayout& pl) {
     // [nvn] pool_upload_burst_firsts (default 256): the threshold of this count. 64 also fired while walking into a cold street (s4-default:
     // a minute of 24 ms upload frames, 531 frames over 33 ms); a load-in needs several hundred at once.
     static const int64_t firsts_n = config_get_int("nvn", "pool_upload_burst_firsts", 256);
-    // ... and in the first [nvn] pool_upload_loadin_frames (30) presents after a loading screen (pacing back on) pool_upload_backlog (64)
+    // ... and in the first [nvn] pool_upload_loadin_frames (30) presents after a loading screen ends, pool_upload_backlog (64)
     // is enough: the load-in frame starts the burst early (s5-default's, with 256, made 426 uploads in 361 ms; s4's, with 64, 173 in 295)
     static const int64_t loadin_frames = config_get_int("nvn", "pool_upload_loadin_frames", 30);
     const uint64_t on_at = g_pacing_on_present.load(std::memory_order_relaxed);
-    // The load-in frame itself is the present at which pacing comes back on: note_frame_for_pacing() runs at that present, after this
-    // frame's prepare_textures(), so frames while pacing is still off (a loading screen and its last frame) count as load-in too.
-    const bool loadin = (loadin_frames > 0 && nxrt::frame_limiter_unpaced()) ||
+    // The load-in frame itself is the present at which loading ends: note_frame_for_pacing() runs at that present, after this
+    // frame's prepare_textures(), so frames while loading is still true (a loading screen and its last frame) count as load-in too.
+    const bool loadin = (loadin_frames > 0 && nxrt::frame_limiter_loading()) ||
                         (on_at && now_p >= on_at && now_p - on_at < static_cast<uint64_t>(std::max<int64_t>(0, loadin_frames)));
     if (pool_ms > 0 && !burst) {
         const size_t lim = static_cast<size_t>(std::max<int64_t>(0, loadin ? std::min(firsts_n, backlog_n) : firsts_n));
@@ -6215,13 +6215,11 @@ void note_startup_ready() {
     }
 }
 
-// [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
-// presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
-// loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
-// steadily (the title screen, a menu) is paced again within 1.5 s, so it does not run at 1000 fps; so is any frame with 16+ draws.
+// Detect loading intervals (boot, loading screens) for the load census, ASTC/mirror budgets, and load-in upload burst.
+// Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the loading screen
+// a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents steadily
+// (the title screen, a menu) leaves loading within 1.5 s; so does any frame with 16+ draws. The frame limiter stays paced throughout.
 void note_frame_for_pacing() {
-    static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
-    if (!on) return;
     using clk = std::chrono::steady_clock;
     static uint64_t last_p = 0, last_d = 0;
     static int low = 0;
@@ -6237,11 +6235,11 @@ void note_frame_for_pacing() {
     last_present = now;
     low = per < 16 ? low + 1 : 0;
     const bool want = low >= 3 && now - last_stall < std::chrono::milliseconds(1500);
-    if (want != nxrt::frame_limiter_unpaced()) {
-        nxrt::frame_limiter_set_unpaced(want);
+    if (want != nxrt::frame_limiter_loading()) {
+        nxrt::frame_limiter_set_loading(want);
         if (!want) g_pacing_on_present.store(p, std::memory_order_relaxed);   // a load just ended (prepare_textures' load-in burst)
         ft::mark(want ? "pace.loading" : "pace.playing", static_cast<uint32_t>(per));
-        NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : "on", static_cast<unsigned long long>(p),
+        NXLOG_I(kTag, "loading %s (present %llu, %llu draws)", want ? "start" : "end", static_cast<unsigned long long>(p),
                 static_cast<unsigned long long>(per));
         load_census(want ? CensusEvent::LoadStart : CensusEvent::LoadEnd, p);
     }

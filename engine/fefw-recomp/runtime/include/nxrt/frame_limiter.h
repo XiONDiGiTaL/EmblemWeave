@@ -78,10 +78,11 @@ private:
 // Busters formula, at least 3 under), never below 1. 60 -> 57, 120 -> 116, 144 -> 138.24, 240 -> 224.
 double suggest_vrr_cap(double refresh_hz);
 
-// While the game loads (a black boot screen, a loading screen: a presented frame with almost no draws) no limiter waits: the loading code
-// advances once per frame, so pacing it at 60 Hz stretches boot and loads. The NVN replay sets it ([display] unpaced_loading, default on).
-void frame_limiter_set_unpaced(bool on);
-bool frame_limiter_unpaced();
+// Set by the NVN replay while the game loads (boot, loading screens: presented frames with almost no draws and a recent stall).
+// Subsystems (ASTC GPU budget, pool mirroring, load-in upload burst, load census) use it to lift gameplay-only per-frame throttles;
+// the frame limiter itself stays paced at the normal rate. Safe from any thread.
+void frame_limiter_set_loading(bool on);
+bool frame_limiter_loading();
 
 // The display rate the game's present interval counts in (nvn_present.cpp: its frame rate is hz / interval). 0 (default): [nvn]
 // present_interval_hz. A game module that raises the game's own display rate sets it (fefw's fps120: 120). Safe from any thread.
