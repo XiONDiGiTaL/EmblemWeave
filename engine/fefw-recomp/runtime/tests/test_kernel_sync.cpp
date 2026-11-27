@@ -558,6 +558,39 @@ NXTEST(wait_process_wide_key_timeout) {
     end();
 }
 
+// A timed wait that is signalled while another thread holds the mutex still returns at its own deadline:
+// SignalProcessWideKey queues the waiter behind the holder instead of handing the mutex over, and the call must
+// not stay blocked until that holder unlocks.
+NXTEST(wait_process_wide_key_timeout_survives_signal) {
+    begin();
+    GMutex m;
+    GCond c;
+    m.word = my_tag();                        // the test thread holds the mutex
+    std::atomic<int> rc{0x7fffffff};
+    std::atomic<double> elapsed{0};
+    const uint32_t w = guest_create(44, 0, [&] {
+        const auto t0 = Clock::now();
+        rc.store(static_cast<int>(ks::wait_process_wide_key(addr_of(&m.word), addr_of(&c.key), my_tag(), 80 * kMs)));
+        elapsed.store(ms_since(t0));
+    });
+    CHECK_MSG(ks::thread_start(w) == ks::kOk, "thread_start failed");
+    // The waiter releases the mutex in the call and queues on the condition variable.
+    CHECK_MSG(wait_until([&] { return load_word(&c.key) == 1 && load_word(&m.word) == 0; }), "the waiter never queued");
+    // Another owner takes the mutex, so the signal queues the waiter behind it instead of handing the mutex over.
+    CHECK_MSG(cas_word(&m.word, 0, my_tag()), "could not take the freed mutex");
+    CHECK_EQ(ks::signal_process_wide_key(addr_of(&c.key), 1), ks::kOk);
+    sleep_ms(700);                            // held well past the waiter's 80 ms deadline
+    CHECK_EQ(ks::arbitrate_unlock(addr_of(&m.word)), ks::kOk);
+    join_guest("wait_process_wide_key_timeout_survives_signal", w);
+    CHECK_EQ(rc.load(), static_cast<int>(ks::kTimedOut));
+    CHECK_MSG(slept_at_least(elapsed.load(), 80.0), "the wait returned before its deadline");
+    CHECK_MSG(elapsed.load() < 450.0, "the wait ignored its deadline while re-acquiring the mutex");
+    CHECK_EQ(load_word(&m.word), 0u);
+    CHECK_EQ(load_word(&c.key), 0u);
+    CHECK_EQ(g_guest_errors.load(), 0);
+    end();
+}
+
 // ---- 9: producer / consumer --------------------------------------------------------------------------------------------------
 
 NXTEST(producer_consumer_exactly_once) {

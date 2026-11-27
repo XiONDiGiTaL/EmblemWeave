@@ -442,25 +442,58 @@ std::string sync_wait_report() {
     return out;
 }
 
-uint32_t arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
+// Removes t from the mutex hand-over queue for addr. The last waiter also clears the "has waiters" bit: a signal sets
+// it before it queues the waiter, and a free word left with only that bit set spins every later mutex_lock for ever
+// (cur != 0, cur & ~mask == 0 != my tag, arbitrate_lock returns kOk without owning it). g_k held.
+void drop_mutex_waiter(KThread& t, uint64_t addr) {
+    remove_from(g_mutex_waiters, &t);
+    const bool others = std::any_of(g_mutex_waiters.begin(), g_mutex_waiters.end(),
+                                    [&](KThread* w) { return w->wait_mutex == addr; });
+    if (others) return;
+    g_broadcast_mutexes.erase(addr);
+    uint32_t cur = load32(addr);
+    while (cur == kHandleWaitMask && !cas32(addr, cur, 0)) cur = load32(addr);
+}
+
+// ArbitrateLock with an optional deadline (until, ns monotonic; 0 = none), for the re-acquire inside a timed
+// WaitProcessWideKey. A signal that finds the mutex held queues the waiter instead of handing the mutex over; that
+// waiter must still give up at its own deadline, as Horizon does, and let the SDK re-lock on timeout. Without one the
+// re-acquire could outlive the caller's timeout by however long the holder kept the mutex.
+uint32_t arbitrate_lock_until(uint32_t owner, uint64_t addr, uint32_t tag, int64_t until) {
     if (addr & 3) return kInvalidAddress;
     const WaitTuning& wt = wait_tuning();
     if (wt.lock_spin && (wt.lock_names.empty() || self().lock_spin_ok)) {
         const int64_t end = qpc_now() + wt.lock_spin;
         for (uint32_t i = 0; load32(addr) == (owner | kHandleWaitMask); i++) {
-            if ((i & 15) == 15 && qpc_now() >= end) break;
+            if ((i & 15) == 15) {
+                if (qpc_now() >= end) break;
+                if (until > 0 && now_ns() >= until) return kTimedOut;
+            }
             nxrt::platform::yield_cpu();
         }
     }
     GuardMutex g;
     KThread& me = self();
     if (load32(addr) != (owner | kHandleWaitMask)) return kOk;      // the owner already released it: the caller retries in guest code
+    if (until > 0 && now_ns() >= until) return kTimedOut;
     me.wake = false;
     me.wait_mutex = addr;
     me.wait_tag = tag;
     g_mutex_waiters.push_back(&me);
-    block_on_wake(me, -1, 1, g_k.m);
+    const int64_t timeout = until > 0 ? std::max<int64_t>(0, until - now_ns()) : -1;
+    if (!block_on_wake(me, timeout, 1, g_k.m)) {
+        // A hand-over that landed as the deadline passed still counts: the mutex word already holds our tag, so
+        // reporting a timeout would leave the caller owning a mutex it thinks it does not hold.
+        if (me.wake) return me.wait_result;
+        drop_mutex_waiter(me, addr);
+        me.wait_mutex = 0;
+        return kTimedOut;
+    }
     return me.wait_result;
+}
+
+uint32_t arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
+    return arbitrate_lock_until(owner, addr, tag, 0);
 }
 
 uint32_t arbitrate_unlock(uint64_t addr) {
@@ -510,21 +543,28 @@ uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64
         }
         // We don't own the mutex yet. We'll acquire it below after releasing the kernel lock.
     }
-    // Kernel lock released. Now acquire the mutex via arbitrate_lock.
-    // Loop until we own the mutex or timeout.
+    // Kernel lock released. Now acquire the mutex, still under the caller's deadline: the signal may have queued us
+    // behind a holder instead of handing the mutex over.
     for (;;) {
-        int64_t remaining_ns = timeout_ns <= 0 ? -1 : until - now_ns();
-        if (remaining_ns < 0) remaining_ns = 0;
+        if (until > 0 && now_ns() >= until) {
+            Guard g;
+            KThread& me = self();
+            remove_from(g_cv_waiters, &me);
+            drop_mutex_waiter(me, mutex);
+            const bool others = std::any_of(g_cv_waiters.begin(), g_cv_waiters.end(), [&](KThread* t) { return t->wait_key == key; });
+            if (!others) store32(key, 0);
+            return kTimedOut;
+        }
         // The owner is the current mutex holder.
         uint32_t cur = load32(mutex);
         uint32_t owner = cur & ~kHandleWaitMask;
-        uint32_t rc = arbitrate_lock(owner, mutex, tag);
+        uint32_t rc = arbitrate_lock_until(owner, mutex, tag, until);
         if (rc != kOk) {
             // Timeout or error - clean up (need to re-acquire kernel lock for cleanup)
             Guard g;
             KThread& me = self();
             remove_from(g_cv_waiters, &me);
-            remove_from(g_mutex_waiters, &me);
+            drop_mutex_waiter(me, mutex);
             bool others = std::any_of(g_cv_waiters.begin(), g_cv_waiters.end(), [&](KThread* t) { return t->wait_key == key; });
             if (!others) store32(key, 0);
             return rc;
