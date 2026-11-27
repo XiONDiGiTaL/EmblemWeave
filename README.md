@@ -130,6 +130,8 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | [lz4_flex](https://github.com/PSeitz/lz4_flex) / [ruzstd](https://github.com/KillingSpark/zstd-rs) | Decompression. |
 | [libm](https://github.com/rust-lang/libm) | Mathematical functions. |
 | [zbic](https://github.com/kinnay/zbic) | ZBIC decoding. |
+| [RenHDrum](https://github.com/trzz1214/RenHDrum) | HD Rumble by trzz1214 (Three-Dola). |
+| [ReShade](https://github.com/crosire/reshade) | Post-processing injector. |
 | [GameBanana](https://gamebanana.com/mods/games/26274) | Mod discovery and hosting. |
 
 Goldoire's original fefw-recomp repository is no longer online; EmblemWeave continues from the snapshot in `engine/`. See [docs/UPSTREAM.md](docs/UPSTREAM.md).
