@@ -39,8 +39,9 @@ pub struct Piece {
     pub exe: &'static str,
     /// The version the piece reports once it runs.
     pub version: &'static str,
-    /// Files and folders to take from a `.tar.zst` archive, relative to its top folder. Empty means everything. The
-    /// small zip pieces are extracted whole.
+    /// The files and folders the piece needs, relative to `tools`. They also select what to take from a `.tar.zst`
+    /// archive; the small zip pieces are extracted whole, so for those this is the completeness check. Empty means the
+    /// executable alone proves the piece is in place.
     pub keep: &'static [&'static str],
 }
 
@@ -57,6 +58,31 @@ const CLANG_KEEP: &[&str] = &[
     "bin/vcruntime140.dll",
     "bin/vcruntime140_1.dll",
     "lib/clang/23/include/",
+];
+
+/// CMake's compiler-detection, compiler-specific and Ninja-generator modules live beside `tools/bin`. Without them every
+/// configure fails before the project is read, so the directory and the files the engine's configure always loads are
+/// part of the piece; a quarantine that took only part of the module tree is then caught like a missing `cmake.exe`.
+const CMAKE_KEEP: &[&str] = &[
+    "share/cmake-3.31/Modules/",
+    "share/cmake-3.31/Modules/CMakeDetermineSystem.cmake",
+    "share/cmake-3.31/Modules/CMakeDetermineCCompiler.cmake",
+    "share/cmake-3.31/Modules/CMakeDetermineCXXCompiler.cmake",
+    "share/cmake-3.31/Modules/CMakeCInformation.cmake",
+    "share/cmake-3.31/Modules/CMakeCXXInformation.cmake",
+    "share/cmake-3.31/Modules/CMakeTestCCompiler.cmake",
+    "share/cmake-3.31/Modules/CMakeTestCXXCompiler.cmake",
+    "share/cmake-3.31/Modules/CMakeNinjaFindMake.cmake",
+    "share/cmake-3.31/Modules/Compiler/Clang.cmake",
+    "share/cmake-3.31/Modules/Platform/Windows-Clang.cmake",
+];
+
+/// The embeddable Python cannot start its stdlib or load an extension without these: the interpreter DLL, the
+/// stable-ABI DLL extensions link against, and the standard-library zip.
+const PYTHON_KEEP: &[&str] = &[
+    "bin/python312.dll",
+    "bin/python3.dll",
+    "bin/python312.zip",
 ];
 
 /// The four pieces, at the versions the engine builds against. LLVM 23 is the release `MIN_CLANG_MAJOR` asks for;
@@ -82,7 +108,7 @@ pub const PIECES: &[Piece] = &[
         bytes: 46473549,
         exe: "cmake.exe",
         version: "3.31.6",
-        keep: &[],
+        keep: CMAKE_KEEP,
     },
     Piece {
         key: "ninja",
@@ -104,7 +130,7 @@ pub const PIECES: &[Piece] = &[
         bytes: 11094114,
         exe: "python.exe",
         version: "3.12.8",
-        keep: &[],
+        keep: PYTHON_KEEP,
     },
 ];
 
@@ -870,6 +896,45 @@ mod tests {
         fs::remove_file(tools.join("bin").join("cmake.exe")).unwrap();
         let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
         assert_eq!(keys, vec!["clang", "cmake"], "the report keeps the pieces' order");
+    }
+
+    /// CMake's executables can survive a quarantine that took the modules they load. The module tree is part of the
+    /// piece, not just `cmake.exe`, so a partial quarantine is named before a configure fails.
+    #[test]
+    fn a_quarantined_cmake_module_is_damage() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        assert!(damage_in(tools).is_empty());
+
+        fs::remove_file(tools.join("share/cmake-3.31/Modules/CMakeDetermineSystem.cmake")).unwrap();
+        let damage = damage_in(tools);
+        assert_eq!(damage.len(), 1, "only CMake is damaged");
+        assert!(
+            damage[0].summary().contains("CMakeDetermineSystem.cmake"),
+            "the module file is named: {}",
+            damage[0].summary()
+        );
+        let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
+        assert_eq!(keys, vec!["cmake"]);
+    }
+
+    #[test]
+    fn a_quarantined_python_dll_or_zip_is_damage() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        assert!(damage_in(tools).is_empty());
+
+        fs::remove_file(tools.join("bin/python312.dll")).unwrap();
+        fs::remove_file(tools.join("bin/python312.zip")).unwrap();
+        let damage = damage_in(tools);
+        assert_eq!(damage.len(), 1, "only Python is damaged");
+        let summary = damage[0].summary();
+        assert!(summary.contains("python312.dll"), "{summary}");
+        assert!(summary.contains("python312.zip"), "{summary}");
+        let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
+        assert_eq!(keys, vec!["python"]);
     }
 
     #[test]
