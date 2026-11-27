@@ -16,6 +16,7 @@
 
 #include "nxrt/config.h"
 #include "nxrt/frame_limiter.h"
+#include "nxrt/gauge.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nxrt/platform.h"
@@ -180,7 +181,11 @@ void open_frame(State& s) {
     sl::FrameToken* t = nullptr;
     if (s.f.token(t, &s.index) != sl::Result::eOk || !t) return;
     const uint64_t t0 = FrameLimiter::now_ns();
-    s.f.reflex_sleep(*t);
+    {
+        // Reflex sleep paces the frame when DLSS-G is active; count it as limiter time so it is not billed to render thread work.
+        nxrt::HitchTimer ht(nxrt::kHpRenderLimiter);
+        s.f.reflex_sleep(*t);
+    }
     g_sleep_ns.store(FrameLimiter::now_ns() - t0, std::memory_order_relaxed);
     s.f.marker(sl::PCLMarker::eSimulationStart, *t);
     s.f.marker(sl::PCLMarker::eSimulationEnd, *t);
