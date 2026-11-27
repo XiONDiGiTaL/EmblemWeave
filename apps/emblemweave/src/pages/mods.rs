@@ -160,10 +160,10 @@ struct Deep {
     settings: HashMap<PathBuf, Vec<String>>,
 }
 
-/// Long enough that a scroll does not rescan, short enough that a folder
+/// Long enough that scrolling does not trigger a rescan; a folder
 /// dropped in from Explorer appears on the next redraw. Actions on the page
 /// invalidate the scan immediately.
-const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Ui {
     /// A question is open: the page behind it takes no typing.
