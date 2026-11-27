@@ -114,12 +114,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         let list = damage.iter().map(|d| d.summary()).collect::<Vec<_>>().join("; ");
                         let paths = damage
                             .iter()
-                            .flat_map(|d| d.missing.iter().map(|p| p.display().to_string()))
+                            .flat_map(|d| d.paths().map(|p| p.display().to_string()))
                             .collect::<Vec<_>>()
                             .join("\n");
                         ui.label(
                             RichText::new(format!(
-                                "Missing: {list}. A quarantine can leave the install record behind; Repair fetches only the damaged pieces."
+                                "Missing or damaged: {list}. A quarantine can leave the install record behind; Repair fetches only the damaged pieces."
                             ))
                             .size(12.5)
                             .color(p.warn),

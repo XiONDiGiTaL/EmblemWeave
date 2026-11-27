@@ -1857,7 +1857,23 @@ fn parse_capture_devices(spec: &str) -> Result<Vec<crate::gpu::Device>, String> 
         .collect()
 }
 
+/// A release build is a `windows` subsystem binary: a flag such as `--verify-tools` has no console to print to unless
+/// the process attaches to the one that started it. A double-click has no parent console and this fails harmlessly.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 fn main() -> eframe::Result<()> {
+    if std::env::args_os().len() > 1 {
+        attach_parent_console();
+    }
     crash::install();
     let args: Vec<String> = std::env::args().collect();
     // Read-only evidence for issue #70: hash the effective ExeFS and RomFS from
@@ -1900,6 +1916,14 @@ fn main() -> eframe::Result<()> {
     // Requirements page reports them as Carried once they land. Pieces the PC already has are not downloaded. `--fetch-tools`
     // forces all four in the foreground, so do not start the background fetch as well: both would download the same archives.
     let fetch_tools = args.iter().any(|a| a == "--fetch-tools");
+    // Re-hash every carried tool without downloading or starting the background fetch. Exit 0 when every required file
+    // matches the manifest written at install time, 1 when something is missing or damaged, so a build machine can gate
+    // on it (issue #116).
+    if args.iter().any(|a| a == "--verify-tools") {
+        let (report, ok) = portable::verify_report();
+        println!("{report}");
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     if !fetch_tools {
         portable::auto_start();
     }

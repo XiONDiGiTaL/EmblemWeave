@@ -2593,14 +2593,16 @@ pub fn build(
     // a piece whose executable is still there would shadow an installed copy and fail at the first link or configure, so
     // name it and stop. A piece whose executable is gone lets the tool search fall through: with a complete installed
     // copy the build can use that instead of forcing a large repair (issue #116).
-    let damage = crate::portable::damage();
+    // Deep here: a same-size substitution passes the Overview's fast check, and this is the one place where a wrong
+    // compiler or linker would be executed.
+    let damage = crate::portable::damage_deep();
     let blocking: Vec<_> = damage.iter().filter(|d| d.blocks_build()).cloned().collect();
     if let Some(note) = crate::portable::damage_note_for(&blocking) {
         return Err(note);
     }
     if !damage.is_empty() {
         ctx.log(format!(
-            "the carried toolchain is missing files for {}; the build will use installed copies",
+            "the carried toolchain is missing or damaged files for {}; the build will use installed copies",
             damage.iter().map(|d| d.piece.name).collect::<Vec<_>>().join(", ")
         ));
     }

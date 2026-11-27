@@ -145,29 +145,197 @@ pub fn bin_dir() -> Option<PathBuf> {
     dir().map(|d| d.join("bin"))
 }
 
-/// The files and folders under `tools` this piece installs that are not there. The stamp only records that the archive was
-/// unpacked once: an antivirus quarantine removes individual files and leaves the stamp, so checking `piece.exe` alone
-/// called a toolchain with no `lld-link.exe` or `llvm-rc.exe` carried, and the build failed at its first link or resource
-/// compile instead (issue #116).
-fn missing_in(tools: &Path, piece: &Piece) -> Vec<PathBuf> {
-    let mut missing = Vec::new();
-    let exe = tools.join("bin").join(piece.exe);
-    if !exe.is_file() {
-        missing.push(exe);
-    }
-    for rel in piece.keep {
-        let path = tools.join(rel);
-        let present = if rel.ends_with('/') { path.is_dir() } else { path.is_file() };
-        if !present && !missing.contains(&path) {
-            missing.push(path);
-        }
-    }
-    missing
+const MANIFEST_SUFFIX: &str = ".manifest";
+
+/// Why a required file failed its check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The path is not there at all.
+    Missing,
+    /// The path exists but is empty, the wrong size, or not the bytes that were installed.
+    Damaged,
 }
 
-/// Whether this piece is in place: its stamp matches the archive, and every file the piece installs is still there.
+/// One required path that failed its check.
+#[derive(Debug, Clone)]
+pub struct Problem {
+    pub path: PathBuf,
+    pub fault: Fault,
+}
+
+/// Every path a piece needs at run time. A `keep` entry ending in `/` is a folder whose files the build reads (clang's
+/// resource headers); a deep check walks it, while the shallow check the Overview runs on every frame only looks at the
+/// folder itself. Walking and hashing a thousand headers per frame would cost more than the page.
+fn required_files(tools: &Path, piece: &Piece, deep: bool) -> Vec<PathBuf> {
+    let mut out = vec![tools.join("bin").join(piece.exe)];
+    for rel in piece.keep {
+        let path = tools.join(rel);
+        if rel.ends_with('/') {
+            if deep {
+                walk_files(&path, &mut out);
+            }
+        } else {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// The manifest written after an install: one `sha256 size relative/path` line per required file. The stamp only records
+/// that the archive was unpacked once, and an antivirus quarantine removes individual files while leaving the stamp, so
+/// the manifest is what lets the check tell a whole file from a truncated or substituted one (issue #116).
+#[derive(Debug, Clone)]
+struct ManifestEntry {
+    sha256: String,
+    size: u64,
+}
+
+fn manifest_path(tools: &Path, piece: &Piece) -> PathBuf {
+    tools
+        .join("bin")
+        .join(format!("{STAMP_PREFIX}{}{MANIFEST_SUFFIX}", piece.key))
+}
+
+fn relative_path(tools: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(tools)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
+/// Records what was installed, after the archive's own hash has been checked and before the stamp is written. A required
+/// file the archive did not contain fails the install here, so a partial extraction is never stamped as whole.
+fn write_manifest(tools: &Path, piece: &Piece) -> Result<(), String> {
+    let mut lines = Vec::new();
+    let mut absent = Vec::new();
+    for path in required_files(tools, piece, true) {
+        if !path.is_file() {
+            absent.push(path);
+            continue;
+        }
+        let Some(rel) = relative_path(tools, &path) else { continue };
+        let size = fs::metadata(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?
+            .len();
+        let sha256 = sha256_file(&path)?;
+        lines.push(format!("{sha256} {size} {rel}"));
+    }
+    if !absent.is_empty() {
+        let names = absent
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{} did not unpack {names}. Delete tools\\unpack and run the fetch again.",
+            piece.file
+        ));
+    }
+    lines.sort();
+    fs::write(manifest_path(tools, piece), lines.join("\n") + "\n")
+        .map_err(|e| format!("writing the toolchain manifest: {e}"))
+}
+
+fn read_manifest(tools: &Path, piece: &Piece) -> Option<Vec<(String, ManifestEntry)>> {
+    let text = fs::read_to_string(manifest_path(tools, piece)).ok()?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let sha256 = parts.next()?;
+        let size = parts.next()?.parse().ok()?;
+        let rel = parts.next()?;
+        if sha256.len() != 64 || rel.is_empty() {
+            continue;
+        }
+        out.push((rel.to_string(), ManifestEntry { sha256: sha256.to_string(), size }));
+    }
+    Some(out)
+}
+
+/// The required files that are missing or no longer intact. `deep` also re-hashes every file against the manifest; the
+/// shallow check compares sizes only, which is what the Overview can afford to run on every frame. An install from before
+/// manifests existed has no recorded hashes: its files are still checked for presence and emptiness, and the report says
+/// they are unverified rather than pretending they are whole.
+fn problems_in(tools: &Path, piece: &Piece, deep: bool) -> Vec<Problem> {
+    let manifest: Option<std::collections::HashMap<String, ManifestEntry>> =
+        read_manifest(tools, piece).map(|entries| entries.into_iter().collect());
+    let mut out: Vec<Problem> = Vec::new();
+    // A required folder that is gone has no files to walk, so name the folder itself.
+    for rel in piece.keep {
+        if rel.ends_with('/') && !tools.join(rel).is_dir() {
+            out.push(Problem { path: tools.join(rel), fault: Fault::Missing });
+        }
+    }
+    for path in required_files(tools, piece, deep) {
+        let fault = match fs::metadata(&path) {
+            Err(_) => Some(Fault::Missing),
+            Ok(meta) if !meta.is_file() => Some(Fault::Missing),
+            Ok(meta) if meta.len() == 0 => Some(Fault::Damaged),
+            Ok(meta) => match relative_path(tools, &path).and_then(|rel| manifest.as_ref().map(|m| (rel, m))) {
+                Some((rel, manifest)) => match manifest.get(&rel) {
+                    Some(entry) if entry.size != meta.len() => Some(Fault::Damaged),
+                    Some(entry) if deep => match sha256_file(&path) {
+                        Ok(got) if got != entry.sha256 => Some(Fault::Damaged),
+                        Ok(_) => None,
+                        // Present but unreadable is damage, not a reason to pass it.
+                        Err(_) => Some(Fault::Damaged),
+                    },
+                    _ => None,
+                },
+                None => None,
+            },
+        };
+        if let Some(fault) = fault {
+            if !out.iter().any(|p| p.path == path) {
+                out.push(Problem { path, fault });
+            }
+        }
+    }
+    // A file inside a folder keep is not in `required_files` once it has been deleted, so the deep pass also walks the
+    // manifest. That is how a quarantine that took one header out of clang's resource tree is named.
+    if deep {
+        if let Some(entries) = &manifest {
+            for (rel, entry) in entries {
+                let path = tools.join(rel);
+                let fault = match fs::metadata(&path) {
+                    Err(_) => Some(Fault::Missing),
+                    Ok(meta) if !meta.is_file() => Some(Fault::Missing),
+                    Ok(meta) if meta.len() != entry.size => Some(Fault::Damaged),
+                    Ok(_) => match sha256_file(&path) {
+                        Ok(got) if got != entry.sha256 => Some(Fault::Damaged),
+                        Ok(_) => None,
+                        Err(_) => Some(Fault::Damaged),
+                    },
+                };
+                if let Some(fault) = fault {
+                    if !out.iter().any(|p| p.path == path) {
+                        out.push(Problem { path, fault });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether this piece is in place: its stamp matches the archive, and every required file is present and the size the
+/// install recorded. The stamp alone is not proof of anything (issue #116).
 fn carried_in(tools: &Path, piece: &Piece) -> bool {
-    missing_in(tools, piece).is_empty()
+    problems_in(tools, piece, false).is_empty()
         && fs::read_to_string(tools.join("bin").join(format!("{STAMP_PREFIX}{}", piece.key)))
             .map(|s| s.trim() == piece.sha256)
             .unwrap_or(false)
@@ -182,27 +350,51 @@ pub fn carried(piece: &Piece) -> bool {
 #[derive(Debug, Clone)]
 pub struct Damage {
     pub piece: &'static Piece,
+    /// Required paths that are not there.
     pub missing: Vec<PathBuf>,
+    /// Required paths that are there but empty, truncated, or not the bytes that were installed.
+    pub damaged: Vec<PathBuf>,
 }
 
 impl Damage {
-    /// `LLVM (clang-cl, lld-link and llvm-rc): lld-link.exe` for a one-line report.
+    fn from_problems(piece: &'static Piece, problems: Vec<Problem>) -> Option<Self> {
+        if problems.is_empty() {
+            return None;
+        }
+        let (damaged, missing) = problems.into_iter().fold((Vec::new(), Vec::new()), |(mut d, mut m), p| {
+            if p.fault == Fault::Damaged { d.push(p.path) } else { m.push(p.path) }
+            (d, m)
+        });
+        Some(Damage { piece, missing, damaged })
+    }
+
+    /// `LLVM (clang-cl, lld-link and llvm-rc): lld-link.exe (damaged)` for a one-line report.
     pub fn summary(&self) -> String {
-        let files = self
-            .missing
-            .iter()
-            .filter_map(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let names = |paths: &[PathBuf], mark: &str| {
+            paths
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| format!("{}{mark}", n.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let missing = names(&self.missing, "");
+        let damaged = names(&self.damaged, " (damaged)");
+        let files = [missing, damaged].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
         format!("{}: {files}", self.piece.name)
     }
 
-    /// Whether the piece's own executable is gone. If it is still there, the build's `NX_LLVM`/PATH finds that broken
-    /// carried copy before an installed one, so installed tools cannot take its place.
+    /// Every path the report names, missing first.
+    pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.missing.iter().chain(self.damaged.iter())
+    }
+
+    /// Whether the piece's own executable is gone or unusable. If it is still there, the build's `NX_LLVM`/PATH finds
+    /// that broken carried copy before an installed one, so installed tools cannot take its place.
     fn executable_missing(&self) -> bool {
         let exe = self.piece.exe;
-        self.missing.iter().any(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(exe)))
+        self.paths()
+            .any(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(exe)))
     }
 
     fn blocks_build_with(&self, system_ready: bool) -> bool {
@@ -226,26 +418,62 @@ impl Damage {
 
 /// The carried pieces whose stamp is still there but whose files are partly gone, with the missing paths. A piece that
 /// was never carried is left to the first-run fetch, which installs it without being asked.
-fn damage_in(tools: &Path) -> Vec<Damage> {
+fn damage_in(tools: &Path, deep: bool) -> Vec<Damage> {
     let bin = tools.join("bin");
     PIECES
         .iter()
         .filter(|piece| bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file())
-        .filter_map(|piece| {
-            let missing = missing_in(tools, piece);
-            (!missing.is_empty()).then_some(Damage { piece, missing })
-        })
+        .filter_map(|piece| Damage::from_problems(piece, problems_in(tools, piece, deep)))
         .collect()
 }
 
-/// The pieces a repair has to fetch again, in the same order as [`PIECES`].
+/// The pieces a repair has to fetch again, in the same order as [`PIECES`]. A repair checks hashes, not just sizes: the
+/// player pressed the button because something is wrong, and a same-size substitution is exactly what a size check misses.
 fn damaged_in(tools: &Path) -> Vec<&'static Piece> {
-    damage_in(tools).into_iter().map(|d| d.piece).collect()
+    damage_in(tools, true).into_iter().map(|d| d.piece).collect()
 }
 
-/// The damage report for the engine this launcher runs, for the Overview. Empty when every carried piece is whole.
+/// The damage report for the engine this launcher runs, for the Overview. Sizes only: this runs on the UI thread, and a
+/// truncated or quarantined file is the common case. Empty when every carried piece is whole.
 pub fn damage() -> Vec<Damage> {
-    dir().map(|tools| damage_in(&tools)).unwrap_or_default()
+    dir().map(|tools| damage_in(&tools, false)).unwrap_or_default()
+}
+
+/// The same report with every required file re-hashed. Used before a build starts and by `--verify-tools`, where a few
+/// hundred megabytes of hashing is cheap next to the build itself and a same-size substitution must not pass.
+pub fn damage_deep() -> Vec<Damage> {
+    dir().map(|tools| damage_in(&tools, true)).unwrap_or_default()
+}
+
+/// A line per carried piece for `--verify-tools`: what is intact, what is not, and whether an older install has no
+/// manifest to check against.
+pub fn verify_report() -> (String, bool) {
+    let Some(tools) = dir() else {
+        return ("the engine folder engine/fefw-recomp was not found".into(), false);
+    };
+    let stamp = |piece: &Piece| tools.join("bin").join(format!("{STAMP_PREFIX}{}", piece.key)).is_file();
+    let carried: Vec<&Piece> = PIECES.iter().filter(|p| stamp(p)).collect();
+    if carried.is_empty() {
+        return ("no toolchain piece is carried; run EmblemWeave.exe --fetch-tools".into(), false);
+    }
+    let damaged = damage_in(&tools, true);
+    let mut verified = damaged.is_empty();
+    let mut lines = Vec::new();
+    for piece in carried {
+        match damaged.iter().find(|d| d.piece.key == piece.key) {
+            Some(d) => lines.push(format!("{}: {}", d.piece.name, d.summary())),
+            None if read_manifest(&tools, piece).is_none() => {
+                verified = false;
+                lines.push(format!(
+                    "{}: files are present and non-empty, but this install has no recorded hashes; run --fetch-tools to \
+                     reinstall it with a manifest",
+                    piece.name
+                ));
+            }
+            None => lines.push(format!("{}: intact", piece.name)),
+        }
+    }
+    (lines.join("\n"), verified)
 }
 
 /// Names the pieces whose files are partly gone, with the way back. None when the list is empty.
@@ -255,9 +483,9 @@ pub fn damage_note_for(damaged: &[Damage]) -> Option<String> {
     }
     let lines = damaged.iter().map(|d| format!("  {}", d.summary())).collect::<Vec<_>>();
     Some(format!(
-        "files the toolchain EmblemWeave carried into tools\\bin needs are missing:\n{}\n\nAn antivirus quarantine removes \
-         files like these and leaves the install stamp behind. Press Repair on Overview, or restore them from the \
-         quarantine, then press Rebuild.",
+        "files the toolchain EmblemWeave carried into tools\\bin needs are missing or damaged:\n{}\n\nAn antivirus \
+         quarantine removes or truncates files like these and leaves the install stamp behind. Press Repair on Overview, \
+         restore them from the quarantine, or run EmblemWeave.exe --fetch-tools, then press Rebuild.",
         lines.join("\n")
     ))
 }
@@ -280,9 +508,14 @@ fn system_ready(piece: &Piece) -> bool {
 }
 
 /// Downloads, checks and unpacks one piece. `progress` is told the fraction (0..1) and a line to show; it is called from
-/// the downloading thread, so the UI can keep drawing.
+/// the downloading thread, so the UI can keep drawing. `force` re-fetches a piece that is already carried; the CLI's
+/// `--fetch-tools` uses it so an install from before manifests existed can gain recorded hashes.
 pub fn install(piece: &'static Piece, progress: &dyn Fn(f32, String)) -> Result<(), String> {
-    if carried(piece) {
+    install_inner(piece, progress, false)
+}
+
+fn install_inner(piece: &'static Piece, progress: &dyn Fn(f32, String), force: bool) -> Result<(), String> {
+    if !force && carried(piece) {
         progress(1.0, format!("{} {} is already carried", piece.name, piece.version));
         return Ok(());
     }
@@ -345,6 +578,9 @@ pub fn install(piece: &'static Piece, progress: &dyn Fn(f32, String)) -> Result<
     }
     let _ = fs::remove_dir_all(&unpack);
 
+    // Record the installed files before stamping the piece: the stamp says the archive was unpacked, the manifest says
+    // what it produced. A required file the archive did not hold fails here instead of being stamped as carried.
+    write_manifest(&tools, piece)?;
     fs::write(bin.join(format!("{STAMP_PREFIX}{}", piece.key)), format!("{}\n", piece.sha256))
         .map_err(|e| format!("writing the stamp: {e}"))?;
     // The archive has been checked and unpacked: keeping it only costs a second copy of the download. A failed install
@@ -355,20 +591,21 @@ pub fn install(piece: &'static Piece, progress: &dyn Fn(f32, String)) -> Result<
 }
 
 /// A subset of the pieces, for the background first-run fetch. The CLI's `--fetch-tools` uses [`install_all`].
-fn install_selected(pieces: &[&'static Piece], progress: &dyn Fn(f32, String)) -> Result<(), String> {
+fn install_selected(pieces: &[&'static Piece], progress: &dyn Fn(f32, String), force: bool) -> Result<(), String> {
     let total = pieces.len().max(1) as f32;
     for (i, piece) in pieces.iter().enumerate() {
         let base = i as f32 / total;
-        install(piece, &|f, line| progress((base + f / total).min(1.0), line))?;
+        install_inner(piece, &|f, line| progress((base + f / total).min(1.0), line), force)?;
     }
     Ok(())
 }
 
-/// Every piece, in order. Like the background first-run path, this trims an existing full LLVM install even when all the
-/// pieces are already carried, then removes the archives a successful install leaves behind.
+/// Every piece, in order, downloaded again even when its stamp is present: `--fetch-tools` is the documented way to get a
+/// fresh, hash-verified toolchain and a manifest for an install from before manifests existed. Trims an existing full LLVM
+/// install, then removes the archives a successful install leaves behind.
 pub fn install_all(progress: &dyn Fn(f32, String)) -> Result<(), String> {
     let pieces: Vec<&'static Piece> = PIECES.iter().collect();
-    trim_after_fetch(install_selected(&pieces, progress))
+    trim_after_fetch(install_selected(&pieces, progress, true))
 }
 
 /// Trim whatever an older full LLVM install left behind, then clear the download cache only when every piece is in
@@ -391,7 +628,7 @@ pub fn repair_damaged(progress: &dyn Fn(f32, String)) -> Result<(), String> {
         progress(1.0, "The carried toolchain is complete".into());
         return Ok(());
     }
-    trim_after_fetch(install_selected(&damaged, progress))
+    trim_after_fetch(install_selected(&damaged, progress, false))
 }
 
 /// Starts the first-run fetch in the background, once. Only the pieces the PC does not already have are downloaded.
@@ -419,7 +656,7 @@ pub fn auto_start() {
                 let _ = writeln!(f, "{:>3.0}% {line}", frac * 100.0);
                 let _ = f.flush();
             }
-        });
+        }, false);
         if let Err(e) = &r {
             if let Some(f) = log.borrow_mut().as_mut() {
                 let _ = writeln!(f, "failed: {e}");
@@ -849,6 +1086,13 @@ mod tests {
                     fs::write(&path, b"carried").unwrap();
                 }
             }
+            // One file inside the folder keep, so the shallow/deep split has something to differ on.
+            if piece.key == "clang" {
+                let header = tools.join("lib/clang/23/include/stddef.h");
+                fs::create_dir_all(header.parent().unwrap()).unwrap();
+                fs::write(&header, b"header").unwrap();
+            }
+            write_manifest(tools, piece).unwrap();
         }
     }
 
@@ -859,18 +1103,18 @@ mod tests {
         plant_carried_toolchain(tools);
         let llvm = PIECES.iter().find(|p| p.key == "clang").expect("the LLVM piece");
         assert!(carried_in(tools, llvm), "the planted toolchain is complete");
-        assert!(damage_note_for(&damage_in(tools)).is_none());
+        assert!(damage_note_for(&damage_in(tools, false)).is_none());
 
         fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
         assert!(!carried_in(tools, llvm), "a marker exe and a stamp are not a complete piece");
-        let note = damage_note_for(&damage_in(tools)).expect("the damaged piece is reported");
+        let note = damage_note_for(&damage_in(tools, false)).expect("the damaged piece is reported");
         assert!(note.contains("lld-link.exe"), "{note}");
         assert!(note.contains("quarantine"), "{note}");
         assert!(note.contains("Repair on Overview"), "{note}");
         assert!(!note.contains("CMake"), "an untouched piece is not reported: {note}");
 
         fs::remove_dir_all(tools.join("lib").join("clang")).unwrap();
-        let note = damage_note_for(&damage_in(tools)).expect("the resource headers are reported too");
+        let note = damage_note_for(&damage_in(tools, false)).expect("the resource headers are reported too");
         assert!(note.contains("include"), "{note}");
     }
 
@@ -881,12 +1125,12 @@ mod tests {
         let tools = temp.path();
         plant_carried_toolchain(tools);
         assert!(damaged_in(tools).is_empty());
-        assert!(damage_in(tools).is_empty());
+        assert!(damage_in(tools, false).is_empty());
 
         fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
         let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
         assert_eq!(keys, vec!["clang"]);
-        let damage = damage_in(tools);
+        let damage = damage_in(tools, false);
         assert_eq!(damage.len(), 1);
         assert!(
             damage[0].summary().contains("lld-link.exe"),
@@ -906,10 +1150,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tools = temp.path();
         plant_carried_toolchain(tools);
-        assert!(damage_in(tools).is_empty());
+        assert!(damage_in(tools, false).is_empty());
 
         fs::remove_file(tools.join("share/cmake-3.31/Modules/CMakeDetermineSystem.cmake")).unwrap();
-        let damage = damage_in(tools);
+        let damage = damage_in(tools, false);
         assert_eq!(damage.len(), 1, "only CMake is damaged");
         assert!(
             damage[0].summary().contains("CMakeDetermineSystem.cmake"),
@@ -925,17 +1169,90 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let tools = temp.path();
         plant_carried_toolchain(tools);
-        assert!(damage_in(tools).is_empty());
+        assert!(damage_in(tools, false).is_empty());
 
         fs::remove_file(tools.join("bin/python312.dll")).unwrap();
         fs::remove_file(tools.join("bin/python312.zip")).unwrap();
-        let damage = damage_in(tools);
+        let damage = damage_in(tools, false);
         assert_eq!(damage.len(), 1, "only Python is damaged");
         let summary = damage[0].summary();
         assert!(summary.contains("python312.dll"), "{summary}");
         assert!(summary.contains("python312.zip"), "{summary}");
         let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
         assert_eq!(keys, vec!["python"]);
+    }
+
+    /// A quarantine can leave a file that still exists but is truncated. Presence alone (and the stamp) called that
+    /// whole, and the build then died at the first link with no clue which file was short (issue #116).
+    #[test]
+    fn a_truncated_carried_executable_is_damage() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        assert!(damage_in(tools, false).is_empty());
+
+        fs::write(tools.join("bin").join("clang-cl.exe"), b"short").unwrap();
+        let damage = damage_in(tools, false);
+        assert_eq!(damage.len(), 1, "only LLVM is damaged");
+        assert!(
+            damage[0].damaged.iter().any(|p| p.ends_with("clang-cl.exe")),
+            "the truncated compiler is named: {}",
+            damage[0].summary()
+        );
+        assert!(damage[0].summary().contains("damaged"), "{}", damage[0].summary());
+    }
+
+    /// A same-size substitution passes every size check. Only the deep check, which re-hashes against the manifest
+    /// written at install time, can see it; this is what the build gate and `--verify-tools` run.
+    #[test]
+    fn a_same_size_substitution_is_caught_only_by_hashing() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        assert!(damage_in(tools, true).is_empty());
+
+        fs::write(tools.join("bin").join("ninja.exe"), b"xxxxxxx").unwrap();
+        assert!(damage_in(tools, false).is_empty(), "the size did not change");
+        let damage = damage_in(tools, true);
+        assert_eq!(damage.len(), 1);
+        assert!(
+            damage[0].damaged.iter().any(|p| p.ends_with("ninja.exe")),
+            "the substituted executable is named: {}",
+            damage[0].summary()
+        );
+    }
+
+    /// The Overview's shallow check must not walk clang's resource tree on every frame. A missing header is caught by
+    /// the deep check the build gate and `--verify-tools` run; the folder itself is still checked cheaply.
+    #[test]
+    fn a_header_inside_the_resource_tree_is_checked_only_by_a_deep_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        fs::remove_file(tools.join("lib/clang/23/include/stddef.h")).unwrap();
+        assert!(damage_in(tools, false).is_empty(), "the shallow pass does not walk the tree");
+        let damage = damage_in(tools, true);
+        assert_eq!(damage.len(), 1);
+        assert!(
+            damage[0].missing.iter().any(|p| p.ends_with("stddef.h")),
+            "the missing header is named: {}",
+            damage[0].summary()
+        );
+    }
+
+    /// The install writes what it produced before it stamps the piece, so a later check has a hash and size to compare
+    /// against rather than trusting the stamp.
+    #[test]
+    fn an_install_records_a_hash_and_size_for_every_required_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        let manifest = fs::read_to_string(manifest_path(tools, &PIECES[0])).expect("the LLVM manifest");
+        assert!(manifest.contains("bin/lld-link.exe"), "{manifest}");
+        assert!(manifest.lines().all(|line| {
+            let parts = line.splitn(3, ' ').collect::<Vec<_>>();
+            parts.len() == 3 && parts[0].len() == 64 && parts[1].parse::<u64>().is_ok()
+        }));
     }
 
     #[test]
@@ -946,7 +1263,7 @@ mod tests {
         fs::remove_file(tools.join("bin").join(format!("{STAMP_PREFIX}clang"))).unwrap();
         fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
         assert!(
-            damage_note_for(&damage_in(tools)).is_none(),
+            damage_note_for(&damage_in(tools, false)).is_none(),
             "no stamp means nothing was carried here"
         );
     }
@@ -961,13 +1278,13 @@ mod tests {
         plant_carried_toolchain(tools);
 
         fs::remove_file(tools.join("bin").join("cmake.exe")).unwrap();
-        let cmake = damage_in(tools).pop().expect("CMake is damaged");
+        let cmake = damage_in(tools, false).pop().expect("CMake is damaged");
         assert!(cmake.executable_missing());
         assert!(!cmake.blocks_build_with(true), "an installed CMake can take over");
         assert!(cmake.blocks_build_with(false), "without one there is nothing to use");
 
         fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
-        let clang = damage_in(tools)
+        let clang = damage_in(tools, false)
             .into_iter()
             .find(|d| d.piece.key == "clang")
             .expect("LLVM is damaged");
@@ -982,7 +1299,7 @@ mod tests {
         );
 
         fs::remove_file(tools.join("bin").join("llvm-rc.exe")).unwrap();
-        let clang = damage_in(tools)
+        let clang = damage_in(tools, false)
             .into_iter()
             .find(|d| d.piece.key == "clang")
             .expect("LLVM is damaged");
