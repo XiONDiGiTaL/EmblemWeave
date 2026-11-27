@@ -576,7 +576,7 @@ bool heap_commit(uint64_t offset, uint64_t size) {
         NXLOG_E(kTag, "heap_commit [%llx, +%llx): platform::commit failed, error %lu",
                 static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start), static_cast<unsigned long>(e));
         if (e == ERROR_COMMITMENT_LIMIT || e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_COMMITMENT_MINIMUM) {
-            crash_set_hint(kOutOfMemoryHint);
+            crash_set_memory_hint(kOutOfMemoryHint);
             g_oom_hinted = true;
         }
 #else
@@ -586,7 +586,7 @@ bool heap_commit(uint64_t offset, uint64_t size) {
         return false;
     }
     if (g_oom_hinted) {         // the game asked again and got it: whatever ends the run now has another cause
-        crash_set_hint("");
+        crash_set_memory_hint("");
         g_oom_hinted = false;
     }
     for (uint64_t p = start / kPage; p < end / kPage; p++) {

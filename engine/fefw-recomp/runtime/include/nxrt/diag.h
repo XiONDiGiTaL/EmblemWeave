@@ -81,6 +81,9 @@ std::string crash_report_path();
 // A known problem found before the crash (an incomplete game dump, #64): the report starts with "LIKELY CAUSE: <text>", which the
 // launcher shows instead of the bare exit code. "" clears it.
 void crash_set_hint(const char* text);
+// Windows could not commit the game's heap (mem/memory.cpp): its own "LIKELY CAUSE:" line, first, kept apart from crash_set_hint's so
+// setting or clearing it leaves that one alone. "" clears it.
+void crash_set_memory_hint(const char* text);
 // Number of exceptions the installed handler has turned into reports (tests).
 uint32_t crash_exceptions_reported();
 

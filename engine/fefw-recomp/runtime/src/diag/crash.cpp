@@ -289,10 +289,29 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
 
 // crash_set_hint: a known setup problem found earlier, put first in the report ("LIKELY CAUSE: ..."; the launcher shows that line).
 char g_hint[1024] = {};
+// crash_set_memory_hint: Windows could not commit the game's heap (mem/memory.cpp). A slot of its own, so setting and clearing it leaves a
+// setup hint (g_hint) alone; it comes first, since it is the more direct cause.
+char g_mem_hint[256] = {};
+
+// Both hints' lines, copied under g_install_mu when it is free (the setters can run on other threads around a crash), as they are otherwise.
+std::string likely_cause() {
+    char hint[sizeof g_hint], mem[sizeof g_mem_hint];
+    {
+        std::unique_lock<std::mutex> lk(g_install_mu, std::try_to_lock);
+        std::memcpy(hint, g_hint, sizeof hint);
+        std::memcpy(mem, g_mem_hint, sizeof mem);
+    }
+    hint[sizeof hint - 1] = mem[sizeof mem - 1] = 0;
+    std::string out;
+    if (mem[0]) out += std::string("LIKELY CAUSE: ") + mem + "\n";
+    if (hint[0]) out += std::string("LIKELY CAUSE: ") + hint + "\n";
+    return out;
+}
 
 // Log block, report file, stderr, then the on_report callback. Terminating is the caller's decision.
 void emit(const std::string& report) {
-    const std::string text = g_hint[0] ? std::string("LIKELY CAUSE: ") + g_hint + "\n\n" + report : report;
+    const std::string cause = likely_cause();
+    const std::string text = cause.empty() ? report : cause + "\n" + report;
     for (size_t pos = 0; pos < text.size();) {
         size_t eol = text.find('\n', pos);
         if (eol == std::string::npos) eol = text.size();
@@ -552,6 +571,11 @@ std::string crash_report_path() { return g_path_given ? g_path : default_report_
 void crash_set_hint(const char* text) {
     std::lock_guard<std::mutex> lk(g_install_mu);
     std::snprintf(g_hint, sizeof g_hint, "%s", text ? text : "");
+}
+
+void crash_set_memory_hint(const char* text) {
+    std::lock_guard<std::mutex> lk(g_install_mu);
+    std::snprintf(g_mem_hint, sizeof g_mem_hint, "%s", text ? text : "");
 }
 
 uint32_t crash_exceptions_reported() { return g_reports.load(std::memory_order_relaxed); }
