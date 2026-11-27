@@ -110,7 +110,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | 🛠️ **Assists** | People who have directly contributed code, fixes, features, or other development work to EmblemWeave. |
 | [ranbinrang-rgb](https://github.com/ranbinrang-rgb) | Code Mods API and loader. |
 | [Mi-Kel](https://github.com/Mi-Kel) | Code Mods API V4, F1 Mods interface & various PR additions/fixes. |
-| [moistman7](https://github.com/moistman7) | HDR, engine integration and rendering improvements. |
+| [moistman7](https://github.com/moistman7) | HDR, engine integration, rendering improvements & various PR additions/fixes. |
 | [mmkzer0](https://github.com/mmkzer0) | Launcher fixes, build improvements and Vulkan integration. |
 | 🤝 **Kudos** | Individuals whose work, preservation efforts, or continued development helped make EmblemWeave possible. |
 | [Goldoire](https://github.com/Goldoire) | Original creator of fefw-recomp. |
