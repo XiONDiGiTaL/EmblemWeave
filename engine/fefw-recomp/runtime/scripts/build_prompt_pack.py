@@ -13,7 +13,7 @@ Pack format, little endian:
   pixel blocks: raw RGBA8, 36x36, straight alpha, sRGB values, row 0 = top, no padding.
   Entries are sorted by name in plain byte order.
 
-Key names follow SDL3 scancode names (lower-cased), taken from SDL 3.4.18 SDL_scancode_names[]
+Key names follow SDL3 scancode names (lower-cased), taken from SDL 3.4.20 SDL_scancode_names[]
 in src/events/SDL_keymap.c of the build tree (runtime/build/release/_deps/sdl3-src).
 """
 from __future__ import annotations

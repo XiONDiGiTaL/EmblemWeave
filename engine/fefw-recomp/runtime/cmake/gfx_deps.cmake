@@ -7,11 +7,11 @@ set(NXRT_DEPS_DIR "$ENV{LOCALAPPDATA}/nxrt/deps" CACHE PATH "Where the pinned th
 set(FETCHCONTENT_QUIET OFF)
 set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)   # extracted files take the time of extraction
 
-# SDL 3.4.18 (zlib licence), released 2026-10-02. Built from source as a static library.
+# SDL 3.4.20 (zlib licence), released 2026-11-03. Built from source as a static library.
 FetchContent_Declare(sdl3
-    URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz
+    URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20.tar.gz
     DOWNLOAD_DIR "${NXRT_DEPS_DIR}"
-    URL_HASH SHA256=9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3)
+    URL_HASH SHA256=f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f)
 # Vulkan-Headers vulkan-sdk-1.4.363.0 (Apache-2.0 OR MIT)
 FetchContent_Declare(vulkan_headers
     URL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.zip

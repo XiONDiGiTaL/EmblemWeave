@@ -78,7 +78,7 @@ The graphics shell (`src/gfx`, `cmake/gfx*.cmake`) downloads the components belo
 
 ### SDL3 (zlib)
 
-Source: SDL 3.4.18, `LICENSE.txt`:
+Source: SDL 3.4.20, `LICENSE.txt`:
 
 ```text
 Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
