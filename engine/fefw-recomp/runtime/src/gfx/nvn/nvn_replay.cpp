@@ -626,7 +626,10 @@ void rs_report() {
     static uint64_t last_scans = 0, last_looks = 0;      // pool_textures_to_prepare: full scans of every registered texture, and all calls
     uint64_t scans = 0, looks = 0;
     pool_scan_counts(&scans, &looks);
-    if (!last_tsc) { last_p = p; last_tsc = __rdtsc(); last_t = clk::now(); g_rs = RStats(); last_scans = scans; last_looks = looks; return; }
+    static uint64_t last_resolves = 0, last_resolve_misses = 0;   // resolve_in_pool's address cache
+    uint64_t resolves = 0, resolve_misses = 0;
+    pool_resolve_counts(&resolves, &resolve_misses);
+    if (!last_tsc) { last_p = p; last_tsc = __rdtsc(); last_t = clk::now(); g_rs = RStats(); last_scans = scans; last_looks = looks; last_resolves = resolves; last_resolve_misses = resolve_misses; return; }
     if (p < last_p + static_cast<uint64_t>(every)) return;
     const uint64_t tsc = __rdtsc();
     const clk::time_point now = clk::now();
@@ -656,6 +659,10 @@ void rs_report() {
             static_cast<double>(g_lean_push_full) * pf, static_cast<double>(g_lean_push_delta) * pf, static_cast<double>(g_lean_push_none) * pf,
             static_cast<double>(g_lean_push_writes) * pf);
     g_lean_push_full = g_lean_push_delta = g_lean_push_none = g_lean_push_writes = 0;
+    NXLOG_I("nvn.rstats", "pool address cache: %.0f lookups/frame, %.1f missed", static_cast<double>(resolves - last_resolves) * pf,
+            static_cast<double>(resolve_misses - last_resolve_misses) * pf);
+    last_resolves = resolves;
+    last_resolve_misses = resolve_misses;
     NXLOG_I("nvn.rstats", "out_prog_dirty %d: out passes/frame: fast %.0f, full %.0f (program bind or reset %.0f, generation %.0f, unmemoised %.0f) | program binds/frame %.0f, "
             "slots marked by them %.0f",
             g_out_prog, s.out_fast * pf, (s.out_full_all + s.out_full_gen + s.out_full_unmemo) * pf, s.out_full_all * pf, s.out_full_gen * pf,
@@ -2707,10 +2714,10 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
     for (uint32_t bi_idx = b_beg; bi_idx < b_end; ++bi_idx) {
         const BindingDesc& d = pl.bindings[bi_idx];
         const DescriptorBinding& b = d.shader->refl.bindings[d.index];
-        VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstBinding = d.binding;
-        w.descriptorCount = 1;
-        w.descriptorType = d.type;
+        // the one of these this binding's write points to
+        const VkDescriptorBufferInfo* w_buffer = nullptr;
+        const VkDescriptorImageInfo* w_image = nullptr;
+        const VkBufferView* w_texel = nullptr;
         if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
             VkDescriptorBufferInfo bi = {dummy_buffer(), 0, 65536};
             switch (b.nvn.source) {
@@ -2760,7 +2767,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                         const bool tsr = tsr_wanted && d.nvn_stage == kVertex && idx == 0 && bind.size >= 272;
                         bool bound_patched = false;
                         if (br.ok && (ufs != 1.0f || tsr)) {
-                            const VkDeviceSize n = std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536});
+                            const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, std::min<VkDeviceSize>(br.avail, 65536));
                             const uint8_t* src = static_cast<const uint8_t*>(host_ptr(bind.addr));
                             uint32_t in_head[68];
                             uint32_t head[68];
@@ -2827,7 +2834,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                             }
                         }
                         if (!bound_patched && br.ok && aligned) {
-                            bi = {br.buffer, br.offset, std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536})};
+                            bi = {br.buffer, br.offset, std::min<VkDeviceSize>(bind.size ? bind.size : 65536, std::min<VkDeviceSize>(br.avail, 65536))};
                         } else if (!bound_patched && br.ok) {
                             // unaligned binding: copy into the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>(bind.size ? bind.size : 65536, 65536);
@@ -2909,7 +2916,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                     break;
             }
             binfo.push_back(bi);
-            w.pBufferInfo = &binfo.back();
+            w_buffer = &binfo.back();
             mix(reinterpret_cast<uint64_t>(bi.buffer)); mix(bi.offset); mix(bi.range);
         } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             const uint8_t int_comp = int_sampler_for(pl, d);    // the integer sampler variant of a compute shader (do_dispatch)
@@ -2997,7 +3004,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
             if (!ii.imageView) ii.imageView = dummy_view(view_type_for(b), b.image.depth, component);
             if (!ii.sampler) ii.sampler = dummy_sampler();
             iinfo.push_back(ii);
-            w.pImageInfo = &iinfo.back();
+            w_image = &iinfo.back();
             mix(reinterpret_cast<uint64_t>(ii.imageView));
             mix(reinterpret_cast<uint64_t>(ii.sampler));
             mix(static_cast<uint64_t>(ii.imageLayout));
@@ -3027,7 +3034,7 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                 ii.imageView = dummy_storage_view(view_type_for(b), shader_fmt);
             }
             iinfo.push_back(ii);
-            w.pImageInfo = &iinfo.back();
+            w_image = &iinfo.back();
             mix(reinterpret_cast<uint64_t>(ii.imageView));
         } else if (d.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || d.type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
             // NVN BUFFER-target textures (samplerBuffer / imageBuffer): a texel buffer view over the pool memory that holds the texels
@@ -3073,13 +3080,21 @@ VkDescriptorSet build_set_impl(const ProgLayout& pl, uint32_t set) {
                 continue;
             }
             tinfo.push_back(v);
-            w.pTexelBufferView = &tinfo.back();
+            w_texel = &tinfo.back();
             mix(reinterpret_cast<uint64_t>(v));
         } else {
             note_unsupported("descriptor of an unhandled type (the binding stays unwritten)");
             continue;
         }
-        writes.push_back(w);
+        // Filled in the vector's own element: copying a local struct read the pointer just stored in it with a wider load, which stalls
+        VkWriteDescriptorSet& w = writes.emplace_back();
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstBinding = d.binding;
+        w.descriptorCount = 1;
+        w.descriptorType = d.type;
+        w.pBufferInfo = w_buffer;
+        w.pImageInfo = w_image;
+        w.pTexelBufferView = w_texel;
     }
     ++g_rs.sets;
     if (is_push0) {   // pushed by bind_sets: writes and binfo were built directly in g_push0

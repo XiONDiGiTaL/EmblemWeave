@@ -651,12 +651,13 @@ BufRef resolve_buffer_imported(uint64_t gpu_address, uint64_t size) {
 namespace {
 struct RtPoolCache {
     struct Entry { uint64_t lo = 0, len = 0; MemoryPool* mp = nullptr; PoolGpu* pg = nullptr; };
-    static constexpr size_t kWays = 64;
+    static constexpr size_t kWays = 1024;   // one MiB of addresses each: a large pool fills many, and 64 left the busy ones evicting each other
     uint64_t gen = ~0ull;
     Entry e[kWays];
     void clear() { gen = ~0ull; }
 };
 RtPoolCache g_rt_pool_cache;
+uint64_t g_pool_resolves = 0, g_pool_resolve_misses = 0;   // render thread: replay_stats (pool_resolve_counts)
 
 // out.buffer / out.offset name the chunk (or span) import holding the range; *pool_off_out receives the offset from the pool's aligned base
 // (what the mirror's pages count from). out.avail is what is left of that import, at least the chunk overlap for a chunked pool.
@@ -666,10 +667,12 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
     PoolGpu* pg = nullptr;
     const uint64_t cur_gen = pool_gen();
     RtPoolCache::Entry& slot = g_rt_pool_cache.e[(gpu_address >> 20) & (RtPoolCache::kWays - 1)];
+    ++g_pool_resolves;
     if (g_rt_pool_cache.gen == cur_gen && gpu_address - slot.lo < slot.len && slot.pg) {
         mp_hit = slot.mp;
         pg = slot.pg;
     } else {
+        ++g_pool_resolve_misses;
         const PoolHit hit = pool_lookup(gpu_address);
         mp_hit = hit.pool;
         if (mp_hit) {
@@ -740,6 +743,11 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
     return out;
 }
 }  // namespace
+
+void pool_resolve_counts(uint64_t* resolves, uint64_t* misses) {
+    *resolves = g_pool_resolves;
+    *misses = g_pool_resolve_misses;
+}
 
 void pool_copy_retire(PoolGpu* p) {
     if (!p || !g_have_copies.load()) return;
