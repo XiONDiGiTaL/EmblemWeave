@@ -58,6 +58,7 @@
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/module.h"
 #include "nxrt/movie_vdec.h"
@@ -106,22 +107,25 @@ constexpr size_t kMaxFrames = 64;
 // them on a different thread (the log shows guest-118 feeding and main releasing). A released frame takes the next picture once the GPU
 // passed it (the worker polls that), which lets the worker pop a packet, and the worker wakes this thread after every queue pop.
 //
-// A player can still stop releasing frames altogether, and that is a deadlock the game itself cannot break: the player's teardown waits for
-// this thread (it joins the movie handler), the player holds every registered frame and asks for no more, so no release can ever arrive. What
-// the player does hand back is therefore the liveness signal: a wait is abandoned after kNoProgressLimit with no queue pop and no deliver()
-// while the game presented frames, and after kPlayerStallLimit when the player holds every frame and has not given one back in that time
-// (the only state in which the host, and not the player, owns the next step). A game that presents nothing because it loads or hitches still
-// gets kPlayerStallLimit to release a frame; past that the picture it holds is not coming back, so the stream ends instead of the thread
-// hanging. abort_stalled() then stops the movie: it marks the decoder
+// A player can still stop releasing frames altogether, and when it is closing the panel that is a deadlock the game itself cannot break: the
+// player's teardown waits for this thread (it joins the movie handler), the player holds every registered frame and asks for no more, so no
+// release can ever arrive. That case is not guessed from a timeout: the kernel counts the WaitSynchronization calls blocked on a thread, and
+// player_is_tearing_down() sees the join on the thread running this call. The stream ends at once (within kTeardownPoll) and the handler
+// returns, so the player's join finishes. A player that stops without joining is still caught after kNoProgressLimit with no queue pop and no
+// deliver() while the game presented frames. A game that presents (almost) nothing is stalled as a whole, by a load or a hitch on its main
+// thread, and that thread is the one that releases the frames: that wait goes on, up to kGameStallLimit, because stopping the movie there cut
+// a legitimate hitch short (4d79b8a1; a one-second timer would break the same 7 s hitch that was fixed for). abort_stalled() then stops the
+// movie: it marks the decoder
 // failed, clears the stalled input/decoded state (the only place packets are discarded), returns any safe ready/free frame as an EOS frame,
 // and wakes both guest events. When the player holds every frame, the EOS is owed instead and deliver() queues it on the first frame the
 // player gives back; without it the player waited for an end that never came and the movie froze on its last picture. A subsequent
 // DecodeAsync returns kResultDecoderStalled instead of waiting. vd_flush() resets the failure for the next stream, and stop_worker() still
 // joins the worker on finalize.
 constexpr auto kNoProgressLimit = std::chrono::seconds(5);
-// Every registered frame is held by the player and none came back in this long: the player is gone (a closed panel, a torn-down movie), not
-// slow. Short, because this decides when a closed panel stops being a frozen game; see the queue comment above for why it cannot be zero.
-constexpr auto kPlayerStallLimit = std::chrono::seconds(1);
+constexpr auto kGameStallLimit = std::chrono::seconds(30);
+constexpr uint64_t kGameRunningFrames = 10;   // presented within kNoProgressLimit (2 a second): the game runs, so the stall is the player's
+// How often the wait looks for the player's join while it sleeps: the join can appear at any time and the wait's own deadline is five seconds away.
+constexpr auto kTeardownPoll = std::chrono::milliseconds(50);
 
 bool g_log = false;
 int g_threads = 4;
@@ -386,7 +390,7 @@ long long ms_since(std::chrono::steady_clock::time_point t, std::chrono::steady_
 // Stops a decoder that has made no progress for `stalled` while the game presented `presented` frames. Called with d.mu held. The feed thread
 // is waiting on cv; marking failed and notifying makes it return without queueing the held packet. The worker sees failed after its current
 // decode and drops that result; Flush can revive the decoder, Finalize still joins the worker. True when an EOS frame could be made.
-bool abort_stalled(Decoder& d, std::chrono::steady_clock::duration stalled, uint64_t presented) {
+bool abort_stalled(Decoder& d, std::chrono::steady_clock::duration stalled, uint64_t presented, bool teardown = false) {
     if (d.failed) return false;
     d.failed = true;
     // The state as the stall found it, before deliver() and the clears below change it: which side stopped is in these numbers. Frames
@@ -400,10 +404,12 @@ bool abort_stalled(Decoder& d, std::chrono::steady_clock::duration stalled, uint
                       nvn::be::gpu::serial_done(oldest) ? "done" : "not done", static_cast<unsigned long long>(nvn::be::gpu::last_serial()));
     else
         std::snprintf(gpu, sizeof gpu, "last reserved serial %llu", static_cast<unsigned long long>(nvn::be::gpu::last_serial()));
-    NXLOG_E(kTag, "movie stall state: queue %zu packets (%zu bytes), decoded %zu, ready %zu, free %zu, pending GPU %zu of %zu frames (%s); "
+    const size_t queued = d.queue.size(), decoded_pictures = d.decoded.size();
+    NXLOG_I(kTag, "movie %s state: queue %zu packets (%zu bytes), decoded %zu, ready %zu, free %zu, pending GPU %zu of %zu frames (%s); "
                   "player asked %lld ms ago, acquired %lld ms ago, released %lld ms ago",
-            d.queue.size(), d.queued_bytes, d.decoded.size(), d.ready.size(), d.free_.size(), d.pending_free.size(), d.frames.size(), gpu,
-            ms_since(d.last_ask, now), ms_since(d.last_acquire, now), ms_since(d.last_release, now));
+            teardown ? "teardown" : "stall", d.queue.size(), d.queued_bytes, d.decoded.size(), d.ready.size(), d.free_.size(),
+            d.pending_free.size(), d.frames.size(), gpu, ms_since(d.last_ask, now), ms_since(d.last_acquire, now),
+            ms_since(d.last_release, now));
     deliver(d);   // harvest any frame whose GPU copy already finished, so EOS has a safe frame when possible
     d.queue.clear();
     d.queued_bytes = 0;
@@ -415,17 +421,22 @@ bool abort_stalled(Decoder& d, std::chrono::steady_clock::duration stalled, uint
     d.cv.notify_all();
     d.in_ready.signal();
     if (!eos) d.out_ready.signal();   // wake a player waiting for output even when no frame can carry EOS yet
-    NXLOG_E(kTag, "movie decoder made no progress for %.1f s while the game presented %llu frame%s; stopping the movie (stalled queue and "
-                  "decoded pictures discarded; EOS %s)",
-            std::chrono::duration<double>(stalled).count(), static_cast<unsigned long long>(presented), presented == 1 ? "" : "s",
-            eos ? "queued" : "follows on the first frame the player gives back");
+    if (teardown)
+        NXLOG_I(kTag, "movie: the player is joining this handler (teardown): ending the stream so the join can finish (%zu queued packets and "
+                       "%zu decoded pictures discarded; EOS %s)",
+                queued, decoded_pictures, eos ? "queued" : "follows on the first frame the player gives back");
+    else
+        NXLOG_E(kTag, "movie decoder made no progress for %.1f s while the game presented %llu frame%s; stopping the movie (stalled queue and "
+                      "decoded pictures discarded; EOS %s)",
+                std::chrono::duration<double>(stalled).count(), static_cast<unsigned long long>(presented), presented == 1 ? "" : "s",
+                eos ? "queued" : "follows on the first frame the player gives back");
     return eos;
 }
 
 // Waits for room in the input queue. Normal backpressure continues as long as the worker/decode/frame path makes progress. The wait ends
-// early when the held packet's generation is no longer current (Flush), the decoder is stopped, or it has been marked failed. Five seconds with
-// no queue pop and no deliver() while the game presents frames is a stall; so is kPlayerStallLimit in which the player held every registered
-// frame and gave none back. abort_stalled stops the movie and this returns Stalled (or StalledEos when an EOS frame could be made).
+// early when the held packet's generation is no longer current (Flush), the decoder is stopped, it has been marked failed, or the player is
+// joining this handler (teardown). Five seconds with no queue pop and no deliver() while the game presents frames is a stall; with the game
+// presenting none, kGameStallLimit. abort_stalled stops the movie and this returns Stalled (or StalledEos when an EOS frame could be made).
 enum class FeedWait { Keep, Stopped, Flushed, Stalled, StalledEos };
 FeedWait wait_for_room(Decoder& d, std::unique_lock<std::mutex>& lk, uint64_t packet_bytes, uint64_t packet_generation) {
     const auto invalidated = [&] {
@@ -443,40 +454,41 @@ FeedWait wait_for_room(Decoder& d, std::unique_lock<std::mutex>& lk, uint64_t pa
     uint64_t frames_moved = diag_frame_count();          // frames the game had presented then
     uint64_t frames_window = frames_moved;               // and when the current window began
     auto deadline = t0 + kNoProgressLimit;
-    // Every registered frame sits in the player and nothing is on its way back. Only the player can move the decoder on from here.
-    const auto frames_exhausted = [&] { return !d.frames.empty() && d.ready.empty() && d.free_.empty() && d.pending_free.empty(); };
-    const auto last_release = [&] { return d.last_release > t0 ? d.last_release : t0; };
     const auto progressed = [&](std::chrono::steady_clock::time_point now) {
         seen = d.progress;
         moved = now;
         frames_moved = frames_window = diag_frame_count();
         deadline = now + kNoProgressLimit;
     };
+    const auto end_for_teardown = [&](std::chrono::steady_clock::time_point now) {
+        const bool eos = abort_stalled(d, now - moved, diag_frame_count() - frames_moved, true);
+        s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+        return eos ? FeedWait::StalledEos : FeedWait::Stalled;
+    };
     while (!has_room()) {
-        // Wake for the player's hand-back too: the queue deadline is five seconds away, and a player that already let go of the stream must not
-        // hold this thread for that long.
-        auto wake = deadline;
-        if (frames_exhausted()) wake = std::min(wake, last_release() + kPlayerStallLimit);
-        if (d.cv.wait_until(lk, wake) == std::cv_status::timeout) {
-            const auto now = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        // The thread that would give a frame back is waiting to join this one: no release can arrive, so end the stream now instead of
+        // waiting out the stall window (and, if the game is not presenting either, the hitch limit).
+        if (player_is_tearing_down()) return end_for_teardown(now);
+        // The join can appear at any time while this sleeps: look again at least every kTeardownPoll, not only at the five-second deadline.
+        if (d.cv.wait_until(lk, std::min(deadline, now + kTeardownPoll)) == std::cv_status::timeout) {
+            const auto woke = std::chrono::steady_clock::now();
             if (d.progress != seen) {
-                progressed(now);
+                progressed(woke);
                 continue;
             }
-            // The player holds every frame and gave none back in kPlayerStallLimit: it is not slow, it stopped. End the stream so its own
-            // teardown (which waits for this thread) completes; the movie it is closing has no next picture to show anyway.
-            if (frames_exhausted() && now - last_release() >= kPlayerStallLimit) {
-                NXLOG_I(kTag, "movie player gave no frame back for %.1f s with all %zu registered frames held (asked %lld ms ago); ending the "
-                               "stream so its teardown can finish",
-                        std::chrono::duration<double>(now - last_release()).count(), d.frames.size(), ms_since(d.last_ask, now));
-                const bool eos = abort_stalled(d, now - moved, diag_frame_count() - frames_moved);
-                s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
-                return eos ? FeedWait::StalledEos : FeedWait::Stalled;
-            }
-            if (now < deadline) continue;   // the hand-back wake fired; the five-second window is still open
+            if (player_is_tearing_down()) return end_for_teardown(woke);
+            if (woke < deadline) continue;   // a teardown poll, not the end of the five-second window
+            // Next to no frame presented in this window either: the game itself stands still, and its main thread is the one that releases
+            // the frames. Wait on for it, up to kGameStallLimit after the last progress (a load or a hitch, not a player that stopped).
             const uint64_t frames = diag_frame_count();
-            const bool eos = abort_stalled(d, now - moved, frames - frames_moved);
-            s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+            if (frames - frames_window < kGameRunningFrames && woke - moved < kGameStallLimit) {
+                frames_window = frames;
+                deadline = std::min(woke + kNoProgressLimit, moved + kGameStallLimit);
+                continue;
+            }
+            const bool eos = abort_stalled(d, woke - moved, frames - frames_moved);
+            s_blocked_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(woke - t0).count());
             return eos ? FeedWait::StalledEos : FeedWait::Stalled;
         }
         if (d.progress != seen) progressed(std::chrono::steady_clock::now());
@@ -688,6 +700,14 @@ namespace vdec {
 
 GpuFence g_gpu{nvn::be::gpu::last_serial, nvn::be::gpu::serial_done};
 
+std::atomic<bool> g_teardown_test{false};   // tests that have no guest threads: pretend the handler is being joined
+
+bool player_is_tearing_down() {
+    if (g_teardown_test.load(std::memory_order_relaxed)) return true;
+    const kernel::KThread* t = kernel::current_thread();
+    return t && kernel::thread_being_joined(*t);
+}
+
 void start_worker(Decoder& d) { d.worker = std::thread(worker_main, &d); }
 
 void stop_worker(Decoder& d) {
@@ -714,7 +734,11 @@ uint32_t decode_async(Decoder& d, const uint8_t* data, uint64_t size, int64_t ti
     {
         std::unique_lock<std::mutex> lk(d.mu);
         if (d.failed) wait = FeedWait::Stalled;
-        else if (size && data) {
+        else if (player_is_tearing_down()) {
+            // The player is joining this handler: it will never take another picture, so do not queue this packet or wait for room.
+            abort_stalled(d, std::chrono::steady_clock::duration::zero(), 0, true);
+            wait = FeedWait::Stalled;
+        } else if (size && data) {
             // Keep the packet: see the queue comment above. This is the guest's feed thread; the wait ends as the main thread gives frames
             // back. Normal room waits reset on every queue pop or delivered picture in wait_for_room().
             //
@@ -940,7 +964,12 @@ void vd_start(::Ctx* c) {   // (self)
     RET(0);
 }
 
-void vd_stop(::Ctx* c) { RET(0); }
+void vd_stop(::Ctx* c) {
+    // The library's Stop: logged because a call here would be an explicit teardown the decoder could honour (it is a no-op for now; the
+    // teardown this title performs is the join on the handler, which the decoder sees through the kernel's wait graph).
+    if (Decoder* d = dec_of(A(0)); d && g_log) NXLOG_I(kTag, "VideoDecoder::Stop");
+    RET(0);
+}
 
 void vd_decode_async(::Ctx* c) {   // (self, const nn::movie::Buffer*)
     Decoder* d = dec_of(A(0));

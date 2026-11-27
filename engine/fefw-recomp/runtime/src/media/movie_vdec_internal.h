@@ -98,4 +98,9 @@ uint32_t acquire(Decoder& d, uint64_t* frame, int* index);
 void release(Decoder& d, uint64_t frame);
 void flush(Decoder& d);
 
+// True when the guest thread calling decode_async is being joined: the player's teardown is waiting for the handler, so it can never take
+// another picture. The host check reads the kernel's WaitSynchronization waiters (KThread::join_waiters); tests set g_teardown_test.
+extern std::atomic<bool> g_teardown_test;
+bool player_is_tearing_down();
+
 }  // namespace nxrt::media::vdec

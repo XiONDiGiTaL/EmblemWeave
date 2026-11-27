@@ -680,6 +680,21 @@ uint32_t wait_synchronization(const uint32_t* handles, int32_t count, int64_t ti
         }
         objs.push_back(std::move(o));
     }
+    // A wait on a thread object is a join. Count it while this call is blocked so the thread can tell it is being torn down: the movie
+    // player joins its handler, whose DecodeAsync would otherwise wait for the very thread that is waiting to join it. The count is dropped
+    // on every return path by the destructor, after the loop but before `objs` (declared first, so destroyed last) lets the objects go.
+    struct JoinWait {
+        std::vector<KThread*> threads;
+        ~JoinWait() {
+            for (KThread* t : threads) t->join_waiters.fetch_sub(1, std::memory_order_release);
+        }
+    } joins;
+    for (const auto& o : objs) {
+        if (o->type() != ObjType::Thread) continue;
+        auto* t = static_cast<KThread*>(o.get());
+        t->join_waiters.fetch_add(1, std::memory_order_acquire);
+        joins.threads.push_back(t);
+    }
     auto ready = [&]() -> int {
         for (int i = 0; i < count; i++)
             if (objs[i]->signaled()) return i;

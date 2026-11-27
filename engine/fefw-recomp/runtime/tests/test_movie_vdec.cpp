@@ -385,52 +385,389 @@ NXTEST(an_owed_eos_rides_the_next_released_frame) {
     CHECK(!d.eos_owed);
 }
 
+// ---- the #117 teardown and the stall policy ---------------------------------------------------------------------------------------------
+// The player is the game's own movie handler's counterpart: it registers its frames, takes pictures and gives them back. These helpers drive
+// the decoder the way that player does, so each test can hold the pool still, fill the queue, or keep handing frames back.
+namespace {
+using nxrt::media::kMovieMaxQueuedPackets;   // the input queue's bound the feed waits on
+
+// Feeds until every registered frame is acquired and held. Pictures can be delayed by a packet or two (the movie's hidden frames), so it
+// keeps feeding rather than assuming one picture per packet. Returns the index of the next unfed packet, or packets.size() on failure.
+size_t hold_all_frames(vd::Decoder& d, const std::vector<std::vector<uint8_t>>& packets, size_t count, std::vector<uint64_t>& held) {
+    size_t fed = 0;
+    for (size_t k = 0; k < count; ++k) {
+        uint64_t f = 0;
+        while (!f) {
+            if (fed >= packets.size()) return packets.size();
+            if (vd::decode_async(d, packets[fed].data(), packets[fed].size(), static_cast<int64_t>(fed) * 1000, false) != 0) return packets.size();
+            ++fed;
+            f = wait_for_frame(d, 1s);
+        }
+        held.push_back(f);
+    }
+    return fed;
+}
+
+// Feeds packets without blocking: it stops as soon as the queue is at its bound, so the caller can start the one call that has to wait.
+// The worker only ever empties the queue, so a full queue at the check cannot turn the next call into a wait.
+size_t fill_queue(vd::Decoder& d, const std::vector<std::vector<uint8_t>>& packets, size_t from) {
+    size_t i = from;
+    for (; i < packets.size(); ++i) {
+        {
+            std::lock_guard<std::mutex> lk(d.mu);
+            if (d.queue.size() >= kMovieMaxQueuedPackets) break;
+        }
+        if (vd::decode_async(d, packets[i].data(), packets[i].size(), static_cast<int64_t>(i) * 1000, false) != 0) break;
+    }
+    return i;
+}
+}  // namespace
+
 // #117: the player closed its panel and joined the handler thread while the handler sat in DecodeAsync. The player held all four frames and
-// asked for no more, so no release could ever make room: the feed thread waited out the 30 s guard and the game stood still for it. A player
-// that holds every registered frame and gives none back for kPlayerStallLimit is not slow, it is gone: the stream ends instead.
-NXTEST(a_player_that_holds_every_frame_and_stops_ends_the_stream) {
+// asked for no more, so no release could ever make room. The join is the explicit teardown signal: the handler must end the stream at once,
+// not wait out a timer. The EOS is owed (every frame is held) and rides the first one the player gives back.
+NXTEST(a_joined_movie_handler_ends_the_stream_at_once) {
     const auto packets = read_ivf(kMovie);
-    REQUIRE(packets.size() > 40);
+    REQUIRE(packets.size() > 80);
     FakeGpu gpu;
     vd::Decoder d;
     d.mime = vd::kMimeAv1;
-    TestFrame frames[2];
-    const uint64_t list[] = {frames[0].addr(), frames[1].addr()};
-    vd::register_frames(d, list, 2);
+    TestFrame frames[4];
+    std::vector<uint64_t> list;
+    for (TestFrame& f : frames) list.push_back(f.addr());
+    vd::register_frames(d, list.data(), list.size());
     Worker worker(d);
 
-    // The player takes both frames and never gives one back: from here it holds the whole pool.
-    for (int i = 0; i < 2; ++i) {
-        CHECK_EQ(vd::decode_async(d, packets[i].data(), packets[i].size(), i * 1000, false), 0u);
-        REQUIRE(wait_for_frame(d, 2s) != 0);
-    }
+    std::vector<uint64_t> held;
+    size_t fed = hold_all_frames(d, packets, 4, held);
+    REQUIRE(fed < packets.size());
+    CHECK_EQ(held.size(), 4u);
+    fed = fill_queue(d, packets, fed);
+    REQUIRE(fed < packets.size());
     {
         std::lock_guard<std::mutex> lk(d.mu);
+        REQUIRE(d.queue.size() >= kMovieMaxQueuedPackets);
         CHECK(d.free_.empty());
         CHECK(d.ready.empty());
     }
 
-    // Keep feeding until the queue fills and the decoder has nothing to deliver. The call that cannot make room must come back in about a
-    // second, not after the stalled-game guard, and it must end the stream rather than leave the packet waiting.
+    // The feed thread runs on through the packets; with every frame held and 30 pictures ahead it blocks within a call or two. Then the
+    // player's thread joins the handler: the blocked call must come back at once.
+    std::atomic<bool> done{false};
+    std::atomic<uint32_t> result{1};
+    std::thread feed([&] {
+        for (size_t i = fed; i < packets.size(); ++i) {
+            const uint32_t r = vd::decode_async(d, packets[i].data(), packets[i].size(), static_cast<int64_t>(i) * 1000, false);
+            if (r) {
+                result = r;
+                break;
+            }
+        }
+        done = true;
+    });
+    std::this_thread::sleep_for(300ms);
+    REQUIRE(!done.load());   // it is waiting for room, as in the game
+
     const auto t0 = std::chrono::steady_clock::now();
-    uint32_t result = 0;
-    for (size_t i = 2; i < packets.size() && result == 0; ++i)
-        result = vd::decode_async(d, packets[i].data(), packets[i].size(), static_cast<int64_t>(i) * 1000, false);
+    vd::g_teardown_test = true;
+    REQUIRE(wait_until([&] { return done.load(); }, 1s));
+    vd::g_teardown_test = false;
+    feed.join();
     const auto took = std::chrono::steady_clock::now() - t0;
-    CHECK_EQ(result, vd::kResultDecoderStalled);
-    CHECK(took < 5s);
+    CHECK_EQ(result.load(), vd::kResultDecoderStalled);
+    CHECK(took < 500ms);   // the join is seen by the 50 ms poll, not after 5 s or 30 s
     {
         std::lock_guard<std::mutex> lk(d.mu);
         CHECK(d.failed);
         CHECK(d.queue.empty());
         CHECK(d.decoded.empty());
-        CHECK(d.eos_owed);   // every frame is held, so the end of stream rides the first one the player gives back
+        CHECK(d.eos_owed);   // every frame is held: the end of stream follows the first frame given back
+    }
+
+    // The player gives its frames back during teardown: exactly one frame carries the end of stream, and the others are safe to release.
+    for (uint64_t f : held) vd::release(d, f);
+    int eos = 0;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t f = 0;
+        if (vd::acquire(d, &f, nullptr) != 0) break;
+        if (is_eos(f)) ++eos;
+        vd::release(d, f);
+    }
+    CHECK_EQ(eos, 1);
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(!d.eos_owed);
     }
 
     // The next feed call answers the failure at once instead of waiting again.
     const auto again = std::chrono::steady_clock::now();
     CHECK_EQ(vd::decode_async(d, packets[0].data(), packets[0].size(), 0, true), vd::kResultDecoderStalled);
     CHECK(std::chrono::steady_clock::now() - again < 1s);
+}
+
+// A player that holds every registered frame for longer than a second but has not been joined is slow, not gone. The 7 s main-thread hitch
+// that 4d79b8a1 fixed starts exactly like this, so the stream must survive a multi-second hold and resume when the frames come back.
+NXTEST(a_player_that_holds_every_frame_for_two_seconds_resumes) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 80);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[4];
+    std::vector<uint64_t> list;
+    for (TestFrame& f : frames) list.push_back(f.addr());
+    vd::register_frames(d, list.data(), list.size());
+    Worker worker(d);
+
+    std::vector<uint64_t> held;
+    size_t fed = hold_all_frames(d, packets, 4, held);
+    REQUIRE(fed < packets.size());
+    fed = fill_queue(d, packets, fed);
+    REQUIRE(fed < packets.size());
+
+    std::atomic<bool> released{false}, done{false};
+    std::atomic<int> accepted_after_release{0};
+    std::atomic<uint32_t> result{0};
+    std::thread feed([&] {
+        for (size_t i = fed; i < packets.size(); ++i) {
+            const uint32_t r = vd::decode_async(d, packets[i].data(), packets[i].size(), static_cast<int64_t>(i) * 1000, false);
+            if (r) {
+                result = r;
+                break;
+            }
+            if (released.load()) ++accepted_after_release;
+        }
+        done = true;
+    });
+    std::this_thread::sleep_for(300ms);
+    REQUIRE(!done.load());
+
+    std::this_thread::sleep_for(2s);
+    CHECK(!done.load());   // still waiting: a two-second hold is not a teardown
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(!d.failed);
+    }
+
+    // The player hands its frames back: the waited packet goes in and the movie continues to accept packets.
+    released = true;
+    for (uint64_t f : held) vd::release(d, f);
+    CHECK(wait_until([&] { return accepted_after_release.load() > 0; }, 2s));
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(!d.failed);
+    }
+
+    // End the feed the way the game does once the player stops taking pictures, then join it.
+    vd::g_teardown_test = true;
+    CHECK(wait_until([&] { return done.load(); }, 2s));
+    vd::g_teardown_test = false;
+    feed.join();
+    CHECK_EQ(result.load(), vd::kResultDecoderStalled);   // only the teardown ended it
+}
+
+// A paused player: nothing asks for a picture for three seconds, the frames wait ready, and the queue stays full. The game is still running
+// (or the test has no presented frames at all), so this is not the player's teardown and the stall window must not end the stream.
+NXTEST(a_paused_player_is_not_ended_by_the_stall_window) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 80);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[4];
+    std::vector<uint64_t> list;
+    for (TestFrame& f : frames) list.push_back(f.addr());
+    vd::register_frames(d, list.data(), list.size());
+    Worker worker(d);
+
+    const size_t fed = fill_queue(d, packets, 0);
+    REQUIRE(fed < packets.size());
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        REQUIRE(d.queue.size() >= kMovieMaxQueuedPackets);
+    }
+
+    std::this_thread::sleep_for(3s);
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(!d.failed);
+    }
+
+    // Resuming: take a picture and give it back, which frees a slot and lets the next packet in without a stall report.
+    uint64_t f = 0;
+    REQUIRE(vd::acquire(d, &f, nullptr) == 0);
+    vd::release(d, f);
+    const auto resumed = std::chrono::steady_clock::now();
+    CHECK_EQ(vd::decode_async(d, packets[fed].data(), packets[fed].size(), static_cast<int64_t>(fed) * 1000, false), 0u);
+    CHECK(std::chrono::steady_clock::now() - resumed < 1s);
+}
+
+// A player that returns frames slowly but keeps returning them: every hand-back is progress, so the decoder keeps the stream alive well
+// past a second (and past the five-second window, which each release resets).
+NXTEST(slow_frame_hand_backs_reset_the_stall_window) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 80);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[4];
+    std::vector<uint64_t> list;
+    for (TestFrame& f : frames) list.push_back(f.addr());
+    vd::register_frames(d, list.data(), list.size());
+    Worker worker(d);
+
+    std::vector<uint64_t> held;
+    size_t fed = hold_all_frames(d, packets, 4, held);
+    REQUIRE(fed < packets.size());
+    fed = fill_queue(d, packets, fed);
+    REQUIRE(fed < packets.size());
+
+    std::atomic<bool> done{false};
+    std::thread feed([&] {
+        for (size_t i = fed; i < packets.size(); ++i)
+            if (vd::decode_async(d, packets[i].data(), packets[i].size(), static_cast<int64_t>(i) * 1000, false) != 0) break;
+        done = true;
+    });
+
+    bool failed_midway = false;
+    for (int i = 0; i < 4; ++i) {
+        std::this_thread::sleep_for(500ms);
+        vd::release(d, held[i]);
+        if (i == 2) {
+            std::lock_guard<std::mutex> lk(d.mu);
+            failed_midway = d.failed;
+        }
+    }
+    CHECK(!failed_midway);
+    // The feed still has packets to queue and the player has stopped taking pictures: end it the way the game does, then join.
+    vd::g_teardown_test = true;
+    CHECK(wait_until([&] { return done.load(); }, 2s));
+    vd::g_teardown_test = false;
+    feed.join();
+}
+
+// EOS is not a picture: it must never be left behind a full queue, or a player waiting for the end of the stream deadlocks with the feed thread.
+// It goes in even at the bound, and is delivered after the pictures that were already queued.
+NXTEST(eos_is_queued_when_the_packet_queue_is_full) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 80);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[4];
+    std::vector<uint64_t> list;
+    for (TestFrame& f : frames) list.push_back(f.addr());
+    vd::register_frames(d, list.data(), list.size());
+    Worker worker(d);
+
+    // Hold every frame, so the worker cannot pop: 30 pictures ahead is its only room, and the queue below stays full.
+    std::vector<uint64_t> held;
+    size_t fed = hold_all_frames(d, packets, 4, held);
+    REQUIRE(fed < packets.size());
+    fed = fill_queue(d, packets, fed);
+    REQUIRE(fed < packets.size());
+    // g_ahead: wait until the worker has filled the picture cushion, so it stops popping. Then top the queue back up and it stays full.
+    REQUIRE(wait_until([&] {
+        std::lock_guard<std::mutex> lk(d.mu);
+        return d.decoded.size() >= 30;
+    }, 2s));
+    fed = fill_queue(d, packets, fed);
+    REQUIRE(fed < packets.size());
+    size_t queued = 0;
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        queued = d.queue.size();
+        REQUIRE(queued >= kMovieMaxQueuedPackets);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK_EQ(vd::decode_async(d, nullptr, 0, 12345, true), 0u);
+    CHECK(std::chrono::steady_clock::now() - t0 < 100ms);   // no room wait for the end of the stream
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK_EQ(d.queue.size(), queued + 1);
+        CHECK(d.queue.back().eos);
+    }
+    for (uint64_t f : held) vd::release(d, f);
+
+    bool got_eos = false, bad_order = false;
+    int64_t last = -1;
+    for (int i = 0; i < 5000 && !got_eos; ++i) {
+        uint64_t f = 0;
+        if (vd::acquire(d, &f, nullptr) == 0) {
+            if (is_eos(f)) {
+                got_eos = true;
+            } else {
+                if (time_of(f) < last) bad_order = true;
+                last = time_of(f);
+            }
+            vd::release(d, f);
+        } else {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+    CHECK(got_eos);
+    CHECK(!bad_order);
+}
+
+// Five start / teardown / flush cycles: a stopped stream must leave nothing behind that breaks the next one, and Flush must revive the decoder.
+NXTEST(five_teardown_and_restart_cycles_keep_the_decoder_usable) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 80);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[4];
+    std::vector<uint64_t> list;
+    for (TestFrame& f : frames) list.push_back(f.addr());
+    vd::register_frames(d, list.data(), list.size());
+    Worker worker(d);
+
+    for (int cycle = 0; cycle < 5; ++cycle) {
+        std::vector<uint64_t> held;
+        size_t fed = hold_all_frames(d, packets, 4, held);
+        REQUIRE(fed < packets.size());
+        vd::g_teardown_test = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK_EQ(vd::decode_async(d, packets[fed].data(), packets[fed].size(), static_cast<int64_t>(fed) * 1000, false),
+                 vd::kResultDecoderStalled);
+        CHECK(std::chrono::steady_clock::now() - t0 < 500ms);
+        vd::g_teardown_test = false;
+
+        vd::flush(d);
+        std::lock_guard<std::mutex> lk(d.mu);
+        CHECK(!d.failed);
+        CHECK(!d.eos_owed);
+        CHECK(d.queue.empty());
+        CHECK(d.decoded.empty());
+        CHECK(d.ready.empty());
+        CHECK_EQ(d.free_.size(), 4u);
+    }
+}
+
+// The worker can be waiting for packets when the player is joined: stopping it (Finalize) must wake it and join it, not wait for a timeout.
+NXTEST(stopping_the_worker_after_a_teardown_returns_promptly) {
+    const auto packets = read_ivf(kMovie);
+    REQUIRE(packets.size() > 8);
+    FakeGpu gpu;
+    vd::Decoder d;
+    d.mime = vd::kMimeAv1;
+    TestFrame frames[2];
+    const uint64_t list[] = {frames[0].addr(), frames[1].addr()};
+    vd::register_frames(d, list, 2);
+    vd::start_worker(d);
+
+    std::vector<uint64_t> held;
+    REQUIRE(hold_all_frames(d, packets, 2, held) < packets.size());
+    vd::g_teardown_test = true;
+    CHECK_EQ(vd::decode_async(d, packets[0].data(), packets[0].size(), 0, false), vd::kResultDecoderStalled);
+    vd::g_teardown_test = false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    vd::stop_worker(d);
+    CHECK(std::chrono::steady_clock::now() - t0 < 2s);
+    // The frames are still the player's: releasing them after the worker is gone must not touch it.
+    for (uint64_t f : held) vd::release(d, f);
 }
 
 // A new stream must not inherit the previous one's owed end of stream.

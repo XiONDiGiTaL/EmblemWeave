@@ -871,6 +871,35 @@ NXTEST(wait_on_thread_handle_until_exit) {
     end();
 }
 
+// A wait on a thread handle is a join: while it is blocked, the target thread can tell it is being joined. That is the signal the movie
+// decoder uses to end a stream whose player is closing its panel (the player joins the handler that is blocked in DecodeAsync).
+NXTEST(thread_handle_wait_marks_the_target_joined) {
+    begin();
+    std::atomic<bool> target_saw_join{false}, seen_by_test{false};
+    const uint32_t target = guest_spawn(44, 0, [&] {
+        const ks::KThread* self = ks::current_thread();
+        for (int i = 0; i < 2000 && self && !ks::thread_being_joined(*self); ++i) sleep_ms(1);
+        target_saw_join = self && ks::thread_being_joined(*self);
+        for (int i = 0; i < 2000 && !seen_by_test.load(); ++i) sleep_ms(1);   // stay joined until the test looked
+    });
+    auto t = ks::handle_as<ks::KThread>(target);
+    REQUIRE(t != nullptr);
+
+    std::atomic<uint32_t> join_rc{99};
+    const uint32_t waiter = guest_spawn(45, 1, [&join_rc, target] {
+        int32_t idx = -1;
+        join_rc = ks::wait_synchronization(&target, 1, -1, &idx);
+    });
+    CHECK(wait_until([&] { return t->join_waiters.load(std::memory_order_acquire) > 0; }, 2000));
+    seen_by_test = true;
+    join_guest("thread_handle_wait_marks_the_target_joined", target);
+    join_guest("thread_handle_wait_marks_the_target_joined", waiter);
+    CHECK_EQ(join_rc.load(), ks::kOk);
+    CHECK(target_saw_join.load());
+    CHECK(!ks::thread_being_joined(*t));   // the waiter has returned: the count is back to zero
+    end();
+}
+
 // ---- 20: CancelSynchronization releases a blocked waiter -----------------------------------------------------------------
 
 NXTEST(cancel_releases_blocked_waiter) {

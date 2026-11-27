@@ -102,6 +102,9 @@ struct KThread : KObject {
     uint32_t host_tid = 0;
     bool started = false, cancel_sync = false;
     std::atomic<bool> exited{false};    // written under the kernel lock (thread_mark_exited), read under the thread-list lock and elsewhere
+    // WaitSynchronization calls blocked on this thread: another guest thread is joining it, so it is being torn down. The movie player
+    // joins the handler whose DecodeAsync waits for frames, and that join is the teardown signal (see thread_being_joined).
+    std::atomic<int> join_waiters{0};
     std::atomic<bool> aged{false};      // starvation guard (starvation_guard.cpp): the host leaves this thread ready, so its yields keep the processor
     std::atomic<uint64_t> host_affinity{0};   // the host affinity mask sched_apply (or a starvation boost) last gave the host thread
     std::atomic<int> last_proc{-1};     // host processor the thread was on at its last SVC (svc_dispatch), for the starvation line
@@ -121,6 +124,10 @@ struct KThread : KObject {
     ObjType type() const override { return ObjType::Thread; }
     bool signaled() const override { return exited; }
 };
+
+// True while another guest thread is blocked in WaitSynchronization on `t` (a join): t is being torn down and must finish its current call,
+// not wait for more work from the thread that is joining it.
+inline bool thread_being_joined(const KThread& t) { return t.join_waiters.load(std::memory_order_acquire) > 0; }
 
 struct ThreadParams {
     uint64_t entry = 0, arg = 0, stack_top = 0;
