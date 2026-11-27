@@ -34,6 +34,10 @@ constexpr uint8_t kSourceId[16] = {'n', 'x', 'r', 't', '-', 's', 't', 'e', 'a', 
 int64_t host_unix() {
     return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
+int64_t raw_ticks_ns() {
+    const uint64_t t = kernel::system_tick(), hz = kernel::tick_hz();
+    return static_cast<int64_t>((t / hz) * 1000000000ull + (t % hz) * 1000000000ull / hz);
+}
 int64_t abs64(int64_t v) { return v < 0 ? -v : v; }
 
 // Ryujinx TimeSharedMemory.ReadObjectFromSharedMemory: live slot = off + 4 + pad + (index & 1) * size.
@@ -237,17 +241,32 @@ NXTEST(svc_time_shared_memory_layout) {
     // Automatic correction flag: counter at 0xC8, one byte per slot at 0xCC / 0xCD, fresh state = 0.
     CHECK_EQ(*live_slot(base, 0xC8, 0, 1), 0u);
 
-    // ContinuousAdjustmentTimePoint, pad 4 at 0xD0, 0x38 per slot: {u64 clock_offset, i64 multiplier, i64 divisor_log2,
-    // SystemClockContext {i64 offset, {i64 time_point, uuid}}}: multiplier 1, divisor 0, context steady time point 0, source uuid.
+    // ContinuousAdjustmentTimePoint, pad 4 at 0xD0, 0x38 per slot: {u64 clock_offset, i64 diff_scale, i64 shift_amount,
+    // i64 lower, i64 upper, uuid}: constant correction (diff_scale 0, shift 0, lower == upper == epoch - tick0).
     const uint8_t* adj = live_slot(base, 0xD0, 4, 0x38);
-    int64_t mult = 0, div = -1, ctx_tp = -1;
-    std::memcpy(&mult, adj + 8, 8);
-    std::memcpy(&div, adj + 16, 8);
-    std::memcpy(&ctx_tp, adj + 32, 8);
-    CHECK_EQ(mult, 1);
-    CHECK_EQ(div, 0);
-    CHECK_EQ(ctx_tp, 0);
+    uint64_t clock_offset = 0;
+    int64_t scale = -1, shift = -1, lower = 0, upper = 0;
+    std::memcpy(&clock_offset, adj, 8);
+    std::memcpy(&scale, adj + 8, 8);
+    std::memcpy(&shift, adj + 16, 8);
+    std::memcpy(&lower, adj + 24, 8);
+    std::memcpy(&upper, adj + 32, 8);
+    CHECK_EQ(scale, 0);
+    CHECK_EQ(shift, 0);
+    CHECK_EQ(lower, upper);
+    CHECK_EQ(lower, kSteadyEpochNs - static_cast<int64_t>(clock_offset));
     CHECK(std::memcmp(adj + 40, kSourceId, 16) == 0);
+
+    // SDK shared-memory reader path: steady = (raw_ticks_ns + clamp((raw_ticks_ns - clock_offset) * scale >> shift, lower, upper)) / 1e9.
+    const int64_t raw_ns = raw_ticks_ns();
+    int64_t corr = ((raw_ns - static_cast<int64_t>(clock_offset)) * scale) >> shift;
+    if (corr < lower) corr = lower;
+    if (corr > upper) corr = upper;
+    const int64_t steady_sdk = (raw_ns + corr) / 1000000000;
+    const uint8_t* local = live_slot(base, 0x38, 4, 0x20);
+    int64_t local_offset = 0;
+    std::memcpy(&local_offset, local, 8);
+    CHECK(abs64(local_offset + steady_sdk - host_unix()) <= 3);
 }
 
 NXTEST(svc_time_shared_memory_follows_set_current_time) {
@@ -282,6 +301,17 @@ NXTEST(svc_time_shared_memory_keeps_posix_across_steady_offset) {
     int64_t internal = 0;
     std::memcpy(&internal, steady_ctx, 8);
     CHECK_EQ(internal, kSteadyEpochNs + 1000000000000ll);
+
+    const uint8_t* adj = live_slot(base, 0xD0, 4, 0x38);
+    uint64_t clock_offset = 0;
+    int64_t lower = 0, upper = 0;
+    std::memcpy(&clock_offset, adj, 8);
+    std::memcpy(&lower, adj + 24, 8);
+    std::memcpy(&upper, adj + 32, 8);
+    CHECK_EQ(lower, upper);
+    CHECK_EQ(lower, kSteadyEpochNs + 1000000000000ll - static_cast<int64_t>(clock_offset));
+    const int64_t steady_sdk = (raw_ticks_ns() + lower) / 1000000000;
+    CHECK(abs64(offset + steady_sdk - host_unix()) <= 3);
 }
 
 NXTEST(svc_time_automatic_correction_flag) {

@@ -20,7 +20,7 @@
 //   0x080 Network SystemClockContext x2 (pad 4; slots 0x088, 0x0A8)
 //   0x0C8 automatic correction flag x2 (pad 0; slots 0x0CC, 0x0CD; 1 byte each)
 //   0x0D0 ContinuousAdjustmentTimePoint x2 (pad 4; slots 0x0D8, 0x110; 0x38 each): u64 clock_offset (= start tick in ns),
-//         i64 multiplier (1), i64 divisor_log2 (0), SystemClockContext {offset 0, {time_point 0, uuid}}
+//         i64 diff_scale (0), i64 shift_amount (0), i64 lower, i64 upper (= epoch + internal + test - tick0, ns), uuid source
 // The user clock has no slot of its own (the layout of the console has none): it is the local context.
 #include <array>
 #include <atomic>
@@ -92,9 +92,11 @@ struct SysCtx {
 };
 struct Adjust {
     uint64_t clock_offset;
-    int64_t multiplier;
-    int64_t divisor_log2;
-    SysCtx ctx;
+    int64_t diff_scale;
+    int64_t shift_amount;
+    int64_t lower;
+    int64_t upper;
+    uint8_t source[16];
 };
 static_assert(sizeof(SteadyCtx) == 0x18);
 static_assert(sizeof(SysCtx) == 0x20);
@@ -255,11 +257,15 @@ void write_shm(State& s) {
     const uint8_t ac = s.auto_correction ? 1 : 0;
     lifo_write(b, kOffAutoCorr, kPadAutoCorr, &ac, 1);
 
+    // Publish a constant correction so the SDK's shared-memory reader (raw_ticks_ns + clamped adjustment) matches steady_total_ns().
+    const int64_t adj_ns = static_cast<int64_t>(kSteadyEpochNs) + s.internal_ns + s.test_ns - static_cast<int64_t>(s.tick0_ns);
     Adjust adj{};
     adj.clock_offset = s.tick0_ns;
-    adj.multiplier = 1;
-    adj.divisor_log2 = 0;
-    std::memcpy(adj.ctx.source, kSourceId, 16);
+    adj.diff_scale = 0;
+    adj.shift_amount = 0;
+    adj.lower = adj_ns;
+    adj.upper = adj_ns;
+    std::memcpy(adj.source, kSourceId, 16);
     lifo_write(b, kOffAdjust, kPadAdjust, &adj, sizeof adj);
 }
 
