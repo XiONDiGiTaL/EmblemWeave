@@ -165,6 +165,9 @@ uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass pro
 uint64_t g_pass_verts = 0;      // vertices (indices for indexed draws) times instances of those draws
 Frame* F = nullptr;
 
+// Global frame counter for LRU generation tracking (must be declared before SetCache for use in clear())
+static uint64_t g_frame_counter = 1;
+
 // Optimized descriptor set cache with per-set-type partitioning, LRU eviction, and atomic generation for lock-free reads.
 // Separates sets by type (0=UBO/push, 1=textures, 2=storage, 3=other) to improve locality and reduce collision rate.
 // Uses 4x larger initial capacity (32768) to minimize rehashing. LRU eviction replaces full generation clears.
@@ -284,9 +287,6 @@ struct SetCache {
     void record_miss() { ++misses; }
     double hit_rate() const { return (hits + misses) ? 100.0 * hits / (hits + misses) : 0.0; }
 };
-
-// Global frame counter for LRU generation tracking
-static uint64_t g_frame_counter = 1;
 
 // Per-set-type caches for better locality and reduced collisions
 // Set 0: UBO / push constants (high frequency, low variance)
