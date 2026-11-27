@@ -260,7 +260,7 @@ struct PipeUpgrade {
 // null: not possible for this key, build it whole. *up (when given) gets the upgrade the linked pipeline will be replaced by (null: none queued).
 VkPipeline gpl_link(const GraphicsKey& key, const ProgLayout& layout, std::shared_ptr<PipeUpgrade>* up = nullptr, bool* pending = nullptr);
 // [nvn] gpl_async: a draw whose shader parts are not compiled yet gets no pipeline while frames are flowing (*pending = true: skip it and ask
-// again later); the parts compile on the background threads ahead of everything else. While the game loads (no present for 100 ms) the draw
+// again later); the parts compile on the background threads ahead of everything else. While the game loads (no present for 2 s) the draw
 // builds them itself as before, so one-time renders of a loading screen are never lost.
 void gpl_note_presents(uint64_t presents);   // the replay, once per submission: when presents were last seen moving
 bool gpl_ab_whole();                                                 // measurement only ([nvn] gpl_ab): true in the windows that run the optimised pipelines
@@ -272,7 +272,7 @@ void gpl_program_bound(const ShaderInfo* const stages[6]);           // a comman
 void gpl_prebuild(std::function<bool(GraphicsKey&, const ProgLayout*&)> resolve, bool front);
 // True when the draw can link this key now: eligible, and its two shader parts are built.
 bool gpl_ready(const GraphicsKey& key, const ProgLayout& layout);
-bool gpl_frames_flowing();                                           // a present within the last 100 ms (draws may be skipped rather than wait)
+bool gpl_frames_flowing();                                           // a present within the last 2 s (draws may be skipped rather than wait)
 // A job for the pipeline-library threads (compute pipelines, compute_prebuild): ahead of the hot programs' parts. False when they are off.
 bool gpl_queue_task(std::function<void()> fn);
 void gpl_progress_log();                                             // one log line when something changed since the last call

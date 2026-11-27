@@ -1398,10 +1398,13 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, cons
                         return VK_NULL_HANDLE;   // nothing recorded: the next dispatch asks again
                     }
                     const auto t0 = std::chrono::steady_clock::now();
+                    const bool on_rt = nxrt::hitch_on_render_thread();
+                    const uint64_t hp0 = on_rt ? nxrt::hitch_ticks() : 0;
                     {
                         NXFT("pipe.compute.wait");
                         g_comp_cv.wait(lk, [&] { return j->state == 2; });
                     }
+                    if (on_rt) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - hp0);
                     ++g_comp_stats.waited;
                     g_comp_stats.wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 }
