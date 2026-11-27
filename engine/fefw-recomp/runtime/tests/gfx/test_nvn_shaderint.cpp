@@ -25,6 +25,7 @@
 #include "nvn_impl.h"
 #include "nvn_shaders.h"
 #include "nxrt/config.h"
+#include "nxrt/gauge.h"
 #include "shaderint_spirv.inc"
 NXTEST_GROUP(gfx_nvn_shaderint)
 
@@ -624,6 +625,91 @@ NXTEST(pool_arrays_sample_by_handle) {
     const auto s1 = nxrt::nvn::backend_stats();
     CHECK_EQ(s1.draws - s0.draws, 8ull);
     CHECK_EQ(s1.draws_skipped - s0.draws_skipped, 0ull);
+    CHECK_EQ(app.validation().errors, 0ull);
+}
+
+// A texture finalized while still registered is drawn through the image of the live texture on its storage, and gives that image back with
+// it (#174: the game remade its 8192 x 8192 shadow maps over the same storage while the old ids stayed registered, each set of images
+// outlived its textures, and video memory ran out until the device was lost).
+NXTEST(pool_arrays_finalized_textures_give_back_a_live_alias_image) {
+    REQUIRE(cache_ready());
+    App app;
+    App::Opts o;
+    o.width = kW;
+    o.height = kH;
+    REQUIRE_WHY(app.init(o), app.error.c_str());
+    App::ShaderBlob vs = blob(vs_block(), "vertex"), fs = blob(pool_fs_block(), "fragment");
+    auto prog = app.make_program({&vs, &fs});
+    REQUIRE(prog != nullptr);
+    auto& api = app.api;
+    auto cube = make_cube(app);
+    auto rt = app.make_texture_2d(NVN_FORMAT_RGBA8, kW, kH, 0, 1, false);
+    REQUIRE(cube && rt);
+    fill(*cube, 32, 0, 0);
+    api.nvnTexturePoolRegisterTexture(app.tex_pool.get(), 12, cube->obj.get(), nullptr);
+    const int smp = app.make_nearest_sampler();
+    const App::Buf ub = app.make_buffer(256);
+    uint32_t* handles = reinterpret_cast<uint32_t*>(ub.ptr);
+    const App::Buf out = app.make_buffer(static_cast<size_t>(kW) * kH * 4);
+    // the 2D texture at `id` plus the cube's (32, 0, 0)
+    auto frame = [&](int id) {
+        handles[0] = static_cast<uint32_t>(app.texture_handle(id, smp));
+        handles[1] = static_cast<uint32_t>(app.texture_handle(12, smp));
+        return render(app, prog.get(), *rt, out, [&](NVNcommandBuffer* c) {
+            api.nvnCommandBufferSetTexturePool(c, app.tex_pool.get());
+            api.nvnCommandBufferSetSamplerPool(c, app.smp_pool.get());
+            api.nvnCommandBufferBindUniformBuffer(c, NVN_SHADER_STAGE_FRAGMENT, 0, ub.address, 256);
+        });
+    };
+    // Texture images alive once the releases queued so far have run (two later submissions destroy what they released).
+    auto images = [&]() {
+        frame(7);
+        frame(7);
+        int64_t n = -1;
+        be::gpu::run_on_render_thread([&] {
+            for (const auto& g : nxrt::gauge_read_all())
+                if (g.first == "nvn.textures_live") n = g.second;
+        });
+        return n;
+    };
+    const int64_t base = images();   // nothing at id 7: the cube and the render target
+    // One texture object after another over the same storage, each registered at an id of its own; the finalized ones stay registered.
+    const size_t storage = app.pool_main->take(4096, 4096);
+    auto make = [&](uint8_t green) {
+        auto t = std::make_unique<nvnapp::Tex>();
+        t->obj = std::make_unique<NVNtexture>();
+        std::memset(t->obj.get(), 0, sizeof(NVNtexture));
+        NVNtextureBuilder b;
+        api.nvnTextureBuilderSetDevice(&b, app.device.get());
+        api.nvnTextureBuilderSetDefaults(&b);
+        api.nvnTextureBuilderSetTarget(&b, NVN_TEXTURE_TARGET_2D);
+        api.nvnTextureBuilderSetSize2D(&b, 4, 4);
+        api.nvnTextureBuilderSetFormat(&b, NVN_FORMAT_RGBA8);
+        t->pool = app.pool_main.get();
+        t->offset = storage;
+        t->size = api.nvnTextureBuilderGetStorageSize(&b);
+        api.nvnTextureBuilderSetStorage(&b, t->pool->obj.get(), static_cast<ptrdiff_t>(storage));
+        if (t->size > 4096 || !api.nvnTextureInitialize(t->obj.get(), &b)) return std::unique_ptr<nvnapp::Tex>();
+        fill(*t, 0, green, 0);
+        return t;
+    };
+    constexpr int kSets = 4, kFirstId = 20;
+    std::vector<std::unique_ptr<nvnapp::Tex>> sets;
+    for (int i = 0; i < kSets; ++i) {
+        if (i) api.nvnTextureFinalize(sets.back()->obj.get());
+        const uint8_t green = static_cast<uint8_t>(50 * (i + 1));
+        sets.push_back(make(green));
+        REQUIRE(sets.back() != nullptr);
+        api.nvnTexturePoolRegisterTexture(app.tex_pool.get(), kFirstId + i, sets.back()->obj.get(), nullptr);
+        // the live texture's id, and every older one, which is sampled through the live texture's image
+        for (int j = i; j >= 0; --j) CHECK(all_pixels(frame(kFirstId + j), 32, green, 0, -1, 1, "an id over the live texture's storage"));
+        CHECK_EQ(images(), base + 1);
+    }
+    // The last live texture goes: so does the image, and every id reads the dummy.
+    api.nvnTextureFinalize(sets.back()->obj.get());
+    CHECK_EQ(images(), base);
+    for (int i = 0; i < kSets; ++i) CHECK(all_pixels(frame(kFirstId + i), 32, 0, 0, -1, 1, "a finalized id, no live texture on its storage"));
+    CHECK_EQ(images(), base);
     CHECK_EQ(app.validation().errors, 0ull);
 }
 

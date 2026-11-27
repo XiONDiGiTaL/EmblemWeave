@@ -402,6 +402,8 @@ bool snapshot_write(int index, const std::string& png_path, std::string* stats);
 // [nvn] trace_dump_tex = <dir>: writes the data prepare_texture builds for t (raw blocks of every level and layer) as t<id>.bin with a t<id>.txt describing it, once per texture.
 void trace_dump_prepared(Texture* t, const std::string& dir);
 int snapshot_record_raw(Texture* t, Frame& f);   // block-compressed level 0 as the GPU holds it; snapshot_write writes the bytes
+// render thread: the finalized texture t gives up its image, and when no other live texture holds it, so do the finalized ones that share it
+void tex_release(Texture* t);
 void tex_destroy(TexGpu* g);      // render thread
 void tex_shutdown();              // frees samplers and dummy resources (device idle)
 // Per-load census lines ([diag] load_census, render thread): live texture images by kind, the Vulkan side of the game pools.
