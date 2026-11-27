@@ -38,7 +38,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "nxrt/config.h"
 #include "nxrt/dispatch.h"
@@ -401,6 +403,135 @@ uint32_t parse_skip(const std::string& list) {
     return m;
 }
 
+// ---- combat death cries (anim group; ported from ObeliskChamber#217) -------------------------------------------------------------------
+// game::combat::ActionDamageCore::DoDie (0x1084840) starts a disposable::EveryFrameProc (0x10c8cc0) of 1.0 s with a callback (a
+// std::function; its operator() 0x1085350: x0 = the closure, +8 the unit index; x1 -> t, the proc's elapsed / 1.0 s). Each frame the proc
+// (0x10c9690) adds its clock's step and calls the callback; it ends when the callback returns 0 or t reaches 1. The callback waits for
+// t > 0.04 and for the dying unit's own clock (unit [+88] + 304, its step this frame at + 16, frames of 1/59.94 s) to have moved more than
+// 0.0001 s this frame, then asks for the voice "Damage_D" or "Damage_H" (0x10b0500 on the unit + 872) and returns 0.
+// At a death the unit's clock stands still (the slow death camera) and then eases back. At 30 fps it passes 0.0001 s a frame at about
+// t = 0.97, two frames before the proc ends. The threshold is per frame, so at 60 fps the same clock speed moves half as far a frame and
+// passes it only after the proc has ended: no cry (at 120 a quarter). The callback is only ever called through its std::function, so it is
+// wrapped through the function table (no hook site needed): the step it reads is divided by s for the call (the 30 fps step for the same
+// clock speed) and put back after. [fefw] diag_voice (off) logs each death's first wait and how it ended.
+constexpr uint32_t kDieCb = 0x1085350, kVoiceBusy = 0x100100, kUnitTableGot = 0x216b488;
+GuestFn g_die_cb_orig = nullptr;
+bool g_voice_log = false;
+std::atomic<bool> g_die_cb_tried{false};
+template <class T> bool vrd(uint64_t a, T* out) {
+    if (!a || !mem::is_mapped(a, sizeof(T))) return false;
+    std::memcpy(out, reinterpret_cast<const void*>(a), sizeof(T));
+    return true;
+}
+uint64_t vcall(::Ctx* c, uint64_t fn, uint64_t x0) {
+    const ::Ctx saved = *c;
+    c->x[0] = x0;
+    dispatch_call(c, fn);
+    const uint64_t r = c->x[0];
+    *c = saved;
+    return r;
+}
+void die_cb_wrap(::Ctx* c) {
+    const uint64_t base = st().base, closure = c->x[0];
+    float t = -1.f, step = -1.f;
+    uint32_t unit = 0xffffffffu;
+    uint64_t got = 0, table = 0, unit_obj = 0, inner = 0, clock = 0;
+    vrd(c->x[1], &t);
+    vrd(closure + 8, &unit);
+    const bool have = vrd(base + kUnitTableGot, &got) && vrd(got, &table) && table && unit <= 3 && vrd(table + unit * 0x18 + 40, &unit_obj) &&
+                      vrd(unit_obj + 88, &inner) && vrd(inner + 304, &clock) && vrd(clock + 16, &step);
+    const float sc = scale(kAnim);
+    const bool scaled = have && sc < 1.0f && step > 0.0f;
+    const float seen = scaled ? step / sc : step;
+    if (scaled) std::memcpy(reinterpret_cast<void*>(clock + 16), &seen, sizeof(float));
+    std::string why;
+    if (g_voice_log && t > 0.04f && seen * 16.683f * 0.001f > 1e-4f) {     // the frame the callback asks for the voice: will 0x10b0500 play it?
+        int busy = -1;
+        uint8_t mode = 0;
+        uint64_t combat = 0, comp = 0, v = 0, vh = 0;
+        if (vrd(table + 8, &combat) && combat) vrd(combat + 113, &mode);
+        if (vrd(unit_obj + 872 + 8, &comp) && vrd(comp + 88, &v) && v && vrd(v + 136, &vh) && vh)
+            busy = static_cast<int>(vcall(c, base + kVoiceBusy, vh + 104) & 1);
+        why = (mode >> 7 & 1) ? ", voices off: not played" : busy == 1 ? ", the unit's voice is busy: not played" : busy == 0 ? ", played" : ", voice handle not found";
+    }
+    g_die_cb_orig(c);
+    if (scaled) {
+        std::memcpy(reinterpret_cast<void*>(clock + 16), &step, sizeof(float));
+        count(kAnim);
+    }
+    if (!g_voice_log) return;
+    static uint64_t last_closure = 0;   // main thread
+    const bool waits = static_cast<uint32_t>(c->x[0]) & 1, first = closure != last_closure;
+    last_closure = closure;
+    const char* end = !waits ? "asks for the voice" : t >= 0.999f ? "the wait ran out: no cry" : first ? "waits" : nullptr;
+    if (!end) return;
+    NXLOG_I(kTag, "voice: death cry, unit %u, t %.3f, unit clock step %.4f (the callback sees %.4f) -> %s%s", unit, t, step, seen, end, why.c_str());
+}
+// The lifted modules are registered after play mode installs its hooks: wrap the callback at the first frame step.
+void die_cb_try_install() {
+    if (g_die_cb_tried.exchange(true)) return;
+    g_voice_log = config_get_bool("fefw", "diag_voice", false);
+    const uint64_t at = st().base + kDieCb;
+    g_die_cb_orig = fn_lookup(at);
+    if (!g_die_cb_orig || !fn_lookup(st().base + kVoiceBusy)) {
+        NXLOG_W(kTag, "frame-rate fixes: the combat death cry callback (0x%x) is not in this build: death cries stay as they are", kDieCb);
+        return;
+    }
+    fn_register(at, &die_cb_wrap);
+    NXLOG_I(kTag, "frame-rate fixes: combat death cries wrapped (anim)%s", g_voice_log ? ", logged ([fefw] diag_voice)" : "");
+}
+
+// ---- talk portraits (Spine): one call per 30 Hz step (ported from ObeliskChamber#217) --------------------------------------------------
+// The talk portraits are Spine skeletons (spine-cpp). The game's wrapper (0x1947dd0) poses each one at its skeleton data's fps
+// (+0x358) from an accumulator of its own (+0x35c): when it passes one step it applies the animation state, updates the world
+// transform and advances the state by that step; otherwise it still calls spine::AnimationState::update(0.0001), with no apply.
+// At 30 fps every call is a step. At 60 every other call is not, and when the game starts an animation with no mix (the eye blink,
+// talk::Seq::BindFaceEyeBlinkSync: mix duration 0) just before such a call, that update gives the new entry a mix time above 0 and
+// Spine drops the entry it replaces as finished mixing before it was ever applied mixing out. What that entry had set (the open eye's
+// images) is never reset while the blink moves the lids: half-closed lids over open eyes, on several of Fortuna's lines.
+// The manager that calls the wrapper for every skeleton (0x1940d60, only called through a pointer) is wrapped through the function
+// table: between 30 Hz steps it is not called at all, and on a step it is called with the clock frames since the last one
+// ([+0x48] + 0x68, frames of 1/59.94 s; put back after the call), so every skeleton is called once per 30 Hz step, as at 30 fps.
+// Group anim: off with the frame-rate fixes, and with [fefw] frame_fixes_skip = anim.
+constexpr uint32_t kSpineManager = 0x1940d60;
+GuestFn g_spine_orig = nullptr;
+std::mutex g_spine_mu;
+std::unordered_map<uint64_t, float> g_spine_acc;   // manager -> clock frames since its last 30 Hz step; under g_spine_mu
+std::atomic<bool> g_spine_tried{false};
+void spine_mgr_wrap(::Ctx* c) {
+    const uint64_t mgr = c->x[0];
+    uint64_t clock = 0;
+    float step = 0.f;
+    if (full(scale(kAnim)) || !vrd(mgr + 0x48, &clock) || !vrd(clock + 0x68, &step) || !(step >= 0.f && step < 64.f)) {
+        g_spine_orig(c);
+        return;
+    }
+    float use = 0.f;
+    {
+        std::lock_guard<std::mutex> lk(g_spine_mu);
+        if (g_spine_acc.size() > 256) g_spine_acc.clear();
+        float& acc = g_spine_acc[mgr];
+        acc += step;
+        if (st().tick.load(std::memory_order_relaxed)) use = acc, acc = 0.f;
+    }
+    count(kAnim);
+    if (use == 0.f) return;   // no 30 Hz step in this frame
+    std::memcpy(reinterpret_cast<void*>(clock + 0x68), &use, 4);
+    g_spine_orig(c);
+    float now = 0.f;
+    if (vrd(clock + 0x68, &now) && now == use) std::memcpy(reinterpret_cast<void*>(clock + 0x68), &step, 4);
+}
+void spine_try_install() {
+    if (g_spine_tried.exchange(true)) return;
+    const uint64_t at = st().base + kSpineManager;
+    if (!(g_spine_orig = fn_lookup(at))) {
+        NXLOG_W(kTag, "frame-rate fixes: the Spine manager (0x%x) is not in this build: talk portraits stay as they are", kSpineManager);
+        return;
+    }
+    fn_register(at, &spine_mgr_wrap);
+    NXLOG_I(kTag, "frame-rate fixes: talk portraits (Spine) called once per 30 Hz step (anim)");
+}
+
 }  // namespace
 
 void frame_install(uint64_t base) {
@@ -463,6 +594,8 @@ void frame_install(uint64_t base) {
 void frame_step(float step, int target) {
     State& s = st();
     if (!s.installed || target <= 0) return;
+    die_cb_try_install();
+    spine_try_install();
     int native = s.native.load(std::memory_order_relaxed);
     if (native <= 0) native = target;
     const float sc = std::clamp(static_cast<float>(native) / static_cast<float>(target), 0.125f, 1.0f);
