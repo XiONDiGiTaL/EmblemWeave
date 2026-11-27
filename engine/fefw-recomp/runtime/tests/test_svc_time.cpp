@@ -47,6 +47,26 @@ const uint8_t* live_slot(const uint8_t* base, uint32_t off, uint32_t pad, uint32
     return base + off + 4 + pad + (idx & 1) * size;
 }
 
+// The numeric fields of a ContinuousAdjustmentTimePoint slot (the source uuid follows at +40).
+struct AdjustPoint {
+    int64_t clock_offset, diff_scale, shift_amount, base, limit;
+};
+AdjustPoint adjust_of(const uint8_t* slot) {
+    AdjustPoint p{};
+    static_assert(sizeof p == 40);
+    std::memcpy(&p, slot, sizeof p);
+    return p;
+}
+
+// Steady seconds as nn::time::detail::SharedMemoryClient computes them from that time point (read from the SDK's code): the scaled
+// elapsed time plus `base`, bounded on one side by `limit`, added to the raw tick in ns.
+int64_t sdk_steady_secs(const AdjustPoint& p, int64_t now_ns) {
+    const int64_t v = (((now_ns - p.clock_offset) * p.diff_scale) >> p.shift_amount) + p.base;
+    const bool floor = p.diff_scale < 0;
+    const int64_t corr = floor ? (v > p.limit ? v : p.limit) : (v < p.limit ? v : p.limit);
+    return (now_ns + corr) / 1000000000;
+}
+
 // The shared memory object behind GetSharedMemoryNativeHandle (cmd 20 on IStaticService).
 const uint8_t* shm_of(nxsvc::Session& st, uint64_t* size = nullptr) {
     nxsvc::Reply r = st.call(20);
@@ -242,31 +262,20 @@ NXTEST(svc_time_shared_memory_layout) {
     CHECK_EQ(*live_slot(base, 0xC8, 0, 1), 0u);
 
     // ContinuousAdjustmentTimePoint, pad 4 at 0xD0, 0x38 per slot: {u64 clock_offset, i64 diff_scale, i64 shift_amount,
-    // i64 lower, i64 upper, uuid}: constant correction (diff_scale 0, shift 0, lower == upper == epoch - tick0).
+    // i64 base, i64 limit, uuid}: constant correction (diff_scale 0, shift 0, base == limit == epoch - tick0).
     const uint8_t* adj = live_slot(base, 0xD0, 4, 0x38);
-    uint64_t clock_offset = 0;
-    int64_t scale = -1, shift = -1, lower = 0, upper = 0;
-    std::memcpy(&clock_offset, adj, 8);
-    std::memcpy(&scale, adj + 8, 8);
-    std::memcpy(&shift, adj + 16, 8);
-    std::memcpy(&lower, adj + 24, 8);
-    std::memcpy(&upper, adj + 32, 8);
-    CHECK_EQ(scale, 0);
-    CHECK_EQ(shift, 0);
-    CHECK_EQ(lower, upper);
-    CHECK_EQ(lower, kSteadyEpochNs - static_cast<int64_t>(clock_offset));
+    const AdjustPoint p = adjust_of(adj);
+    CHECK_EQ(p.diff_scale, 0);
+    CHECK_EQ(p.shift_amount, 0);
+    CHECK_EQ(p.base, p.limit);
+    CHECK_EQ(p.base, kSteadyEpochNs - p.clock_offset);
     CHECK(std::memcmp(adj + 40, kSourceId, 16) == 0);
 
-    // SDK shared-memory reader path: steady = (raw_ticks_ns + clamp((raw_ticks_ns - clock_offset) * scale >> shift, lower, upper)) / 1e9.
-    const int64_t raw_ns = raw_ticks_ns();
-    int64_t corr = ((raw_ns - static_cast<int64_t>(clock_offset)) * scale) >> shift;
-    if (corr < lower) corr = lower;
-    if (corr > upper) corr = upper;
-    const int64_t steady_sdk = (raw_ns + corr) / 1000000000;
+    // The posix time the SDK's shared-memory reader gets: local context offset + its steady seconds.
     const uint8_t* local = live_slot(base, 0x38, 4, 0x20);
     int64_t local_offset = 0;
     std::memcpy(&local_offset, local, 8);
-    CHECK(abs64(local_offset + steady_sdk - host_unix()) <= 3);
+    CHECK(abs64(local_offset + sdk_steady_secs(p, raw_ticks_ns()) - host_unix()) <= 3);
 }
 
 NXTEST(svc_time_shared_memory_follows_set_current_time) {
@@ -302,16 +311,10 @@ NXTEST(svc_time_shared_memory_keeps_posix_across_steady_offset) {
     std::memcpy(&internal, steady_ctx, 8);
     CHECK_EQ(internal, kSteadyEpochNs + 1000000000000ll);
 
-    const uint8_t* adj = live_slot(base, 0xD0, 4, 0x38);
-    uint64_t clock_offset = 0;
-    int64_t lower = 0, upper = 0;
-    std::memcpy(&clock_offset, adj, 8);
-    std::memcpy(&lower, adj + 24, 8);
-    std::memcpy(&upper, adj + 32, 8);
-    CHECK_EQ(lower, upper);
-    CHECK_EQ(lower, kSteadyEpochNs + 1000000000000ll - static_cast<int64_t>(clock_offset));
-    const int64_t steady_sdk = (raw_ticks_ns() + lower) / 1000000000;
-    CHECK(abs64(offset + steady_sdk - host_unix()) <= 3);
+    const AdjustPoint p = adjust_of(live_slot(base, 0xD0, 4, 0x38));
+    CHECK_EQ(p.base, p.limit);
+    CHECK_EQ(p.base, kSteadyEpochNs + 1000000000000ll - p.clock_offset);
+    CHECK(abs64(offset + sdk_steady_secs(p, raw_ticks_ns()) - host_unix()) <= 3);
 }
 
 NXTEST(svc_time_automatic_correction_flag) {
