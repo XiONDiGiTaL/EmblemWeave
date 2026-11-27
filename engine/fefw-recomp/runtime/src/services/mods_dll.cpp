@@ -566,9 +566,9 @@ bool site_in_build(uint64_t main_base, const char* kind, uint64_t addr) {
 int sites_missing(const std::string& mod_dir, std::vector<std::string>* unknown) {
     namespace stdfs = std::filesystem;
     const SiteList& l = lifted_sites();
-    if (!l.known || mod_dir.empty()) return -1;
+    if (mod_dir.empty()) return -1;
     std::error_code ec;
-    int missing = 0;
+    int missing = l.known ? 0 : -1;   // unknown kinds are still named without the build's own list
     std::set<std::string> other;
     for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(mod_dir) / "exefs", ec)) {
         if (!e.is_regular_file(ec) || _wcsicmp(e.path().extension().c_str(), L".sites") != 0) continue;
@@ -581,7 +581,7 @@ int sites_missing(const std::string& mod_dir, std::vector<std::string>* unknown)
                 other.insert(s.first);
                 continue;
             }
-            missing += l.sites.count(s) == 0;
+            if (l.known) missing += l.sites.count(s) == 0;
         }
     }
     if (unknown) unknown->assign(other.begin(), other.end());
