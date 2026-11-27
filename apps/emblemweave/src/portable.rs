@@ -61,10 +61,9 @@ const CLANG_KEEP: &[&str] = &[
 ];
 
 /// CMake's compiler-detection, compiler-specific and Ninja-generator modules live beside `tools/bin`. Without them every
-/// configure fails before the project is read, so the directory and the files the engine's configure always loads are
-/// part of the piece; a quarantine that took only part of the module tree is then caught like a missing `cmake.exe`.
+/// configure fails before the project is read, so the files the engine's configure always loads are part of the piece; a
+/// quarantine that took only part of the module tree is then caught like a missing `cmake.exe`.
 const CMAKE_KEEP: &[&str] = &[
-    "share/cmake-3.31/Modules/",
     "share/cmake-3.31/Modules/CMakeDetermineSystem.cmake",
     "share/cmake-3.31/Modules/CMakeDetermineCCompiler.cmake",
     "share/cmake-3.31/Modules/CMakeDetermineCXXCompiler.cmake",
@@ -180,9 +179,9 @@ pub fn carried(piece: &Piece) -> bool {
 }
 
 /// One carried piece whose files are partly gone: enough to report on Overview and repair with one press.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Damage {
-    pub name: &'static str,
+    pub piece: &'static Piece,
     pub missing: Vec<PathBuf>,
 }
 
@@ -196,7 +195,24 @@ impl Damage {
             .map(|n| n.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(", ");
-        format!("{}: {files}", self.name)
+        format!("{}: {files}", self.piece.name)
+    }
+
+    /// Whether the piece's own executable is gone. If it is still there, the build's `NX_LLVM`/PATH finds that broken
+    /// carried copy before an installed one, so installed tools cannot take its place.
+    fn executable_missing(&self) -> bool {
+        let exe = self.piece.exe;
+        self.missing.iter().any(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(exe)))
+    }
+
+    fn blocks_build_with(&self, system_ready: bool) -> bool {
+        !self.executable_missing() || !system_ready
+    }
+
+    /// Whether this damage must stop Rebuild. A missing executable with a complete installed copy does not: the tool
+    /// search falls through to it. A present but incomplete carried copy does, because it still shadows the installed one.
+    pub fn blocks_build(&self) -> bool {
+        self.blocks_build_with(system_ready(self.piece))
     }
 }
 
@@ -209,19 +225,14 @@ fn damage_in(tools: &Path) -> Vec<Damage> {
         .filter(|piece| bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file())
         .filter_map(|piece| {
             let missing = missing_in(tools, piece);
-            (!missing.is_empty()).then_some(Damage { name: piece.name, missing })
+            (!missing.is_empty()).then_some(Damage { piece, missing })
         })
         .collect()
 }
 
 /// The pieces a repair has to fetch again, in the same order as [`PIECES`].
 fn damaged_in(tools: &Path) -> Vec<&'static Piece> {
-    let bin = tools.join("bin");
-    PIECES
-        .iter()
-        .filter(|piece| bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file())
-        .filter(|piece| !missing_in(tools, piece).is_empty())
-        .collect()
+    damage_in(tools).into_iter().map(|d| d.piece).collect()
 }
 
 /// The damage report for the engine this launcher runs, for the Overview. Empty when every carried piece is whole.
@@ -229,25 +240,18 @@ pub fn damage() -> Vec<Damage> {
     dir().map(|tools| damage_in(&tools)).unwrap_or_default()
 }
 
-/// Names the carried pieces whose files are partly gone, with the way back. None when every carried piece is whole.
-fn damage_note_in(tools: &Path) -> Option<String> {
-    let damaged = damage_in(tools);
+/// Names the pieces whose files are partly gone, with the way back. None when the list is empty.
+pub fn damage_note_for(damaged: &[Damage]) -> Option<String> {
     if damaged.is_empty() {
         return None;
     }
     let lines = damaged.iter().map(|d| format!("  {}", d.summary())).collect::<Vec<_>>();
     Some(format!(
         "files the toolchain EmblemWeave carried into tools\\bin needs are missing:\n{}\n\nAn antivirus quarantine removes \
-         files like these and leaves the install stamp behind, so the build would fail at its first link or resource compile. \
-         Put them back with Repair on Overview (or `EmblemWeave.exe --fetch-tools`), or restore them from the antivirus \
-         quarantine. Then press Rebuild.",
+         files like these and leaves the install stamp behind. Press Repair on Overview, or restore them from the \
+         quarantine, then press Rebuild.",
         lines.join("\n")
     ))
-}
-
-/// [`damage_note_in`] for the engine this launcher runs.
-pub fn damage_note() -> Option<String> {
-    dir().and_then(|tools| damage_note_in(&tools))
 }
 
 /// Whether the PC already has a tool this piece would supply. Checked in the background before the launcher downloads
@@ -857,19 +861,18 @@ mod tests {
         plant_carried_toolchain(tools);
         let llvm = PIECES.iter().find(|p| p.key == "clang").expect("the LLVM piece");
         assert!(carried_in(tools, llvm), "the planted toolchain is complete");
-        assert!(damage_note_in(tools).is_none());
+        assert!(damage_note_for(&damage_in(tools)).is_none());
 
         fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
         assert!(!carried_in(tools, llvm), "a marker exe and a stamp are not a complete piece");
-        let note = damage_note_in(tools).expect("the damaged piece is reported");
+        let note = damage_note_for(&damage_in(tools)).expect("the damaged piece is reported");
         assert!(note.contains("lld-link.exe"), "{note}");
         assert!(note.contains("quarantine"), "{note}");
         assert!(note.contains("Repair on Overview"), "{note}");
-        assert!(note.contains("--fetch-tools"), "{note}");
         assert!(!note.contains("CMake"), "an untouched piece is not reported: {note}");
 
         fs::remove_dir_all(tools.join("lib").join("clang")).unwrap();
-        let note = damage_note_in(tools).expect("the resource headers are reported too");
+        let note = damage_note_for(&damage_in(tools)).expect("the resource headers are reported too");
         assert!(note.contains("include"), "{note}");
     }
 
@@ -944,6 +947,35 @@ mod tests {
         plant_carried_toolchain(tools);
         fs::remove_file(tools.join("bin").join(format!("{STAMP_PREFIX}clang"))).unwrap();
         fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
-        assert!(damage_note_in(tools).is_none(), "no stamp means nothing was carried here");
+        assert!(
+            damage_note_for(&damage_in(tools)).is_none(),
+            "no stamp means nothing was carried here"
+        );
+    }
+
+    /// A broken carried copy still shadows an installed one; a piece whose executable is gone lets the tool search fall
+    /// through, so a complete installed copy makes that damage safe to build past.
+    #[test]
+    fn damage_blocks_only_when_the_carried_copy_would_be_used() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+
+        fs::remove_file(tools.join("bin").join("cmake.exe")).unwrap();
+        let cmake = damage_in(tools).pop().expect("CMake is damaged");
+        assert!(cmake.executable_missing());
+        assert!(!cmake.blocks_build_with(true), "an installed CMake can take over");
+        assert!(cmake.blocks_build_with(false), "without one there is nothing to use");
+
+        fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
+        let clang = damage_in(tools)
+            .into_iter()
+            .find(|d| d.piece.key == "clang")
+            .expect("LLVM is damaged");
+        assert!(!clang.executable_missing(), "clang-cl.exe is still there");
+        assert!(
+            clang.blocks_build_with(true),
+            "the incomplete carried LLVM is still found first, so an installed LLVM does not take over"
+        );
     }
 }

@@ -97,7 +97,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let (text, colour) = if building {
                         ("Building the game from your dump; progress is in the status bar and on Diagnostics.".to_string(), p.body)
                     } else if !damage.is_empty() {
-                        ("Some files of the carried build toolchain are missing: repair them before rebuilding.".to_string(), p.bad)
+                        ("Some files of the carried build toolchain are missing; Repair restores them.".to_string(), p.warn)
                     } else if ready {
                         ("Ready to play. Saves are kept in EmblemWeave's save folder; RomFS mods go in the run folder's mods folder.".to_string(), p.ok)
                     } else if !missing.is_empty() {
@@ -118,10 +118,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             .join("\n");
                         ui.label(
                             RichText::new(format!(
-                                "Missing: {list}. A quarantine can leave the install record behind; the build would stop at its first link or resource compile."
+                                "Missing: {list}. A quarantine can leave the install record behind; Repair fetches only the damaged pieces."
                             ))
                             .size(12.5)
-                            .color(p.bad),
+                            .color(p.warn),
                         );
                         let repairing = app.running(JobKind::Toolchain).is_some();
                         let label = if repairing { "Repairing the build tools…" } else { "Repair build tools" };

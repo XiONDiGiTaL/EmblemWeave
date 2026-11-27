@@ -2552,11 +2552,20 @@ pub fn build(
     }
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
 
-    // The toolchain this launcher carries is unpacked into tools\bin. Its stamp and main executable outlive a quarantine
-    // that takes lld-link.exe or llvm-rc.exe, so without this the build ran every earlier stage and died at the first link
-    // or resource compile. Name what is gone and how to put it back before any stage starts (issue #116).
-    if let Some(note) = crate::portable::damage_note() {
+    // The carried toolchain is unpacked into tools\bin and deliberately comes first through NX_LLVM and PATH. Damage to
+    // a piece whose executable is still there would shadow an installed copy and fail at the first link or configure, so
+    // name it and stop. A piece whose executable is gone lets the tool search fall through: with a complete installed
+    // copy the build can use that instead of forcing a large repair (issue #116).
+    let damage = crate::portable::damage();
+    let blocking: Vec<_> = damage.iter().filter(|d| d.blocks_build()).cloned().collect();
+    if let Some(note) = crate::portable::damage_note_for(&blocking) {
         return Err(note);
+    }
+    if !damage.is_empty() {
+        ctx.log(format!(
+            "the carried toolchain is missing files for {}; the build will use installed copies",
+            damage.iter().map(|d| d.piece.name).collect::<Vec<_>>().join(", ")
+        ));
     }
 
     // Initialize the unified ToolchainManager with tools.lock. The manager is rooted at the engine folder, where
