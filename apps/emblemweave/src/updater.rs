@@ -11,12 +11,24 @@
 //! binary is staged as `EmblemWeave.exe.new`, the current one is kept as
 //! `backups\EmblemWeave.exe.old`, and a short script swaps them and starts the new one.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 pub const REPO: &str = "XiONDiGiTaL/EmblemWeave";
 /// The asset name a Windows build is published under.
 pub const ASSET_SUFFIX: &str = "-windows-x64.zip";
+
+/// One file attached to a release, with the size and SHA-256 GitHub records for it when the response carries them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+}
 
 /// A published release, as much of it as the launcher shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +37,10 @@ pub struct Release {
     pub version: Option<(u32, u32, u32)>,
     pub notes: String,
     pub page: String,
-    /// The Windows zip: its name and download URL.
-    pub asset: Option<(String, String)>,
+    /// The Windows zip: its name, download URL and published hash.
+    pub asset: Option<Asset>,
+    /// The release's `release-manifest.json`, which also pins the zip's SHA-256 and size.
+    pub manifest: Option<Asset>,
 }
 
 /// Whether RecompLauncher started this copy. It sets `RECOMPLAUNCHER=1` on the programs it starts and installs every
@@ -121,6 +135,36 @@ pub fn latest() -> Result<Release, String> {
     release_from_json(&body)
 }
 
+/// One attached file from a GitHub release object. A missing download URL or name makes it unusable.
+fn asset_from_json(v: &serde_json::Value) -> Option<Asset> {
+    Some(Asset {
+        name: v.get("name")?.as_str()?.to_string(),
+        url: v.get("browser_download_url")?.as_str()?.to_string(),
+        size: v.get("size").and_then(|s| s.as_u64()),
+        sha256: v
+            .get("digest")
+            .and_then(|d| d.as_str())
+            .and_then(|d| d.strip_prefix("sha256:"))
+            .map(str::to_ascii_lowercase)
+            .filter(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit())),
+    })
+}
+
+/// The first 64-character hex run after `marker`. The release notes quote the zip's hash as
+/// `` `sha256` of the zip: `<hash>` ``, which older releases publish even when GitHub records no asset digest.
+fn sha256_after(text: &str, marker: &str) -> Option<String> {
+    let start = text.to_ascii_lowercase().find(&marker.to_ascii_lowercase())? + marker.len();
+    let bytes = text.as_bytes();
+    let mut i = start;
+    while i + 64 <= bytes.len() {
+        if bytes[i..i + 64].iter().all(u8::is_ascii_hexdigit) {
+            return Some(String::from_utf8_lossy(&bytes[i..i + 64]).to_ascii_lowercase());
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Reads a GitHub release object. Separated from the request so it can be
 /// tested against recorded responses.
 pub fn release_from_json(body: &[u8]) -> Result<Release, String> {
@@ -134,32 +178,34 @@ pub fn release_from_json(body: &[u8]) -> Result<Release, String> {
     if tag.is_empty() {
         return Err("the release has no tag".into());
     }
-    let asset = v.get("assets").and_then(|a| a.as_array()).and_then(|a| {
-        a.iter().find_map(|a| {
-            let name = a.get("name")?.as_str()?;
-            if name.ends_with(ASSET_SUFFIX) {
-                Some((
-                    name.to_string(),
-                    a.get("browser_download_url")?.as_str()?.to_string(),
-                ))
-            } else {
-                None
-            }
-        })
+    let body_text = v.get("body").and_then(|b| b.as_str()).unwrap_or_default();
+    let assets = v.get("assets").and_then(|a| a.as_array());
+    let zip_sha = sha256_after(body_text, "of the zip:");
+    let mut asset = assets.and_then(|a| {
+        a.iter()
+            .filter_map(asset_from_json)
+            .find(|a| a.name.ends_with(ASSET_SUFFIX))
+    });
+    if let Some(a) = asset.as_mut() {
+        if a.sha256.is_none() {
+            a.sha256 = zip_sha;
+        }
+    }
+    let manifest = assets.and_then(|a| {
+        a.iter()
+            .filter_map(asset_from_json)
+            .find(|a| a.name.eq_ignore_ascii_case("release-manifest.json"))
     });
     Ok(Release {
         version: parse_version(&tag),
-        notes: v
-            .get("body")
-            .and_then(|b| b.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        notes: body_text.to_string(),
         page: v
             .get("html_url")
             .and_then(|p| p.as_str())
             .unwrap_or_default()
             .to_string(),
         asset,
+        manifest,
         tag,
     })
 }
@@ -287,18 +333,145 @@ pub fn has_backup() -> bool {
     !backup_exes().is_empty()
 }
 
-/// Download a release's zip and unpack its executable into `dir`, returning
-/// the unpacked `EmblemWeave.exe`.
-pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
-    let (name, url) = release
+/// The SHA-256 of a file, read in chunks so a release zip does not have to fit in memory.
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The zip hash and size `release-manifest.json` pins, checked against the file the updater is about to install.
+fn expected_from_manifest(body: &[u8], zip_name: &str) -> Result<(String, Option<u64>), String> {
+    let v: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("release-manifest.json is not JSON: {e}"))?;
+    let archive = v
+        .get("archive")
+        .ok_or("release-manifest.json has no archive entry")?;
+    let name = archive
+        .get("name")
+        .and_then(|n| n.as_str())
+        .ok_or("release-manifest.json does not name its archive")?;
+    if !name.eq_ignore_ascii_case(zip_name) {
+        return Err(format!(
+            "release-manifest.json describes {name}, not {zip_name}"
+        ));
+    }
+    let sha = archive
+        .get("sha256")
+        .and_then(|s| s.as_str())
+        .ok_or("release-manifest.json has no archive SHA-256")?;
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "release-manifest.json's archive SHA-256 is malformed: {sha}"
+        ));
+    }
+    Ok((
+        sha.to_ascii_lowercase(),
+        archive.get("size").and_then(|s| s.as_u64()),
+    ))
+}
+
+/// Reject a download that is not the exact file the release published: the wrong size (an interrupted download) or the
+/// wrong SHA-256 (a corrupted or substituted zip). The hash comes from GitHub's asset digest, the release notes, or the
+/// release's `release-manifest.json`. When more than one is published they must agree.
+fn verify_download(zip: &Path, release: &Release) -> Result<(), String> {
+    let asset = release
         .asset
-        .clone()
+        .as_ref()
         .ok_or("that release has no Windows download")?;
+    let size = std::fs::metadata(zip)
+        .map_err(|e| format!("reading the downloaded zip: {e}"))?
+        .len();
+    if let Some(want) = asset.size {
+        if size != want {
+            return Err(format!(
+                "the download is incomplete: {size} bytes arrived, the release publishes {want}. Nothing was installed; try the update again."
+            ));
+        }
+    }
+    let mut sha = asset.sha256.clone();
+    let mut published_size = asset.size;
+    if let Some(manifest) = &release.manifest {
+        if !manifest.url.starts_with("https://") {
+            return Err("the release manifest address is not https".into());
+        }
+        match fetch(&manifest.url) {
+            Ok(body) => {
+                let (manifest_sha, manifest_size) = expected_from_manifest(&body, &asset.name)?;
+                if let Some(known) = &sha {
+                    if !known.eq_ignore_ascii_case(&manifest_sha) {
+                        return Err(format!(
+                            "the release's SHA-256 ({known}) and release-manifest.json ({manifest_sha}) disagree; nothing was installed"
+                        ));
+                    }
+                }
+                if let (Some(a), Some(b)) = (published_size, manifest_size) {
+                    if a != b {
+                        return Err(format!(
+                            "the release's zip size ({a}) and release-manifest.json ({b}) disagree; nothing was installed"
+                        ));
+                    }
+                }
+                sha = Some(manifest_sha);
+                if manifest_size.is_some() {
+                    published_size = manifest_size;
+                }
+            }
+            // The manifest is a second source, not the only one: a digest or the hash in the notes still verifies the zip.
+            Err(e) if sha.is_none() => {
+                return Err(format!(
+                    "the release's SHA-256 could not be read from release-manifest.json ({e}), and it publishes no other one; nothing was installed"
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    let Some(expected) = sha else {
+        return Err(
+            "the release publishes no SHA-256 for its Windows zip, so EmblemWeave cannot verify the download. Install it from the release page and check SHA256SUMS."
+                .into(),
+        );
+    };
+    let got = sha256_file(zip)?;
+    if got != expected {
+        return Err(format!(
+            "the download does not match the SHA-256 the release publishes: got {got}, expected {expected}. Nothing was installed; try the update again."
+        ));
+    }
+    if let Some(want) = published_size {
+        if size != want {
+            return Err(format!(
+                "the download is incomplete: {size} bytes arrived, release-manifest.json publishes {want}. Nothing was installed; try the update again."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Download a release's zip, check it against the hash the release publishes, and unpack its executable into `dir`,
+/// returning the unpacked `EmblemWeave.exe`. A zip that does not match is deleted and never unpacked.
+pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
+    let asset = release
+        .asset
+        .as_ref()
+        .ok_or("that release has no Windows download")?;
+    let (name, url) = (&asset.name, &asset.url);
     if !url.starts_with("https://") {
         return Err("the download address is not https".into());
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let zip = dir.join(crate::mods::clean_name(&name));
+    let zip = dir.join(crate::mods::clean_name(name));
     // An interrupted download must not be mistaken for the new zip.
     let _ = std::fs::remove_file(&zip);
     let out = hidden(Command::new(system_tool("curl.exe")).args([
@@ -310,7 +483,7 @@ pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
         "-o",
     ]))
     .arg(&zip)
-    .arg(&url)
+    .arg(url)
     .output()
     .map_err(|e| format!("running curl: {e}"))?;
     if !out.status.success() {
@@ -319,7 +492,12 @@ pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    if let Err(e) = verify_download(&zip, release) {
+        let _ = std::fs::remove_file(&zip);
+        return Err(e);
+    }
     let unpacked = dir.join("unpacked");
+
     let _ = std::fs::remove_dir_all(&unpacked);
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
     let out = hidden(
@@ -1030,7 +1208,144 @@ mod tests {
         assert_eq!(r.version, Some((0, 9, 0)));
         assert_eq!(r.notes, "Big changes.");
         assert!(r.page.ends_with("v0.9.0"));
-        assert_eq!(r.asset.unwrap().0, "EmblemWeave-v0.9.0-windows-x64.zip");
+        assert_eq!(
+            r.asset.unwrap().name,
+            "EmblemWeave-v0.9.0-windows-x64.zip"
+        );
+    }
+
+    /// GitHub records a digest and size for each asset; the release's manifest is found beside the zip, and the notes'
+    /// quoted hash is the fallback for releases whose API response carries no digest.
+    #[test]
+    fn reads_the_published_hash_size_and_manifest() {
+        let body = br#"{
+            "tag_name": "v0.9.0",
+            "body": "`sha256` of the zip: `1111111111111111111111111111111111111111111111111111111111111111`",
+            "assets": [
+                {
+                    "name": "EmblemWeave-v0.9.0-windows-x64.zip",
+                    "browser_download_url": "https://example.com/app.zip",
+                    "size": 42,
+                    "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                },
+                {
+                    "name": "release-manifest.json",
+                    "browser_download_url": "https://example.com/release-manifest.json",
+                    "size": 7
+                }
+            ]
+        }"#;
+        let r = release_from_json(body).unwrap();
+        let asset = r.asset.unwrap();
+        assert_eq!(asset.size, Some(42));
+        assert_eq!(
+            asset.sha256.as_deref(),
+            Some("2222222222222222222222222222222222222222222222222222222222222222")
+        );
+        assert_eq!(
+            r.manifest.unwrap().name,
+            "release-manifest.json",
+            "the manifest is kept as its own asset"
+        );
+
+        let no_digest = br#"{
+            "tag_name": "v0.9.0",
+            "body": "`sha256` of the zip: `3333333333333333333333333333333333333333333333333333333333333333`",
+            "assets": [{"name": "EmblemWeave-v0.9.0-windows-x64.zip", "browser_download_url": "https://example.com/app.zip"}]
+        }"#;
+        let r = release_from_json(no_digest).unwrap();
+        assert_eq!(
+            r.asset.unwrap().sha256.as_deref(),
+            Some("3333333333333333333333333333333333333333333333333333333333333333")
+        );
+        assert!(r.manifest.is_none());
+    }
+
+    #[test]
+    fn release_manifest_pins_the_zip_it_describes() {
+        let sha = "a".repeat(64);
+        let body = serde_json::json!({
+            "schema": 1,
+            "archive": {
+                "name": "EmblemWeave-v0.9.0-windows-x64.zip",
+                "sha256": sha,
+                "size": 1234
+            }
+        });
+        let text = body.to_string();
+        let (got, size) = expected_from_manifest(
+            text.as_bytes(),
+            "EmblemWeave-v0.9.0-windows-x64.zip",
+        )
+        .unwrap();
+        assert_eq!(got, sha);
+        assert_eq!(size, Some(1234));
+        assert!(
+            expected_from_manifest(text.as_bytes(), "EmblemWeave-v0.9.0-other.zip").is_err(),
+            "a manifest for another archive cannot verify this download"
+        );
+        assert!(expected_from_manifest(b"{}", "EmblemWeave-v0.9.0-windows-x64.zip").is_err());
+        assert!(expected_from_manifest(b"not json", "EmblemWeave-v0.9.0-windows-x64.zip").is_err());
+    }
+
+    fn zip_with_launcher() -> Vec<u8> {
+        use std::io::Write;
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        {
+            let mut zw = zip::ZipWriter::new(&mut bytes);
+            zw.start_file(
+                "EmblemWeave-v0.9.0/EmblemWeave.exe",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zw.write_all(b"new launcher").unwrap();
+            zw.finish().unwrap();
+        }
+        bytes.into_inner()
+    }
+
+    fn release_for_zip(name: &str, sha: String, size: u64) -> Release {
+        Release {
+            tag: "v0.9.0".into(),
+            version: Some((0, 9, 0)),
+            notes: String::new(),
+            page: String::new(),
+            asset: Some(Asset {
+                name: name.into(),
+                url: "https://example.com/app.zip".into(),
+                size: Some(size),
+                sha256: Some(sha),
+            }),
+            manifest: None,
+        }
+    }
+
+    /// A zip that bit rot, a truncated transfer or a substituted file changed must never reach the installer.
+    #[test]
+    fn a_corrupted_or_incomplete_download_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("ew-update-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "EmblemWeave-v0.9.0-windows-x64.zip";
+        let path = dir.join(name);
+
+        let good = zip_with_launcher();
+        std::fs::write(&path, &good).unwrap();
+        let release = release_for_zip(name, sha256_file(&path).unwrap(), good.len() as u64);
+        assert!(verify_download(&path, &release).is_ok(), "the intact download passes");
+
+        let mut corrupted = good.clone();
+        let at = corrupted.len() / 2;
+        corrupted[at] ^= 0xff;
+        std::fs::write(&path, &corrupted).unwrap();
+        let err = verify_download(&path, &release).unwrap_err();
+        assert!(err.contains("does not match the SHA-256"), "{err}");
+
+        std::fs::write(&path, &good[..good.len() / 2]).unwrap();
+        let err = verify_download(&path, &release).unwrap_err();
+        assert!(err.contains("incomplete"), "{err}");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
