@@ -458,9 +458,14 @@ fn attachments(app: &App, ui: &mut egui::Ui, p: &Palette, state: &mut State) {
         }
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Limit: 12 files, 25 MiB each, 50 MiB total. Executables, installers and credential files are refused. Do not attach passwords, tokens, keys, or saves with personal data.")
-                .size(10.5)
-                .color(p.muted),
+            RichText::new(format!(
+                "Limit: {} files, {} each, {} total (GitHub accepts 10 per comment). Executables, installers and credential files are refused. Do not attach passwords, tokens, keys, or saves with personal data.",
+                issue_report::MAX_ATTACHMENTS,
+                crate::fmt_size(issue_report::MAX_FILE_BYTES),
+                crate::fmt_size(issue_report::MAX_TOTAL_BYTES)
+            ))
+            .size(10.5)
+            .color(p.muted),
         );
     });
     if let Some(i) = remove {

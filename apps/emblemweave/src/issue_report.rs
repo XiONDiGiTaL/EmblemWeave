@@ -24,7 +24,7 @@ pub const NEW_ISSUE_URL: &str = "https://github.com/XiONDiGiTaL/EmblemWeave/issu
 const MAX_URL_BODY: usize = 6_000;
 const MAX_DIAGNOSTIC_CHARS: usize = 3_000;
 
-pub const MAX_ATTACHMENTS: usize = 12;
+pub const MAX_ATTACHMENTS: usize = 10;
 pub const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -426,7 +426,8 @@ impl AttachmentKind {
     fn for_path(path: &Path) -> AttachmentKind {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         match ext.as_str() {
-            "log" | "txt" => AttachmentKind::Log,
+            "log" => AttachmentKind::Log,
+            "txt" => AttachmentKind::Text,
             "zip" | "7z" | "rar" | "gz" | "tar" => AttachmentKind::Archive,
             "png" | "jpg" | "jpeg" | "webp" | "gif" => AttachmentKind::Image,
             "ini" | "cfg" | "conf" | "json" | "toml" | "yaml" | "yml" => AttachmentKind::Config,
@@ -472,8 +473,13 @@ pub fn add_attachment(draft: &mut Draft, path: &Path) -> AddResult {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     const BLOCKED: &[&str] = &[
         "exe", "dll", "sys", "msi", "bat", "cmd", "ps1", "com", "scr", "lnk", "pif", "reg", "kdbx", "pfx", "p12",
+        "env", "key", "pem", "crt", "cer", "ovpn",
     ];
-    if BLOCKED.contains(&ext.as_str()) {
+    let leaf = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    const BLOCKED_NAMES: &[&str] = &[
+        ".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", ".git-credentials", ".npmrc", ".netrc", "credentials",
+    ];
+    if BLOCKED.contains(&ext.as_str()) || BLOCKED_NAMES.contains(&leaf.as_str()) || leaf.starts_with(".env.") {
         return bad(format!(
             "{} is a program or credential file. Attach a log, screenshot, archive, or text file instead.",
             path.display()
@@ -1086,12 +1092,19 @@ pub fn prepare_handoff(root: &Path, draft: &Draft, markdown: &str) -> Result<Pat
     if !draft.attachments.is_empty() {
         std::fs::create_dir_all(&files).map_err(|e| format!("creating {}: {e}", files.display()))?;
         for a in &draft.attachments {
+            // A draft is local state, but it is still not trusted to choose a path
+            // outside the handoff folder: only the leaf name is used.
+            let safe = Path::new(&a.name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|n| !n.is_empty() && *n != "." && *n != "..")
+                .unwrap_or("attachment");
             // Two different folders can hold files with the same name; keep both
             // instead of letting the second copy overwrite the first.
-            let mut dest = files.join(&a.name);
+            let mut dest = files.join(safe);
             if dest.exists() {
-                let stem = Path::new(&a.name).file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-                let ext = Path::new(&a.name).extension().and_then(|s| s.to_str()).unwrap_or("");
+                let stem = Path::new(safe).file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+                let ext = Path::new(safe).extension().and_then(|s| s.to_str()).unwrap_or("");
                 for n in 2..1000 {
                     let candidate = if ext.is_empty() {
                         files.join(format!("{stem}-{n}"))
@@ -1322,6 +1335,61 @@ mod tests {
         assert_eq!(std::fs::read(out.join("attachments/report.zip")).unwrap(), b"PK\x03\x04 not really a zip");
         // The archive is copied as one file; nothing is extracted beside it.
         assert!(!out.join("attachments/report").exists());
+    }
+
+    #[test]
+    fn credential_files_are_refused_by_extension_and_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = dir.path().join(".env");
+        std::fs::write(&env, "TOKEN=secret").unwrap();
+        let key = dir.path().join("signing.key");
+        std::fs::write(&key, "secret").unwrap();
+        let rsa = dir.path().join("id_rsa");
+        std::fs::write(&rsa, "secret").unwrap();
+        let mut d = Draft::default();
+        for path in [&env, &key, &rsa] {
+            match add_attachment(&mut d, path) {
+                AddResult::Rejected(why) => assert!(why.contains("credential")),
+                _ => panic!("{} must be refused", path.display()),
+            }
+        }
+        assert!(d.attachments.is_empty());
+    }
+
+    #[test]
+    fn the_attachment_count_cap_matches_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = Draft::default();
+        for i in 0..MAX_ATTACHMENTS {
+            let path = dir.path().join(format!("evidence-{i}.log"));
+            std::fs::write(&path, "line").unwrap();
+            assert!(matches!(add_attachment(&mut d, &path), AddResult::Added(_)));
+        }
+        let extra = dir.path().join("one-too-many.log");
+        std::fs::write(&extra, "line").unwrap();
+        match add_attachment(&mut d, &extra) {
+            AddResult::Rejected(why) => assert!(why.contains("at most")),
+            _ => panic!("the cap must be enforced"),
+        }
+        assert_eq!(d.attachments.len(), MAX_ATTACHMENTS);
+        assert_eq!(MAX_ATTACHMENTS, 10);
+    }
+
+    #[test]
+    fn handoff_never_uses_an_attachment_name_as_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.log");
+        std::fs::write(&src, "body").unwrap();
+        let mut d = filled(Category::Bug);
+        d.attachments.push(Attachment {
+            path: src,
+            name: "../escape.log".into(),
+            size: 4,
+            kind: AttachmentKind::Log,
+        });
+        let out = prepare_handoff(dir.path(), &d, "body").unwrap();
+        assert!(out.join("attachments/escape.log").is_file());
+        assert!(!dir.path().join("escape.log").exists());
     }
 
     #[test]
