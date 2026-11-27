@@ -24,6 +24,7 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/hooks.h"
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/mod_api.h"
@@ -371,11 +372,24 @@ int64_t api_zstd_compress(const void* src, uint64_t src_size, void* dst, uint64_
 // ---- version 4: panels in the overlay's Mods tab ---------------------------------------------------------------------------------
 std::atomic<bool> g_panel_visible{false};
 
+// The mod whose nxmod_early / nxmod_init is running on this thread, or null. add_panel may be called from any thread, so it goes by
+// this and not by State::in_init: another thread's panel is not the starting mod's (fefw-recomp 3d83bb5).
+thread_local const Mod* t_starting = nullptr;
+
 int api_add_panel(const char* title, NxModPanelFn fn, void* user) {
+    // ObeliskChamber's version 4 has open_list(Ctx* c, item, list) in this slot, and a mod built for it calls it with its game
+    // thread's Ctx, which arrives here as the title. Refused, so the mod sees that no screen opened: taken as a panel, the menu item
+    // (a guest address) would be called as the panel's function (fefw-recomp 55adca2).
+    if (title && static_cast<const void*>(title) == static_cast<const void*>(kernel::current_ctx())) {
+        NXLOG_W(kTag, "a code mod called open_list (ObeliskChamber's list screen), which this runtime does not have");
+        return 0;
+    }
     if (!title || !*title || !fn) return 0;
     std::lock_guard<std::mutex> lk(st().mu);
-    // added from nxmod_init: kept back until it returns 0, so the overlay never calls into a mod that is still starting or declined
-    st().panels.push_back({title, fn, user, st().in_init, st().in_init == nullptr});
+    // added from nxmod_early / nxmod_init: kept back until it returns 0, so the overlay never calls into a mod that is still starting
+    // or declined
+    const Mod* owner = t_starting;
+    st().panels.push_back({title, fn, user, owner, owner == nullptr});
     return 1;
 }
 int api_panel_visible() { return g_panel_visible.load(std::memory_order_relaxed) ? 1 : 0; }
@@ -420,7 +434,9 @@ void start_all() {
     for (Mod* m : mods) {
         if (m->declined) continue;
         st().in_init = m;
+        t_starting = m;
         const int rc = m->init(&m->api, m->dir.c_str());
+        t_starting = nullptr;
         st().in_init = nullptr;
         if (rc != 0) {
             withdraw(m);
@@ -486,7 +502,9 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
     // nxmod_early (optional): before the game's file system is set up, so the mod can register file edits
     if (const auto early = reinterpret_cast<NxModEarlyFn>(GetProcAddress(dll, "nxmod_early"))) {
         st().in_init = m;
+        t_starting = m;
         const int rc = early(&m->api, m->dir.c_str());
+        t_starting = nullptr;
         st().in_init = nullptr;
         if (rc != 0) {
             m->declined = true;
