@@ -292,9 +292,12 @@ void type2_scenario(int waiters, int32_t value, int32_t count, int32_t want_word
             woken++;
         });
     }
-    sleep_ms(100);
+    CHECK_MSG(wait_until([a, waiters] { return static_cast<int>(ks::address_waiter_count(a)) == waiters; }),
+              "not all waiters slept on the address");
     CHECK_EQ(ks::signal_to_address(a, 2, value, count), ks::kOk);
-    sleep_ms(100);
+    CHECK_MSG(wait_until([&woken, want_woken] { return woken.load() == want_woken; }),
+              "signal type 2 did not wake expected count");
+    if (want_woken < waiters) sleep_ms(50);
     CHECK_EQ(woken.load(), want_woken);
     CHECK_EQ(static_cast<int32_t>(w), want_word);
     CHECK_EQ(ks::signal_to_address(a, 0, 0, -1), ks::kOk);
@@ -740,9 +743,10 @@ NXTEST(signal_to_address_wakes_count) {
             done++;
         });
     }
-    sleep_ms(100);                                                     // all three sleep on the address
+    CHECK_MSG(wait_until([a] { return ks::address_waiter_count(a) == 3; }), "not all three waiters slept on the address");
     CHECK_EQ(ks::signal_to_address(a, 0, 0, 1), ks::kOk);
-    sleep_ms(100);
+    CHECK_MSG(wait_until([&done] { return done.load() == 1; }), "signal 1 did not wake one waiter");
+    sleep_ms(50);
     CHECK_EQ(done.load(), 1);                                          // count 1 wakes exactly one
     CHECK_EQ(ks::signal_to_address(a, 0, 0, -1), ks::kOk);             // -1: the rest
     CHECK_MSG(wait_until([&done] { return done.load() == 3; }), "signal -1 did not wake the other two");
@@ -761,7 +765,7 @@ NXTEST(signal_to_address_increment_if_equal) {
     std::thread waiter([&, a] {
         if (ks::wait_for_address(a, 2, 3, -1) == ks::kOk) woken++;     // WaitIfEqual 3
     });
-    sleep_ms(100);
+    CHECK_MSG(wait_until([a] { return ks::address_waiter_count(a) == 1; }), "waiter never slept on the address");
     CHECK_EQ(ks::signal_to_address(a, 1, 2, 1), ks::kInvalidState);    // value 2 != word 3: nothing changes, nobody wakes
     sleep_ms(50);
     CHECK_EQ(w, 3u);
