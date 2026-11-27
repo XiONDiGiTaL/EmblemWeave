@@ -165,12 +165,10 @@ uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass pro
 uint64_t g_pass_verts = 0;      // vertices (indices for indexed draws) times instances of those draws
 Frame* F = nullptr;
 
-// Global frame counter for LRU generation tracking (must be declared before SetCache for use in clear())
-static uint64_t g_frame_counter = 1;
-
-// Optimized descriptor set cache with per-set-type partitioning, LRU eviction, and atomic generation for lock-free reads.
-// Separates sets by type (0=UBO/push, 1=textures, 2=storage, 3=other) to improve locality and reduce collision rate.
-// Uses 4x larger initial capacity (32768) to minimize rehashing. LRU eviction replaces full generation clears.
+// Descriptor set cache, partitioned by set type (0=UBO/push, 1=textures, 2=storage, 3=other) for locality and fewer collisions.
+// It is a per-frame cache: present() advances every generation before any set is bound, so entries written in an earlier frame
+// are never returned. That is required, not an optimisation: the sets come from frame-scoped pools that are reset on reuse.
+// find() and put() both run on the present thread, which is what makes the lock-free read safe.
 struct SetCache {
     struct Slot {
         uint64_t key = 0;
@@ -180,7 +178,7 @@ struct SetCache {
     std::vector<Slot> slots;
     std::atomic<uint64_t> cur_gen{1};    // current frame generation (atomic for lock-free find)
     size_t used = 0;
-    uint64_t hits = 0, misses = 0;
+    std::atomic<uint64_t> hits{0}, misses{0};   // read by the gauges from the telemetry thread
     uint64_t evictions = 0;
 
     // Per-set-type cache instances: 0=UBO/push, 1=textures (combined image sampler), 2=storage (storage buffer/image), 3=other
@@ -245,47 +243,20 @@ struct SetCache {
         }
     }
 
-    // LRU eviction: advance generation and evict entries older than 2 frames
-    // This replaces the old full clear which invalidated everything at once
-    void advance_generation(uint64_t frame_gen) {
-        const uint64_t old_gen = cur_gen.load(std::memory_order_relaxed);
-        const uint64_t new_gen = old_gen + 1;
-        cur_gen.store(new_gen, std::memory_order_release);
-
-        // Count evictions for statistics (entries from generations older than frame_gen - 1)
-        // In practice, we just track the generation advance; actual cleanup happens on next grow/put
-        // since slots with old gen are treated as empty in find()
-        if (frame_gen > old_gen + 2) {
-            // Full cleanup needed - entries from 3+ frames ago are now unreachable
-            size_t evicted = 0;
-            for (auto& sl : slots) {
-                if (sl.gen != 0 && sl.gen < frame_gen - 1) {
-                    sl.gen = 0;
-                    sl.key = 0;
-                    sl.ds = VK_NULL_HANDLE;
-                    ++evicted;
-                } else if (sl.gen == new_gen) {
-                    ++used;
-                }
-            }
-            used = 0;
-            for (const auto& sl : slots) if (sl.gen == new_gen) ++used;
-            evictions += evicted;
-        } else {
-            used = 0;
-            for (const auto& sl : slots) if (sl.gen == new_gen) ++used;
-        }
+    // One generation per present. Older slots are treated as empty by find(), so nothing from a reset pool can be handed out;
+    // they are overwritten as new sets are put, and grow() only rehashes the current generation.
+    void advance_generation() {
+        cur_gen.store(cur_gen.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+        used = 0;
+        ++evictions;   // one frame's worth of slots became unreachable
     }
 
-    // Legacy clear() for compatibility - now uses LRU advancement
-    void clear() {
-        ++g_frame_counter;  // use global frame counter for LRU
-        advance_generation(g_frame_counter);
+    void record_hit() { hits.fetch_add(1, std::memory_order_relaxed); }
+    void record_miss() { misses.fetch_add(1, std::memory_order_relaxed); }
+    double hit_rate() const {
+        const uint64_t h = hits.load(std::memory_order_relaxed), m = misses.load(std::memory_order_relaxed);
+        return (h + m) ? 100.0 * h / (h + m) : 0.0;
     }
-
-    void record_hit() { ++hits; }
-    void record_miss() { ++misses; }
-    double hit_rate() const { return (hits + misses) ? 100.0 * hits / (hits + misses) : 0.0; }
 };
 
 // Per-set-type caches for better locality and reduced collisions
@@ -299,13 +270,8 @@ struct SetCacheArray {
     SetCache& get(uint32_t set) { return caches[set]; }
     const SetCache& get(uint32_t set) const { return caches[set]; }
 
-    void advance_generation(uint64_t frame_gen) {
-        for (auto& c : caches) c.advance_generation(frame_gen);
-    }
-
     void clear_all() {
-        ++g_frame_counter;
-        advance_generation(g_frame_counter);
+        for (auto& c : caches) c.advance_generation();
     }
 };
 
@@ -6564,14 +6530,14 @@ struct ReplayGauges {
         nxrt::gauge_register("nvn.replay.set_cache_hit_rate_1", [] { return g_set_caches.get(1).hit_rate(); });
         nxrt::gauge_register("nvn.replay.set_cache_hit_rate_2", [] { return g_set_caches.get(2).hit_rate(); });
         nxrt::gauge_register("nvn.replay.set_cache_hit_rate_3", [] { return g_set_caches.get(3).hit_rate(); });
-        nxrt::gauge_register("nvn.replay.set_cache_hits_0", [] { return g_set_caches.get(0).hits; });
-        nxrt::gauge_register("nvn.replay.set_cache_misses_0", [] { return g_set_caches.get(0).misses; });
-        nxrt::gauge_register("nvn.replay.set_cache_hits_1", [] { return g_set_caches.get(1).hits; });
-        nxrt::gauge_register("nvn.replay.set_cache_misses_1", [] { return g_set_caches.get(1).misses; });
-        nxrt::gauge_register("nvn.replay.set_cache_hits_2", [] { return g_set_caches.get(2).hits; });
-        nxrt::gauge_register("nvn.replay.set_cache_misses_2", [] { return g_set_caches.get(2).misses; });
-        nxrt::gauge_register("nvn.replay.set_cache_hits_3", [] { return g_set_caches.get(3).hits; });
-        nxrt::gauge_register("nvn.replay.set_cache_misses_3", [] { return g_set_caches.get(3).misses; });
+        nxrt::gauge_register("nvn.replay.set_cache_hits_0", [] { return g_set_caches.get(0).hits.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_misses_0", [] { return g_set_caches.get(0).misses.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_hits_1", [] { return g_set_caches.get(1).hits.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_misses_1", [] { return g_set_caches.get(1).misses.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_hits_2", [] { return g_set_caches.get(2).hits.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_misses_2", [] { return g_set_caches.get(2).misses.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_hits_3", [] { return g_set_caches.get(3).hits.load(std::memory_order_relaxed); });
+        nxrt::gauge_register("nvn.replay.set_cache_misses_3", [] { return g_set_caches.get(3).misses.load(std::memory_order_relaxed); });
         nxrt::gauge_register("nvn.replay.set_cache_evictions_0", [] { return g_set_caches.get(0).evictions; });
         nxrt::gauge_register("nvn.replay.set_cache_evictions_1", [] { return g_set_caches.get(1).evictions; });
         nxrt::gauge_register("nvn.replay.set_cache_evictions_2", [] { return g_set_caches.get(2).evictions; });
