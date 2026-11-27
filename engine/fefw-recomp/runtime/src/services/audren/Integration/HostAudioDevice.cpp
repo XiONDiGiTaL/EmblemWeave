@@ -2,6 +2,8 @@
 // Implementation of HostAudioDevice / HostAudioDeviceDriver (see HostAudioDevice.h).
 #include "HostAudioDevice.h"
 
+#include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -21,6 +23,8 @@ std::shared_ptr<::nxrt::audio::AudioSink> gOpenSink;
 uint32_t gOpenRate = 0;
 uint32_t gOpenChannels = 0;
 bool gOpenOk = false;
+std::chrono::steady_clock::time_point gNextRetry{};
+int gRetryDelaySec = 1;
 
 }  // namespace
 
@@ -63,7 +67,12 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
 
     std::shared_ptr<::nxrt::audio::AudioSink> sink = ::nxrt::audio::sink();
 
-    if (sink != gOpenSink || _sampleRate != gOpenRate || _channelCount != gOpenChannels) {
+    const bool changed = sink != gOpenSink || _sampleRate != gOpenRate || _channelCount != gOpenChannels;
+    if (changed || !gOpenOk) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!changed && now < gNextRetry) {
+            return;
+        }
         // A new sink object was installed with set_sink (it closes the previous one), or the stream format changed: (re)open.
         if (gOpenOk && gOpenSink != nullptr && sink == gOpenSink) {
             gOpenSink->close();
@@ -74,12 +83,17 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
         gOpenChannels = _channelCount;
         gOpenOk = sink->open(_sampleRate, _channelCount);
         if (!gOpenOk) {
-            NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels): playing without sound", sink->name(),
-                    _sampleRate, _channelCount);
+            if (changed) {
+                gRetryDelaySec = 1;
+                NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels): playing without sound", sink->name(),
+                        _sampleRate, _channelCount);
+            } else {
+                gRetryDelaySec = std::min(gRetryDelaySec * 2, 30);
+            }
+            gNextRetry = now + std::chrono::seconds(gRetryDelaySec);
             return;
         }
-    } else if (!gOpenOk) {
-        return;
+        gRetryDelaySec = 1;
     }
 
     sink->write(out.data(), static_cast<uint32_t>(frames));
