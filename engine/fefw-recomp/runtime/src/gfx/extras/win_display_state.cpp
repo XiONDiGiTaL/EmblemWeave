@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <wingdi.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -28,15 +29,28 @@ constexpr const char* kTag = "display";
 // (10.0.26100); a build made with an older SDK (10.0.19041 and the like) did not have them and failed on these lines. The
 // request numbers and layouts are part of the API's ABI, so they are spelled out here under local names: every SDK builds the
 // file, and on a 24H2 or later machine the newer query and the HDR switch work as before. The bit order of each flags word is
-// wingdi.h's bitfield order. The request numbers stay plain integers: the 19041 SDK's DISPLAYCONFIG_DEVICE_INFO_TYPE ends at 11
-// (clang limits it to [-16, 15]), so a constant of the enum type cannot hold 16 on that SDK; the header field is set below.
+// wingdi.h's bitfield order. These structs carry their own header, whose type is a plain UINT32: request 16 is outside the 19041
+// SDK's DISPLAYCONFIG_DEVICE_INFO_TYPE (clang limits it to [-16, 15]), so it must not be cast into that enum. The header keeps
+// DISPLAYCONFIG_DEVICE_INFO_HEADER's layout (asserted below) and the calls cast the pointer back to the SDK's type.
 constexpr UINT32 kGetAdvancedColorInfo2 = 15;   // DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2
 constexpr UINT32 kSetHdrState = 16;             // DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE
 constexpr UINT32 kHdrSupported = 1u << 4;
 constexpr UINT32 kHdrUserEnabled = 1u << 5;
 
+struct DisplayRequestHeader {
+    UINT32 type;   // DISPLAYCONFIG_DEVICE_INFO_TYPE as its ABI number
+    UINT32 size;
+    LUID adapterId;
+    UINT32 id;
+};
+static_assert(sizeof(DisplayRequestHeader) == sizeof(DISPLAYCONFIG_DEVICE_INFO_HEADER), "keep the DISPLAYCONFIG_DEVICE_INFO_HEADER layout");
+static_assert(offsetof(DisplayRequestHeader, type) == offsetof(DISPLAYCONFIG_DEVICE_INFO_HEADER, type), "type offset");
+static_assert(offsetof(DisplayRequestHeader, size) == offsetof(DISPLAYCONFIG_DEVICE_INFO_HEADER, size), "size offset");
+static_assert(offsetof(DisplayRequestHeader, adapterId) == offsetof(DISPLAYCONFIG_DEVICE_INFO_HEADER, adapterId), "adapterId offset");
+static_assert(offsetof(DisplayRequestHeader, id) == offsetof(DISPLAYCONFIG_DEVICE_INFO_HEADER, id), "id offset");
+
 struct AdvancedColorInfo2 {
-    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    DisplayRequestHeader header;
     UINT32 flags;   // 0 advanced colour supported, 4 HDR supported, 5 HDR enabled by the user, 6/7 wide colour
     DISPLAYCONFIG_COLOR_ENCODING color_encoding;
     UINT32 bits_per_color_channel;
@@ -45,7 +59,7 @@ struct AdvancedColorInfo2 {
 static_assert(sizeof(AdvancedColorInfo2) == 36, "keep the DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 layout");
 
 struct SetHdrState {
-    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    DisplayRequestHeader header;
     UINT32 flags;   // bit 0: HDR on
 };
 static_assert(sizeof(SetHdrState) == 24, "keep the DISPLAYCONFIG_SET_HDR_STATE layout");
@@ -95,11 +109,11 @@ bool read_hdr(const std::string& device, bool* supported, bool* enabled, float* 
     }
 
     AdvancedColorInfo2 info2{};
-    info2.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(kGetAdvancedColorInfo2);
+    info2.header.type = kGetAdvancedColorInfo2;
     info2.header.size = sizeof info2;
     info2.header.adapterId = adapter;
     info2.header.id = target;
-    LONG rc = DisplayConfigGetDeviceInfo(&info2.header);
+    LONG rc = DisplayConfigGetDeviceInfo(reinterpret_cast<DISPLAYCONFIG_DEVICE_INFO_HEADER*>(&info2.header));
     if (rc == ERROR_SUCCESS) {
         *supported = (info2.flags & kHdrSupported) != 0;
         *enabled = (info2.flags & kHdrUserEnabled) != 0;
@@ -236,12 +250,12 @@ public:
             return false;
         }
         SetHdrState set{};
-        set.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(kSetHdrState);
+        set.header.type = kSetHdrState;
         set.header.size = sizeof set;
         set.header.adapterId = adapter;
         set.header.id = target;
         set.flags = enable ? 1u : 0u;
-        const LONG rc = DisplayConfigSetDeviceInfo(&set.header);
+        const LONG rc = DisplayConfigSetDeviceInfo(reinterpret_cast<DISPLAYCONFIG_DEVICE_INFO_HEADER*>(&set.header));
         if (rc != ERROR_SUCCESS) {
             if (why) *why = "SET_HDR_STATE " + std::to_string(rc);
             return false;
