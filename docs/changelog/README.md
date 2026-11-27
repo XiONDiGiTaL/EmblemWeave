@@ -3,11 +3,11 @@
 One file per release, newest first. Each file is what the release notes said, word for word, so the README can stay a
 description of the current state instead of a wall of history.
 
-The current public release is **0.1.43**. The 0.1.42 file is the previous release.
+**0.1.43** is prepared as the next release and has not been published; **0.1.42** is the current public release.
 
 | Version | Date | In one line |
 | --- | --- | --- |
-| [0.1.43](0.1.43.md) | 2026-11-25 | Fixes the launcher-started runtime build failing with "The input line is too long" on a long Windows environment. |
+| [0.1.43](0.1.43.md) | release candidate | Windows SDK 10.0.19041 builds again, the Obelisk Chamber stall is fixed, and the engine picks up the 0.2.12-0.2.13 performance and stability work. |
 | [0.1.42](0.1.42.md) | 2026-11-25 | Cinematic AV1+Opus infrastructure, Find Units optimization, title-return crash mitigation, HDR exit handling (original-state restoration outstanding), and save-directory reconciliation. Field verification remains listed in the release notes. |
 | [0.1.41](0.1.41.md) | 2026-11-20 | A measured performance controller, a Performance page, a themed nine-tab F1 menu, 200% master volume, real Vulkan GPU selection, save portraits and party cheats, and no drag glide. |
 | [0.1.40](0.1.40.md) | 2026-11-18 | Update and Play without a rebuild, cleaner add-on failures, and a bounded packed-audio cache. |
