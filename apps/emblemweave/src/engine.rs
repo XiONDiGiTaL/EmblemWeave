@@ -2552,6 +2552,13 @@ pub fn build(
     }
     let root = root().ok_or("the engine folder engine/fefw-recomp is missing beside the launcher; unpack the repository whole, or set EW_ENGINE to its path")?;
 
+    // The toolchain this launcher carries is unpacked into tools\bin. Its stamp and main executable outlive a quarantine
+    // that takes lld-link.exe or llvm-rc.exe, so without this the build ran every earlier stage and died at the first link
+    // or resource compile. Name what is gone and how to put it back before any stage starts (issue #116).
+    if let Some(note) = crate::portable::damage_note() {
+        return Err(note);
+    }
+
     // Initialize the unified ToolchainManager with tools.lock. The manager is rooted at the engine folder, where
     // tools.lock lives; find_tool also checks the checkout beside it, which is where the carried tools\bin is.
     let toolchain_root = root.join("..");

@@ -120,15 +120,71 @@ pub fn bin_dir() -> Option<PathBuf> {
     dir().map(|d| d.join("bin"))
 }
 
-/// Whether this piece is already in place, from the stamp the installer writes and the executable it names.
-pub fn carried(piece: &Piece) -> bool {
-    let Some(bin) = bin_dir() else { return false };
-    if !bin.join(piece.exe).is_file() {
-        return false;
+/// The files and folders under `tools` this piece installs that are not there. The stamp only records that the archive was
+/// unpacked once: an antivirus quarantine removes individual files and leaves the stamp, so checking `piece.exe` alone
+/// called a toolchain with no `lld-link.exe` or `llvm-rc.exe` carried, and the build failed at its first link or resource
+/// compile instead (issue #116).
+fn missing_in(tools: &Path, piece: &Piece) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let exe = tools.join("bin").join(piece.exe);
+    if !exe.is_file() {
+        missing.push(exe);
     }
-    fs::read_to_string(bin.join(format!("{STAMP_PREFIX}{}", piece.key)))
-        .map(|s| s.trim() == piece.sha256)
-        .unwrap_or(false)
+    for rel in piece.keep {
+        let path = tools.join(rel);
+        let present = if rel.ends_with('/') { path.is_dir() } else { path.is_file() };
+        if !present && !missing.contains(&path) {
+            missing.push(path);
+        }
+    }
+    missing
+}
+
+/// Whether this piece is in place: its stamp matches the archive, and every file the piece installs is still there.
+fn carried_in(tools: &Path, piece: &Piece) -> bool {
+    missing_in(tools, piece).is_empty()
+        && fs::read_to_string(tools.join("bin").join(format!("{STAMP_PREFIX}{}", piece.key)))
+            .map(|s| s.trim() == piece.sha256)
+            .unwrap_or(false)
+}
+
+/// Whether this piece is already in place, from the stamp the installer writes and the files it unpacked.
+pub fn carried(piece: &Piece) -> bool {
+    dir().is_some_and(|tools| carried_in(&tools, piece))
+}
+
+/// Names the carried pieces whose stamp is still there but whose files are partly gone, with the way back. None when
+/// every carried piece is whole. A piece that was never carried is left to the first-run fetch, which installs it without
+/// being asked.
+fn damage_note_in(tools: &Path) -> Option<String> {
+    let bin = tools.join("bin");
+    let mut lines = Vec::new();
+    for piece in PIECES {
+        if !bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file() {
+            continue;
+        }
+        let missing = missing_in(tools, piece);
+        if missing.is_empty() {
+            continue;
+        }
+        let list = missing.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+        lines.push(format!("  {}: {list}", piece.name));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "files the toolchain EmblemWeave carried into tools\\bin needs are missing:\n{}\n\nAn antivirus quarantine removes \
+         files like these and leaves the install stamp behind, so the build would fail at its first link or resource compile. \
+         Put them back with `EmblemWeave.exe --fetch-tools` (it re-fetches and checks the same pinned archives), or restore \
+         them from the antivirus quarantine. Then press Rebuild.",
+        lines.join("\n")
+    ))
+}
+
+/// [`damage_note_in`] for the engine this launcher runs.
+pub fn damage_note() -> Option<String> {
+    dir().and_then(|tools| damage_note_in(&tools))
 }
 
 /// Whether the PC already has a tool this piece would supply. Checked in the background before the launcher downloads
@@ -697,5 +753,56 @@ mod tests {
         for p in PIECES {
             assert!(format!("{STAMP_PREFIX}{}", p.key).starts_with(".carried-"));
         }
+    }
+
+    /// Writes the stamps and every file the four pieces install, so a test can take one away the way a quarantine does.
+    fn plant_carried_toolchain(tools: &Path) {
+        let bin = tools.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for piece in PIECES {
+            fs::write(bin.join(format!("{STAMP_PREFIX}{}", piece.key)), format!("{}\n", piece.sha256)).unwrap();
+            fs::write(bin.join(piece.exe), b"carried").unwrap();
+            for rel in piece.keep {
+                let path = tools.join(rel);
+                if rel.ends_with('/') {
+                    fs::create_dir_all(&path).unwrap();
+                } else {
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(&path, b"carried").unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_quarantined_file_in_a_carried_toolchain_is_named_with_the_way_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        let llvm = PIECES.iter().find(|p| p.key == "clang").expect("the LLVM piece");
+        assert!(carried_in(tools, llvm), "the planted toolchain is complete");
+        assert!(damage_note_in(tools).is_none());
+
+        fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
+        assert!(!carried_in(tools, llvm), "a marker exe and a stamp are not a complete piece");
+        let note = damage_note_in(tools).expect("the damaged piece is reported");
+        assert!(note.contains("lld-link.exe"), "{note}");
+        assert!(note.contains("quarantine"), "{note}");
+        assert!(note.contains("--fetch-tools"), "{note}");
+        assert!(!note.contains("CMake"), "an untouched piece is not reported: {note}");
+
+        fs::remove_dir_all(tools.join("lib").join("clang")).unwrap();
+        let note = damage_note_in(tools).expect("the resource headers are reported too");
+        assert!(note.contains("include"), "{note}");
+    }
+
+    #[test]
+    fn a_piece_that_was_never_carried_is_left_to_the_first_run_fetch() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        fs::remove_file(tools.join("bin").join(format!("{STAMP_PREFIX}clang"))).unwrap();
+        fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
+        assert!(damage_note_in(tools).is_none(), "no stamp means nothing was carried here");
     }
 }
