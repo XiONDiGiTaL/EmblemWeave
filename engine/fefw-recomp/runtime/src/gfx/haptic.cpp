@@ -1652,7 +1652,43 @@ bool is_pro(const uint16_t vendor, const uint16_t product) {
     return vendor == 0x057E && (product == 0x2006 || product == 0x2007 || product == 0x2009);
 }
 
+// SDL learns the transport from the system's description of the device. Wine does not describe a Bluetooth device as one, so
+// SDL calls a wireless DualSense wired there, and the haptics would go to the audio endpoint of a cable that is not plugged
+// in. The pad's own report descriptor still tells.
+bool dualsense_on_bluetooth(SDL_Joystick* joy) {
+    const char* path = SDL_GetJoystickPath(joy);
+    SDL_hid_device* d = path && *path ? SDL_hid_open_path(path) : nullptr;
+    if (!d) return false;
+    uint8_t desc[4096];
+    const int n = SDL_hid_get_report_descriptor(d, desc, sizeof(desc));
+    SDL_hid_close(d);
+    return n > 0 && dualsense_descriptor_is_bluetooth(desc, static_cast<size_t>(n));
+}
+
 }  // namespace
+
+bool dualsense_descriptor_is_bluetooth(const uint8_t* desc, size_t size) {
+    // HID short items: a prefix byte (size, type, tag), then 0, 1, 2 or 4 bytes of value. Long items (0xFE) carry their size.
+    uint32_t report_id = 0;
+    for (size_t i = 0; desc && i < size;) {
+        const uint8_t prefix = desc[i];
+        if (prefix == 0xFE) {
+            if (i + 1 >= size) break;
+            i += 3u + desc[i + 1];
+            continue;
+        }
+        const size_t len = (prefix & 3) == 3 ? 4 : prefix & 3;
+        if (i + 1 + len > size) break;
+        if ((prefix & 0xFC) == 0x84) {          // global item Report ID
+            report_id = 0;
+            for (size_t k = 0; k < len; ++k) report_id |= static_cast<uint32_t>(desc[i + 1 + k]) << (8 * k);
+        } else if ((prefix & 0xFC) == 0x90 && report_id == 0x31) {   // main item Output, in the Bluetooth state report
+            return true;
+        }
+        i += 1 + len;
+    }
+    return false;
+}
 
 const char* backend_name(Backend b) {
     switch (b) {
@@ -1720,6 +1756,10 @@ void pad_added(uint32_t instance_id) {
     // Third-party XInput pads may report another gamepad type, so Microsoft's vendor id counts as well.
     const bool xbox = SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(instance_id)) == SDL_GAMEPAD_TYPE_XBOXONE ||
                       vendor == 0x045E;
+    const bool dualsense = is_dualsense(name, vendor, product);
+    const bool ds_bt = dualsense && conn != SDL_JOYSTICK_CONNECTION_WIRELESS && dualsense_on_bluetooth(joy);
+    if (ds_bt)
+        NXLOG_I(kTag, "pad \"%s\": SDL does not report it as wireless, but its reports are Bluetooth's", name ? name : "controller");
     std::lock_guard<std::mutex> lk(g_life_mu);
     {
         std::lock_guard<std::mutex> hl(g_host_mu);
@@ -1733,11 +1773,11 @@ void pad_added(uint32_t instance_id) {
         g_pad.joy = joy;
         g_pad.vendor = vendor;
         g_pad.product = product;
-        g_pad.dualsense = is_dualsense(name, vendor, product);
+        g_pad.dualsense = dualsense;
         g_pad.pro = is_pro(vendor, product);
         g_pad.xbox = xbox && !g_pad.dualsense && !g_pad.pro;
-        g_pad.bt = conn == SDL_JOYSTICK_CONNECTION_WIRELESS;
-        g_pad.wired = conn == SDL_JOYSTICK_CONNECTION_WIRED;
+        g_pad.bt = ds_bt || conn == SDL_JOYSTICK_CONNECTION_WIRELESS;
+        g_pad.wired = !ds_bt && conn == SDL_JOYSTICK_CONNECTION_WIRED;
         g_pad.rumble = rumble;
         std::snprintf(g_pad.name, sizeof(g_pad.name), "%s", name ? name : "controller");
     }
