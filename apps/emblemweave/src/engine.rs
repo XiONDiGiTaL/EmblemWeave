@@ -4182,6 +4182,48 @@ pub fn resolution_size(label: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// The ratio behind an aspect label the Graphics page offers.
+pub fn aspect_ratio(label: &str) -> Option<f64> {
+    Some(match label.trim() {
+        "16:9" => 16.0 / 9.0,
+        "16:10" => 16.0 / 10.0,
+        "21:9" => 21.0 / 9.0,
+        "32:9" => 32.0 / 9.0,
+        _ => return None,
+    })
+}
+
+/// The `[fefw] output` size a wide aspect needs at `height`: the game's own
+/// height with the width that ratio asks for, rounded to even pixels the way
+/// the engine's sizes are.
+///
+/// This is the part F1's 21:9 entries set and the launcher's old aspect key
+/// did not: the ultrawide hooks compute from the *output* size, so a 16:9
+/// output with a forced 21:9 aspect widens nothing. 16:9 and 16:10 keep the
+/// engine's named modes; the runtime letterboxes the 16:9 picture in 16:10 as
+/// it always has.
+pub fn wide_output(aspect: &str, height: u32) -> Option<(u32, u32)> {
+    let ratio = aspect_ratio(aspect)?;
+    if ratio <= 16.0 / 9.0 + 0.001 {
+        return None;
+    }
+    // The engine's own limits: up to 7680 x 2160, both dimensions even.
+    let h = (height.clamp(480, 2160) / 2) * 2;
+    let w = ((h as f64 * ratio / 2.0).round() as u32) * 2;
+    (w <= 7680).then_some((w, h))
+}
+
+/// The wide output the page's resolution and aspect ask for, if any. "Native
+/// display" has no size of its own, so the current window's height stands in
+/// (the game's handheld 1080p before the first start).
+pub fn wide_output_size(g: &crate::config::Graphics) -> Option<(u32, u32)> {
+    let height = resolution_size(&g.resolution)
+        .map(|(_, h)| h)
+        .or_else(|| live().map(|l| l.window.1).filter(|h| *h >= 480))
+        .unwrap_or(1080);
+    wide_output(&g.aspect, height)
+}
+
 /// The engine's `[display] window_mode` for a display-mode label.
 pub fn window_mode(label: &str) -> &'static str {
     match label {
@@ -4416,7 +4458,21 @@ fn save_applied(v: &Values) {
 pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> Values {
     let mut d = Values::new();
     let sdk = sdk();
-    d.insert("fefw.output".into(), output_mode(&g.resolution).into());
+    // A wide aspect is a wide *output*: that is what F1's 21:9 / 32:9 entries
+    // set, and what `[fefw] ultrawide` reads to widen the 3D view. Writing only
+    // `[display] aspect` left the game at its 16:9 output, where the hooks have
+    // nothing to do.
+    let wide = wide_output_size(g);
+    d.insert(
+        "fefw.output".into(),
+        match wide {
+            Some((w, h)) => format!("{w}x{h}"),
+            None => output_mode(&g.resolution).into(),
+        },
+    );
+    // The game-specific ultrawide hooks. `auto` is the runtime's own default;
+    // `off` is the switch F1 exposes, and it is never forced back on here.
+    d.insert("fefw.ultrawide".into(), if g.ultrawide { "auto" } else { "off" }.into());
     // Never ask the engine for an upscaler whose DLLs are not there: the run
     // folder is created by this launcher, so it is the one place they can be,
     // and a mode the engine cannot load is a black picture with working sound.
@@ -4455,6 +4511,9 @@ pub fn desired_values(g: &crate::config::Graphics, a: &crate::config::Audio) -> 
     d.insert("display.fps_limit".into(), g.frame_limit.to_string());
     let scale = g.render_scale.clamp(0.5, 2.0);
     let even = |v: f32| (((v.round() as i64) & !1).max(320)).to_string();
+    // The window keeps the size the page chose. A 21:9 game picture in a 16:9
+    // window is letterboxed by the engine (keep_aspect), not a window wider
+    // than the monitor; borderless still fills the display.
     if let Some((w, h)) = resolution_size(&g.resolution) {
         d.insert("display.width".into(), w.to_string());
         d.insert("display.height".into(), h.to_string());
@@ -4774,6 +4833,9 @@ fn adopt_from(
         if let Some(label) = window_mode_label(v) {
             changed |= put(&mut g.display_mode, label.to_string());
         }
+    }
+    if let Some(v) = take_back(desired, applied, on_file, "fefw.ultrawide") {
+        changed |= put(&mut g.ultrawide, !v.trim().eq_ignore_ascii_case("off"));
     }
     if let Some(v) = take_back(desired, applied, on_file, "display.aspect") {
         // "auto" is the engine's own default; leaving it out keeps the page's
@@ -7422,5 +7484,76 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         // Nothing there now: CMake will write its own.
         assert!(crate::toolchain::cache_mismatch_in(&dir, compiler, "Ninja", "").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The launcher's aspect setting and F1's wide Output sizes must reach the
+    /// engine as the same thing: a wide `[fefw] output`. A forced aspect with a
+    /// 16:9 output is what did not work.
+    #[test]
+    fn a_wide_aspect_writes_a_wide_output_like_f1() {
+        let audio = crate::config::Audio::default();
+        let mut g = crate::config::Graphics { resolution: "2560 × 1440".into(), ..crate::config::Graphics::default() };
+
+        // 16:9 keeps the engine's named mode and the plain window size.
+        let d = desired_values(&g, &audio);
+        assert_eq!(d.get("fefw.output").unwrap(), "1440p");
+        assert_eq!(d.get("display.width").unwrap(), "2560");
+        assert_eq!(d.get("fefw.ultrawide").unwrap(), "auto");
+
+        // 21:9: a 3360 x 1440 output, the window that shows it, and the same
+        // ratio in the play-mode key F1's Aspect ratio writes.
+        g.aspect = "21:9".into();
+        let d = desired_values(&g, &audio);
+        assert_eq!(d.get("fefw.output").unwrap(), "3360x1440");
+        // The window stays the size the page picked: the engine letterboxes the
+        // wider picture into it rather than making a window wider than the screen.
+        assert_eq!(d.get("display.width").unwrap(), "2560");
+        assert_eq!(d.get("display.aspect").unwrap(), "21:9");
+
+        // 32:9 at 1080p is exactly 3840 x 1080, within the engine's limit.
+        g.resolution = "1920 × 1080".into();
+        g.aspect = "32:9".into();
+        let d = desired_values(&g, &audio);
+        assert_eq!(d.get("fefw.output").unwrap(), "3840x1080");
+        assert_eq!(d.get("display.width").unwrap(), "1920");
+
+        // 2160p stays inside 7680 x 2160.
+        g.resolution = "3840 × 2160".into();
+        let d = desired_values(&g, &audio);
+        assert_eq!(d.get("fefw.output").unwrap(), "7680x2160");
+
+        // F1's switch is written, not ignored.
+        g.ultrawide = false;
+        assert_eq!(desired_values(&g, &audio).get("fefw.ultrawide").unwrap(), "off");
+
+        // 16:10 is not a world-widening ratio: the engine letterboxes instead.
+        g.resolution = "2560 × 1440".into();
+        g.aspect = "16:10".into();
+        g.ultrawide = true;
+        assert_eq!(desired_values(&g, &audio).get("fefw.output").unwrap(), "1440p");
+        assert_eq!(wide_output("16:10", 1440), None);
+        assert_eq!(wide_output("21:9", 1440), Some((3360, 1440)));
+        assert_eq!(wide_output("32:9", 2160), Some((7680, 2160)));
+        // Even pixels, and never past the engine's height limit.
+        assert_eq!(wide_output("21:9", 1081), Some((2520, 1080)));
+        assert_eq!(wide_output("32:9", 9999), Some((7680, 2160)));
+    }
+
+    /// What F1 writes, the page reads back: turning the hooks off or changing
+    /// the ratio in the game's own menu is the player's newer choice.
+    #[test]
+    fn f1_ultrawide_and_aspect_changes_come_back_to_the_page() {
+        let mut g = crate::config::Graphics { resolution: "2560 × 1440".into(), aspect: "21:9".into(), ..crate::config::Graphics::default() };
+        let a = crate::config::Audio::default();
+        let desired = desired_values(&g, &a);
+        let mut on_file = desired.clone();
+        on_file.insert("fefw.ultrawide".into(), "off".into());
+        on_file.insert("display.aspect".into(), "1.7777777777777777".into());
+        assert!(adopt_from(&mut g, &mut crate::config::Audio::default(), &desired, &desired, &on_file));
+        assert!(!g.ultrawide, "F1's Off is adopted");
+        assert_eq!(g.aspect, "16:9", "F1's ratio is shown as the ratio it is");
+        // The launcher's own untouched choices are not adopted as if they were
+        // the game's.
+        assert!(!adopt_from(&mut g, &mut crate::config::Audio::default(), &desired, &desired, &desired));
     }
 }

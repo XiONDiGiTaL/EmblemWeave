@@ -76,6 +76,10 @@ pub struct Graphics {
     pub vsync: bool,
     pub frame_limit: u32,
     pub aspect: String,
+    /// `[fefw] ultrawide`: the game-specific hooks that widen the 3D view and
+    /// keep the menus in the centred 16:9 area. `auto` (on) is the runtime's
+    /// default; off stretches the 16:9 picture to a wide output as before.
+    pub ultrawide: bool,
     pub render_scale: f32,
     pub upscaling: String,
     /// How crisp the final picture is: the engine's `[upscale] sharpness`, in
@@ -124,6 +128,7 @@ impl Default for Graphics {
             vsync: true,
             frame_limit: 60,
             aspect: "16:9".into(),
+            ultrawide: true,
             render_scale: 1.0,
             upscaling: "Off".into(),
             sharpening: "Default".into(),

@@ -337,9 +337,54 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
         widgets::setting_row(ui, &p, "Display mode", "Windowed, borderless or exclusive, from the game's next start.", |ui| {
             combo(ui, "mode", &mut g.display_mode, &["Windowed", "Borderless window", "Exclusive fullscreen"]);
         });
-        widgets::setting_row(ui, &p, "Aspect ratio", "Wider ratios need the game's camera and UI adjusted, not only the output. Applies at the next start.", |ui| {
-            combo(ui, "aspect", &mut g.aspect, &["16:9", "16:10", "21:9", "32:9"]);
-        });
+        widgets::setting_row(
+            ui,
+            &p,
+            "Aspect ratio",
+            "21:9 and 32:9 make the game render a wider picture (for example 3360 × 1440 at 2560 × 1440) and switch on the engine's ultrawide hooks. \
+             That is the same change as picking Output size 3440 x 1440 or 5120 x 1440 in F1: more of the 3D world, with the menus, HUD and cutscenes \
+             kept in the centred 16:9 area. 16:10 letterboxes the 16:9 picture as before. Applies at the game's next start.",
+            |ui| {
+                combo(ui, "aspect", &mut g.aspect, &["16:9", "16:10", "21:9", "32:9"]);
+            },
+        );
+        widgets::setting_row(
+            ui,
+            &p,
+            "Ultrawide hooks",
+            "The game-specific hooks that widen the 3D view and keep the UI centred ([fefw] ultrawide). Off stretches the 16:9 picture across a wide \
+             output, which is what F1's Ultrawide = Off does. A wide aspect ratio needs them on.",
+            |ui| {
+                widgets::toggle(ui, &p, &mut g.ultrawide);
+            },
+        );
+        if let Some((w, h)) = crate::engine::wide_output_size(g) {
+            if g.ultrawide {
+                widgets::pending_note(
+                    ui,
+                    &p,
+                    &format!(
+                        "Next start: the game renders {w} × {h} and Ultrawide changes the camera, HUD, menus and cutscenes. In a narrower window the \
+                         wide picture is letterboxed; borderless or a monitor of that shape fills it."
+                    ),
+                );
+            } else {
+                widgets::pending_note(
+                    ui,
+                    &p,
+                    &format!(
+                        "Next start: the game renders {w} × {h}, but the ultrawide hooks are off, so the 16:9 picture is stretched to it. Turn Ultrawide \
+                         hooks on for the wider view."
+                    ),
+                );
+            }
+        } else if g.aspect != "16:9" && crate::engine::aspect_ratio(&g.aspect).is_some_and(|r| r <= 16.0 / 9.0) {
+            widgets::pending_note(
+                ui,
+                &p,
+                "A narrower ratio keeps the game's 16:9 picture and letterboxes it: no extra world is visible. Use 21:9 or 32:9 for that.",
+            );
+        }
         widgets::setting_row(ui, &p, "VSync", "Synchronise presentation with the display. Applies at the next start.", |ui| {
             widgets::toggle(ui, &p, &mut g.vsync);
         });
