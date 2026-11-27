@@ -134,7 +134,7 @@ EmblemWeave contains no game code, no game assets, no firmware and no keys, and 
 | [ReShade](https://github.com/crosire/reshade) | Post-processing injector. |
 | [GameBanana](https://gamebanana.com/mods/games/26274) | Mod discovery and hosting. |
 
-Goldoire's original fefw-recomp repository is no longer online; EmblemWeave continues from the snapshot in `engine/`. See [docs/UPSTREAM.md](docs/UPSTREAM.md).
+
 Copyright © 2026 [XiØN](https://github.com/XiONDiGiTaL). EmblemWeave is free software under the GNU General Public License,
 version 3 ([LICENSE](LICENSE)). Third-party code
 keeps its own licence; [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) lists it.
