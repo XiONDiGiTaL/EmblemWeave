@@ -88,6 +88,12 @@ if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         add_compile_options(/EHsc /W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
                             -Wno-cast-function-type-strict -Wno-language-extension-token)
     endif()
+    # CMPXCHG16B. MSVC's <atomic> gives all its functions target("cx16") under clang on x64: without the flag clang may not inline
+    # them into code that lacks it, and every std::atomic load, store or add becomes a call ("conflicting target features"). Both
+    # builds of the game code need the instruction anyway.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")   # clang-cl only: MSVC has no -mcx16
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mcx16>)
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # GCC and Clang on Linux. -Wno-* for the same reasons the clang-cl line has them: generated and third-party code.
     add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type)
