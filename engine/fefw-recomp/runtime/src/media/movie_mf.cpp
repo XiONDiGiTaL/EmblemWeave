@@ -126,6 +126,13 @@ bool mf_ready() {
         if (SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE) t_com = true;
     }
     std::call_once(g_mf_once, [] {
+        // delay-loaded (runtime/CMakeLists.txt): a first call into a DLL that is not there would end the process
+        for (const wchar_t* dll : {L"mfplat.dll", L"mfreadwrite.dll"}) {
+            if (LoadLibraryExW(dll, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) continue;
+            NXLOG_W("movie", "Media Foundation is not installed (%ls: error %lu), so this movie cannot play. A Windows N edition needs the Media Feature Pack",
+                    dll, static_cast<unsigned long>(GetLastError()));
+            return;     // g_mf_hr stays E_FAIL
+        }
         g_mf_hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
         NXLOG_I("movie", "MFStartup 0x%08lx", static_cast<unsigned long>(g_mf_hr));
     });
