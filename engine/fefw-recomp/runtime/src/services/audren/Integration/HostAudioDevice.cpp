@@ -2,9 +2,9 @@
 // Implementation of HostAudioDevice / HostAudioDeviceDriver (see HostAudioDevice.h).
 #include "HostAudioDevice.h"
 
-#include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "../Dsp/PcmHelper.h"
@@ -23,10 +23,8 @@ std::shared_ptr<::nxrt::audio::AudioSink> gOpenSink;
 uint32_t gOpenRate = 0;
 uint32_t gOpenChannels = 0;
 bool gOpenOk = false;
-std::chrono::steady_clock::time_point gNextRetry{};
-int gRetryDelaySec = 1;
-int gFailedRetries = 0;
-constexpr int kMaxOpenRetries = 3;
+std::wstring gFailedDefaultId;
+std::chrono::steady_clock::time_point gNextEndpointCheck{};
 
 }  // namespace
 
@@ -71,12 +69,22 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
 
     const bool changed = sink != gOpenSink || _sampleRate != gOpenRate || _channelCount != gOpenChannels;
     if (changed || !gOpenOk) {
-        if (!changed && gFailedRetries >= kMaxOpenRetries) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (!changed && now < gNextRetry) {
-            return;
+        if (!changed) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now < gNextEndpointCheck) {
+                return;
+            }
+            gNextEndpointCheck = now + std::chrono::seconds(1);
+            // Only retry when the default output endpoint actually changes to a different non-empty device, so a broken or dummy
+            // endpoint never churns XAudio2 while a newly connected (or reconnected) device recovers automatically.
+            const std::wstring def = ::nxrt::audio::default_output_id();
+            if (def.empty()) {
+                gFailedDefaultId.clear();
+                return;
+            }
+            if (def == gFailedDefaultId) {
+                return;
+            }
         }
         // A new sink object was installed with set_sink (it closes the previous one), or the stream format changed: (re)open.
         if (gOpenOk && gOpenSink != nullptr && sink == gOpenSink) {
@@ -88,25 +96,13 @@ void HostAudioDevice::AppendBuffer(Span<const int16_t> data, uint32_t channelCou
         gOpenChannels = _channelCount;
         gOpenOk = sink->open(_sampleRate, _channelCount);
         if (!gOpenOk) {
-            if (changed) {
-                gRetryDelaySec = 1;
-                gFailedRetries = 0;
-                NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels): playing without sound", sink->name(),
-                        _sampleRate, _channelCount);
-            } else {
-                gFailedRetries++;
-                gRetryDelaySec = std::min(gRetryDelaySec * 2, 30);
-                if (gFailedRetries >= kMaxOpenRetries) {
-                    NXLOG_W("AudioRenderer", "host audio sink %s still cannot open after %d retries; staying silent", sink->name(),
-                            gFailedRetries);
-                    return;
-                }
-            }
-            gNextRetry = now + std::chrono::seconds(gRetryDelaySec);
+            gFailedDefaultId = ::nxrt::audio::default_output_id();
+            gNextEndpointCheck = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            NXLOG_W("AudioRenderer", "host audio sink %s failed to open (%u Hz, %u channels): playing without sound", sink->name(),
+                    _sampleRate, _channelCount);
             return;
         }
-        gRetryDelaySec = 1;
-        gFailedRetries = 0;
+        gFailedDefaultId.clear();
     }
 
     sink->write(out.data(), static_cast<uint32_t>(frames));
