@@ -158,7 +158,7 @@ Third-party code fetched at configure time (graphics shell). Each archive is dow
 
 | Component | Pin | URL / SHA256 | Licence |
 |---|---|---|---|
-| SDL3 | 3.4.18 (released 2026-10-02), built from source, static | github.com/libsdl-org/SDL release-3.4.18 `SDL3-3.4.18.tar.gz`, 9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3 | zlib |
+| SDL3 | 3.4.20 (released 2026-11-03), built from source, static | github.com/libsdl-org/SDL release-3.4.20 `SDL3-3.4.20.tar.gz`, f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f | zlib |
 | Vulkan-Headers | vulkan-sdk-1.4.363.0 | github.com/KhronosGroup/Vulkan-Headers tag archive, f4be95220ff0ee0b1c620301ff4fe9ae48592d71f4c30f2d5c571351a153ae81 | Apache-2.0 OR MIT |
 | volk | vulkan-sdk-1.4.363.0 | github.com/zeux/volk tag archive, 889b90fdcbe9cee7b118339d640c6895b7be5c920d309c44b744692063275b3d | MIT |
 | VulkanMemoryAllocator | v3.4.0 | github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator tag archive, ce9a61ea5e72284ac9ccc152c214eef381ab57bfd7383f20232e5a652e3afda6 | MIT |
