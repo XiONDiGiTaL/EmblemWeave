@@ -360,6 +360,53 @@ NXTEST_CHILD(crash_stackoverflow) {
     return crash_test_recurse(0);
 }
 
+namespace {
+
+// A child with a setup hint and the out-of-memory hint, which clears the latter again when asked, then faults.
+void crash_with_hints(int argc, char** argv, bool memory_cleared) {
+    nxrt::CrashOptions o;
+    child_options(argc, argv, o);
+    nxrt::crash_install(o);
+    nxrt::crash_set_hint("setup");
+    nxrt::crash_set_memory_hint("memory");
+    if (memory_cleared) nxrt::crash_set_memory_hint("");
+    crash_test_null_write();
+}
+
+std::string report_of_child(const char* mode) {
+    const std::string report = temp_file("nxr"), log = temp_file("nxl");
+    DWORD code = 0;
+    CHECK(run_child(mode, report, log, code));
+    CHECK_EQ(code, static_cast<DWORD>(kChildExitCode));
+    const std::string text = read_file(report);
+    remove_temp(report);
+    remove_temp(log);
+    return text;
+}
+
+}  // namespace
+
+NXTEST_CHILD(crash_both_hints) {
+    crash_with_hints(argc, argv, false);
+    return 0;
+}
+
+NXTEST_CHILD(crash_memory_hint_cleared) {
+    crash_with_hints(argc, argv, true);
+    return 0;
+}
+
+// The launcher shows the first line (launcher/src-tauri/src/play.rs likely_cause): the memory cause goes first.
+NXTEST(child_report_names_the_memory_cause_before_the_setup_cause) {
+    const std::string text = report_of_child("crash_both_hints");
+    CHECK_MSG(text.rfind("LIKELY CAUSE: memory\nLIKELY CAUSE: setup\n\nHOST EXCEPTION", 0) == 0, text.substr(0, 200));
+}
+
+NXTEST(child_clearing_the_memory_cause_keeps_the_setup_cause) {
+    const std::string text = report_of_child("crash_memory_hint_cleared");
+    CHECK_MSG(text.rfind("LIKELY CAUSE: setup\n\nHOST EXCEPTION", 0) == 0, text.substr(0, 200));
+}
+
 NXTEST(child_access_violation_terminates_with_report) {
     const std::string report = temp_file("nxr");
     const std::string log = temp_file("nxl");
