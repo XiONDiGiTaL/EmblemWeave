@@ -124,11 +124,18 @@ VkShaderStageFlagBits stage_bit(ShaderStage s) {
 std::mutex g_cache_mu;
 std::atomic<bool> g_cache_ready{false};
 
+// One read plus one vkCreatePipelineCache, on the calling thread, before the first pipeline that needs the cache.
+// Kept synchronous on purpose: a VkPipelineCache needs external synchronisation against every vkCreate*Pipelines and
+// vkMergePipelineCaches call, so a cache loaded on a background thread could only be merged under the same exclusive
+// lock pipeline creation takes, and the data would be parsed twice (creating the temporary cache, then merging it).
+// The time this takes is logged below; it is startup work that the first pipeline needs anyway. [nvn] pipeline_cache = ""
+// turns the file off.
 void ensure_cache() {
     if (g_cache_ready.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(g_cache_mu);       // the prewarm workers and the render thread may get here together
     if (g_cache_tried) return;
     g_cache_tried = true;
+    const auto cache_t0 = std::chrono::steady_clock::now();
     g_cache_path = config_get_str("nvn", "pipeline_cache", "pipeline_cache.bin");
     std::vector<char> data;
     if (!g_cache_path.empty()) {
@@ -147,12 +154,20 @@ void ensure_cache() {
     VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
     ci.pInitialData = data.empty() ? nullptr : data.data();
-    if (vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache) != VK_SUCCESS) {
+    const bool loaded = vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache) == VK_SUCCESS;
+    if (!loaded) {
         ci.initialDataSize = 0;
         ci.pInitialData = nullptr;
         vkCreatePipelineCache(vkdev(), &ci, nullptr, &g_cache);
-    } else if (!data.empty()) {
-        NXLOG_I(kTag, "pipeline cache loaded: %zu bytes from %s", data.size(), g_cache_path.c_str());
+    }
+    const double cache_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cache_t0).count();
+    if (!data.empty()) {
+        if (loaded)
+            NXLOG_I(kTag, "pipeline cache loaded: %zu bytes from %s in %.1f ms", data.size(), g_cache_path.c_str(), cache_ms);
+        else
+            NXLOG_W(kTag, "pipeline cache rejected the %zu bytes from %s (%.1f ms): starting empty", data.size(), g_cache_path.c_str(), cache_ms);
+    } else if (cache_ms >= 1.0) {
+        NXLOG_I(kTag, "pipeline cache: empty, created in %.1f ms (%s)", cache_ms, g_cache_path.c_str());
     }
     g_cache_ready.store(true, std::memory_order_release);
 }
