@@ -206,11 +206,19 @@ impl Damage {
     }
 
     fn blocks_build_with(&self, system_ready: bool) -> bool {
-        !self.executable_missing() || !system_ready
+        match self.piece.key {
+            // `find_clang` skips an incomplete carried folder, so a complete installed LLVM takes over even while the
+            // damaged `clang-cl.exe` is still present.
+            "clang" => !system_ready,
+            // CMake, Ninja and Python are single executables: a present carried copy is found first and cannot yield to
+            // an installed one, so only a missing executable makes the fall-through safe.
+            _ => !self.executable_missing() || !system_ready,
+        }
     }
 
-    /// Whether this damage must stop Rebuild. A missing executable with a complete installed copy does not: the tool
-    /// search falls through to it. A present but incomplete carried copy does, because it still shadows the installed one.
+    /// Whether this damage must stop Rebuild. A complete installed copy can take over when the carried executable is
+    /// gone, or when it is LLVM and selection skips the incomplete folder. Otherwise the present carried copy shadows
+    /// the installed one.
     pub fn blocks_build(&self) -> bool {
         self.blocks_build_with(system_ready(self.piece))
     }
@@ -258,19 +266,9 @@ pub fn damage_note_for(damaged: &[Damage]) -> Option<String> {
 /// anything: a player with LLVM 23, CMake, Ninja and Python installed gets no duplicate copy and no download.
 fn system_ready(piece: &Piece) -> bool {
     match piece.key {
-        "clang" => crate::toolchain::clang_candidates().into_iter().any(|exe| {
-            let major = crate::toolchain::clang_version(&exe)
-                .as_deref()
-                .and_then(crate::toolchain::version_parts)
-                .and_then(|parts| parts.first().copied())
-                .unwrap_or(0);
-            major >= crate::toolchain::MIN_CLANG_MAJOR
-                && exe.parent().is_some_and(|bin| {
-                    ["clang.exe", "lld-link.exe", "llvm-lib.exe", "llvm-rc.exe", "llvm-mt.exe"]
-                        .iter()
-                        .all(|tool| bin.join(tool).is_file())
-                })
-        }),
+        "clang" => crate::toolchain::clang_candidates()
+            .into_iter()
+            .any(|exe| crate::toolchain::clang_is_ready(&exe)),
         "cmake" => crate::toolchain::cmake_version()
             .is_some_and(|version| crate::deps::compare(&version, &[3, 25])),
         "ninja" => crate::toolchain::ninja_version().is_some(),
@@ -953,8 +951,9 @@ mod tests {
         );
     }
 
-    /// A broken carried copy still shadows an installed one; a piece whose executable is gone lets the tool search fall
-    /// through, so a complete installed copy makes that damage safe to build past.
+    /// A broken carried copy shadows an installed one; a piece whose executable is gone lets the tool search fall
+    /// through, so a complete installed copy makes that damage safe to build past. LLVM is the exception: its selection
+    /// skips an incomplete carried folder, so an installed LLVM takes over even while `clang-cl.exe` is still present.
     #[test]
     fn damage_blocks_only_when_the_carried_copy_would_be_used() {
         let temp = tempfile::tempdir().unwrap();
@@ -974,8 +973,22 @@ mod tests {
             .expect("LLVM is damaged");
         assert!(!clang.executable_missing(), "clang-cl.exe is still there");
         assert!(
-            clang.blocks_build_with(true),
-            "the incomplete carried LLVM is still found first, so an installed LLVM does not take over"
+            !clang.blocks_build_with(true),
+            "a complete installed LLVM is selected instead of the incomplete carried folder"
+        );
+        assert!(
+            clang.blocks_build_with(false),
+            "without an installed LLVM there is no usable compiler"
+        );
+
+        fs::remove_file(tools.join("bin").join("llvm-rc.exe")).unwrap();
+        let clang = damage_in(tools)
+            .into_iter()
+            .find(|d| d.piece.key == "clang")
+            .expect("LLVM is damaged");
+        assert!(
+            !clang.blocks_build_with(true),
+            "a missing resource compiler is also covered by the installed LLVM"
         );
     }
 }

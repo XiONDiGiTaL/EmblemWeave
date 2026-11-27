@@ -590,6 +590,18 @@ impl ToolchainManager {
             if loaded_tool.category != fresh_tool.category {
                 return false;
             }
+            // A lock whose expected executable is gone, or whose expected clang-cl now sits in an incomplete folder,
+            // describes a file this probe would no longer choose. Its checksum belongs to that file, so verification
+            // against the installed copy would report a false mismatch; regenerate the lock instead.
+            if let Some(expected) = loaded_tool.expected_path.as_deref() {
+                let expected = PathBuf::from(expected);
+                if expected.extension().is_some() && !expected.exists() {
+                    return false;
+                }
+                if loaded_tool.name == "clang_cl" && expected.exists() && !tool_candidate_usable(loaded_tool, &expected) {
+                    return false;
+                }
+            }
             if loaded_tool.category == ToolCategory::Required
                 && !matches!(self.find_tool(loaded_tool), Ok(Some(_)))
             {
@@ -952,66 +964,74 @@ impl ToolchainManager {
     }
 
     fn find_tool(&self, tool: &ToolSpec) -> Result<Option<PathBuf>> {
-        // Check expected path first
-        if let Some(expected) = &tool.expected_path {
-            let path = PathBuf::from(expected);
-            if path.exists() {
-                return Ok(Some(path));
-            }
+        // Check expected path first. A `clang-cl.exe` whose folder is missing `lld-link.exe` or `llvm-rc.exe` is the
+        // shape an antivirus quarantine leaves; continuing past it is what lets a complete installed LLVM take over.
+        if let Some(path) = self.expected_tool_path(tool) {
+            return Ok(Some(path));
         }
 
         // The release carries CMake, Ninja, Python, clang-cl and lld-link in `<checkout>/tools/bin`. The build roots
         // the manager at the engine folder, so check the checkout beside it as well as the root itself. A carried tool
         // is the known-good one, so it wins over the process PATH — which a launcher started from Explorer may not
         // have refreshed since a tool was installed.
-        let mut names = vec![format!("{}.exe", tool.name), format!("{}.cmd", tool.name)];
-        let dashed = tool.name.replace('_', "-");
-        if dashed != tool.name {
-            names.push(format!("{dashed}.exe"));
-            names.push(format!("{dashed}.cmd"));
-        }
         for base in [
             self.toolchain_root.clone(),
             self.toolchain_root.join("fefw-recomp"),
         ] {
-            for name in &names {
+            for name in tool_names(tool) {
                 let bundled = base.join("tools").join("bin").join(name);
-                if bundled.is_file() {
+                if bundled.is_file() && tool_candidate_usable(tool, &bundled) {
                     return Ok(Some(bundled));
                 }
             }
         }
 
-        // Search in PATH if on_path
+        // Search the PATH the build actually gets, not the one this process inherited. The launcher adds Program Files,
+        // winget, Visual Studio's CMake and the other install folders there; an Explorer-started launcher often does not
+        // have them in its own PATH, and a build then failed over a tool the Requirements page had just found (issue 30).
         if tool.on_path {
-            if let Ok(path_var) = std::env::var("PATH") {
-                for dir in path_var.split(';') {
-                    let dir = dir.trim().trim_matches('"');
-                    for name in &names {
-                        let exe_path = PathBuf::from(dir).join(name);
-                        if exe_path.is_file() {
-                            return Ok(Some(exe_path));
-                        }
-                    }
-                }
+            if let Some(found) = self.find_tool_in_path(tool, &toolchain::tool_path()) {
+                return Ok(Some(found));
             }
         }
 
         // Try version command to locate
         if let Some(cmd) = &tool.version_cmd {
             if let Some(exe_name) = cmd.first() {
-                if let Ok(path_var) = std::env::var("PATH") {
-                    for dir in path_var.split(';') {
-                        let exe_path = PathBuf::from(dir).join(exe_name);
-                        if exe_path.is_file() {
-                            return Ok(Some(exe_path));
-                        }
+                if let Some(found) = toolchain::find_in_path(exe_name, &toolchain::tool_path()) {
+                    if tool_candidate_usable(tool, &found) {
+                        return Ok(Some(found));
                     }
                 }
             }
         }
 
         Ok(None)
+    }
+
+    /// The lock's expected path, when it still names a usable tool. An incomplete carried `clang-cl` is rejected here
+    /// rather than returned and later failing at the first link.
+    fn expected_tool_path(&self, tool: &ToolSpec) -> Option<PathBuf> {
+        let path = PathBuf::from(tool.expected_path.as_deref()?);
+        (path.exists() && tool_candidate_usable(tool, &path)).then_some(path)
+    }
+
+    /// Look for `tool` only along `path`. Kept separate from [`Self::find_tool`] so the fall-through from a missing
+    /// carried executable to an installed one can be tested without changing this process's environment.
+    fn find_tool_in_path(&self, tool: &ToolSpec, path: &str) -> Option<PathBuf> {
+        for dir in path.split(';') {
+            let dir = dir.trim().trim_matches('"');
+            if dir.is_empty() {
+                continue;
+            }
+            for name in tool_names(tool) {
+                let candidate = Path::new(dir).join(name);
+                if candidate.is_file() && tool_candidate_usable(tool, &candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
     fn get_tool_version(&self, tool: &ToolSpec, path: &Path) -> Result<Option<String>> {
@@ -1098,6 +1118,24 @@ impl ToolchainManager {
         };
         calc.get_info()
     }
+}
+
+/// The file names a tool may have in a tools folder: `cmake` and `cmake.exe`, and for `clang_cl`, the dashed
+/// `clang-cl.exe` the release carries.
+fn tool_names(tool: &ToolSpec) -> Vec<String> {
+    let mut names = vec![format!("{}.exe", tool.name), format!("{}.cmd", tool.name)];
+    let dashed = tool.name.replace('_', "-");
+    if dashed != tool.name {
+        names.push(format!("{dashed}.exe"));
+        names.push(format!("{dashed}.cmd"));
+    }
+    names
+}
+
+/// A found path is usable unless it is `clang-cl` from an incomplete folder. The other tools are single executables;
+/// Visual Studio, MSVC and the SDK are folders, and their presence is the check the probe already made.
+fn tool_candidate_usable(tool: &ToolSpec, path: &Path) -> bool {
+    tool.name != "clang_cl" || path.parent().is_some_and(toolchain::clang_dir_complete)
 }
 
 /// The executable a tool's version command names. `path` is the file `find_tool` chose; when the command is the
@@ -1397,7 +1435,9 @@ mod tests {
         let bin = checkout.join("tools").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("ninja.exe"), b"").unwrap();
-        std::fs::write(bin.join("clang-cl.exe"), b"").unwrap();
+        for tool in toolchain::CLANG_TOOLS {
+            std::fs::write(bin.join(tool), b"").unwrap();
+        }
 
         let ninja = tool_spec("ninja", "1.13.1", None, Some(vec!["ninja".into(), "--version".into()]));
         let clang = tool_spec("clang_cl", "23.1.5", None, Some(vec!["clang-cl".into(), "--version".into()]));
@@ -1409,6 +1449,83 @@ mod tests {
 
         let parent = ToolchainManager::new(root.clone());
         assert_eq!(parent.find_tool(&ninja).unwrap(), Some(bin.join("ninja.exe")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A carried CMake whose executable was quarantined must not hide an installed CMake. The search uses the build
+    /// PATH, which names the install folders the launcher resolved even when the launcher's own PATH does not.
+    #[test]
+    fn a_missing_carried_cmake_falls_through_to_the_installed_one() {
+        let root = std::env::temp_dir().join(format!("ew-tool-fallthrough-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let carried = root.join("tools").join("bin");
+        let installed = root.join("installed-cmake");
+        std::fs::create_dir_all(&carried).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        let system_cmake = installed.join("cmake.exe");
+        std::fs::write(&system_cmake, b"").unwrap();
+
+        let spec = tool_spec("cmake", "3.31.6", None, Some(vec!["cmake".into(), "--version".into()]));
+        let mgr = ToolchainManager::new(root.clone());
+        let path = format!("{};{}", carried.display(), installed.display());
+        assert_eq!(mgr.find_tool_in_path(&spec, &path), Some(system_cmake));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A lock generated while the carried LLVM was whole names its `clang-cl.exe` and checksum. Once a quarantine leaves
+    /// that folder incomplete, the lock must be discarded rather than verified against an installed copy with a
+    /// different checksum.
+    #[test]
+    fn a_lock_naming_a_now_incomplete_carried_clang_is_not_reusable() {
+        let root = std::env::temp_dir().join(format!("ew-tool-stale-clang-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("tools").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("clang-cl.exe"), b"").unwrap();
+        let spec = tool_spec(
+            "clang_cl",
+            "23.1.5",
+            Some(&bin.join("clang-cl.exe")),
+            Some(vec!["clang-cl.exe".into(), "--version".into()]),
+        );
+        let mgr = ToolchainManager::new(root.clone());
+        let loaded = lock_with(vec![spec.clone()]);
+        assert!(!mgr.lock_is_usable(&loaded, &lock_with(vec![spec])));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A carried `clang-cl.exe` without `lld-link.exe`/`llvm-rc.exe` is skipped, and a complete installed LLVM is found
+    /// instead. Without one, the expected path is still not accepted as a usable compiler.
+    #[test]
+    fn an_incomplete_carried_clang_is_skipped_for_a_complete_installed_one() {
+        let root = std::env::temp_dir().join(format!("ew-tool-clang-fallthrough-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let carried = root.join("tools").join("bin");
+        let installed = root.join("installed-llvm");
+        std::fs::create_dir_all(&carried).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(carried.join("clang-cl.exe"), b"").unwrap();
+        for tool in toolchain::CLANG_TOOLS {
+            std::fs::write(installed.join(tool), b"").unwrap();
+        }
+
+        let spec = tool_spec(
+            "clang_cl",
+            "23.1.5",
+            Some(&carried.join("clang-cl.exe")),
+            Some(vec!["clang-cl.exe".into(), "--version".into()]),
+        );
+        let mgr = ToolchainManager::new(root.clone());
+        let path = format!("{};{}", carried.display(), installed.display());
+        assert_eq!(
+            mgr.find_tool_in_path(&spec, &path),
+            Some(installed.join("clang-cl.exe"))
+        );
+        assert_eq!(
+            mgr.expected_tool_path(&spec),
+            None,
+            "the expected path names the incomplete carried compiler"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -91,7 +91,9 @@ pub struct Toolchain {
     pub sdk: Option<Sdk>,
     pub clang: Option<Clang>,
     pub cmake: Option<String>,
+    pub cmake_exe: Option<PathBuf>,
     pub ninja: Option<String>,
+    pub ninja_exe: Option<PathBuf>,
     /// The environment `vcvars64.bat` produced, when it could be read. This is
     /// what the compilers will actually see, and the only trustworthy source for
     /// where the SDK and MSVC toolset are: they are not always in the folder
@@ -150,6 +152,21 @@ impl Toolchain {
                 out.push(("NX_LLVM".to_string(), bin.display().to_string()));
                 out.push(("NX_LLVM_BIN".to_string(), bin.display().to_string()));
             }
+        }
+        // `nx_env.cmd` uses `NX_TOOLS` ahead of its own Program Files default. Name the folders the launcher actually
+        // resolved, so a CMake or Ninja installed through winget, Visual Studio or a custom path is the one the build
+        // runs instead of only being found by the launcher's own probes.
+        let mut tools: Vec<String> = Vec::new();
+        for exe in [self.cmake_exe.as_deref(), self.ninja_exe.as_deref()].into_iter().flatten() {
+            if let Some(dir) = exe.parent() {
+                let dir = dir.display().to_string();
+                if !tools.iter().any(|d| d.eq_ignore_ascii_case(&dir)) {
+                    tools.push(dir);
+                }
+            }
+        }
+        if !tools.is_empty() {
+            out.push(("NX_TOOLS".to_string(), tools.join(";")));
         }
         out
     }
@@ -502,11 +519,51 @@ fn same_file(a: &Path, b: &Path) -> bool {
     a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
+/// The executables CMake's toolchain file and the launcher's recompiler need beside `clang-cl.exe`. A folder missing
+/// one of these is not a usable LLVM install, even when `clang-cl.exe` itself survived.
+pub const CLANG_TOOLS: [&str; 6] = ["clang-cl.exe", "clang.exe", "lld-link.exe", "llvm-lib.exe", "llvm-rc.exe", "llvm-mt.exe"];
+
+/// Whether `dir` holds the complete LLVM tool set the build invokes.
+pub fn clang_dir_complete(dir: &Path) -> bool {
+    CLANG_TOOLS.iter().all(|tool| dir.join(tool).is_file())
+}
+
+/// Whether `exe` is a `clang-cl` from a complete folder, new enough for the engine.
+pub fn clang_is_ready(exe: &Path) -> bool {
+    exe.parent().is_some_and(clang_dir_complete)
+        && clang_version(exe)
+            .as_deref()
+            .and_then(version_parts)
+            .and_then(|parts| parts.first().copied())
+            .is_some_and(|major| major >= MIN_CLANG_MAJOR)
+}
+
+/// Pick the first complete, new-enough `clang-cl`; only when none exists fall back to the first candidate so `probe` can
+/// name what is actually wrong with it. Skipping the carried folder when a quarantine took `lld-link.exe` or `llvm-rc.exe`
+/// is what lets a complete installed LLVM take its place (issue #116).
 pub fn find_clang() -> Option<Clang> {
-    let exe = clang_candidates().into_iter().next()?;
-    let version = clang_version(&exe).unwrap_or_default();
-    let major = version_parts(&version).map(|p| p[0]).unwrap_or(0);
-    Some(Clang { exe, version, major })
+    select_clang(clang_candidates())
+}
+
+fn select_clang(candidates: Vec<PathBuf>) -> Option<Clang> {
+    let mut first_complete = None;
+    let mut first_any = None;
+    for exe in candidates {
+        let version = clang_version(&exe).unwrap_or_default();
+        let major = version_parts(&version).map(|p| p[0]).unwrap_or(0);
+        let found = Clang { exe, version, major };
+        let complete = found.exe.parent().is_some_and(clang_dir_complete);
+        if complete && found.major >= MIN_CLANG_MAJOR {
+            return Some(found);
+        }
+        if complete && first_complete.is_none() {
+            first_complete = Some(found.clone());
+        }
+        if first_any.is_none() {
+            first_any = Some(found);
+        }
+    }
+    first_complete.or(first_any)
 }
 
 /// The first version number in `clang-cl --version`. Recent builds print
@@ -545,6 +602,10 @@ fn leading_version(token: &str) -> Option<String> {
 }
 
 fn version_of(program: &str, args: &[&str]) -> Option<String> {
+    find_program(program).and_then(|path| version_at(&path, args))
+}
+
+fn version_at(program: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(program);
     // The same PATH every build step gets. A CMake or Ninja in `C:\Program Files\CMake\bin`, in winget's Links folder or
     // anywhere else the launcher adds is what `deps` reports as installed, and a bare lookup here said "CMake was not
@@ -564,6 +625,35 @@ pub fn ninja_version() -> Option<String> {
     version_of("ninja", &["--version"])
 }
 
+/// The first `name` in `path`, with Windows' usual executable suffixes. This is what the build scripts receive: a
+/// carried tool whose executable was quarantined is skipped, and an installed copy in a folder the inherited PATH does
+/// not name is still found because the launcher's build PATH is the one searched.
+pub fn find_in_path(name: &str, path: &str) -> Option<PathBuf> {
+    let mut names = vec![name.to_string()];
+    if Path::new(name).extension().is_none() {
+        names.push(format!("{name}.exe"));
+        names.push(format!("{name}.cmd"));
+    }
+    for dir in path.split(';') {
+        let dir = dir.trim().trim_matches('"');
+        if dir.is_empty() {
+            continue;
+        }
+        for name in &names {
+            let candidate = Path::new(dir).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// [`find_in_path`] along [`tool_path`], the PATH every build step gets.
+pub fn find_program(name: &str) -> Option<PathBuf> {
+    find_in_path(name, &tool_path())
+}
+
 /// Probe the toolchain cheaply: `vswhere` plus a few version commands, no
 /// `vcvars`. This is what the launcher's pages ask for, so it stays fast and
 /// says nothing about the SDK, which cannot be known without the environment the
@@ -574,10 +664,12 @@ pub fn probe() -> Toolchain {
     let msvc = vs.as_ref().and_then(|v| msvc_toolset(&v.path));
     let sdk = sdk_selected();
     let clang = find_clang();
-    let cmake = cmake_version();
-    let ninja = ninja_version();
+    let cmake_exe = find_program("cmake");
+    let cmake = cmake_exe.as_deref().and_then(|p| version_at(p, &["--version"]));
+    let ninja_exe = find_program("ninja");
+    let ninja = ninja_exe.as_deref().and_then(|p| version_at(p, &["--version"]));
 
-    let mut tc = Toolchain { vs, vs_all, msvc, sdk, clang, cmake, ninja, dev_env: None, problems: Vec::new() };
+    let mut tc = Toolchain { vs, vs_all, msvc, sdk, clang, cmake, cmake_exe, ninja, ninja_exe, dev_env: None, problems: Vec::new() };
 
     if tc.vs.is_none() {
         match tc.vs_all.first() {
@@ -970,8 +1062,13 @@ fn resolve() -> Result<Resolved, String> {
     } else {
         env.push(("PATH".to_string(), path));
     }
+    // The resolved folders win over whatever the caller's shell exported. `vcvars64.bat` copies the inherited
+    // environment into its `set` dump, so an old NX_LLVM or NX_TOOLS would otherwise survive here and send the build
+    // back to a folder this probe rejected.
     for (k, v) in toolchain.vars() {
-        if !env.iter().any(|(name, _)| *name == k) {
+        if let Some(slot) = env.iter_mut().find(|(name, _)| *name == k) {
+            slot.1 = v;
+        } else {
             env.push((k, v));
         }
     }
@@ -1247,5 +1344,99 @@ SOME_MISSING:STRING=value-NOTFOUND
 
         assert!(cmake_args.iter().any(|a| a.contains("FORCE_RESPONSE_FILE")));
         assert!(cmake_args.iter().any(|a| a.contains("SUPPRESS_REGENERATION")));
+    }
+
+    fn plant_tools(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for tool in CLANG_TOOLS {
+            std::fs::write(dir.join(tool), b"").unwrap();
+        }
+    }
+
+    /// A quarantine can leave `clang-cl.exe` behind and remove `lld-link.exe` or `llvm-rc.exe`. Selection must skip that
+    /// folder and use a complete installed LLVM; the incomplete folder is only a last-resort fallback so `probe` can say
+    /// what is wrong with it.
+    #[test]
+    fn an_incomplete_carried_llvm_is_skipped_for_a_complete_installed_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let carried = temp.path().join("carried");
+        let installed = temp.path().join("installed");
+        std::fs::create_dir_all(&carried).unwrap();
+        std::fs::write(carried.join("clang-cl.exe"), b"").unwrap();
+        plant_tools(&installed);
+
+        assert!(!clang_dir_complete(&carried), "the carried folder lost lld-link and the rest");
+        assert!(clang_dir_complete(&installed));
+        let picked = select_clang(vec![carried.join("clang-cl.exe"), installed.join("clang-cl.exe")])
+            .expect("an installed LLVM is selected");
+        assert_eq!(picked.exe, installed.join("clang-cl.exe"));
+
+        // With no complete candidate, the first is returned so the probe can name the missing tool instead of saying
+        // clang-cl was never found.
+        let fallback = select_clang(vec![carried.join("clang-cl.exe")]).expect("the damaged folder is still inspected");
+        assert_eq!(fallback.exe, carried.join("clang-cl.exe"));
+    }
+
+    /// The build PATH names CMake/Ninja folders for `nx_env.cmd`. If the carried executable was quarantined, the
+    /// installed one is chosen and its folder is what the build scripts receive.
+    #[test]
+    fn an_installed_cmake_is_named_when_the_carried_executable_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let carried = temp.path().join("carried");
+        let installed = temp.path().join("installed");
+        std::fs::create_dir_all(&carried).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        let system_cmake = installed.join("cmake.exe");
+        std::fs::write(&system_cmake, b"").unwrap();
+
+        let path = format!("{};{}", carried.display(), installed.display());
+        assert_eq!(find_in_path("cmake", &path), Some(system_cmake.clone()));
+
+        let mut tc = Toolchain::default();
+        tc.cmake_exe = Some(system_cmake);
+        plant_tools(&installed);
+        tc.clang = Some(Clang {
+            exe: installed.join("clang-cl.exe"),
+            version: "23.1.5".into(),
+            major: 23,
+        });
+        let env = tc.vars();
+        let tools = env.iter().find(|(k, _)| k == "NX_TOOLS").map(|(_, v)| v).expect("NX_TOOLS is set to the installed folder");
+        assert_eq!(tools.as_str(), installed.display().to_string());
+        let llvm = env.iter().find(|(k, _)| k == "NX_LLVM").map(|(_, v)| v).expect("NX_LLVM is set to the selected folder");
+        assert_eq!(llvm.as_str(), installed.display().to_string());
+    }
+
+    /// End to end through Windows' own lookup: a PATH whose first folder has no `cmake.exe` runs the installed copy in
+    /// the next folder. This is the resolution the build scripts perform, not just a file-existence check.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_missing_the_carried_cmake_runs_the_installed_copy() {
+        let Some(real) = find_program("cmake") else {
+            return; // a machine with no CMake has nothing to fall through to
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let carried = temp.path().join("carried");
+        let installed = temp.path().join("installed");
+        std::fs::create_dir_all(&carried).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        let copied = installed.join("cmake.exe");
+        if std::fs::hard_link(&real, &copied).is_err() {
+            std::fs::copy(&real, &copied).unwrap();
+        }
+        let path = format!(
+            "{};{};{}",
+            carried.display(),
+            installed.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = Command::new("cmake")
+            .arg("--version")
+            .env("PATH", &path)
+            .output()
+            .expect("the installed cmake runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let said = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        assert!(said.contains("cmake version"), "{said}");
     }
 }
