@@ -9,12 +9,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 #include "nxrt/config.h"
 #include "nxrt/haptic.h"
 #include "nxrt/input.h"
 #include "nxrt/log.h"
+#include "pad_diag.h"
 
 namespace nxrt::platform {
 namespace {
@@ -32,6 +34,16 @@ struct OpenPad {
     SDL_Gamepad* pad;
 };
 std::vector<OpenPad> g_pads;
+
+// The controllers are logged once more this long after init if no gamepad is open by then.
+constexpr Uint64 kPadSnapshotAfterMs = 10000;
+Uint64 g_pad_snapshot_at = 0;   // SDL ticks; 0 = not due (logged, or gamepads off)
+
+// Under Proton a pad that is there at start can be missing from SDL's list until some other device is plugged in or removed
+// (issue 176). While SDL lists nothing and XInput has a controller, the joystick subsystems are restarted so that SDL looks again.
+constexpr Uint64 kPadRescanAfterMs[] = {500, 2000, 5000};   // each counted from init or the attempt before
+size_t g_pad_rescan = std::size(kPadRescanAfterMs);         // the next one; the size = none left
+Uint64 g_pad_rescan_from = 0;
 
 input::Event make_event(input::EventType type, uint64_t ts) {
     input::Event e;
@@ -259,6 +271,19 @@ void translate(const SDL_Event& ev) {
             break;
         }
 
+        case SDL_EVENT_JOYSTICK_ADDED: {
+            // every joystick, also one SDL has no gamepad mapping for (which gets no GAMEPAD_ADDED)
+            const SDL_JoystickID id = ev.jdevice.which;
+            const char* name = SDL_GetJoystickNameForID(id);
+            NXLOG_I(kTag, "joystick %u added: \"%s\" %04x:%04x gamepad=%d", static_cast<unsigned>(id), name ? name : "unknown",
+                    SDL_GetJoystickVendorForID(id), SDL_GetJoystickProductForID(id), SDL_IsGamepad(id) ? 1 : 0);
+            break;
+        }
+
+        case SDL_EVENT_JOYSTICK_REMOVED:
+            NXLOG_I(kTag, "joystick %u removed", static_cast<unsigned>(ev.jdevice.which));
+            break;
+
         case SDL_EVENT_GAMEPAD_ADDED:
             gamepad_opened(ev.gdevice.which, ts);
             break;
@@ -331,6 +356,29 @@ void translate(const SDL_Event& ev) {
     }
 }
 
+void rescan_missed_pads() {
+    if (g_pad_rescan >= std::size(kPadRescanAfterMs) || SDL_GetTicks() - g_pad_rescan_from < kPadRescanAfterMs[g_pad_rescan]) return;
+    int listed = 0;
+    SDL_free(SDL_GetJoysticks(&listed));
+    // nothing to do once SDL has any joystick (a restart would also close it), or when the system has none to find
+    if (listed > 0) {
+        g_pad_rescan = std::size(kPadRescanAfterMs);
+        return;
+    }
+    ++g_pad_rescan;
+    g_pad_rescan_from = SDL_GetTicks();
+    if (pad_diag::xinput_slots() <= 0) return;
+    NXLOG_W(kTag, "XInput has a controller that SDL does not list: restarting SDL's joystick support");
+    constexpr SDL_InitFlags kFlags = SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD;
+    SDL_QuitSubSystem(kFlags);
+    if (!SDL_InitSubSystem(kFlags)) {
+        NXLOG_E(kTag, "restarting SDL's joystick support failed: %s", SDL_GetError());
+        g_pad_rescan = std::size(kPadRescanAfterMs);
+        return;
+    }
+    pad_diag::log_snapshot("after the restart");
+}
+
 }  // namespace
 
 // ---- lifecycle ----------------------------------------------------------------------------------------------------
@@ -354,6 +402,13 @@ bool init(const InitOptions& opt) {
     const int v = SDL_GetVersion();
     NXLOG_I(kTag, "SDL %d.%d.%d initialised (gamepads %s)", SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v),
             SDL_VERSIONNUM_MICRO(v), opt.gamepads ? "on" : "off");
+    g_pad_rescan = opt.gamepads ? 0 : std::size(kPadRescanAfterMs);
+    g_pad_rescan_from = SDL_GetTicks();
+    g_pad_snapshot_at = opt.gamepads ? g_pad_rescan_from + kPadSnapshotAfterMs : 0;
+    if (opt.gamepads) {
+        pad_diag::log_environment();
+        pad_diag::log_snapshot("at start");
+    }
     return true;
 }
 
@@ -593,6 +648,11 @@ int pump_events(bool wait, int timeout_ms) {
         ++handled;
         translate(ev);
         have = SDL_PollEvent(&ev);
+    }
+    rescan_missed_pads();
+    if (g_pad_snapshot_at != 0 && SDL_GetTicks() >= g_pad_snapshot_at) {
+        g_pad_snapshot_at = 0;
+        if (g_pads.empty()) pad_diag::log_snapshot("after 10 s with no gamepad open");
     }
     return handled;
 }
