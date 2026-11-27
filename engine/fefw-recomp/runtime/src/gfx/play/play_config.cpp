@@ -382,6 +382,16 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                 return true;
             }
             if (k == "haptic_strength") return set_int(-1, 100, &s->pad.haptic_strength);
+            // Advanced haptics (RenHDrum 0.6.0+)
+            if (k == "haptic_advanced") return set_bool(&s->pad.haptic_advanced);
+            if (k == "haptic_xbox_direct") return set_bool(&s->pad.haptic_xbox_direct);
+            if (k == "haptic_dualsense_bt36") return set_bool(&s->pad.haptic_dualsense_bt36);
+            if (k == "haptic_adaptive_triggers") return set_bool(&s->pad.haptic_adaptive_triggers);
+            if (k == "haptic_steam_grips") return set_bool(&s->pad.haptic_steam_grips);
+            if (k == "haptic_switch2_pro") return set_bool(&s->pad.haptic_switch2_pro);
+            if (k == "haptic_crisp_notes") return set_bool(&s->pad.haptic_crisp_notes);
+            if (k == "haptic_envelope_5ms") return set_bool(&s->pad.haptic_envelope_5ms);
+            if (k == "dualsense_haptics_volume") return set_int(0, 100, &s->pad.dualsense_haptics_volume);
             if (k == key_alt_orbit()) return set_real(0.0, 6.0, &s->pad.alt_orbit);
             break;
         case Sec::Timing:
@@ -1009,6 +1019,16 @@ std::string format_settings(const Settings& s) {
     kv("rumble_scale", num(s.pad.rumble_scale));
     kv("haptic", gfx::haptic::mode_name(static_cast<gfx::haptic::Mode>(s.pad.haptic)));
     kv("haptic_strength", std::to_string(s.pad.haptic_strength));
+    // Advanced haptics (RenHDrum 0.6.0+)
+    kv("haptic_advanced", flag(s.pad.haptic_advanced));
+    kv("haptic_xbox_direct", flag(s.pad.haptic_xbox_direct));
+    kv("haptic_dualsense_bt36", flag(s.pad.haptic_dualsense_bt36));
+    kv("haptic_adaptive_triggers", flag(s.pad.haptic_adaptive_triggers));
+    kv("haptic_steam_grips", flag(s.pad.haptic_steam_grips));
+    kv("haptic_switch2_pro", flag(s.pad.haptic_switch2_pro));
+    kv("haptic_crisp_notes", flag(s.pad.haptic_crisp_notes));
+    kv("haptic_envelope_5ms", flag(s.pad.haptic_envelope_5ms));
+    kv("dualsense_haptics_volume", std::to_string(s.pad.dualsense_haptics_volume));
     kv(key_alt_orbit(), num(s.pad.alt_orbit));
 
     o += "\n[padmap]\n";

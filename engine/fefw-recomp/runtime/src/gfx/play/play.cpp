@@ -878,7 +878,10 @@ int update_hook(::Ctx*, uint64_t, void*) {
             apply_fps_counter(s.fps);
             st.want_present.store(static_cast<int>(present_mode_for(s.display)));
             apply_audio(s.audio);
-            haptic::configure(static_cast<haptic::Mode>(s.pad.haptic), s.pad.haptic_strength, s.pad.rumble_scale, s.pad.rumble);
+            haptic::configure(static_cast<haptic::Mode>(s.pad.haptic), s.pad.haptic_strength, s.pad.rumble_scale, s.pad.rumble,
+                       s.pad.haptic_advanced, s.pad.haptic_xbox_direct, s.pad.haptic_dualsense_bt36,
+                       s.pad.haptic_adaptive_triggers, s.pad.haptic_steam_grips, s.pad.haptic_switch2_pro,
+                       s.pad.haptic_crisp_notes, s.pad.haptic_envelope_5ms, s.pad.dualsense_haptics_volume);
             if (st.window && s.display.monitor != old_monitor && s.display.monitor > 0) {
                 if (platform::move_to_display(s.display.monitor)) st.limiter.reset_schedule();
                 apply_frame_cap(s);                        // another display can mean another refresh rate
@@ -1455,7 +1458,10 @@ bool start(const StartOptions& opt) {
     st.source = std::shared_ptr<hid::InputSource>(st.source_owner.get(), [](hid::InputSource*) {});   // owned by G
     hid::set_input_source(st.source);
     hid::set_vibration_sink(&vib_sink, nullptr);
-    haptic::configure(static_cast<haptic::Mode>(st.settings.pad.haptic), st.settings.pad.haptic_strength, st.settings.pad.rumble_scale, st.settings.pad.rumble);
+    haptic::configure(static_cast<haptic::Mode>(st.settings.pad.haptic), st.settings.pad.haptic_strength, st.settings.pad.rumble_scale, st.settings.pad.rumble,
+                       st.settings.pad.haptic_advanced, st.settings.pad.haptic_xbox_direct, st.settings.pad.haptic_dualsense_bt36,
+                       st.settings.pad.haptic_adaptive_triggers, st.settings.pad.haptic_steam_grips, st.settings.pad.haptic_switch2_pro,
+                       st.settings.pad.haptic_crisp_notes, st.settings.pad.haptic_envelope_5ms, st.settings.pad.dualsense_haptics_volume);
     tt::set_mouse_sink(&test_mouse_sink);
     tt::set_key_sink(&key_sink);
     if (st.renderer) tt::set_screenshot_provider(&screenshot_provider, nullptr);

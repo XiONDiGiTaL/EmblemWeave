@@ -159,6 +159,16 @@ struct PadSettings {
     // haptic_strength is 0..100 percent, or -1 to keep using rumble_scale above.
     int haptic = 0;
     int haptic_strength = -1;
+    // Advanced haptics (RenHDrum 0.6.0+)
+    bool haptic_advanced = false;       // enable advanced features: Xbox Direct, DualSense BT 0x36, adaptive triggers, Steam grips, Switch 2 Pro
+    bool haptic_xbox_direct = false;    // Xbox Direct mode: SDL_RumbleJoystick + Triggers (grips + triggers)
+    bool haptic_dualsense_bt36 = false; // DualSense Bluetooth report 0x36 (combined rumble + triggers + speaker)
+    bool haptic_adaptive_triggers = false; // Adaptive trigger effects (DualSense)
+    bool haptic_steam_grips = false;    // Steam Controller grip haptics (report 0x88)
+    bool haptic_switch2_pro = false;    // Switch 2 Pro Controller HD Rumble 2 (report 0x02)
+    bool haptic_crisp_notes = false;    // Crisp note shaping for transients
+    bool haptic_envelope_5ms = false;   // 5 ms envelope for crisp transients
+    int dualsense_haptics_volume = 60;  // DualSense speaker volume 0..100
     double alt_orbit = 2.0;       // rad/s at full right-stick deflection, 0 = off (0..6). The alternate body's camera only (mpr: morph ball).
 };
 struct TimingSettings {

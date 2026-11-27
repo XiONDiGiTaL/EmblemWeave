@@ -4,10 +4,19 @@
 //! The game takes player 1 from the first XInput gamepad and reads its pad
 //! settings from the `[pad]` section of `controls.ini` in its play folder
 //! (`engine/fefw-recomp/runtime/docs/CONFIG.md`): `deadzone`, `right_deadzone`,
-//! `stick_max`, `trigger_threshold`, and the two haptics keys, `haptic`
-//! (`auto`, `off`, `rumble`, `dualsense`) and `haptic_strength` (a percentage,
-//! or `-1` to follow the rumble strength). The page writes those keys where the
-//! game looks for them.
+//! `stick_max`, `trigger_threshold`, and the haptics keys:
+//! - `haptic` (`auto`, `off`, `rumble`, `dualsense`)
+//! - `haptic_strength` (a percentage, or `-1` to follow the rumble strength)
+//! - `haptic_advanced` (enable advanced controller haptics)
+//! - `haptic_xbox_direct` (Xbox Direct mode: grips + triggers via SDL)
+//! - `haptic_dualsense_bt36` (DualSense BT report 0x36: combined rumble + triggers + speaker)
+//! - `haptic_adaptive_triggers` (adaptive trigger effects)
+//! - `haptic_steam_grips` (Steam Controller grip haptics)
+//! - `haptic_switch2_pro` (Switch 2 Pro Controller HD Rumble 2)
+//! - `haptic_crisp_notes` (crisp note shaping for transients)
+//! - `haptic_envelope_5ms` (5ms envelope for crisp transients)
+//! - `dualsense_haptics_volume` (DualSense speaker volume 0-100)
+//! The page writes those keys where the game looks for them.
 
 use std::path::Path;
 
@@ -117,12 +126,48 @@ pub struct Tuning {
     pub rumble: bool,
     /// `rumble_scale`: 0 to 1, multiplied into the game's own amplitude.
     pub rumble_scale: f32,
+    // Advanced haptics settings (RenHDrum 0.6.0+)
+    /// `haptic_advanced`: enable advanced controller haptics (Xbox Direct, DualSense BT 0x36, etc.)
+    pub haptic_advanced: bool,
+    /// `haptic_xbox_direct`: Xbox Direct mode (grips + triggers via SDL_RumbleJoystick + Triggers)
+    pub haptic_xbox_direct: bool,
+    /// `haptic_dualsense_bt36`: DualSense Bluetooth report 0x36 (combined rumble + triggers + speaker)
+    pub haptic_dualsense_bt36: bool,
+    /// `haptic_adaptive_triggers`: adaptive trigger effects (DualSense)
+    pub haptic_adaptive_triggers: bool,
+    /// `haptic_steam_grips`: Steam Controller grip haptics
+    pub haptic_steam_grips: bool,
+    /// `haptic_switch2_pro`: Switch 2 Pro Controller HD Rumble 2
+    pub haptic_switch2_pro: bool,
+    /// `haptic_crisp_notes`: crisp note shaping for transients
+    pub haptic_crisp_notes: bool,
+    /// `haptic_envelope_5ms`: 5ms envelope for crisp transients
+    pub haptic_envelope_5ms: bool,
+    /// `dualsense_haptics_volume`: DualSense speaker volume 0-100
+    pub dualsense_haptics_volume: u32,
 }
 
 impl Default for Tuning {
     /// The engine's own defaults (`play_types.h`).
     fn default() -> Self {
-        Tuning { left_deadzone: 0.10, right_deadzone: 0.10, stick_max: 1.0, trigger: 0.35, rumble: true, rumble_scale: 1.0 }
+        Tuning {
+            left_deadzone: 0.10,
+            right_deadzone: 0.10,
+            stick_max: 1.0,
+            trigger: 0.35,
+            rumble: true,
+            rumble_scale: 1.0,
+            // Advanced haptics defaults (off by default for compatibility)
+            haptic_advanced: false,
+            haptic_xbox_direct: false,
+            haptic_dualsense_bt36: false,
+            haptic_adaptive_triggers: false,
+            haptic_steam_grips: false,
+            haptic_switch2_pro: false,
+            haptic_crisp_notes: false,
+            haptic_envelope_5ms: false,
+            dualsense_haptics_volume: 60, // Default volume 60%
+        }
     }
 }
 
@@ -153,6 +198,8 @@ impl Tuning {
     /// wrote the file).
     pub fn from_ini(text: &str, seed: f32) -> Tuning {
         let num = |key: &str| value(text, "pad", key).and_then(|v| v.parse::<f32>().ok());
+        let num_u32 = |key: &str| value(text, "pad", key).and_then(|v| v.parse::<u32>().ok());
+        let flag_val = |key: &str| value(text, "pad", key).and_then(flag);
         let mut t = Tuning { left_deadzone: seed.clamp(0.0, 0.5), ..Tuning::default() };
         if let Some(v) = num("deadzone").filter(|v| (0.0..=0.5).contains(v)) {
             t.left_deadzone = v;
@@ -190,6 +237,16 @@ impl Tuning {
         } else if let Some(v) = num("rumble_scale").filter(|v| (0.0..=1.0).contains(v)) {
             t.rumble_scale = v;
         }
+        // Advanced haptics settings (RenHDrum 0.6.0+)
+        if let Some(v) = flag_val("haptic_advanced") { t.haptic_advanced = v; }
+        if let Some(v) = flag_val("haptic_xbox_direct") { t.haptic_xbox_direct = v; }
+        if let Some(v) = flag_val("haptic_dualsense_bt36") { t.haptic_dualsense_bt36 = v; }
+        if let Some(v) = flag_val("haptic_adaptive_triggers") { t.haptic_adaptive_triggers = v; }
+        if let Some(v) = flag_val("haptic_steam_grips") { t.haptic_steam_grips = v; }
+        if let Some(v) = flag_val("haptic_switch2_pro") { t.haptic_switch2_pro = v; }
+        if let Some(v) = flag_val("haptic_crisp_notes") { t.haptic_crisp_notes = v; }
+        if let Some(v) = flag_val("haptic_envelope_5ms") { t.haptic_envelope_5ms = v; }
+        if let Some(v) = num_u32("dualsense_haptics_volume").filter(|v| *v <= 100) { t.dualsense_haptics_volume = v; }
         t
     }
 
@@ -269,6 +326,16 @@ pub fn write_haptic(path: &Path, on: bool) -> Result<(), String> {
 pub fn write_haptic_strength(path: &Path, scale: f32) -> Result<(), String> {
     let pct = (scale.clamp(0.0, 1.0) * 100.0).round() as i32;
     write_text(path, "haptic_strength", &pct.to_string())
+}
+
+/// Write an advanced haptics boolean flag.
+pub fn write_haptic_flag(path: &Path, key: &str, on: bool) -> Result<(), String> {
+    write_text(path, key, if on { "1" } else { "0" })
+}
+
+/// Write the DualSense haptics volume (0-100).
+pub fn write_dualsense_volume(path: &Path, volume: u32) -> Result<(), String> {
+    write_text(path, "dualsense_haptics_volume", &volume.clamp(0, 100).to_string())
 }
 
 fn write_text(path: &Path, key: &str, value: &str) -> Result<(), String> {

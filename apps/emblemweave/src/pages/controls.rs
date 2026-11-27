@@ -239,14 +239,99 @@ fn pad_tuning(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette) {
         }
     }
 
+    // Advanced Controller Haptics section (RenHDrum 0.6.0+)
+    widgets::setting_row(ui, p, "Advanced controller haptics", "Enables RenHDrum 0.6.0 advanced features: Xbox Direct mode, DualSense BT report 0x36, adaptive triggers, Steam grips, Switch 2 Pro. Requires renhdrum.dll 0.6.0+.", |ui| {
+        let mut on = t.haptic_advanced;
+        if widgets::toggle(ui, p, &mut on).changed() {
+            t.haptic_advanced = on;
+            save_flag = Some(("haptic_advanced", on));
+        }
+    });
+
+    if t.haptic_advanced {
+        ui.add_space(4.0);
+        widgets::setting_row(ui, p, "Xbox Direct mode", "Xbox One/Series controller: uses SDL_RumbleJoystick for grips and SDL_RumbleJoystickTriggers for triggers directly (no converter). Written to controls.ini as [pad] haptic_xbox_direct.", |ui| {
+            let mut on = t.haptic_xbox_direct;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_xbox_direct = on;
+                save_flag = Some(("haptic_xbox_direct", on));
+            }
+        });
+        widgets::setting_row(ui, p, "DualSense BT report 0x36", "DualSense over Bluetooth: combined rumble, adaptive triggers, and speaker audio in one report (0x36). Falls back to report 0x32 if unavailable. Written to controls.ini as [pad] haptic_dualsense_bt36.", |ui| {
+            let mut on = t.haptic_dualsense_bt36;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_dualsense_bt36 = on;
+                save_flag = Some(("haptic_dualsense_bt36", on));
+            }
+        });
+        widgets::setting_row(ui, p, "Adaptive triggers", "DualSense adaptive trigger effects (bow tension, weapon feedback, etc.). Requires DualSense and BT 0x36. Written to controls.ini as [pad] haptic_adaptive_triggers.", |ui| {
+            let mut on = t.haptic_adaptive_triggers;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_adaptive_triggers = on;
+                save_flag = Some(("haptic_adaptive_triggers", on));
+            }
+        });
+        widgets::setting_row(ui, p, "Steam Controller grips", "Steam Controller grip haptics via report 0x88. Written to controls.ini as [pad] haptic_steam_grips.", |ui| {
+            let mut on = t.haptic_steam_grips;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_steam_grips = on;
+                save_flag = Some(("haptic_steam_grips", on));
+            }
+        });
+        widgets::setting_row(ui, p, "Switch 2 Pro Controller", "Switch 2 Pro Controller HD Rumble 2 via report 0x02. Written to controls.ini as [pad] haptic_switch2_pro.", |ui| {
+            let mut on = t.haptic_switch2_pro;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_switch2_pro = on;
+                save_flag = Some(("haptic_switch2_pro", on));
+            }
+        });
+        widgets::setting_row(ui, p, "Crisp notes", "5 ms envelope shaping for crisp transient response on all haptic backends. Written to controls.ini as [pad] haptic_crisp_notes.", |ui| {
+            let mut on = t.haptic_crisp_notes;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_crisp_notes = on;
+                save_flag = Some(("haptic_crisp_notes", on));
+            }
+        });
+        widgets::setting_row(ui, p, "5 ms envelope", "Experimental 5 ms envelope for sharper attack/decay on HD Rumble. Written to controls.ini as [pad] haptic_envelope_5ms.", |ui| {
+            let mut on = t.haptic_envelope_5ms;
+            if widgets::toggle(ui, p, &mut on).changed() {
+                t.haptic_envelope_5ms = on;
+                save_flag = Some(("haptic_envelope_5ms", on));
+            }
+        });
+        widgets::setting_row(ui, p, "DualSense volume", "Speaker volume for DualSense haptics (0-100%). Written to controls.ini as [pad] dualsense_haptics_volume.", |ui| {
+            let mut vol = t.dualsense_haptics_volume as f32;
+            if widgets::Slider::new(&mut vol, 0.0..=100.0).suffix(" %").show(ui, p).changed() {
+                let vol = vol.round() as u32;
+                t.dualsense_haptics_volume = vol;
+                save = Some(("dualsense_haptics_volume", vol as f32));
+            }
+        });
+    }
+
     if let Some((key, on)) = save_flag {
-        let written = if key == "haptic" { pad::write_haptic(&ini, on) } else { pad::write_flag(&ini, key, on) };
+        let written = match key {
+            "haptic" => pad::write_haptic(&ini, on),
+            "haptic_advanced"
+            | "haptic_xbox_direct"
+            | "haptic_dualsense_bt36"
+            | "haptic_adaptive_triggers"
+            | "haptic_steam_grips"
+            | "haptic_switch2_pro"
+            | "haptic_crisp_notes"
+            | "haptic_envelope_5ms" => pad::write_haptic_flag(&ini, key, on),
+            _ => pad::write_flag(&ini, key, on),
+        };
         match written {
             Ok(()) => app.tuning = Some(t),
             Err(e) => app.notify(e, Tone::Bad),
         }
     } else if let Some((key, v)) = save {
-        let written = if key == "haptic_strength" { pad::write_haptic_strength(&ini, v) } else { pad::write(&ini, key, v) };
+        let written = match key {
+            "haptic_strength" => pad::write_haptic_strength(&ini, v),
+            "dualsense_haptics_volume" => pad::write_dualsense_volume(&ini, v as u32),
+            _ => pad::write(&ini, key, v),
+        };
         match written {
             Ok(()) => {
                 if key == "deadzone" {

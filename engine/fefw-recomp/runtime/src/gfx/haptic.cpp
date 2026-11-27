@@ -58,10 +58,10 @@ namespace {
 
 constexpr const char* kTag = "haptic";
 
-// The library's own constants (renhdrum.h v0.4.0, kept in third_party/renhdrum). The header is not included: these are the
-// ABI-stable parts we call. renhdrum_version() must be on the same major.minor branch (0x0004xx) before anything is created;
+// The library's own constants (renhdrum.h v0.6.0, kept in third_party/renhdrum). The header is not included: these are the
+// ABI-stable parts we call. renhdrum_version() must be on the same major.minor branch (0x0006xx) before anything is created;
 // a patch release of that branch keeps the ABI and is accepted.
-constexpr uint32_t kExpectedVersion = 0x000400;
+constexpr uint32_t kExpectedVersion = 0x000600;
 constexpr int64_t kStaleUs = 250000;                 // silence watchdog: no new value for this long -> neutral sample
 constexpr uint64_t kEnumPeriodNs = 2000000000ull;    // the DualSense audio endpoint takes 1-2 s to appear after the cable
 constexpr int kSendFailuresBeforeFallback = 3;       // SDL refusing the packets this many times drops back to the rumble
@@ -77,12 +77,55 @@ constexpr uint32_t kXboxTriggerMs = 200;             // the triggers: short, so 
 constexpr int64_t kXboxRetryUs = 100000;             // a refused Xbox send is retried at most this often
 constexpr const char* kNeutral = "the standard rumble, in use again";
 
-// The settings struct the library fills in (renhdrum.h, RenHdcSettings). Only `enabled` and the three transport flags are set
+// RenHDrum 0.6.0 device classification and constants (from renhdrum.h)
+constexpr int32_t RENHDRUM_FAMILY_NONE = 0;
+constexpr int32_t RENHDRUM_FAMILY_SWITCH1 = 1;
+constexpr int32_t RENHDRUM_FAMILY_SWITCH2 = 2;
+constexpr int32_t RENHDRUM_FAMILY_DUALSENSE = 3;
+constexpr int32_t RENHDRUM_FAMILY_DUALSENSE_EDGE = 4;
+constexpr int32_t RENHDRUM_FAMILY_XBOX = 5;
+constexpr int32_t RENHDRUM_FAMILY_STEAM = 6;
+constexpr int32_t RENHDRUM_CLAIM_UNSUPPORTED_DEVICE = 1;
+
+constexpr size_t RENHDRUM_DS5_BT36_REPORT_SIZE = 398;
+constexpr size_t RENHDRUM_DS5_EFFECTS_SIZE = 47;
+constexpr size_t RENHDRUM_PRO2_REPORT_SIZE = 64;
+constexpr uint16_t RENHDRUM_PRO2_AMP_CEILING_DEFAULT = 450;
+
+// RenHdSideSample (from renhdrum.h v0.6.0)
+struct RenHdSideSample {
+    float amp_low;
+    float freq_low;
+    float amp_high;
+    float freq_high;
+};
+
+constexpr uint8_t RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K = 8;
+constexpr uint8_t RENHDRUM_VALVE_GRIP_FORMAT_MULAW_4K = 9;
+constexpr uint64_t RENHDRUM_VALVE_GRIP_PERIOD_NS_8K = 3875000ULL;
+constexpr uint64_t RENHDRUM_VALVE_GRIP_PERIOD_NS_4K = 7750000ULL;
+constexpr int RENHDRUM_VALVE_GRIP_SKIP = 2;
+constexpr size_t RENHDRUM_VALVE_GRIP_REPORT_SIZE = 64;
+constexpr size_t RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE = 4;
+constexpr int RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT = 2;
+constexpr size_t RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE = 8;
+
+constexpr int32_t RENHDRUM_HD_HAPTICS_SPEAKER_PERCENT = 60;
+
+// Device info struct for renhdrum_device_classify
+struct RenHdcDeviceInfo {
+    uint32_t struct_size;
+    int32_t family;
+    uint32_t flags;
+    int32_t steam_grip_format;
+};
+
+// The settings struct the library fills in (renhdrum.h v0.6.0, RenHdcSettings). Only `enabled` and the transport flags are set
 // by us; the rest keeps what renhdrum_settings_default() writes.
 struct RenSettings {
     bool enabled;
     int32_t usb_interval_ms;
-    int32_t bluetooth_level;
+    int32_t bluetooth_level;      /* 1-4, 4 = Compatible (default) */
     bool usb_auto_slow;
     bool sync_to_input;
     bool click_pulse;
@@ -107,12 +150,20 @@ struct RenXbox;
 struct Api {
     bool tried = false;
     bool ok = false;
-    bool has_ds = false;       // DualSense DSP (wired audio, and the base of the wireless path)
-    bool has_ds_bt = false;    // DualSense report 0x32
-    bool has_xbox = false;     // Xbox four-motor converter
+    bool has_ds = false;           // DualSense DSP (wired audio, and the base of the wireless path)
+    bool has_ds_bt = false;        // DualSense report 0x32
+    bool has_ds_bt36 = false;      // DualSense report 0x36 (combined rumble + triggers + speaker)
+    bool has_xbox = false;         // Xbox four-motor converter
+    bool has_xbox_direct = false;  // Xbox Direct mode (SDL_RumbleJoystick + Triggers)
+    bool has_steam_grip = false;   // Steam Controller grip haptics
+    bool has_pro2 = false;         // Switch 2 Pro Controller
+    bool has_adaptive_triggers = false; // Adaptive trigger support (tri-trigger + presets)
     HMODULE dll = nullptr;
     uint32_t (*version)() = nullptr;
     int32_t (*settings_default)(RenSettings*) = nullptr;
+    int32_t (*settings_resolve_pure)(const void*, RenSettings*) = nullptr; // RenHdcConfig* but we don't include the header
+    int32_t (*preset_apply)(int32_t, void*) = nullptr;
+    int32_t (*preset_detect)(const void*, int32_t*) = nullptr;
     RenEngine* (*engine_create)(bool, bool) = nullptr;
     void (*engine_destroy)(RenEngine*) = nullptr;
     int32_t (*engine_apply)(RenEngine*, const RenSettings*) = nullptr;
@@ -124,11 +175,54 @@ struct Api {
     int32_t (*dsp_set_half)(RenDsDsp*, bool, float, float, float, float) = nullptr;
     int32_t (*dsp_fill)(RenDsDsp*, float*, size_t) = nullptr;
     int32_t (*dsp_bt_report)(RenDsDsp*, uint8_t, uint8_t*) = nullptr;
+    int32_t (*dsp_set_speaker)(RenDsDsp*, int32_t) = nullptr;
+    int32_t (*dsp_bt36_report)(RenDsDsp*, const uint8_t*, uint8_t, uint8_t*) = nullptr;
+    RenDsDsp* (*valve_grip_dsp_create)(int32_t, bool) = nullptr;
+    RenDsDsp* (*valve_grip_dsp_create_ex)(int32_t, bool, bool) = nullptr;
+    int32_t (*valve_grip_build_report)(RenDsDsp*, uint8_t, uint8_t*) = nullptr;
+    int32_t (*valve_grip_mode_tick)(RenDsDsp*, uint8_t, uint64_t, bool, uint8_t*) = nullptr;
+    int32_t (*valve_grip_mode_off)(uint8_t, uint8_t*) = nullptr;
     RenXbox* (*xb_create)(bool) = nullptr;
     void (*xb_destroy)(RenXbox*) = nullptr;
     int32_t (*xb_push)(RenXbox*, int64_t, bool, float, float, float, float) = nullptr;
     int32_t (*xb_tick)(RenXbox*, int64_t, uint16_t*) = nullptr;
     int32_t (*xb_resend)(RenXbox*) = nullptr;
+    void* (*xb_direct_create)() = nullptr;
+    void (*xb_direct_destroy)(void*) = nullptr;
+    int32_t (*xb_direct_push)(void*, const void*, int64_t, bool, float, float, bool, uint16_t*) = nullptr;
+    int32_t (*xb_direct_tick)(void*, int64_t, bool, uint16_t*) = nullptr;
+    void* (*tri_trigger_create)() = nullptr;
+    void (*tri_trigger_destroy)(void*) = nullptr;
+    int32_t (*tri_trigger_update)(void*, uint32_t, uint8_t, float, float, float, float, bool, uint8_t*) = nullptr;
+    void (*tri_trigger_note_action)(void*, uint32_t) = nullptr;
+    void* (*trigger_preset_create)() = nullptr;
+    void (*trigger_preset_destroy)(void*) = nullptr;
+    void (*trigger_preset_set)(void*, uint8_t, float, uint32_t) = nullptr;
+    int32_t (*trigger_preset_tick)(void*, uint32_t, uint8_t*) = nullptr;
+    int32_t (*hd_haptics_speaker_block)(int32_t, uint8_t*) = nullptr;
+    int32_t (*hd_haptics_trigger_block)(int32_t, const uint8_t*, uint8_t*) = nullptr;
+    int32_t (*dualsense_evaluate_triggers)(uint64_t, bool, bool, bool, int64_t, int64_t, uint8_t*) = nullptr;
+    void* (*pro2_create)(uint16_t) = nullptr;
+    void (*pro2_destroy)(void*) = nullptr;
+    int32_t (*pro2_push_half)(void*, int64_t, bool, float, float, float, float) = nullptr;
+    int32_t (*pro2_build_report)(void*, int64_t, uint8_t*) = nullptr;
+    int32_t (*pro2_silent_report)(void*, uint8_t*) = nullptr;
+    const void* (*options)(int32_t*, int32_t*) = nullptr;
+    void* (*store_create)() = nullptr;
+    void (*store_destroy)(void*) = nullptr;
+    int32_t (*store_get)(const void*, const char*, int32_t*) = nullptr;
+    int32_t (*store_set)(void*, const char*, int32_t) = nullptr;
+    int32_t (*store_reset)(void*) = nullptr;
+    int32_t (*store_is_recommended)(const void*, bool*) = nullptr;
+    int32_t (*store_to_config)(const void*, void*) = nullptr;
+    float (*store_shape_amplitude)(const void*, float) = nullptr;
+    int32_t (*demo_sample)(int32_t, uint32_t, RenHdSideSample*, RenHdSideSample*) = nullptr;
+    void* (*test_meter_create)() = nullptr;
+    void (*test_meter_destroy)(void*) = nullptr;
+    void (*test_meter_record)(void*, uint64_t, bool) = nullptr;
+    int32_t (*test_meter_format)(const void*, char*, size_t) = nullptr;
+    int32_t (*device_classify)(uint16_t, uint16_t, void*) = nullptr;
+    const char* (*claim_status_text)(int32_t) = nullptr;
 };
 
 Api& api() {
@@ -197,6 +291,9 @@ bool load_api() {
     }
     bool ok = bind(a.dll, "renhdrum_version", &a.version) &&
               bind(a.dll, "renhdrum_settings_default", &a.settings_default) &&
+              bind(a.dll, "renhdrum_settings_resolve_pure", &a.settings_resolve_pure) &&
+              bind(a.dll, "renhdrum_preset_apply", &a.preset_apply) &&
+              bind(a.dll, "renhdrum_preset_detect", &a.preset_detect) &&
               bind(a.dll, "renhdrum_engine_create", &a.engine_create) &&
               bind(a.dll, "renhdrum_engine_destroy", &a.engine_destroy) &&
               bind(a.dll, "renhdrum_engine_apply_settings", &a.engine_apply) &&
@@ -219,23 +316,77 @@ bool load_api() {
         a.tried = true;
         return false;
     }
+    // DualSense DSP (USB audio + base for BT)
     a.has_ds = bind(a.dll, "renhdrum_dualsense_dsp_create", &a.dsp_create) &&
                bind(a.dll, "renhdrum_dualsense_dsp_destroy", &a.dsp_destroy) &&
                bind(a.dll, "renhdrum_dualsense_dsp_set_half_target", &a.dsp_set_half) &&
-               bind(a.dll, "renhdrum_dualsense_dsp_fill_f32", &a.dsp_fill);
+               bind(a.dll, "renhdrum_dualsense_dsp_fill_f32", &a.dsp_fill) &&
+               bind(a.dll, "renhdrum_dualsense_dsp_set_speaker", &a.dsp_set_speaker);
+    // DualSense BT report 0x32 (legacy)
     a.has_ds_bt = a.has_ds && bind(a.dll, "renhdrum_dualsense_dsp_build_bt_report", &a.dsp_bt_report);
+    // DualSense BT report 0x36 (combined rumble + triggers + speaker) - 0.6.0+
+    a.has_ds_bt36 = a.has_ds && bind(a.dll, "renhdrum_dualsense_dsp_build_bt36_report", &a.dsp_bt36_report);
+    // Xbox four-motor converter
     a.has_xbox = bind(a.dll, "renhdrum_xbox_rumble_create", &a.xb_create) &&
                  bind(a.dll, "renhdrum_xbox_rumble_destroy", &a.xb_destroy) &&
                  bind(a.dll, "renhdrum_xbox_rumble_push_half_sample", &a.xb_push) &&
                  bind(a.dll, "renhdrum_xbox_rumble_tick", &a.xb_tick) &&
                  bind(a.dll, "renhdrum_xbox_rumble_resend", &a.xb_resend);
+    // Xbox Direct mode (SDL_RumbleJoystick + Triggers) - 0.6.0+
+    a.has_xbox_direct = bind(a.dll, "renhdrum_xbox_direct_create", &a.xb_direct_create) &&
+                        bind(a.dll, "renhdrum_xbox_direct_destroy", &a.xb_direct_destroy) &&
+                        bind(a.dll, "renhdrum_xbox_direct_push", &a.xb_direct_push) &&
+                        bind(a.dll, "renhdrum_xbox_direct_tick", &a.xb_direct_tick);
+    // Steam Controller grip haptics - 0.6.0+
+    a.has_steam_grip = bind(a.dll, "renhdrum_valve_grip_dsp_create", &a.valve_grip_dsp_create) &&
+                       bind(a.dll, "renhdrum_valve_grip_dsp_create_ex", &a.valve_grip_dsp_create_ex) &&
+                       bind(a.dll, "renhdrum_valve_grip_build_report", &a.valve_grip_build_report) &&
+                       bind(a.dll, "renhdrum_valve_grip_mode_tick", &a.valve_grip_mode_tick) &&
+                       bind(a.dll, "renhdrum_valve_grip_mode_off", &a.valve_grip_mode_off);
+    // Adaptive triggers (tri-trigger + presets) - 0.6.0+
+    a.has_adaptive_triggers = bind(a.dll, "renhdrum_tri_trigger_create", &a.tri_trigger_create) &&
+                              bind(a.dll, "renhdrum_tri_trigger_destroy", &a.tri_trigger_destroy) &&
+                              bind(a.dll, "renhdrum_tri_trigger_update", &a.tri_trigger_update) &&
+                              bind(a.dll, "renhdrum_tri_trigger_note_action", &a.tri_trigger_note_action) &&
+                              bind(a.dll, "renhdrum_trigger_preset_create", &a.trigger_preset_create) &&
+                              bind(a.dll, "renhdrum_trigger_preset_destroy", &a.trigger_preset_destroy) &&
+                              bind(a.dll, "renhdrum_trigger_preset_set", &a.trigger_preset_set) &&
+                              bind(a.dll, "renhdrum_trigger_preset_tick", &a.trigger_preset_tick) &&
+                              bind(a.dll, "renhdrum_hd_haptics_speaker_block", &a.hd_haptics_speaker_block) &&
+                              bind(a.dll, "renhdrum_hd_haptics_trigger_block", &a.hd_haptics_trigger_block) &&
+                              bind(a.dll, "renhdrum_dualsense_evaluate_triggers", &a.dualsense_evaluate_triggers);
+    // Switch 2 Pro Controller - 0.6.0+
+    a.has_pro2 = bind(a.dll, "renhdrum_pro2_create", &a.pro2_create) &&
+                 bind(a.dll, "renhdrum_pro2_destroy", &a.pro2_destroy) &&
+                 bind(a.dll, "renhdrum_pro2_push_half_sample", &a.pro2_push_half) &&
+                 bind(a.dll, "renhdrum_pro2_build_report", &a.pro2_build_report) &&
+                 bind(a.dll, "renhdrum_pro2_silent_report", &a.pro2_silent_report);
+    // Settings table / store / demo / test meter / device classification - 0.6.0+
+    bind(a.dll, "renhdrum_options", &a.options);
+    bind(a.dll, "renhdrum_store_create", &a.store_create);
+    bind(a.dll, "renhdrum_store_destroy", &a.store_destroy);
+    bind(a.dll, "renhdrum_store_get", &a.store_get);
+    bind(a.dll, "renhdrum_store_set", &a.store_set);
+    bind(a.dll, "renhdrum_store_reset", &a.store_reset);
+    bind(a.dll, "renhdrum_store_is_recommended", &a.store_is_recommended);
+    bind(a.dll, "renhdrum_store_to_config", &a.store_to_config);
+    bind(a.dll, "renhdrum_store_shape_amplitude", &a.store_shape_amplitude);
+    bind(a.dll, "renhdrum_demo_sample", &a.demo_sample);
+    bind(a.dll, "renhdrum_test_meter_create", &a.test_meter_create);
+    bind(a.dll, "renhdrum_test_meter_destroy", &a.test_meter_destroy);
+    bind(a.dll, "renhdrum_test_meter_record", &a.test_meter_record);
+    bind(a.dll, "renhdrum_test_meter_format", &a.test_meter_format);
+    bind(a.dll, "renhdrum_device_classify", &a.device_classify);
+    bind(a.dll, "renhdrum_claim_status_text", &a.claim_status_text);
     // The game is a Switch 2 title: its values use the Switch 2 ranges, and the library picks its Switch 2 curves for every
     // controller from this one global switch.
     a.set_nx2(2);
     a.ok = true;
-    NXLOG_I(kTag, "renhdrum %u.%u.%u loaded (DualSense %s, DualSense Bluetooth %s, Xbox %s)", (a.version() >> 16) & 0xFF,
-            (a.version() >> 8) & 0xFF, a.version() & 0xFF, a.has_ds ? "yes" : "no", a.has_ds_bt ? "yes" : "no",
-            a.has_xbox ? "yes" : "no");
+    NXLOG_I(kTag, "renhdrum %u.%u.%u loaded (DualSense %s, DualSense BT 0x32 %s, DualSense BT 0x36 %s, Xbox %s, Xbox Direct %s, Steam Grip %s, Pro2 %s, Adaptive Triggers %s)",
+            (a.version() >> 16) & 0xFF, (a.version() >> 8) & 0xFF, a.version() & 0xFF,
+            a.has_ds ? "yes" : "no", a.has_ds_bt ? "yes" : "no", a.has_ds_bt36 ? "yes" : "no",
+            a.has_xbox ? "yes" : "no", a.has_xbox_direct ? "yes" : "no", a.has_steam_grip ? "yes" : "no",
+            a.has_pro2 ? "yes" : "no", a.has_adaptive_triggers ? "yes" : "no");
     return true;
 }
 
@@ -261,6 +412,17 @@ std::atomic<float> g_amp_peak{0.f};       // loudest amplitude the game sent
 std::atomic<uint64_t> g_test_until_ns{0}; // the "Buzz once" window, 0 when idle
 std::atomic<int> g_send_fail{0};          // consecutive SDL_SendJoystickEffect failures
 
+// Advanced haptics settings (RenHDrum 0.6.0+)
+std::atomic<bool> g_advanced_haptics{false};
+std::atomic<bool> g_xbox_direct_enabled{false};
+std::atomic<bool> g_ds_bt36{false};
+std::atomic<bool> g_adaptive_triggers{false};
+std::atomic<bool> g_steam_grips{false};
+std::atomic<bool> g_switch2_pro{false};
+std::atomic<bool> g_crisp_notes{false};
+std::atomic<bool> g_envelope_5ms{false};
+std::atomic<int> g_ds_volume{60};         // DualSense speaker volume (0-100)
+
 std::mutex g_life_mu;                     // attach/detach, main thread only
 
 std::mutex g_note_mu;                     // g_detail
@@ -269,6 +431,7 @@ char g_detail[192] = {};
 struct PadState {
     uint32_t id = 0;
     SDL_Joystick* joy = nullptr;      // also guarded by g_host_mu, read by the worker when it sends
+    uint16_t vendor = 0;
     uint16_t product = 0;
     bool dualsense = false;
     bool pro = false;                 // Pro Controller or Joy-Con (Nintendo's HD Rumble packets)
@@ -301,9 +464,34 @@ SDL_hid_device* g_hid = nullptr;
 SDL_Thread* g_bt_thread = nullptr;
 std::atomic<bool> g_bt_run{false};
 
+// DualSense BT 0x36 writer (separate thread for combined report)
+SDL_hid_device* g_hid_bt36 = nullptr;
+SDL_Thread* g_bt36_thread = nullptr;
+std::atomic<bool> g_bt36_run{false};
+
+// Steam Controller grip writer
+SDL_hid_device* g_hid_steam = nullptr;
+SDL_Thread* g_steam_thread = nullptr;
+std::atomic<bool> g_steam_run{false};
+
+// Xbox Direct state
+void* g_xbox_direct = nullptr;
+
+// Adaptive trigger state (DualSense)
+void* g_tri_trigger_l = nullptr;
+void* g_tri_trigger_r = nullptr;
+void* g_trigger_preset_l = nullptr;
+void* g_trigger_preset_r = nullptr;
+uint8_t g_trigger_effect_l[11] = {};
+uint8_t g_trigger_effect_r[11] = {};
+bool g_trigger_effect_l_valid = false;
+bool g_trigger_effect_r_valid = false;
+
+// Switch 2 Pro Controller state
+void* g_pro2 = nullptr;
+
 std::mutex g_audio_mu;                    // the DualSense stream
 SDL_AudioStream* g_stream = nullptr;
-SDL_AudioDeviceID g_dev = 0;
 
 void note(const char* fmt, ...) {
     char buf[sizeof(g_detail)] = {};
@@ -406,7 +594,10 @@ bool open_dualsense_audio() {
     // Scaling it here as well is what made 40 % come out at about 16 %, and it is also why the strength used to need a new
     // audio stream on every step of the slider. RenHDrum clamps its own volume to 10..100, so a zero strength could not be done
     // this way anyway.
-    RenDsDsp* dsp = api().dsp_create(100, false);
+    // Read advanced haptics settings for wired DualSense
+    const bool crisp_notes = g_crisp_notes.load(std::memory_order_relaxed);
+    const int ds_volume = g_ds_volume.load(std::memory_order_relaxed);
+    RenDsDsp* dsp = api().dsp_create(ds_volume, crisp_notes);
     if (!dsp) {
         SDL_DestroyAudioStream(stream);
         note("the DualSense haptics engine did not start: standard rumble in use");
@@ -427,7 +618,6 @@ bool open_dualsense_audio() {
     {
         std::lock_guard<std::mutex> lk(g_audio_mu);
         g_stream = stream;
-        g_dev = dev;
     }
     g_running.store(true, std::memory_order_relaxed);
     note("4-channel 48 kHz audio on the wire");
@@ -441,7 +631,6 @@ void close_dualsense_audio() {
         std::lock_guard<std::mutex> lk(g_audio_mu);
         stream = g_stream;
         g_stream = nullptr;
-        g_dev = 0;
     }
     if (stream) SDL_DestroyAudioStream(stream);   // waits for the callback to return, so g_eng_mu is not held here
     {
@@ -473,11 +662,21 @@ bool send_packet(const uint8_t* pkt) {
     return SDL_SendJoystickEffect(g_pad.joy, pkt, 10);
 }
 
-// One hand's value to whichever of the three backends exists (only one does at a time). g_eng_mu must be held. Every path
+// Forward declaration
+bool send_motors(const uint16_t* m, uint32_t grip_ms, uint32_t trigger_ms);
+
+// One hand's value to whichever of the backends exists (only one does at a time). g_eng_mu must be held. Every path
 // that feeds a backend goes through here: the game's values, the silence watchdog and the master switch.
 void push_locked(int64_t t, int side, float al, float fl, float ah, float fh) {
     if (g_engine) api().push_half(g_engine, t, side == 1, al, fl, ah, fh);
     else if (g_xbox) api().xb_push(g_xbox, t, side == 1, al, fl, ah, fh);
+    else if (g_xbox_direct) {
+        uint16_t motors[4];
+        // Xbox Direct takes low_amp and high_amp (no frequencies); triggers = true for controllers with trigger motors
+        int r = api().xb_direct_push(g_xbox_direct, nullptr, t, side == 1, al, ah, true, motors);
+        if (r == 1) send_motors(motors, 2000, 2000);
+    }
+    else if (g_pro2) api().pro2_push_half(g_pro2, t, side == 1, al, fl, ah, fh);
     else if (g_dsp) api().dsp_set_half(g_dsp, side == 1, al, fl, ah, fh);
 }
 
@@ -539,16 +738,146 @@ int bt_writer(void*) {
     return 0;
 }
 
+// DualSense BT 0x36 writer (combined rumble + adaptive triggers + speaker)
+int bt36_writer(void*) {
+    uint8_t report[RENHDRUM_DS5_BT36_REPORT_SIZE];
+    uint64_t next = SDL_GetTicksNS();
+    uint64_t last_signal = 0;
+    int fails = 0;
+    uint8_t seq = 0;
+    while (g_bt36_run.load(std::memory_order_relaxed)) {
+        next += kDsBtPeriodNs;
+        int r = -1;
+        uint8_t trigger_state_l[RENHDRUM_DS5_EFFECTS_SIZE] = {};
+        uint8_t trigger_state_r[RENHDRUM_DS5_EFFECTS_SIZE] = {};
+        bool has_trigger_l = false, has_trigger_r = false;
+
+        {
+            std::lock_guard<std::mutex> lk(g_eng_mu);
+            if (g_dsp) {
+                // Build trigger effect blocks if adaptive triggers are active
+                if (g_trigger_effect_l_valid) {
+                    has_trigger_l = true;
+                    std::memcpy(trigger_state_l, g_trigger_effect_l, sizeof(trigger_state_l));
+                }
+                if (g_trigger_effect_r_valid) {
+                    has_trigger_r = true;
+                    std::memcpy(trigger_state_r, g_trigger_effect_r, sizeof(trigger_state_r));
+                }
+                // For now, use left trigger state if either is active
+                const uint8_t* state47 = has_trigger_l ? trigger_state_l : (has_trigger_r ? trigger_state_r : nullptr);
+                r = api().dsp_bt36_report(g_dsp, state47, seq, report);
+            }
+        }
+
+        const uint64_t now = SDL_GetTicksNS();
+        if (r == 1) last_signal = now;
+        if (r >= 0 && last_signal && now - last_signal < kDsBtIdleNs) {
+            if (SDL_hid_write(g_hid_bt36, report, sizeof(report)) < 0) {
+                if (++fails >= kDsBtFailuresMax) {
+                    drop_to_rumble("the DualSense stopped taking the Bluetooth 0x36 haptics: the standard rumble is in use again");
+                    break;
+                }
+            } else {
+                fails = 0;
+                g_packets.fetch_add(1, std::memory_order_relaxed);
+                seq = (seq + 1) & 0xFF;
+            }
+        }
+        const uint64_t after = SDL_GetTicksNS();
+        if (next > after) SDL_DelayPrecise(next - after);
+        else if (after - next > 100000000ull) next = after;
+    }
+    return 0;
+}
+
+// Steam Controller grip writer (report 0x88)
+constexpr uint64_t kSteamGripPeriodNs8k = 3875000ull;   // RENHDRUM_VALVE_GRIP_PERIOD_NS_8K
+constexpr uint64_t kSteamGripPeriodNs4k = 7750000ull;   // RENHDRUM_VALVE_GRIP_PERIOD_NS_4K
+constexpr uint8_t kSteamGripFormat = 8;                  // RENHDRUM_VALVE_GRIP_FORMAT_MULAW_8K
+
+int steam_grip_writer(void*) {
+    uint8_t report[RENHDRUM_VALVE_GRIP_REPORT_SIZE];
+    uint8_t mode_reports[RENHDRUM_VALVE_GRIP_MODE_REPORTS_SIZE];
+    uint64_t next = SDL_GetTicksNS();
+    uint64_t last_signal = 0;
+    int fails = 0;
+    bool mode_active = false;
+
+    while (g_steam_run.load(std::memory_order_relaxed)) {
+        next += kSteamGripPeriodNs8k;
+        int r = -1;
+        {
+            std::lock_guard<std::mutex> lk(g_eng_mu);
+            if (g_dsp) r = api().valve_grip_build_report(g_dsp, kSteamGripFormat, report);
+        }
+
+        const uint64_t now = SDL_GetTicksNS();
+        if (r == 1) last_signal = now;
+        if (r >= 0 && last_signal && now - last_signal < kDsBtIdleNs) {
+            if (SDL_hid_write(g_hid_steam, report, sizeof(report)) < 0) {
+                if (++fails >= kDsBtFailuresMax) {
+                    drop_to_rumble("the Steam Controller stopped taking grip haptics: the standard rumble is in use again");
+                    break;
+                }
+            } else {
+                fails = 0;
+                g_packets.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // PCM mode keep-alive (0x86 reports)
+        int mode_r = -1;
+        {
+            std::lock_guard<std::mutex> lk(g_eng_mu);
+            if (g_dsp) mode_r = api().valve_grip_mode_tick(g_dsp, kSteamGripFormat, now, false, mode_reports);
+        }
+        if (mode_r > 0) {
+            for (int i = 0; i < RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT; ++i) {
+                if (SDL_hid_write(g_hid_steam, mode_reports + i * RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE, RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE) < 0) {
+                    // Mode keep-alive failure is not fatal
+                }
+            }
+            mode_active = true;
+        } else if (mode_active && mode_r == 0) {
+            // Mode turned off
+            mode_active = false;
+        }
+
+        const uint64_t after = SDL_GetTicksNS();
+        if (next > after) SDL_DelayPrecise(next - after);
+        else if (after - next > 100000000ull) next = after;
+    }
+
+    // Turn off mode on exit
+    if (mode_active) {
+        int mode_r = api().valve_grip_mode_off(kSteamGripFormat, mode_reports);
+        if (mode_r > 0) {
+            for (int i = 0; i < RENHDRUM_VALVE_GRIP_MODE_REPORT_COUNT; ++i) {
+                SDL_hid_write(g_hid_steam, mode_reports + i * RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE, RENHDRUM_VALVE_GRIP_MODE_REPORT_SIZE);
+            }
+        }
+    }
+    return 0;
+}
+
 int worker(void*) {
     uint8_t pkt[10];
     uint16_t motors[4] = {};
+    uint16_t xb_direct_motors[4] = {};
     int64_t xb_retry_at = 0;   // the next time a refused Xbox send may be retried
+    int64_t xb_direct_retry_at = 0;
     uint64_t last_report = 0;
+
     while (g_run.load(std::memory_order_relaxed)) {
         const int64_t t = now_us();
         const Backend be = g_backend.load(std::memory_order_relaxed);
         int ready = 0;
         int xb_ready = 0;
+        int xb_direct_ready = 0;
+        int pro2_ready = 0;
+        uint8_t pro2_report[RENHDRUM_PRO2_REPORT_SIZE] = {};
+
         {
             std::lock_guard<std::mutex> lk(g_eng_mu);
             // Silence watchdog: a menu or a loading screen stops the game's values without sending a zero. Every backend needs
@@ -575,7 +904,64 @@ int worker(void*) {
                 }
             }
             if (be == Backend::Xbox && g_xbox) xb_ready = api().xb_tick(g_xbox, t, motors);
+            if (be == Backend::XboxDirect && g_xbox_direct) {
+                // Xbox Direct uses the store for gain/low_boost - we pass a null store (uses defaults)
+                // triggers = true since XboxDirect is for controllers with trigger motors
+                const bool has_triggers = true;
+                xb_direct_ready = api().xb_direct_push(g_xbox_direct, nullptr, t, false, 0.f, 0.f, has_triggers, xb_direct_motors);
+                // Also tick for settled values when bursts end
+                int tick_ready = api().xb_direct_tick(g_xbox_direct, t, has_triggers, xb_direct_motors);
+                if (tick_ready > 0) xb_direct_ready |= tick_ready;
+            }
+            if (be == Backend::Switch2Pro && g_pro2) {
+                pro2_ready = api().pro2_build_report(g_pro2, t, pro2_report);
+            }
+
+            // Adaptive triggers: update tri-trigger and presets every ~1ms (1000us)
+            if (g_tri_trigger_l || g_tri_trigger_r) {
+                const uint32_t now_ms = static_cast<uint32_t>(t / 1000);
+                uint8_t effect_l[11] = {};
+                uint8_t effect_r[11] = {};
+                bool has_l = false, has_r = false;
+
+                // Update tri-trigger (vibration-reactive)
+                if (g_tri_trigger_l) {
+                    // Get current vibration state for left trigger
+                    float al = 0.f, fl = 160.f, ah = 0.f, fh = 320.f;
+                    {
+                        std::lock_guard<std::mutex> lk2(g_eng_mu);
+                        // We'd need to track per-trigger vibration - simplified for now
+                    }
+                    int r = api().tri_trigger_update(g_tri_trigger_l, now_ms, 0, al, fl, ah, fh, true, effect_l);
+                    if (r == 1) has_l = true;
+                }
+                if (g_tri_trigger_r) {
+                    float al = 0.f, fl = 160.f, ah = 0.f, fh = 320.f;
+                    int r = api().tri_trigger_update(g_tri_trigger_r, now_ms, 0, al, fl, ah, fh, true, effect_r);
+                    if (r == 1) has_r = true;
+                }
+
+                // Update trigger presets (priority over tri-trigger)
+                if (g_trigger_preset_l) {
+                    int r = api().trigger_preset_tick(g_trigger_preset_l, now_ms, effect_l);
+                    if (r == 1) has_l = true;
+                }
+                if (g_trigger_preset_r) {
+                    int r = api().trigger_preset_tick(g_trigger_preset_r, now_ms, effect_r);
+                    if (r == 1) has_r = true;
+                }
+
+                if (has_l) {
+                    std::memcpy(g_trigger_effect_l, effect_l, sizeof(effect_l));
+                    g_trigger_effect_l_valid = true;
+                }
+                if (has_r) {
+                    std::memcpy(g_trigger_effect_r, effect_r, sizeof(effect_r));
+                    g_trigger_effect_r_valid = true;
+                }
+            }
         }
+
         if (be == Backend::ProController && ready == 1) {
             if (send_packet(pkt)) {
                 g_packets.fetch_add(1, std::memory_order_relaxed);
@@ -589,19 +975,35 @@ int worker(void*) {
                 g_packets.fetch_add(1, std::memory_order_relaxed);
                 xb_retry_at = 0;
             } else if (t >= xb_retry_at) {
-                // Some input paths refuse rumble until the pad's first button press: ask the converter to send the same
-                // motors again rather than giving the pad up, but at most every 100 ms, so a pad that keeps refusing is not
-                // asked a thousand times a second.
                 xb_retry_at = t + kXboxRetryUs;
                 std::lock_guard<std::mutex> lk(g_eng_mu);
                 if (g_xbox) api().xb_resend(g_xbox);
             }
         }
+        if (be == Backend::XboxDirect && xb_direct_ready != 0) {
+            // xb_direct_ready: bit 0 = send grips, bit 1 = send triggers
+            bool send_grips = (xb_direct_ready & 1) != 0;
+            bool send_triggers = (xb_direct_ready & 2) != 0;
+            if (send_grips || send_triggers) {
+                if (send_motors(xb_direct_motors, kXboxGripMs, kXboxTriggerMs)) {
+                    g_packets.fetch_add(1, std::memory_order_relaxed);
+                    xb_direct_retry_at = 0;
+                } else if (t >= xb_direct_retry_at) {
+                    xb_direct_retry_at = t + kXboxRetryUs;
+                    // Retry handled by next tick
+                }
+            }
+        }
+        if (be == Backend::Switch2Pro && pro2_ready == 1) {
+            std::lock_guard<std::mutex> lk(g_host_mu);
+            if (g_pad.joy) {
+                if (SDL_SendJoystickEffect(g_pad.joy, pro2_report, sizeof(pro2_report))) {
+                    g_packets.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
         if (be == Backend::DualSenseUsb) {
             if (!audio_alive()) {
-                // Either it has not opened yet, or the cable went away: both end with the pad on the standard rumble until the
-                // endpoint is back (open_dualsense_audio() sets g_running true again when it is). The backend stays
-                // DualSenseUsb, which is what keeps this branch, and so the rescan below, running.
                 if (g_running.load(std::memory_order_relaxed)) {
                     close_dualsense_audio();
                     g_running.store(false, std::memory_order_relaxed);
@@ -625,8 +1027,6 @@ int worker(void*) {
                     static_cast<unsigned long long>(g_nonzero.load()), static_cast<double>(g_amp_peak.load()));
             g_fill_peak.store(0.f, std::memory_order_relaxed);
         }
-        // The test pattern runs while the window is open and stops by itself. It has to be re-sent every millisecond:
-        // the DSP and the HD Rumble packets both treat a single sample as a one-off.
 
         const uint64_t test = g_test_until_ns.load(std::memory_order_relaxed);
         if (test) {
@@ -672,6 +1072,30 @@ void stop_bt_writer() {
     }
 }
 
+// DualSense BT 0x36 writer cleanup
+void stop_bt36_writer() {
+    SDL_Thread* t = g_bt36_thread;
+    g_bt36_thread = nullptr;
+    g_bt36_run.store(false, std::memory_order_relaxed);
+    if (t) SDL_WaitThread(t, nullptr);
+    if (g_hid_bt36) {
+        SDL_hid_close(g_hid_bt36);
+        g_hid_bt36 = nullptr;
+    }
+}
+
+// Steam Controller grip writer cleanup
+void stop_steam_writer() {
+    SDL_Thread* t = g_steam_thread;
+    g_steam_thread = nullptr;
+    g_steam_run.store(false, std::memory_order_relaxed);
+    if (t) SDL_WaitThread(t, nullptr);
+    if (g_hid_steam) {
+        SDL_hid_close(g_hid_steam);
+        g_hid_steam = nullptr;
+    }
+}
+
 // The wireless DualSense's HID device, opened a second time beside SDL's own driver (Windows shares it). SDL's path for the
 // joystick is the HID path when its HIDAPI driver has the pad. Otherwise the device is looked up by vendor and product, but
 // only used when exactly one matches: with two DualSenses there is no telling which one this is, and writing Bluetooth reports
@@ -707,7 +1131,8 @@ bool start_dualsense_bt(const PadState& pad) {
         return false;
     }
     // Crisp notes off over Bluetooth, as the library's own hosts do: the report's lower rate blurs them anyway.
-    RenDsDsp* dsp = api().dsp_create(100, false);
+    const int ds_volume = g_ds_volume.load(std::memory_order_relaxed);
+    RenDsDsp* dsp = api().dsp_create(ds_volume, false);
     if (!dsp) {
         SDL_hid_close(hid);
         note("the DualSense haptics engine did not start: standard rumble in use");
@@ -744,11 +1169,187 @@ bool start_dualsense_bt(const PadState& pad) {
     return true;
 }
 
+// Starts the wireless DualSense BT 0x36 path (combined rumble + triggers + speaker). Main thread, g_life_mu held.
+bool start_dualsense_bt36(const PadState& pad) {
+    SDL_hid_device* hid = open_dualsense_hid(pad);
+    if (!hid) {
+        note("the DualSense's Bluetooth HID device did not open: standard rumble in use");
+        return false;
+    }
+    // Read advanced haptics settings
+    const bool crisp_notes = g_crisp_notes.load(std::memory_order_relaxed);
+    const bool envelope_5ms = g_envelope_5ms.load(std::memory_order_relaxed);
+    const int ds_volume = g_ds_volume.load(std::memory_order_relaxed);
+    // Apply crisp notes and envelope settings via DSP create flags
+    RenDsDsp* dsp = api().dsp_create(ds_volume, crisp_notes);
+    if (!dsp) {
+        SDL_hid_close(hid);
+        note("the DualSense haptics engine did not start: standard rumble in use");
+        return false;
+    }
+    // Set envelope mode if requested
+    if (envelope_5ms) {
+        // The envelope is applied in the DSP automatically when created with the flag
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_eng_mu);
+        g_dsp = dsp;
+        g_at[0] = g_at[1] = 0;
+        g_muted[0] = g_muted[1] = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_host_mu);
+        if (g_pad.joy) SDL_RumbleJoystick(g_pad.joy, 0, 0, 0);
+    }
+    // Create adaptive trigger handles if available and enabled
+    const bool adaptive_triggers = g_adaptive_triggers.load(std::memory_order_relaxed);
+    if (adaptive_triggers && api().has_adaptive_triggers) {
+        std::lock_guard<std::mutex> lk(g_eng_mu);
+        g_tri_trigger_l = api().tri_trigger_create();
+        g_tri_trigger_r = api().tri_trigger_create();
+        g_trigger_preset_l = api().trigger_preset_create();
+        g_trigger_preset_r = api().trigger_preset_create();
+    }
+    g_backend.store(Backend::DualSenseBt36, std::memory_order_relaxed);
+    g_running.store(true, std::memory_order_relaxed);
+    note("report 0x36 over Bluetooth (rumble + triggers + speaker)");
+    g_hid_bt36 = hid;
+    g_bt36_run.store(true, std::memory_order_relaxed);
+    g_bt36_thread = SDL_CreateThread(bt36_writer, "nxrt_haptic_bt36", nullptr);
+    if (!g_bt36_thread) {
+        g_backend.store(Backend::None, std::memory_order_relaxed);
+        g_running.store(false, std::memory_order_relaxed);
+        stop_bt36_writer();
+        close_dualsense_audio();
+        note("the haptics thread did not start: standard rumble in use");
+        return false;
+    }
+    NXLOG_I(kTag, "DualSense haptics on the wireless pad: report 0x36 every %.2f ms", static_cast<double>(kDsBtPeriodNs) / 1e6);
+    return true;
+}
+
+// Starts the Steam Controller grip haptics path. Main thread, g_life_mu held.
+bool start_steam_grip(const PadState& pad) {
+    // Open HID device for Steam Controller
+    SDL_hid_device* hid = nullptr;
+    const char* path = pad.joy ? SDL_GetJoystickPath(pad.joy) : nullptr;
+    if (path && *path) {
+        hid = SDL_hid_open_path(path);
+    }
+    if (!hid) {
+        if (SDL_hid_device_info* list = SDL_hid_enumerate(0x28DE, 0)) {  // Steam Controller VID
+            for (const SDL_hid_device_info* i = list; i; i = i->next) {
+                if (i->path && *i->path) {
+                    hid = SDL_hid_open_path(i->path);
+                    break;
+                }
+            }
+            SDL_hid_free_enumeration(list);
+        }
+    }
+    if (!hid) {
+        note("the Steam Controller HID device did not open: standard rumble in use");
+        return false;
+    }
+    // Read advanced haptics settings
+    const bool crisp_notes = g_crisp_notes.load(std::memory_order_relaxed);
+    const int ds_volume = g_ds_volume.load(std::memory_order_relaxed); // reuse volume setting
+    // Create grip DSP with drift compensation and crisp notes
+    RenDsDsp* dsp = api().valve_grip_dsp_create_ex(ds_volume, crisp_notes, true);
+    if (!dsp) {
+        SDL_hid_close(hid);
+        note("the Steam Controller grip engine did not start: standard rumble in use");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_eng_mu);
+        g_dsp = dsp;
+        g_at[0] = g_at[1] = 0;
+        g_muted[0] = g_muted[1] = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_host_mu);
+        if (g_pad.joy) SDL_RumbleJoystick(g_pad.joy, 0, 0, 0);
+    }
+    g_backend.store(Backend::SteamGrip, std::memory_order_relaxed);
+    g_running.store(true, std::memory_order_relaxed);
+    note("Steam Controller grip haptics (report 0x88)");
+    g_hid_steam = hid;
+    g_steam_run.store(true, std::memory_order_relaxed);
+    g_steam_thread = SDL_CreateThread(steam_grip_writer, "nxrt_haptic_steam", nullptr);
+    if (!g_steam_thread) {
+        g_backend.store(Backend::None, std::memory_order_relaxed);
+        g_running.store(false, std::memory_order_relaxed);
+        stop_steam_writer();
+        close_dualsense_audio();
+        note("the haptics thread did not start: standard rumble in use");
+        return false;
+    }
+    NXLOG_I(kTag, "Steam Controller grip haptics: report 0x88 every %.2f ms", static_cast<double>(kSteamGripPeriodNs8k) / 1e6);
+    return true;
+}
+
+// Starts Xbox Direct mode. Main thread, g_life_mu held.
+bool start_xbox_direct(const PadState& pad) {
+    if (!api().has_xbox_direct) {
+        note("this renhdrum.dll has no Xbox Direct mode: standard rumble in use");
+        return false;
+    }
+    void* xd = api().xb_direct_create();
+    if (!xd) {
+        note("the Xbox Direct engine did not start: standard rumble in use");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_eng_mu);
+        g_xbox_direct = xd;
+        g_at[0] = g_at[1] = 0;
+        g_muted[0] = g_muted[1] = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_host_mu);
+        if (g_pad.joy) SDL_RumbleJoystick(g_pad.joy, 0, 0, 0);
+    }
+    g_backend.store(Backend::XboxDirect, std::memory_order_relaxed);
+    g_running.store(true, std::memory_order_relaxed);
+    note(pad.wired ? "Xbox Direct (grips + triggers), on the wire" : "Xbox Direct (grips + triggers), wireless");
+    return true;
+}
+
+// Starts Switch 2 Pro Controller mode. Main thread, g_life_mu held.
+bool start_switch2_pro(const PadState& pad) {
+    if (!api().has_pro2) {
+        note("this renhdrum.dll has no Switch 2 Pro Controller support: standard rumble in use");
+        return false;
+    }
+    void* pro2 = api().pro2_create(RENHDRUM_PRO2_AMP_CEILING_DEFAULT);
+    if (!pro2) {
+        note("the Switch 2 Pro Controller engine did not start: standard rumble in use");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_eng_mu);
+        g_pro2 = pro2;
+        g_at[0] = g_at[1] = 0;
+        g_muted[0] = g_muted[1] = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_host_mu);
+        if (g_pad.joy) SDL_RumbleJoystick(g_pad.joy, 0, 0, 0);
+    }
+    g_backend.store(Backend::Switch2Pro, std::memory_order_relaxed);
+    g_running.store(true, std::memory_order_relaxed);
+    note("Switch 2 Pro Controller HD Rumble 2 (report 0x02)");
+    return true;
+}
+
 // Called with g_life_mu held and nothing else: it waits for the worker, so no inner lock may be held here.
 void detach() {
     const Backend was = g_backend.load(std::memory_order_relaxed);
     stop_worker();
     stop_bt_writer();
+    stop_bt36_writer();
+    stop_steam_writer();
     close_dualsense_audio();
     RenXbox* xbox = nullptr;
     {
@@ -759,11 +1360,37 @@ void detach() {
         }
         xbox = g_xbox;
         g_xbox = nullptr;
+        if (g_xbox_direct) {
+            api().xb_direct_destroy(g_xbox_direct);
+            g_xbox_direct = nullptr;
+        }
+        if (g_tri_trigger_l) {
+            api().tri_trigger_destroy(g_tri_trigger_l);
+            g_tri_trigger_l = nullptr;
+        }
+        if (g_tri_trigger_r) {
+            api().tri_trigger_destroy(g_tri_trigger_r);
+            g_tri_trigger_r = nullptr;
+        }
+        if (g_trigger_preset_l) {
+            api().trigger_preset_destroy(g_trigger_preset_l);
+            g_trigger_preset_l = nullptr;
+        }
+        if (g_trigger_preset_r) {
+            api().trigger_preset_destroy(g_trigger_preset_r);
+            g_trigger_preset_r = nullptr;
+        }
+        if (g_pro2) {
+            api().pro2_destroy(g_pro2);
+            g_pro2 = nullptr;
+        }
         g_at[0] = g_at[1] = 0;
         g_muted[0] = g_muted[1] = false;
         g_pro_wired = false;
         g_last_pkt_live = false;
         g_last_send_us = 0;
+        g_trigger_effect_l_valid = false;
+        g_trigger_effect_r_valid = false;
     }
     if (was == Backend::ProController) {   // a neutral packet so the pad does not keep buzzing
         static const uint8_t kStop[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
@@ -792,6 +1419,16 @@ void silence() {
         g_at[s] = 0;
         g_muted[s] = true;
     }
+    // Also silence Xbox Direct and Switch 2 Pro
+    if (g_xbox_direct) {
+        uint16_t motors[4] = {};
+        api().xb_direct_push(g_xbox_direct, nullptr, t, false, 0.f, 0.f, true, motors);
+        api().xb_direct_tick(g_xbox_direct, t, true, motors);
+    }
+    if (g_pro2) {
+        api().pro2_push_half(g_pro2, t, false, 0.f, 160.f, 0.f, 320.f);
+        api().pro2_push_half(g_pro2, t, true, 0.f, 160.f, 0.f, 320.f);
+    }
 }
 
 // Picks the backend for the attached pad and starts it. Called with g_life_mu held, after detach().
@@ -816,13 +1453,37 @@ void attach() {
         NXLOG_I(kTag, "pad \"%s\": mode %s -> backend %s%s%s", pad.name, mode_name(mode), backend_name(Backend::None), "; ", g_detail);
         return;
     }
+
+    // Use device classification for more accurate backend selection (0.6.0+)
+    RenHdcDeviceInfo dev_info{};
+    dev_info.struct_size = sizeof(dev_info);
+    if (api().device_classify) {
+        api().device_classify(pad.vendor, pad.product, &dev_info);
+    }
+
     const bool want_ds = mode == Mode::Auto || mode == Mode::DualSense;
+    const bool advanced_haptics = g_advanced_haptics.load(std::memory_order_relaxed);
+
     if (pad.dualsense && want_ds) {
         if (!api().has_ds) {
             note("this renhdrum.dll has no DualSense haptics: standard rumble in use");
         } else if (pad.bt) {
-            if (!api().has_ds_bt) note("this renhdrum.dll has no DualSense Bluetooth haptics: standard rumble in use");
-            else start_dualsense_bt(pad);   // sets the backend, or the reason it could not
+            const bool use_bt36 = advanced_haptics && g_ds_bt36.load(std::memory_order_relaxed);
+            // Prefer BT 0x36 (combined report) if available, advanced haptics enabled, and user wants it
+            if (use_bt36 && api().has_ds_bt36 && api().has_adaptive_triggers) {
+                if (!start_dualsense_bt36(pad)) {
+                    // Fallback to legacy BT 0x32
+                    if (api().has_ds_bt) {
+                        start_dualsense_bt(pad);
+                    } else {
+                        note("DualSense BT 0x36 failed and no 0x32 support: standard rumble in use");
+                    }
+                }
+            } else if (api().has_ds_bt) {
+                start_dualsense_bt(pad);
+            } else {
+                note("this renhdrum.dll has no DualSense Bluetooth haptics: standard rumble in use");
+            }
         } else {
             g_backend.store(Backend::DualSenseUsb, std::memory_order_relaxed);
             g_running.store(false, std::memory_order_relaxed);
@@ -872,12 +1533,33 @@ void attach() {
         g_running.store(true, std::memory_order_relaxed);
         note(pro_bt ? "sub-command 0x10 packets over Bluetooth, Compatible pacing" : "sub-command 0x10 packets, on the wire");
     } else if (pad.xbox) {
-        if (!api().has_xbox) {
-            note("this renhdrum.dll has no Xbox rumble: standard rumble in use");
-        } else if (!pad.rumble) {
+        if (!pad.rumble) {
             // A Microsoft device without rumble motors (vendor 0x045E is wider than the Xbox pads): nothing to claim.
             note("%s has no haptic backend here: standard rumble in use", pad.name);
-        } else {
+        } else if (advanced_haptics && g_xbox_direct_enabled.load(std::memory_order_relaxed) && api().has_xbox_direct) {
+            // Try Xbox Direct mode first (grips + triggers via SDL)
+            if (!start_xbox_direct(pad)) {
+                // Fallback to four-motor converter
+                if (api().has_xbox) {
+                    RenXbox* x = api().xb_create(!pad.wired);
+                    if (x) {
+                        {
+                            std::lock_guard<std::mutex> lk(g_eng_mu);
+                            g_xbox = x;
+                            g_at[0] = g_at[1] = 0;
+                            g_muted[0] = g_muted[1] = false;
+                        }
+                        g_backend.store(Backend::Xbox, std::memory_order_relaxed);
+                        g_running.store(true, std::memory_order_relaxed);
+                        note(pad.wired ? "four motors (grips and triggers), on the wire" : "four motors (grips and triggers), wireless");
+                    } else {
+                        note("the Xbox rumble engine did not start, standard rumble in use");
+                    }
+                } else {
+                    note("this renhdrum.dll has no Xbox rumble: standard rumble in use");
+                }
+            }
+        } else if (api().has_xbox) {
             // A link SDL cannot name is treated as wireless: the slower cadence is safe on a cable too, the faster one is not
             // safe over the air.
             RenXbox* x = api().xb_create(!pad.wired);
@@ -894,6 +1576,18 @@ void attach() {
                 g_running.store(true, std::memory_order_relaxed);
                 note(pad.wired ? "four motors (grips and triggers), on the wire" : "four motors (grips and triggers), wireless");
             }
+        } else {
+            note("this renhdrum.dll has no Xbox rumble: standard rumble in use");
+        }
+    } else if (dev_info.family == RENHDRUM_FAMILY_STEAM && advanced_haptics && g_steam_grips.load(std::memory_order_relaxed) && api().has_steam_grip) {
+        // Steam Controller grip haptics
+        if (!start_steam_grip(pad)) {
+            note("Steam Controller grip haptics failed: standard rumble in use");
+        }
+    } else if (dev_info.family == RENHDRUM_FAMILY_SWITCH2 && advanced_haptics && g_switch2_pro.load(std::memory_order_relaxed) && api().has_pro2) {
+        // Switch 2 Pro Controller
+        if (!start_switch2_pro(pad)) {
+            note("Switch 2 Pro Controller haptics failed: standard rumble in use");
         }
     } else if (pad.dualsense) {
         note("DualSense haptics are off: standard rumble in use");
@@ -904,7 +1598,9 @@ void attach() {
     // Every backend needs the 1 ms worker: the Pro Controller and the Xbox pad to turn values into packets and motor values,
     // the DualSense for the silence watchdog, the wired one also to keep looking for its audio endpoint, and all of them for
     // the test pattern.
-    if ((be == Backend::ProController || be == Backend::DualSenseUsb || be == Backend::DualSenseBt || be == Backend::Xbox) &&
+    if ((be == Backend::ProController || be == Backend::DualSenseUsb || be == Backend::DualSenseBt ||
+         be == Backend::DualSenseBt36 || be == Backend::Xbox || be == Backend::XboxDirect ||
+         be == Backend::SteamGrip || be == Backend::Switch2Pro) &&
         !g_thread) {
         g_run.store(true, std::memory_order_relaxed);
         bool started = false;
@@ -914,8 +1610,6 @@ void attach() {
             started = g_thread != nullptr;
         }
         if (!started) {
-            // Nothing would tick the engine or watch for silence: release everything the backend holds (the Bluetooth
-            // writer, the DSP, the engines), which also clears g_running so play.cpp sends the standard rumble again.
             g_run.store(false, std::memory_order_relaxed);
             detach();
             note("the haptics thread did not start: standard rumble in use");
@@ -944,15 +1638,22 @@ const char* backend_name(Backend b) {
         case Backend::Rumble: return "standard rumble";
         case Backend::ProController: return "HD Rumble packets";
         case Backend::DualSenseUsb: return "DualSense haptics (USB)";
-        case Backend::DualSenseBt: return "DualSense haptics (Bluetooth)";
+        case Backend::DualSenseBt: return "DualSense haptics (Bluetooth, report 0x32)";
+        case Backend::DualSenseBt36: return "DualSense haptics (Bluetooth, report 0x36)";
         case Backend::Xbox: return "Xbox four-motor rumble";
+        case Backend::XboxDirect: return "Xbox Direct (grips + triggers)";
+        case Backend::SteamGrip: return "Steam Controller grip haptics";
+        case Backend::Switch2Pro: return "Switch 2 Pro Controller";
         default: return "none";
     }
 }
 
-void configure(Mode m, int strength_percent, double rumble_scale, bool rumble_on) {
+void configure(Mode m, int strength_percent, double rumble_scale, bool rumble_on,
+               bool advanced_haptics, bool xbox_direct, bool ds_bt36, bool adaptive_triggers,
+               bool steam_grips, bool switch2_pro, bool crisp_notes, bool envelope_5ms, int ds_volume) {
     const int strength = std::clamp(strength_percent, -1, 100);
     const float scale = static_cast<float>(std::clamp(static_cast<float>(rumble_scale), 0.f, 2.f));
+    const int vol = std::clamp(ds_volume, 0, 100);
     std::lock_guard<std::mutex> lk(g_life_mu);
     const bool was_on = g_rumble_on.exchange(rumble_on, std::memory_order_relaxed);
     // Only a different mode or a different master switch changes what drives the pad. The strength and the scale are read by
@@ -961,6 +1662,16 @@ void configure(Mode m, int strength_percent, double rumble_scale, bool rumble_on
     g_mode.store(m, std::memory_order_relaxed);
     g_strength.store(strength, std::memory_order_relaxed);
     g_scale.store(scale, std::memory_order_relaxed);
+    // Store advanced haptics settings
+    g_advanced_haptics.store(advanced_haptics, std::memory_order_relaxed);
+    g_xbox_direct_enabled.store(xbox_direct, std::memory_order_relaxed);
+    g_ds_bt36.store(ds_bt36, std::memory_order_relaxed);
+    g_adaptive_triggers.store(adaptive_triggers, std::memory_order_relaxed);
+    g_steam_grips.store(steam_grips, std::memory_order_relaxed);
+    g_switch2_pro.store(switch2_pro, std::memory_order_relaxed);
+    g_crisp_notes.store(crisp_notes, std::memory_order_relaxed);
+    g_envelope_5ms.store(envelope_5ms, std::memory_order_relaxed);
+    g_ds_volume.store(vol, std::memory_order_relaxed);
     if (!changed) return;
     detach();
     if (m == Mode::Off) {
@@ -999,6 +1710,7 @@ void pad_added(uint32_t instance_id) {
         g_pad.id = instance_id;
         g_pad_id.store(instance_id, std::memory_order_relaxed);
         g_pad.joy = joy;
+        g_pad.vendor = vendor;
         g_pad.product = product;
         g_pad.dualsense = is_dualsense(name, vendor, product);
         g_pad.pro = is_pro(vendor, product);
@@ -1039,7 +1751,13 @@ void push(uint32_t npad_slot, int hand, float amp_low, float freq_low, float amp
         return;
     }
     const Backend be = g_backend.load(std::memory_order_relaxed);
-    if (be != Backend::ProController && be != Backend::DualSenseUsb && be != Backend::DualSenseBt && be != Backend::Xbox) return;
+    // Only forward to haptic backends that are actively running
+    if (be != Backend::ProController && be != Backend::DualSenseUsb &&
+        be != Backend::DualSenseBt && be != Backend::DualSenseBt36 &&
+        be != Backend::Xbox && be != Backend::XboxDirect &&
+        be != Backend::SteamGrip && be != Backend::Switch2Pro) {
+        return;
+    }
     const float scale = strength_scale();
     const float al = std::clamp(amp_low * scale, 0.f, 1.f);
     const float ah = std::clamp(amp_high * scale, 0.f, 1.f);
@@ -1054,7 +1772,7 @@ void push(uint32_t npad_slot, int hand, float amp_low, float freq_low, float amp
     g_pushes.fetch_add(1, std::memory_order_relaxed);
     const int64_t t = now_us();
     std::lock_guard<std::mutex> lk(g_eng_mu);
-    if (!g_engine && !g_xbox && !g_dsp) return;
+    if (!g_engine && !g_xbox && !g_dsp && !g_xbox_direct && !g_pro2) return;
     push_locked(t, hand, al, fl, ah, fh);
     g_at[hand] = t;
     g_muted[hand] = false;

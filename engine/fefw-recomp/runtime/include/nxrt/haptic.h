@@ -50,12 +50,16 @@ inline bool mode_from_name(const char* s, Mode* out) {
 
 // What is actually driving the pad.
 enum class Backend : uint8_t {
-    None = 0,        // no pad, or nothing is sent
-    Rumble,          // SDL_RumbleGamepad, two motors
-    ProController,   // renhdrum 10-byte sub-command 0x10 packets
-    DualSenseUsb,    // renhdrum 4-channel 48 kHz audio haptics
-    DualSenseBt,     // renhdrum DualSense haptics over Bluetooth, HID report 0x32
-    Xbox,            // renhdrum four-motor converter: grips and trigger motors
+    None = 0,              // no pad, or nothing is sent
+    Rumble,                // SDL_RumbleGamepad, two motors
+    ProController,         // renhdrum 10-byte sub-command 0x10 packets
+    DualSenseUsb,          // renhdrum 4-channel 48 kHz audio haptics
+    DualSenseBt,           // renhdrum DualSense haptics over Bluetooth, HID report 0x32
+    DualSenseBt36,         // renhdrum DualSense haptics over Bluetooth, HID report 0x36 (combined)
+    Xbox,                  // renhdrum four-motor converter: grips and trigger motors
+    XboxDirect,            // renhdrum Xbox Direct: SDL_RumbleJoystick + Triggers
+    SteamGrip,             // renhdrum Steam Controller grip haptics (report 0x88)
+    Switch2Pro,            // renhdrum Switch 2 Pro Controller (report 0x02)
 };
 const char* backend_name(Backend b);
 
@@ -78,9 +82,21 @@ struct Status {
 //                           (1.0 = unchanged, up to 2.0), so an untouched controls.ini keeps exactly one strength knob.
 //   rumble_on             : the [pad] rumble master switch. False silences every output path, the standard rumble included
 //                           (legacy_rumble() returns false too), and clears what the backends are still playing.
+// Advanced haptics (RenHDrum 0.6.0+):
+//   advanced_haptics       : enable advanced features (Xbox Direct, DualSense BT 0x36, adaptive triggers, Steam grips, Switch 2 Pro)
+//   xbox_direct            : Xbox Direct mode (SDL_RumbleJoystick + Triggers)
+//   ds_bt36                : DualSense BT report 0x36 (combined rumble + triggers + speaker)
+//   adaptive_triggers      : Adaptive trigger effects
+//   steam_grips            : Steam Controller grip haptics
+//   switch2_pro            : Switch 2 Pro Controller HD Rumble 2
+//   crisp_notes            : Crisp note shaping
+//   envelope_5ms           : 5 ms envelope
+//   ds_volume              : DualSense speaker volume (0-100)
 // Only a different mode or master switch re-attaches: the strength applies to the next value, so moving its slider never
 // reopens the DualSense audio stream.
-void configure(Mode m, int strength_percent, double rumble_scale, bool rumble_on);
+void configure(Mode m, int strength_percent, double rumble_scale, bool rumble_on,
+               bool advanced_haptics, bool xbox_direct, bool ds_bt36, bool adaptive_triggers,
+               bool steam_grips, bool switch2_pro, bool crisp_notes, bool envelope_5ms, int ds_volume);
 
 // Pads, from the platform layer's hot-plug events (main thread).
 void pad_added(uint32_t instance_id);
