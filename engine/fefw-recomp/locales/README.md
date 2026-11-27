@@ -48,6 +48,10 @@ English source string = Translated string
 - A percent that is not a conversion is plain text and is left alone, which is
   why prose such as `1% low` or `100% (native)` needs no escaping.
 
+A table committed to this repository has to translate the menu's strings: CI runs `tools/check_menu_translations.py`, which
+reads them from the menu's sources. It does not see every string (one a function returns for the menu to translate, for
+example).
+
 ## Where the tables live
 
 `make-release.ps1` puts this folder into the release package, and EmblemWeave
