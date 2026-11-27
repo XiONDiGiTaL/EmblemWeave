@@ -29,6 +29,10 @@ namespace nxrt::kernel {
 namespace detail {
 
 // One kernel lock for every wait queue (thread.cpp and occupancy.cpp take the same lock).
+// Keep it one lock: block_on_wake runs the occupancy hooks while its caller holds the mutex/cv/addr
+// lock, and those hooks take this lock. Separate wait-queue locks invert that order (mutex -> sync
+// against sync -> mutex) and reopen the mutex hand-over/queue gap. A sharded build froze at startup
+// after 236 frames with main in arbitrate_lock and guests in wait_process_wide_key.
 detail::KernelLock g_k;
 
 namespace {
