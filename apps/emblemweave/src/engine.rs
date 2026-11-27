@@ -3674,30 +3674,67 @@ fn sdk_fsr(dirs: &[PathBuf]) -> Option<PathBuf> {
     .or_else(|| sdk_in(dirs, &folders, &["amd_fidelityfx_vk.dll"], true))
 }
 
-/// The SDK layout is a handful of directory walks. The Graphics page asks for
-/// it several times a frame, so keep the answer briefly; installing the files
-/// calls `forget_sdk` instead of waiting for the TTL.
-static SDK_CACHE: std::sync::Mutex<Option<(std::time::Instant, Sdk)>> = std::sync::Mutex::new(None);
-const SDK_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Cached SDK scan with background scanning, similar to the Mods page pattern.
+/// The first scan runs synchronously (like the Mods page), subsequent rescans
+/// run on a background thread after SDK_CACHE_TTL to avoid blocking the UI.
+struct SdkCache {
+    sdk: Option<Sdk>,
+    scan_started: bool,
+    last_scan: Option<Instant>,
+}
+
+static SDK_CACHE: Mutex<SdkCache> = Mutex::new(SdkCache {
+    sdk: None,
+    scan_started: false,
+    last_scan: None,
+});
+
+const SDK_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Where the engine will look, in the same order: `upscalers\fsr` (and the older `upscalers\fsr3`), `upscalers\streamline`,
 /// `upscalers\xess`, under each of `sdk_dirs`.
+/// First call does a synchronous scan (like the Mods page). Subsequent calls return
+/// cached result immediately; background rescan triggered after SDK_CACHE_TTL.
 pub fn sdk() -> Sdk {
     let mut cache = SDK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, sdk)) = cache.as_ref() {
-        if at.elapsed() < SDK_CACHE_TTL {
-            return sdk.clone();
-        }
+    // Check TTL and trigger background rescan BEFORE borrowing sdk
+    let should_rescan = cache.sdk.is_some()
+        && cache.last_scan.is_some_and(|last| last.elapsed() >= SDK_CACHE_TTL)
+        && !cache.scan_started;
+    if should_rescan {
+        start_background_sdk_scan(&mut cache);
     }
+    if let Some(sdk) = cache.sdk.as_ref() {
+        return sdk.clone();
+    }
+    // First call: do synchronous scan (like Mods page), then return result
     let sdk = scan_sdk();
-    *cache = Some((std::time::Instant::now(), sdk.clone()));
+    cache.sdk = Some(sdk.clone());
+    cache.last_scan = Some(Instant::now());
     sdk
 }
 
 /// Forget the SDK scan after files were installed, so the next page frame
-/// sees them instead of waiting for the cache to expire.
+/// sees them immediately instead of waiting for the cache to expire.
 fn forget_sdk() {
-    *SDK_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let mut cache = SDK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.sdk = None;
+    cache.last_scan = None;
+    // Don't reset scan_started - let any in-flight background scan complete naturally
+}
+
+fn start_background_sdk_scan(cache: &mut SdkCache) {
+    cache.scan_started = true;
+    std::thread::spawn(|| {
+        let sdk = scan_sdk();
+        let mut guard = SDK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.sdk = Some(sdk);
+        guard.scan_started = false;
+        guard.last_scan = Some(Instant::now());
+    });
 }
 
 fn scan_sdk() -> Sdk {

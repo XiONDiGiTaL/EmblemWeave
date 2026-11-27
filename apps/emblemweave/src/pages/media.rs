@@ -524,7 +524,8 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
                             gpu_combo(ui, &mut g.gpu, &[]);
                         });
                         ui.label(crate::i18n::text("Looking for Vulkan devices...").size(10.8).color(p.muted));
-                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                        // No repaint loop: the background scan will complete and the next frame
+                        // will naturally pick up the cached value (like the Mods page pattern).
                     }
                 });
             },

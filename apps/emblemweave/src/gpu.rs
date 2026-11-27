@@ -79,45 +79,119 @@ pub fn profiles() -> Vec<Profile> {
     platform::profiles()
 }
 
-static CACHE: std::sync::OnceLock<Vec<Device>> = std::sync::OnceLock::new();
-static SCAN: std::sync::Once = std::sync::Once::new();
-static PROFILE_CACHE: std::sync::OnceLock<Vec<Profile>> = std::sync::OnceLock::new();
-static PROFILE_SCAN: std::sync::Once = std::sync::Once::new();
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-/// The list for this launcher run, or `None` while the one scan still runs. The scan loads vulkan-1.dll and every ICD on its
-/// own thread: on the UI thread, whose OpenGL context is current, loading NVIDIA's ICD crashed AMD's OpenGL driver at the
-/// next `wglMakeCurrent` on a hybrid laptop.
-pub fn cached() -> Option<&'static [Device]> {
-    if let Some(list) = CACHE.get() {
-        return Some(list.as_slice());
-    }
-    SCAN.call_once(|| {
-        std::thread::spawn(|| {
-            let _ = CACHE.set(devices());
-        });
-    });
-    CACHE.get().map(Vec::as_slice)
+/// Cached GPU device list with background scanning, similar to the Mods page pattern.
+/// The first scan runs synchronously (like the Mods page), subsequent rescans
+/// run on a background thread after GPU_SCAN_TTL to avoid blocking the UI thread
+/// (loading NVIDIA's ICD on the UI thread crashed AMD's OpenGL driver on hybrid laptops).
+struct GpuCache {
+    devices: Option<Vec<Device>>,
+    scan_started: bool,
+    last_scan: Option<Instant>,
 }
 
-/// The detailed list for the Lab, scanned once on a background thread for the
-/// same reason as [`cached`]. `None` means the scan is still running.
-pub fn cached_profiles() -> Option<&'static [Profile]> {
-    if let Some(list) = PROFILE_CACHE.get() {
-        return Some(list.as_slice());
+static GPU_CACHE: Mutex<GpuCache> = Mutex::new(GpuCache {
+    devices: None,
+    scan_started: false,
+    last_scan: None,
+});
+
+/// Cached GPU profiles (detailed info for the Lab) with background scanning.
+struct GpuProfileCache {
+    profiles: Option<Vec<Profile>>,
+    scan_started: bool,
+    last_scan: Option<Instant>,
+}
+
+static GPU_PROFILE_CACHE: Mutex<GpuProfileCache> = Mutex::new(GpuProfileCache {
+    profiles: None,
+    scan_started: false,
+    last_scan: None,
+});
+
+const GPU_SCAN_TTL: Duration = Duration::from_secs(30);
+
+/// The list for this launcher run, or `None` while the scan has not completed yet.
+/// First call does a synchronous scan (like the Mods page). Subsequent calls return
+/// cached result immediately; background rescan triggered after GPU_SCAN_TTL.
+pub fn cached() -> Option<&'static [Device]> {
+    let mut cache = GPU_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    // Check TTL and trigger background rescan BEFORE borrowing devices
+    let should_rescan = cache.devices.is_some()
+        && cache.last_scan.is_some_and(|last| last.elapsed() >= GPU_SCAN_TTL)
+        && !cache.scan_started;
+    if should_rescan {
+        start_background_scan(&mut cache);
     }
-    PROFILE_SCAN.call_once(|| {
-        std::thread::spawn(|| {
-            let _ = PROFILE_CACHE.set(profiles());
-        });
+    if let Some(devices) = cache.devices.as_ref() {
+        // SAFETY: We're returning a reference to a static cache that lives for the
+        // program duration. The cache is only ever appended to, never replaced.
+        return Some(unsafe { std::mem::transmute::<&[Device], &'static [Device]>(devices.as_slice()) });
+    }
+    // First call: do synchronous scan (like Mods page), then return result
+    let devices = devices();
+    cache.devices = Some(devices);
+    cache.last_scan = Some(Instant::now());
+    // SAFETY: We're returning a reference to a static cache that lives for the
+    // program duration. The cache is only ever appended to, never replaced.
+    Some(unsafe { std::mem::transmute::<&[Device], &'static [Device]>(cache.devices.as_ref().unwrap().as_slice()) })
+}
+
+/// The detailed list for the Lab, scanned on a background thread. `None` means
+/// the scan has not completed yet. First call does synchronous scan, then background rescans.
+pub fn cached_profiles() -> Option<&'static [Profile]> {
+    let mut cache = GPU_PROFILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    // Check TTL and trigger background rescan BEFORE borrowing profiles
+    let should_rescan = cache.profiles.is_some()
+        && cache.last_scan.is_some_and(|last| last.elapsed() >= GPU_SCAN_TTL)
+        && !cache.scan_started;
+    if should_rescan {
+        start_background_profile_scan(&mut cache);
+    }
+    if let Some(profiles) = cache.profiles.as_ref() {
+        return Some(unsafe { std::mem::transmute::<&[Profile], &'static [Profile]>(profiles.as_slice()) });
+    }
+    // First call: do synchronous scan
+    let profiles = profiles();
+    cache.profiles = Some(profiles);
+    cache.last_scan = Some(Instant::now());
+    // SAFETY: We're returning a reference to a static cache that lives for the
+    // program duration. The cache is only ever appended to, never replaced.
+    Some(unsafe { std::mem::transmute::<&[Profile], &'static [Profile]>(cache.profiles.as_ref().unwrap().as_slice()) })
+}
+
+fn start_background_scan(cache: &mut GpuCache) {
+    cache.scan_started = true;
+    std::thread::spawn(|| {
+        let devices = devices();
+        let mut guard = GPU_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.devices = Some(devices);
+        guard.scan_started = false;
+        guard.last_scan = Some(Instant::now());
     });
-    PROFILE_CACHE.get().map(Vec::as_slice)
+}
+
+fn start_background_profile_scan(cache: &mut GpuProfileCache) {
+    cache.scan_started = true;
+    std::thread::spawn(|| {
+        let profiles = profiles();
+        let mut guard = GPU_PROFILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.profiles = Some(profiles);
+        guard.scan_started = false;
+        guard.last_scan = Some(Instant::now());
+    });
 }
 
 /// For `--gpu-list`: render this list instead of scanning, so the Graphics page can be checked with a hybrid machine's two
 /// adapters on a PC that has one, or with no Vulkan device at all. Must run before the first `cached()`; `false` means the
 /// scan already owns the answer.
 pub fn set_for_capture(devices: Vec<Device>) -> bool {
-    CACHE.set(devices).is_ok()
+    let mut cache = GPU_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.devices = Some(devices);
+    cache.last_scan = Some(Instant::now());
+    true
 }
 
 #[cfg(windows)]
