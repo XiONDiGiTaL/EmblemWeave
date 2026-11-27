@@ -20,7 +20,8 @@
 // finalized, and are guarded against a page that disappears.
 //
 // Format. A job for an ASTC texture whose image exists makes its data in the image's format (Texture::image_format): the format was chosen from
-// the storage's content when the image was made, and a later content that would choose another one still goes into that image.
+// the storage's content when the image was made, and a later content that would choose another one still goes into that image. An image made
+// again (the residency restore, a retry) takes its format from the content, not from such a job (peek_entry_format).
 //
 // Transcodes. An ASTC texture without a cache entry (the GPU has no ASTC) is transcoded by the job itself, on one thread at below-normal priority, and
 // the result is written to the cache. A job in that state is not waited for: the render thread uploads a quick stand-in (preset 0, all threads, not

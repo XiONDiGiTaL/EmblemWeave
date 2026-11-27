@@ -1490,8 +1490,8 @@ NXTEST(download_array_with_partial_block_column) {
     teardown(r);
 }
 
-// The residency restore (tex_promote) makes the image again, in the format the storage's content asks for then: jobs follow the new one. The
-// first image is RGBA8 (the content's cache entry), the new one BC7.
+// The residency restore (tex_promote) makes the image again, in the format the storage's content asks for then: not in the old one a finished
+// job made its data in, and jobs follow the new one. The first image is RGBA8 (the content's cache entry), the new one BC7.
 NXTEST(texprep_rewrite_keeps_image_format_remade) {
     if (!astctest::transcoder_or_skip()) return;
     config_set("gfx", "astc_gpu", "off");
@@ -1529,9 +1529,15 @@ NXTEST(texprep_rewrite_keeps_image_format_remade) {
         nxrt::nvn::be::texprep::wait_idle_for_test();
         fill_astc_void_extent(x, 51, false);   // no entry for this content
         gpu::mark_texture_cpu_dirty(x.t.get());
+        gpu::texture_bound(x.t.get());
+        nxrt::nvn::be::texprep::wait_idle_for_test();   // its job's RGBA8 result is waiting when the image is made again
         bool remade = false;
-        gpu::run_frame_sync([&](Frame& f) { remade = gpu::tex_promote_for_test(x.t.get(), f); });
+        gpu::run_frame_sync([&](Frame& f) {
+            remade = gpu::tex_promote_for_test(x.t.get(), f);
+            vk = gpu::tex_vk_format(x.t.get());
+        });
         CHECK(remade);
+        CHECK_EQ(vk, VK_FORMAT_BC7_UNORM_BLOCK);
         nxrt::nvn::be::texprep::wait_idle_for_test();
         fill_astc_void_extent(x, 52, false);
         check_rewrite_settles(*r.dev, x, VK_FORMAT_BC7_UNORM_BLOCK);
@@ -1574,6 +1580,60 @@ NXTEST(texprep_bc1_image_caches_opaque_content_only) {
         fill_astc_void_extent(x, 61, false);
         check_rewrite_settles(*r.dev, x, VK_FORMAT_BC1_RGB_UNORM_BLOCK);
         CHECK_EQ(be::cache_entry_format(*x.t, true), VK_FORMAT_UNDEFINED);             // alpha: BC7 for a texture made from it
+    }
+    teardown(r);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// [nvn] tex_prep_verify compares a job's result with a preparation of its own, also when no cache entry holds the result (here RGBA8 data for
+// an RGBA8 image). The setting is read once per process, so this skips unless nothing started the background preparation before (run it by name).
+NXTEST(texprep_verifies_uncached_result) {
+    if (!astctest::transcoder_or_skip()) return;
+    config_set("gfx", "astc_gpu", "off");
+    config_set("nvn", "tex_prep_verify", "true");
+    struct Restore {
+        ~Restore() { config_set("gfx", "astc_gpu", "auto"); config_set("nvn", "tex_prep_verify", "false"); no_cache(); }
+    } restore;
+    Rig r;
+    if (!bring_up(r)) {
+        CHECK(false);
+        return;
+    }
+    if (!r.dev->features().bc || r.dev->features().astc_ldr) {
+        nxtest::skip("needs BC and no native ASTC (the stand-in path)");
+        teardown(r);
+        return;
+    }
+    const fs::path dir = new_cache_dir("verify");
+    {
+        namespace tp = nxrt::nvn::be::texprep;
+        Tex x;
+        CHECK(make_tex(x, info(NVN_TEXTURE_TARGET_2D, 256, 256, 1, 1, NVN_FORMAT_RGBA_ASTC_4x4)));
+        fill_astc_void_extent(x, 70, false);
+        be::PreparedTexture prep;
+        CHECK_MSG(be::prepare_texture(*x.t, be::TexCaps(), prep), prep.error);
+        fs::path file;
+        uint64_t key = 0;
+        CHECK_MSG(single_entry(dir, file, key), "expected one cache file after the transcode");
+        std::vector<uint8_t> rgba = rgba8_pattern(x.L);
+        write_entry(file, key, VK_FORMAT_R8G8B8A8_UNORM, tight_table(x.L, true), x.L.layers, rgba);
+        gpu::texture_bound(x.t.get());
+        tp::wait_idle_for_test();
+        gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(x.t.get(), f); });   // an RGBA8 image
+        const tp::Stats before = tp::stats();
+        fill_astc_void_extent(x, 71, false);   // no entry for this content
+        gpu::mark_texture_cpu_dirty(x.t.get());
+        gpu::texture_bound(x.t.get());
+        tp::wait_idle_for_test();
+        gpu::run_frame_sync([&](Frame& f) { gpu::tex_ensure_current(x.t.get(), f); });
+        const tp::Stats after = tp::stats();
+        if (after.verified == before.verified) {
+            nxtest::skip("needs [nvn] tex_prep_verify in effect");
+        } else {
+            CHECK_EQ(after.mismatches - before.mismatches, 0ull);
+            CHECK_EQ(after.hits - before.hits, 1ull);
+        }
     }
     teardown(r);
     std::error_code ec;

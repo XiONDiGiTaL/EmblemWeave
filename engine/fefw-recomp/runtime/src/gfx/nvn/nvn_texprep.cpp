@@ -37,6 +37,7 @@ struct Entry {
     uint64_t due_ns = 0;                     // Waiting: when the job may start
     Ref<Texture> keep;                       // alive while a job or a result exists
     uint32_t job_gen = 0;                    // prep_gen the job read the storage at
+    VkFormat job_forced = VK_FORMAT_UNDEFINED;   // the image format the job makes its data in (UNDEFINED: no image yet, the content decides)
     uint64_t src_hash = 0;                   // hash of the storage the job read (before and after its work: equal, or the result is dropped)
     uint64_t seq = 0;                        // identifies the queued job (bumped to cancel it)
     bool again = false;                      // written again while the job ran: queue another when it ends
@@ -306,6 +307,10 @@ void worker_main() {
         e.fmt_known = false;
         e.job_gen = t->prep_gen.load(std::memory_order_acquire);
         const uint32_t gen = e.job_gen;
+        // The image's format was fixed by what the storage held when it was made. Data in another one (BC1 for content that is opaque now,
+        // the format of a cache entry) cannot be uploaded into it: the stand-in stayed and the job was queued again at every use (#146).
+        const VkFormat forced = t->fmt && t->fmt->astc ? static_cast<VkFormat>(t->image_format.load(std::memory_order_acquire)) : VK_FORMAT_UNDEFINED;
+        e.job_forced = forced;
         lk.unlock();
         set_entry_format_hook(entry_hook, t);
 
@@ -319,9 +324,7 @@ void worker_main() {
             // [gfx] astc_gpu (nvn_astc_gpu.h): a texture without a cache entry leaves the job as its ASTC blocks (ok, PreparedTexture::gpu_astc) for the
             // GPU to transcode at the upload, so the slow pass below is not entered
             TexCaps jc = s.caps;
-            // The image's format was fixed by what the storage held when it was made. Data in another one (BC1 for content that is opaque now,
-            // the format of a cache entry) cannot be uploaded into it: the stand-in stayed and the job was queued again at every use (#146).
-            if (t->fmt->astc) jc.image_format = static_cast<VkFormat>(t->image_format.load(std::memory_order_acquire));
+            jc.image_format = forced;
             if (!gpu::astc_gpu_ready()) {   // its pipelines are still being built (seconds at a first start): a take does not wait for this job
                 {
                     std::lock_guard<std::mutex> sl(s.mu);
@@ -345,7 +348,7 @@ void worker_main() {
                 // without this it slept through the whole transcode (1.5-2 s render-thread stalls choosing body types at character creation).
                 s.cv_done.notify_all();
                 TexCaps full = s.caps;
-                full.image_format = jc.image_format;
+                full.image_format = forced;
                 full.cache_only = false;
                 full.encode_threads = 1;
                 const int prio = GetThreadPriority(GetCurrentThread());
@@ -589,6 +592,8 @@ bool peek_entry_format(Texture* t, VkFormat& entry) {
         auto it = s.map.find(t);
         if (it == s.map.end()) return false;
         Entry& e = it->second;
+        // A job that makes its data in an existing image's format says nothing about the format for a new one (tex_promote, a retry)
+        if (e.job_forced != VK_FORMAT_UNDEFINED) return false;
         if (e.st == Entry::Running && e.job_gen == t->prep_gen.load(std::memory_order_acquire)) {
             if (e.fmt_known) {          // the job has looked at the cache entry: its format is known before the job is done
                 entry = e.fmt_pub;
@@ -674,6 +679,7 @@ bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged, uint64_t* src_h
         // Done: usable when nothing was written since (generation) and the storage still holds the bytes the job read (content hash)
         bool good = e.job_gen == t->prep_gen.load(std::memory_order_acquire);
         const uint64_t want = e.src_hash;
+        const VkFormat forced = e.job_forced;
         std::unique_ptr<PreparedTexture> res = std::move(e.res);
         gfx::Buffer stage = e.stage;
         e.stage = gfx::Buffer{};
@@ -698,7 +704,8 @@ bool take(Texture* t, PreparedTexture& out, gfx::Buffer* staged, uint64_t* src_h
             if (s.verify && !out.gpu_astc) {   // (ASTC blocks for the GPU transcode: nothing made here to compare)
                 PreparedTexture fresh;
                 TexCaps vc = s.caps;
-                if (t->fmt->astc) vc.image_format = static_cast<VkFormat>(t->image_format.load(std::memory_order_acquire));
+                vc.image_format = forced;
+                vc.cache_only = false;   // not every result has a cache entry (the cache off, RGBA8, BC1 data with alpha)
                 const bool ok = prepare_texture(*t, vc, fresh);
                 uint64_t after = 0;
                 const bool still = hash_guarded(*t, after) && after == want;     // the game may be writing the storage right now: then there is nothing to compare

@@ -1183,11 +1183,12 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     }
     NXLOG_I(kTag, "texture %u: %s %ux%u, %u levels, %u layers%s: %.1f ms", t.id, bc7 ? "ASTC -> BC7" : bc1 ? "ASTC -> BC1" : "ASTC -> RGBA8",
             geo[0].w, geo[0].h, L.levels, L.layers, provisional ? " (quick stand-in, preset 0)" : "", ms_since(t0));
-    if (bc1_alpha_seen && g_bc1_alpha_misses.fetch_add(1) < 16)
+    if (bc1_alpha_seen && !bc1_unproven && g_bc1_alpha_misses.fetch_add(1) < 16)   // (an image that is BC1 takes content with alpha too)
         NXLOG_W(kTag, "texture %u: stored as BC1 but its ASTC decodes with alpha under 255 (alpha scan wrong?): drawn opaque", t.id);
 
-    // A BC1 entry says its content is opaque: a texture takes BC1 from it without a scan. A BC1 image gets whatever its storage holds now.
-    if (!cache_file.empty() && bc1_unproven && !astc_bc1_candidate(t, src_mem)) cache_file.clear();
+    // A BC1 entry says its content is opaque: a texture takes BC1 from it without a scan. Not written for data encoded from texels with alpha
+    // (a BC1 image takes them; or the storage changed after the scan), nor for content nothing has called opaque.
+    if (!cache_file.empty() && (bc1_alpha_seen || (bc1_unproven && !astc_bc1_candidate(t, src_mem)))) cache_file.clear();
     if (!cache_file.empty() && !cache_write(cache_file, key, out))
         NXLOG_W(kTag, "texture %u: could not write cache file %s", t.id, cache_file.c_str());
     if (upgrade_possible && !edit_make && !provisional) schedule_upgrade(t, src_mem, upgrade_key, upgrade_quality, cache_dir());   // the fast transcode serves now; the high preset is made behind
