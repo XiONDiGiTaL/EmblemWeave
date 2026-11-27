@@ -757,12 +757,16 @@ void provisional_uploaded(Texture* t) {
     auto it = s.map.find(t);
     if (it != s.map.end()) {
         Entry& e = it->second;
-        if (e.st == Entry::Done && e.job_gen == gen) {   // finished meanwhile: used at the next upload
+        const VkFormat cur = t->fmt && t->fmt->astc ? static_cast<VkFormat>(t->image_format.load(std::memory_order_acquire)) : VK_FORMAT_UNDEFINED;
+        if (e.st == Entry::Done && e.job_gen == gen && e.job_forced == cur) {   // finished meanwhile: used at the next upload
             t->cpu_dirty.store(true);
             gpu::pool_note_cpu_write(t);
             return;
         }
-        if (e.st == Entry::Running && e.job_gen == gen) return;                             // the worker marks the texture when it is done
+        if (e.st == Entry::Running && e.job_gen == gen) {
+            if (e.job_forced != cur) e.again = true;   // image format changed while the job ran (e.g. BC5 remade): run again in the new format
+            return;
+        }
         if (e.st == Entry::Queued || e.st == Entry::Waiting) return;
     }
     // the stand-in stays until this job is done: it goes first and is not dropped for the budget

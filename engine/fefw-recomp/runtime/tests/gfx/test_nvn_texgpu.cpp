@@ -1547,6 +1547,57 @@ NXTEST(texprep_rewrite_keeps_image_format_remade) {
     fs::remove_all(dir, ec);
 }
 
+// A BC5 image whose storage is rewritten with uncached ASTC content (#177): the image is remade in a format chosen from the new content
+// (here BC7) and uploaded with the new data instead of being cleared to zero.
+NXTEST(bc5_rewrite_with_uncached_content_remakes_image) {
+    if (!astctest::transcoder_or_skip()) return;
+    config_set("gfx", "astc_gpu", "off");
+    struct Restore { ~Restore() { config_set("gfx", "astc_gpu", "auto"); no_cache(); } } restore;
+    Rig r;
+    if (!bring_up(r)) {
+        CHECK(false);
+        return;
+    }
+    if (!r.dev->features().bc || r.dev->features().astc_ldr) {
+        nxtest::skip("needs BC and no native ASTC (the stand-in path)");
+        teardown(r);
+        return;
+    }
+    const fs::path dir = new_cache_dir("bc5_rewrite");
+    {
+        Tex x;
+        CHECK(make_tex(x, info(NVN_TEXTURE_TARGET_2D, 256, 256, 1, 1, NVN_FORMAT_RGBA_ASTC_4x4)));
+        fill_astc_void_extent(x, 55, false);
+        be::PreparedTexture prep;
+        CHECK_MSG(be::prepare_texture(*x.t, be::TexCaps(), prep), prep.error);
+        fs::path file;
+        uint64_t key = 0;
+        CHECK_MSG(single_entry(dir, file, key), "expected one cache file after the transcode");
+        const std::vector<be::PreparedLevel> table = tight_table(x.L, false);
+        std::vector<uint8_t> bc5(static_cast<size_t>(table.back().offset + table.back().size), 0);
+        fill_random(bc5, 902);
+        write_entry(file, key, VK_FORMAT_BC5_UNORM_BLOCK, table, x.L.layers, bc5);
+        gpu::texture_bound(x.t.get());
+        nxrt::nvn::be::texprep::wait_idle_for_test();
+        VkFormat vk = VK_FORMAT_UNDEFINED;
+        gpu::run_frame_sync([&](Frame& f) {
+            gpu::tex_ensure_current(x.t.get(), f);
+            vk = gpu::tex_vk_format(x.t.get());
+        });
+        CHECK_EQ(vk, VK_FORMAT_BC5_UNORM_BLOCK);
+        nxrt::nvn::be::texprep::wait_idle_for_test();
+        // Rewrite the storage with uncached content (also bind it first so a background job sees the old BC5 image_format).
+        fill_astc_void_extent(x, 56, false);
+        gpu::mark_texture_cpu_dirty(x.t.get());
+        gpu::texture_bound(x.t.get());
+        nxrt::nvn::be::texprep::wait_idle_for_test();
+        check_rewrite_settles(*r.dev, x, VK_FORMAT_BC7_UNORM_BLOCK);
+    }
+    teardown(r);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
 // A BC1 image takes later content with alpha too, as BC1. That data must not become a cache entry: a BC1 entry says the content is opaque, and
 // a texture with the same content would be given a BC1 image without an alpha scan. Run by name (as the test above this one).
 NXTEST(texprep_bc1_image_caches_opaque_content_only) {
