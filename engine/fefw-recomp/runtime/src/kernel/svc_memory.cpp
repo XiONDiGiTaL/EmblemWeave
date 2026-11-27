@@ -816,4 +816,12 @@ void svc_memory_reset_for_tests() {
     g_heap_cur = 0;
 }
 
+namespace kernel {
+
+void with_shared_memory_host(const KSharedMemory& s, const std::function<void(uint64_t host)>& fn) {
+    std::lock_guard lk(g_mu);   // map_shared_memory and unmap_shared_memory change s.host and release views under it
+    fn(s.host);
+}
+
+}  // namespace kernel
 }  // namespace nxrt

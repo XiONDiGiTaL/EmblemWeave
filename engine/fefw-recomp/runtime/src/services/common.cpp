@@ -127,6 +127,10 @@ ServiceSharedMemory::ServiceSharedMemory(uint64_t size, const char* name) {
 
 uint32_t ServiceSharedMemory::new_handle() const { return obj_ ? kernel::handle_add(obj_) : 0; }
 
+void ServiceSharedMemory::with_host(const std::function<void(uint64_t host)>& fn) const {
+    if (obj_) kernel::with_shared_memory_host(*obj_, fn);
+}
+
 // ---- title profile ---------------------------------------------------------------------------------------------------------------
 
 namespace {

@@ -6,6 +6,7 @@
 // 0x70C74, TimeZoneConversionFailed (903) = 0x70E74, TimeZoneNotFound (989) = 0x7BA74.
 // Tests whose name ends in `_needs_tz` depend on src/services/timezone.cpp (tz::to_calendar / tz::to_posix); on a branch where that
 // file is still the placeholder they fail for that reason only.
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -385,6 +386,66 @@ NXTEST(svc_time_shared_memory_ignores_small_clock_movement) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));    // at least two checks
     std::memcpy(&after, base + 0x38, 4);
     CHECK_EQ(after, before);
+    nxrt::services::reset_all();
+}
+
+NXTEST(svc_time_shared_memory_offset_ignores_write_phase) {
+    nxsvc::Env env;
+    nxsvc::Session st = nxsvc::connect("time:a");
+    const uint8_t* base = shm_of(st);
+    REQUIRE(base != nullptr);
+    // Put the host clock's lead over the steady clock half way between two seconds.
+    const int64_t host_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t lead = host_ns - (raw_ticks_ns() + adjust_of(live_slot(base, 0xD0, 4, 0x38)).base);
+    const int64_t skew = 500000000 - lead % 1000000000;
+    nxrt::services::time_set_host_skew_for_test(skew);
+    // Writes spread over a second (each flag change rewrites the shared memory) all publish that lead rounded down.
+    for (int i = 0; i < 10; ++i) {
+        REQUIRE(st.call(101, nxsvc::Args().u8(1)).ok());
+        int64_t offset = 0;
+        std::memcpy(&offset, live_slot(base, 0x80, 4, 0x20), 8);   // network clock: no offset of its own
+        CHECK_EQ(offset, (lead + skew) / 1000000000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    nxrt::services::reset_all();
+}
+
+NXTEST(svc_time_shared_memory_writes_survive_remapping) {
+    nxsvc::Env env;
+    nxsvc::Session st = nxsvc::connect("time:a");
+    nxsvc::Reply handle = st.call(20);
+    REQUIRE(handle.ok() && handle.copy.size() == 1);
+    auto obj = kernel::handle_as<kernel::KSharedMemory>(handle.copy[0]);
+    REQUIRE(obj != nullptr);
+    const uint64_t view = mem::kAliasBase + 0x50000;
+    const auto shm_svc = [&](uint32_t num) {
+        ::Ctx c{};
+        c.x[0] = handle.copy[0];
+        c.x[1] = view;
+        c.x[2] = 0x1000;
+        c.x[3] = 1;
+        svc_dispatch(&c, num);
+        return static_cast<uint32_t>(c.x[0]);
+    };
+    // The guest maps and unmaps while another thread makes the service write: no write may hit a released view or be left behind.
+    std::atomic<bool> stop{false};
+    std::thread guest([&] {
+        while (!stop.load()) {
+            if (shm_svc(0x13) != 0 || shm_svc(0x14) != 0) break;
+        }
+    });
+    int lost = 0;
+    for (int i = 0; i < 20000; ++i) {
+        const uint8_t on = static_cast<uint8_t>(i & 1);
+        st.call(101, nxsvc::Args().u8(on));
+        kernel::with_shared_memory_host(*obj, [&](uint64_t host) {
+            if (*live_slot(reinterpret_cast<const uint8_t*>(host), 0xC8, 0, 1) != on) ++lost;
+        });
+    }
+    stop = true;
+    guest.join();
+    CHECK_EQ(lost, 0);
     nxrt::services::reset_all();
 }
 

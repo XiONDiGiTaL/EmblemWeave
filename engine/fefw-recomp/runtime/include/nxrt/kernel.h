@@ -5,6 +5,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -71,6 +72,9 @@ struct KSharedMemory : KObject {
     std::string name;
     ObjType type() const override { return ObjType::SharedMemory; }
 };
+// Runs fn on s.host while MapSharedMemory and UnmapSharedMemory are held off, so the memory is neither moved nor released under it. For
+// service threads that write while the guest runs. fn must not call a memory SVC. (src/kernel/svc_memory.cpp)
+void with_shared_memory_host(const KSharedMemory& s, const std::function<void(uint64_t host)>& fn);
 
 struct KTransferMemory : KObject {
     uint64_t addr = 0, size = 0;

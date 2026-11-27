@@ -14,6 +14,7 @@
 //   * buffers: ipc::Request::in_buf(n) / out_buf(n) already pick A/X and B/C; pointers are host pointers.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -71,12 +72,15 @@ private:
 
 // Shared memory handed to the guest (hid, pl:u, the audio renderer's work buffer ...). `host()` is where the service writes: it is the
 // kernel-region buffer until the guest maps the object (MapSharedMemory), and the guest's view afterwards (the kernel tracks that in
-// KSharedMemory::host), so always write through host(), never through a pointer cached at creation.
+// KSharedMemory::host), so always write through host(), never through a pointer cached at creation. A thread that writes while the guest
+// may be mapping or unmapping the object uses with_host().
 class ServiceSharedMemory {
 public:
     explicit ServiceSharedMemory(uint64_t size, const char* name = "");
     uint64_t host() const { return obj_ ? obj_->host : 0; }
     uint64_t size() const { return obj_ ? obj_->size : 0; }
+    // fn(host()) with the memory held in place (kernel::with_shared_memory_host); not called when there is no memory.
+    void with_host(const std::function<void(uint64_t host)>& fn) const;
     uint32_t new_handle() const;            // a new handle onto the same object (each handle is closed by the guest)
     bool ok() const { return obj_ != nullptr; }
 
