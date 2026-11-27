@@ -22,6 +22,8 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 #if defined(_WIN32)
 #include <windows.h>
@@ -540,39 +542,63 @@ constexpr const char* kOutOfMemoryHint =
 bool g_oom_hinted = false;   // under g_heap_mu: the hint is ours to clear
 }  // namespace
 
+// Lock order: the write tracker's scope is taken before g_heap_mu, as protect() does. The scope waits for an ImportFreeze over the range,
+// and an ImportFreeze holds its slot while it reads the heap's page table (heap_rw_pages, under g_heap_mu): waiting with the lock held,
+// neither would end. The commit-limit retries sleep without the lock too, so the page table stays readable for those seconds.
 bool heap_commit(uint64_t offset, uint64_t size) {
-    std::lock_guard lk(g_heap_mu);
-    if (!g_heap_size) {
-        NXLOG_W(kTag, "heap_commit: no heap");
-        return false;
+    uint64_t start = 0, end = 0;
+    {
+        std::lock_guard lk(g_heap_mu);
+        if (!g_heap_size) {
+            NXLOG_W(kTag, "heap_commit: no heap");
+            return false;
+        }
+        if (size == 0) return true;
+        if (offset > g_heap_size || size > g_heap_size - offset) {
+            NXLOG_E(kTag, "heap_commit: [%llx, +%llx) is outside the %llu MiB section",
+                    static_cast<unsigned long long>(offset), static_cast<unsigned long long>(size),
+                    static_cast<unsigned long long>(g_heap_size >> 20));
+            return false;
+        }
+        start = offset & ~(kPage - 1);
+        end = align_up(offset + size, kPage);
     }
-    if (size == 0) return true;
-    if (offset > g_heap_size || size > g_heap_size - offset) {
-        NXLOG_E(kTag, "heap_commit: [%llx, +%llx) is outside the %llu MiB section",
-                static_cast<unsigned long long>(offset), static_cast<unsigned long long>(size),
-                static_cast<unsigned long long>(g_heap_size >> 20));
-        return false;
-    }
-    const uint64_t start = offset & ~(kPage - 1);
-    const uint64_t end = align_up(offset + size, kPage);
     const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);   // MEM_COMMIT makes committed pages read-write again
+    std::unique_lock lk(g_heap_mu);
+    if (!g_heap_size || end > g_heap_size) return false;   // the heap went away meanwhile
     // The game sets a heap of about 11 GB at boot and all of it is committed here. When the system's commit charge is near its limit (just after
     // the launcher's setup, or with a small page file) this fails, the game turns the result into nn::os OutOfMemory (0x1003) and calls svcBreak.
     // The system grows a page file after such a failure and other processes give memory back, so wait a little and try again.
-    bool ok = nxrt::platform::commit(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start));
-    if (ok) ok = nxrt::platform::protect(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+    // Windows: only for the out-of-commit errors (others will not change by waiting). The lock is let go while sleeping.
+    const auto try_commit = [&] {
+        bool done = nxrt::platform::commit(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start));
+#ifdef _WIN32
+        const DWORD err = done ? 0 : GetLastError();   // platform::commit is VirtualAlloc here: its error is still the last one
+#endif
+        if (done) done = nxrt::platform::protect(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+#ifdef _WIN32
+        return std::make_pair(done, err);
+#else
+        return std::make_pair(done, 0ul);
+#endif
+    };
+    auto [ok, e] = try_commit();
     for (int attempt = 1; !ok && attempt <= 40; ++attempt) {
+#ifdef _WIN32
+        if (e != ERROR_COMMITMENT_LIMIT && e != ERROR_NOT_ENOUGH_MEMORY && e != ERROR_COMMITMENT_MINIMUM) break;
+#endif
         if (attempt == 1)
-            NXLOG_W(kTag, "heap_commit [%llx, +%llx): the system is out of commit; waiting up to 10 s for the page file to grow",
-                    static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start));
+            NXLOG_W(kTag, "heap_commit [%llx, +%llx): the system is out of commit (error %lu); waiting up to 10 s for the page file to grow",
+                    static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start), static_cast<unsigned long>(e));
+        lk.unlock();
         nxrt::platform::sleep_ns(250000000);  // 250 ms
-        ok = nxrt::platform::commit(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start));
-        if (ok) ok = nxrt::platform::protect(reinterpret_cast<void*>(kHeapBase + start), static_cast<std::size_t>(end - start), nxrt::platform::PROT_READ | nxrt::platform::PROT_WRITE);
+        lk.lock();
+        if (!g_heap_size || end > g_heap_size) return false;
+        std::tie(ok, e) = try_commit();
         if (ok) NXLOG_I(kTag, "heap_commit: committed after %d retries", attempt);
     }
     if (!ok) {
 #ifdef _WIN32
-        const DWORD e = GetLastError();   // platform::commit is VirtualAlloc here: its error is still the last one
         NXLOG_E(kTag, "heap_commit [%llx, +%llx): platform::commit failed, error %lu",
                 static_cast<unsigned long long>(start), static_cast<unsigned long long>(end - start), static_cast<unsigned long>(e));
         if (e == ERROR_COMMITMENT_LIMIT || e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_COMMITMENT_MINIMUM) {
@@ -601,20 +627,25 @@ bool heap_commit(uint64_t offset, uint64_t size) {
 }
 
 bool heap_decommit(uint64_t offset, uint64_t size) {
-    std::lock_guard lk(g_heap_mu);
-    if (!g_heap_size) return false;
-    if (size == 0) return true;
-    if (offset > g_heap_size || size > g_heap_size - offset) {
-        NXLOG_E(kTag, "heap_decommit: [%llx, +%llx) is outside the section", static_cast<unsigned long long>(offset),
-                static_cast<unsigned long long>(size));
-        return false;
+    uint64_t start = 0, end = 0;
+    {
+        std::lock_guard lk(g_heap_mu);
+        if (!g_heap_size) return false;
+        if (size == 0) return true;
+        if (offset > g_heap_size || size > g_heap_size - offset) {
+            NXLOG_E(kTag, "heap_decommit: [%llx, +%llx) is outside the section", static_cast<unsigned long long>(offset),
+                    static_cast<unsigned long long>(size));
+            return false;
+        }
+        start = offset & ~(kPage - 1);
+        end = align_up(offset + size, kPage);
     }
+    const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);   // before g_heap_mu, as in heap_commit
+    std::lock_guard lk(g_heap_mu);
+    if (!g_heap_size || end > g_heap_size) return false;   // the heap went away meanwhile
     // For section views, decommit is not supported (ERROR_INVALID_PARAMETER), so the pages are made
     // PAGE_NOACCESS through the primary view instead: guest accesses fault, the host pages stay charged to the section
     // (as in smo-recomp's SetMemoryHeapSize), and the alias views still show the section's contents.
-    const uint64_t start = offset & ~(kPage - 1);
-    const uint64_t end = align_up(offset + size, kPage);
-    const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);
     for (uint64_t p = start / kPage; p < end / kPage;) {
         if (!bit_test(p)) {
             p++;
