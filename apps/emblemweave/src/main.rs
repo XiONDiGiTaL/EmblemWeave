@@ -223,6 +223,8 @@ pub struct App {
     pub show_activity: bool,
     /// The one Overview panel open from the header or a status button.
     pub overview_popup: Option<crate::pages::overview::Popup>,
+    /// The next Build changes popup starts its scroll body at the newest note, not where the last visit stopped.
+    pub overview_popup_fresh: bool,
     /// Keep the hover preview open while the pointer crosses the gap between
     /// the status-bar hub and the panel. This is transient UI state, never
     /// written to config.
@@ -376,6 +378,7 @@ impl App {
             tour_step: 0,
             show_activity: false,
             overview_popup: None,
+            overview_popup_fresh: false,
             activity_hover_until: None,
             nav_last: None,
             minimize_after_play: false,

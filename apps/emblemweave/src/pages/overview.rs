@@ -154,6 +154,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                     .clicked()
                                 {
                                     app.overview_popup = Some(Popup::BuildChanges);
+                                    app.overview_popup_fresh = true;
                                 }
                             }
                         }
@@ -458,6 +459,12 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
     let freshness = app.stale_build_cache.clone().or_else(crate::engine::build_freshness);
     let built = freshness.as_ref().and_then(|f| f.built.clone());
     let changes = (kind == Popup::BuildChanges).then(|| crate::build_notes::current(built.as_deref()));
+    // Rebuild reads the same two inputs the Play card needs. A ready game with its data paths removed must not offer a
+    // button that closes the popup only to warn that the build could not start.
+    let can_rebuild = !app.busy()
+        && crate::engine::ready()
+        && app.game.exefs.is_some()
+        && (app.game.nup.is_some() || app.game.romfs.is_some());
     let (title, subtitle) = match kind {
         Popup::WhatsNew => {
             let update = match &app.update.state {
@@ -501,109 +508,165 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
         }
     };
     let mut close = false;
-    egui::Area::new(egui::Id::new(("overview-popup", kind as u8)))
+    let area = egui::Area::new(egui::Id::new(("overview-popup", kind as u8)))
         .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-18.0, 54.0))
         .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::alpha(p.surface, 238))
-                .stroke(egui::Stroke::new(1.0_f32, p.line_strong))
-                .corner_radius(egui::CornerRadius::same(14))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 10],
-                    blur: 28,
-                    spread: 0,
-                    color: Color32::from_black_alpha(150),
-                })
-                .show(ui, |ui| {
-                    if kind == Popup::BuildChanges {
-                        ui.set_min_width(420.0);
-                        ui.set_max_width(440.0);
-                    } else {
-                        ui.set_min_width(280.0);
-                    }
-                    ui.vertical(|ui| {
-                        ui.add_space(theme::SPACE_S);
-                        ui.label(
-                            RichText::new(title)
-                                .font(theme::semibold(15.0))
-                                .color(p.ink),
-                        );
+        // This is a notice, not a tool window: dragging it would move the comparison away from the edge it belongs to
+        // and can leave it half off-screen. The other popups keep their existing behaviour.
+        .movable(kind != Popup::BuildChanges);
+    area.show(ctx, |ui| {
+        let frame = egui::Frame::new()
+            .fill(theme::alpha(p.surface, 238))
+            .stroke(egui::Stroke::new(1.0_f32, p.line_strong))
+            .corner_radius(egui::CornerRadius::same(14))
+            .shadow(egui::epaint::Shadow {
+                offset: [0, 10],
+                blur: 28,
+                spread: 0,
+                color: Color32::from_black_alpha(150),
+            });
+        // The comparison has a scroll body and two footer buttons; text flush against the rounded edge reads as
+        // clipped and puts the last words under the scrollbar. Give it the same inset as the page cards. The body is
+        // 408 wide, so the frame plus 16 on each side stays at the intended 440.
+        let frame = if kind == Popup::BuildChanges {
+            frame.inner_margin(egui::Margin::symmetric(16, 14))
+        } else {
+            frame
+        };
+        frame
+            .show(ui, |ui| {
+                if kind == Popup::BuildChanges {
+                    ui.set_width(408.0);
+                } else {
+                    ui.set_min_width(280.0);
+                }
+                ui.vertical(|ui| {
+                    ui.add_space(theme::SPACE_S);
+                    ui.label(
+                        RichText::new(title)
+                            .font(theme::semibold(15.0))
+                            .color(p.ink),
+                    );
+                    ui.add_space(theme::SPACE_XS);
+                    ui.add(egui::Label::new(RichText::new(subtitle).size(13.0).color(p.body)).wrap());
+                    if let Some(changes) = &changes {
                         ui.add_space(theme::SPACE_XS);
-                        ui.label(RichText::new(subtitle).size(13.0).color(p.body));
-                        if let Some(changes) = &changes {
-                            ui.add_space(theme::SPACE_S);
-                            egui::ScrollArea::vertical()
-                                .id_salt("build-changes")
-                                .max_height(crate::widgets::list_height(ui, 0.42).max(260.0))
-                                .show(ui, |ui| {
-                                    if changes.notes.is_empty() {
-                                        ui.label(
-                                            RichText::new(
-                                                "The shipped release notes for this version were not found. A rebuild still compiles the engine sources that came with this launcher.",
-                                            )
-                                            .size(12.5)
-                                            .color(p.muted),
-                                        );
-                                    }
-                                    for note in &changes.notes {
-                                        ui.label(
-                                            RichText::new(format!("EmblemWeave {}", note.version))
-                                                .font(theme::semibold(13.0))
-                                                .color(p.accent_hi),
-                                        );
-                                        if !note.summary.is_empty() {
-                                            ui.label(RichText::new(&note.summary).size(12.0).color(p.muted));
-                                        }
-                                        for point in &note.points {
-                                            ui.horizontal_top(|ui| {
-                                                ui.label(RichText::new("•").size(12.5).color(p.accent));
-                                                ui.add(
-                                                    egui::Label::new(RichText::new(point).size(12.5).color(p.body))
-                                                        .wrap(),
-                                                );
-                                            });
-                                        }
-                                        ui.add_space(theme::SPACE_S);
-                                    }
-                                    if changes.older > 0 {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "Plus {} earlier release(s). A rebuild compiles all of them, not only the notes shown.",
-                                                changes.older
-                                            ))
-                                            .size(11.5)
-                                            .color(p.muted),
-                                        );
-                                    }
-                                });
+                        let rule = ui.available_rect_before_wrap();
+                        ui.painter().hline(rule.x_range(), rule.top(), egui::Stroke::new(1.0_f32, p.line));
+                        ui.add_space(theme::SPACE_S);
+                        // egui's default scrollbar is a 2 px dormant line that nearly disappears against this
+                        // surface. A solid, accent-coloured bar makes the scrollable body legible at a glance.
+                        let style = ui.style_mut();
+                        style.spacing.scroll.floating = false;
+                        style.spacing.scroll.bar_width = 8.0;
+                        style.spacing.scroll.bar_inner_margin = 6.0;
+                        style.spacing.scroll.bar_outer_margin = 0.0;
+                        style.spacing.scroll.foreground_color = true;
+                        style.visuals.widgets.inactive.fg_stroke.color = p.accent;
+                        style.visuals.widgets.hovered.fg_stroke.color = p.accent_hi;
+                        style.visuals.widgets.active.fg_stroke.color = p.ink;
+                        let mut body = egui::ScrollArea::vertical()
+                            .id_salt("build-changes")
+                            .auto_shrink([false, true])
+                            // A clipped sentence at the fold without a bar reads as truncation. With the solid style
+                            // above, "when needed" is enough to keep the affordance visible over the body.
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                            // Leave room for the footer: a body sized to 42% of the window ran under the buttons on a
+                            // 900 px window. A third still shows several releases and always scrolls the rest.
+                            .max_height(crate::widgets::list_height(ui, 0.34).max(220.0));
+                        if app.overview_popup_fresh {
+                            body = body.vertical_scroll_offset(0.0);
                         }
-                        ui.add_space(theme::SPACE_M);
-                        ui.horizontal(|ui| {
-                            if widgets::button(ui, &p, "Close", true).clicked() {
-                                close = true;
+                        body.show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if changes.notes.is_empty() {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(
+                                            "The shipped release notes for this version were not found. A rebuild still compiles the engine sources that came with this launcher.",
+                                        )
+                                        .size(12.5)
+                                        .color(p.muted),
+                                    )
+                                    .wrap(),
+                                );
                             }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if kind == Popup::BuildChanges {
-                                    if widgets::primary_button(ui, &p, "Rebuild now", !app.busy() && crate::engine::ready()).clicked() {
-                                        app.start(JobKind::Engine);
-                                        close = true;
-                                    }
-                                } else if widgets::button(ui, &p, "Open page", true).clicked() {
-                                    match kind {
-                                        Popup::WhatsNew => app.page = Page::About,
-                                        Popup::QuickHelp => app.page = Page::Troubleshoot,
-                                        Popup::GameStatus => app.page = Page::Overview,
-                                        Popup::BuildStatus => app.page = Page::Recompile,
-                                        Popup::BuildChanges => {}
-                                        Popup::SetupGuide => app.page = Page::Setup,
-                                    }
+                            for note in &changes.notes {
+                                ui.label(
+                                    RichText::new(format!("EmblemWeave {}", note.version))
+                                        .font(theme::semibold(13.0))
+                                        .color(p.accent_hi),
+                                );
+                                if !note.summary.is_empty() {
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&note.summary).size(12.0).color(p.muted))
+                                            .wrap(),
+                                    );
+                                }
+                                for point in &note.points {
+                                    ui.horizontal_top(|ui| {
+                                        ui.label(RichText::new("•").size(12.5).color(p.accent));
+                                        ui.add(
+                                            egui::Label::new(RichText::new(point).size(12.5).color(p.body))
+                                                .wrap(),
+                                        );
+                                    });
+                                }
+                                ui.add_space(theme::SPACE_S);
+                            }
+                            if changes.older > 0 {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "Plus {} earlier release(s). A rebuild compiles all of them, not only the notes shown.",
+                                            changes.older
+                                        ))
+                                        .size(11.5)
+                                        .color(p.muted),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                        });
+                        app.overview_popup_fresh = false;
+                    }
+                    ui.add_space(theme::SPACE_S);
+                    if kind == Popup::BuildChanges {
+                        let rule = ui.available_rect_before_wrap();
+                        ui.painter().hline(rule.x_range(), rule.top(), egui::Stroke::new(1.0_f32, p.line));
+                        ui.add_space(theme::SPACE_XS);
+                    }
+                    ui.horizontal(|ui| {
+                        if widgets::button(ui, &p, "Close", true).clicked() {
+                            close = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if kind == Popup::BuildChanges {
+                                let rebuild = widgets::primary_button(ui, &p, "Rebuild now", can_rebuild)
+                                    .on_disabled_hover_text(if app.busy() {
+                                        "Wait for the current job to finish"
+                                    } else {
+                                        "Choose the game data on Game Setup before rebuilding"
+                                    });
+                                if rebuild.clicked() {
+                                    app.start(JobKind::Engine);
                                     close = true;
                                 }
-                            });
+                            } else if widgets::button(ui, &p, "Open page", true).clicked() {
+                                match kind {
+                                    Popup::WhatsNew => app.page = Page::About,
+                                    Popup::QuickHelp => app.page = Page::Troubleshoot,
+                                    Popup::GameStatus => app.page = Page::Overview,
+                                    Popup::BuildStatus => app.page = Page::Recompile,
+                                    Popup::BuildChanges => {}
+                                    Popup::SetupGuide => app.page = Page::Setup,
+                                }
+                                close = true;
+                            }
                         });
                     });
                 });
+            });
         });
     if close {
         app.overview_popup = None;
