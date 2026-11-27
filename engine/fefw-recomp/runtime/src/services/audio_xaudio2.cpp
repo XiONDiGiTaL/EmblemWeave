@@ -326,10 +326,6 @@ void XAudio2Sink::close_device() {
         started_.store(false);
         source_->Stop(0);
         source_->FlushSourceBuffers();
-        // DestroyVoice waits for the audio thread to leave the callbacks.
-        std::lock_guard<std::mutex> vl(voice_mu_);
-        source_->DestroyVoice();
-        source_ = nullptr;
     }
     teardown();
     std::lock_guard<std::mutex> lk(mu_);
@@ -340,7 +336,11 @@ void XAudio2Sink::close_device() {
 }
 
 void XAudio2Sink::teardown() {
-    if (source_) {   // open_device failing after CreateSourceVoice: the voice would outlive its engine and be used by submit/stats
+    // Stop the engine before destroying voices or releasing it: under Wine/Proton (FAudio) with a broken or missing output sink,
+    // tearing down an active engine can race with its audio thread (issue #44).
+    if (engine_) engine_->StopEngine();
+    if (source_) {
+        // DestroyVoice waits for the audio thread to leave the callbacks.
         std::lock_guard<std::mutex> vl(voice_mu_);
         source_->DestroyVoice();
         source_ = nullptr;
