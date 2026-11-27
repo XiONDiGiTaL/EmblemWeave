@@ -66,7 +66,7 @@ int g_async = -1;                          // -1: not read yet
 // and the start-up settings dump (tag "config") are never held back.
 int g_repeat_limit = -1;
 struct Site {
-    long long window_start = 0;     // QPC
+    long long window_start = 0;     // platform::now_ns()
     unsigned lines = 0, dropped = 0;
     const char* tag = nullptr;
 };
@@ -332,17 +332,16 @@ void logv(LogLevel l, const char* tag, const char* fmt, va_list ap) {
     std::string note;   // a repeat-limit summary that goes before this line
     // the start-up settings dump ("config" lines, all from one format) is always kept whole
     if (g_repeat_limit > 0 && li > static_cast<int>(LogLevel::Warn) && fmt && !(tag && std::strcmp(tag, "config") == 0)) {
-        LARGE_INTEGER now{};
-        QueryPerformanceCounter(&now);
+        const long long now = platform::now_ns();
         Site& st = g_sites[fmt];
-        if (!st.lines || now.QuadPart - st.window_start >= 10 * g_freq) {
+        if (!st.lines || now - st.window_start >= 10'000'000'000ll) {
             if (st.dropped) {
                 char b[200];
                 std::snprintf(b, sizeof b, "log: %u more lines from %s's \"%.60s\" in 10 s were left out ([log] repeat_limit = %d)", st.dropped,
                               st.tag ? st.tag : "?", fmt, g_repeat_limit);
                 note = b;
             }
-            st.window_start = now.QuadPart;
+            st.window_start = now;
             st.lines = 0;
             st.dropped = 0;
             st.tag = tag;
