@@ -474,8 +474,10 @@ SDL_hid_device* g_hid_steam = nullptr;
 SDL_Thread* g_steam_thread = nullptr;
 std::atomic<bool> g_steam_run{false};
 
-// Xbox Direct state
+// Xbox Direct state. The store is host-owned and not thread-safe: every push happens on the game's thread under g_eng_mu,
+// while the worker only asks the engine for the settled values at burst end. push() rejects a null store (RENHDRUM_ERR_NULL_PTR).
 void* g_xbox_direct = nullptr;
+void* g_xbox_store = nullptr;
 
 // Adaptive trigger state (DualSense)
 void* g_tri_trigger_l = nullptr;
@@ -670,11 +672,12 @@ bool send_motors(const uint16_t* m, uint32_t grip_ms, uint32_t trigger_ms);
 void push_locked(int64_t t, int side, float al, float fl, float ah, float fh) {
     if (g_engine) api().push_half(g_engine, t, side == 1, al, fl, ah, fh);
     else if (g_xbox) api().xb_push(g_xbox, t, side == 1, al, fl, ah, fh);
-    else if (g_xbox_direct) {
-        uint16_t motors[4];
-        // Xbox Direct takes low_amp and high_amp (no frequencies); triggers = true for controllers with trigger motors
-        int r = api().xb_direct_push(g_xbox_direct, nullptr, t, side == 1, al, ah, true, motors);
-        if (r == 1) send_motors(motors, 2000, 2000);
+    else if (g_xbox_direct && g_xbox_store) {
+        uint16_t motors[4] = {};
+        // Xbox Direct takes low_amp and high_amp (no frequencies); triggers = true for controllers with trigger motors.
+        // A negative return is an error, not a send: only a positive mask holds motor values.
+        const int r = api().xb_direct_push(g_xbox_direct, g_xbox_store, t, side == 1, al, ah, true, motors);
+        if (r > 0) send_motors(motors, 2000, 2000);
     }
     else if (g_pro2) api().pro2_push_half(g_pro2, t, side == 1, al, fl, ah, fh);
     else if (g_dsp) api().dsp_set_half(g_dsp, side == 1, al, fl, ah, fh);
@@ -905,13 +908,15 @@ int worker(void*) {
             }
             if (be == Backend::Xbox && g_xbox) xb_ready = api().xb_tick(g_xbox, t, motors);
             if (be == Backend::XboxDirect && g_xbox_direct) {
-                // Xbox Direct uses the store for gain/low_boost - we pass a null store (uses defaults)
-                // triggers = true since XboxDirect is for controllers with trigger motors
-                const bool has_triggers = true;
-                xb_direct_ready = api().xb_direct_push(g_xbox_direct, nullptr, t, false, 0.f, 0.f, has_triggers, xb_direct_motors);
-                // Also tick for settled values when bursts end
-                int tick_ready = api().xb_direct_tick(g_xbox_direct, t, has_triggers, xb_direct_motors);
-                if (tick_ready > 0) xb_direct_ready |= tick_ready;
+                // Only the burst-end settle belongs here: the game's own values arrive through push_locked. Pushing zeros in this
+                // loop (as it used to) cancelled every value the game had just sent, and the tick that followed zeroed the very
+                // motor buffer the loop was about to hand to SDL.
+                uint16_t settled[4] = {};
+                const int tick_ready = api().xb_direct_tick(g_xbox_direct, t, true, settled);
+                if (tick_ready > 0) {
+                    xb_direct_ready = tick_ready;
+                    std::memcpy(xb_direct_motors, settled, sizeof(settled));
+                }
             }
             if (be == Backend::Switch2Pro && g_pro2) {
                 pro2_ready = api().pro2_build_report(g_pro2, t, pro2_report);
@@ -1300,9 +1305,17 @@ bool start_xbox_direct(const PadState& pad) {
         note("the Xbox Direct engine did not start: standard rumble in use");
         return false;
     }
+    void* store = api().store_create ? api().store_create() : nullptr;
+    if (store && api().store_set) api().store_set(store, "xbox_mode", 1);   // the Direct row of the settings table
+    if (!store) {
+        api().xb_direct_destroy(xd);
+        note("the Xbox Direct settings store did not start: standard rumble in use");
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lk(g_eng_mu);
         g_xbox_direct = xd;
+        g_xbox_store = store;
         g_at[0] = g_at[1] = 0;
         g_muted[0] = g_muted[1] = false;
     }
@@ -1352,6 +1365,8 @@ void detach() {
     stop_steam_writer();
     close_dualsense_audio();
     RenXbox* xbox = nullptr;
+    void* xbox_store = nullptr;
+    bool xbox_direct = false;
     {
         std::lock_guard<std::mutex> lk(g_eng_mu);
         if (g_engine) {
@@ -1363,7 +1378,10 @@ void detach() {
         if (g_xbox_direct) {
             api().xb_direct_destroy(g_xbox_direct);
             g_xbox_direct = nullptr;
+            xbox_direct = true;
         }
+        xbox_store = g_xbox_store;
+        g_xbox_store = nullptr;
         if (g_tri_trigger_l) {
             api().tri_trigger_destroy(g_tri_trigger_l);
             g_tri_trigger_l = nullptr;
@@ -1396,11 +1414,14 @@ void detach() {
         static const uint8_t kStop[10] = {0x10, 0, 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
         send_packet(kStop);
     }
-    if (xbox) {   // all four motors to zero, then the converter goes
+    if (xbox_store) {
+        if (api().store_destroy) api().store_destroy(xbox_store);
+    }
+    if (xbox || xbox_direct) {   // all four motors to zero, then the engine goes
         static const uint16_t kZero[4] = {0, 0, 0, 0};
         send_motors(kZero, 0, 0);
-        api().xb_destroy(xbox);
     }
+    if (xbox) api().xb_destroy(xbox);
     g_backend.store(Backend::None, std::memory_order_relaxed);
     g_running.store(false, std::memory_order_relaxed);
     g_send_fail.store(0, std::memory_order_relaxed);
@@ -1420,10 +1441,10 @@ void silence() {
         g_muted[s] = true;
     }
     // Also silence Xbox Direct and Switch 2 Pro
-    if (g_xbox_direct) {
+    if (g_xbox_direct && g_xbox_store) {
         uint16_t motors[4] = {};
-        api().xb_direct_push(g_xbox_direct, nullptr, t, false, 0.f, 0.f, true, motors);
-        api().xb_direct_tick(g_xbox_direct, t, true, motors);
+        if (api().xb_direct_push(g_xbox_direct, g_xbox_store, t, false, 0.f, 0.f, true, motors) > 0) send_motors(motors, 0, 0);
+        if (api().xb_direct_tick(g_xbox_direct, t, true, motors) > 0) send_motors(motors, 0, 0);
     }
     if (g_pro2) {
         api().pro2_push_half(g_pro2, t, false, 0.f, 160.f, 0.f, 320.f);

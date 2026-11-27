@@ -1,27 +1,29 @@
-RenHDrum 0.4.0, the upstream release binary
-https://github.com/trzz1214/RenHDrum/tree/v0.4.0
-https://github.com/trzz1214/RenHDrum/releases/tag/v0.4.0
+RenHDrum 0.6.0, the upstream release binary
+https://github.com/trzz1214/RenHDrum/tree/v0.6.0
+https://github.com/trzz1214/RenHDrum/releases/tag/v0.6.0
 
-Since 0.4.0 the upstream build links the C runtime statically (.cargo/config.toml sets
+The build links the C runtime statically (.cargo/config.toml sets
 -C target-feature=+crt-static for x86_64-pc-windows-msvc), so the release binary is
 shipped here as it is: no rebuild is needed for players without the Visual C++
-redistributable. renhdrum.dll is the release asset byte for byte (438272 bytes), and its
+redistributable. renhdrum.dll is the release asset byte for byte (915456 bytes), and its
 sha256 matches the one on the release page. Its dependencies:
 
     api-ms-win-core-synch-l1-2-0.dll
     KERNEL32.dll
     ntdll.dll
 
-No VCRUNTIME140.dll, no MSVCP140.dll, no api-ms-win-crt-*.dll. It exports 50 names (the
-47 of 0.3.0 plus renhdrum_settings_resolve_pure and the two renhdrum_valve_grip_* calls);
-renhdrum_version() returns 0x000400.
+No VCRUNTIME140.dll, no MSVCP140.dll, no api-ms-win-crt-*.dll. renhdrum_version()
+returns 0x000600, which is what src/gfx/haptic.cpp accepts; the 0.3.0 binary that this
+folder held before could not load at all (its version is 0x000300 and it lacks the store,
+device_classify and Xbox Direct entry points).
 
-renhdrum.h is include/renhdrum.h from the v0.4.0 tag, byte for byte. The release asset
-of the same name differs only in its CRLF line endings
-(sha256 930528372d9e37c4b8c566a864aff4f696e6a00ca074bee6b7a4b7f89140a506).
+renhdrum.h is include/renhdrum.h from the 0.6.0 line plus the declarations the runtime
+uses (Xbox Direct, adaptive triggers, Switch 2 Pro). The release asset of the same version
+is sha256 664575d5a67fc52ede8a5405ecce4a925a1e96c2f985a35774e4d6ade860a621; this copy
+is that file plus those declarations.
 
-853ddc07fcf2c1011f7dcae791c61d405aca378b5fd46248006e0e5880153a59  renhdrum.dll
-32d8da0d06b34704d3d89873d53c1b4d030acfbe820bd629e8c25d18b9b93a0a  renhdrum.h
+1e266ce970876c025dadba5780fde00f081c5f6dd474b9946af3cea7cbca6026  renhdrum.dll
+7cc5179c4cccdcaaf6e471180419514472109cd94bf5e5c1d1d636f7ccdd5214  renhdrum.h
 
 LICENSE-MIT, LICENSE-APACHE and NOTICE are copied from the same tag: the core of
 RenHDrum is dual licensed MIT OR Apache-2.0, and NOTICE asks for
