@@ -4194,14 +4194,19 @@ pub fn aspect_ratio(label: &str) -> Option<f64> {
 }
 
 /// The `[fefw] output` size a wide aspect needs at `height`: the game's own
-/// height with the width that ratio asks for, rounded to even pixels the way
-/// the engine's sizes are.
+/// height with the width an ultrawide panel of that height has.
 ///
 /// This is the part F1's 21:9 entries set and the launcher's old aspect key
 /// did not: the ultrawide hooks compute from the *output* size, so a 16:9
 /// output with a forced 21:9 aspect widens nothing. 16:9 and 16:10 keep the
 /// engine's named modes; the runtime letterboxes the 16:9 picture in 16:10 as
 /// it always has.
+///
+/// The widths are the panels people own (2560x1080, 3440x1440, 5120x2160 for
+/// 21:9; 3840x1080, 5120x1440, 7680x2160 for 32:9), the same sizes F1's Output
+/// size list offers. The exact 21/9 ratio (3360x1440) is not a panel shape and
+/// would leave small bars on a 3440-wide screen. Any other height gets the
+/// exact ratio.
 pub fn wide_output(aspect: &str, height: u32) -> Option<(u32, u32)> {
     let ratio = aspect_ratio(aspect)?;
     if ratio <= 16.0 / 9.0 + 0.001 {
@@ -4209,7 +4214,18 @@ pub fn wide_output(aspect: &str, height: u32) -> Option<(u32, u32)> {
     }
     // The engine's own limits: up to 7680 x 2160, both dimensions even.
     let h = (height.clamp(480, 2160) / 2) * 2;
-    let w = ((h as f64 * ratio / 2.0).round() as u32) * 2;
+    let w = if aspect == "21:9" {
+        match h {
+            720 => 1680,
+            1080 => 2560,
+            1440 => 3440,
+            2160 => 5120,
+            _ => ((h as f64 * ratio / 2.0).round() as u32) * 2,
+        }
+    } else {
+        // 32/9 is exactly 3840x1080, 5120x1440 and 7680x2160.
+        ((h as f64 * ratio / 2.0).round() as u32) * 2
+    };
     (w <= 7680).then_some((w, h))
 }
 
@@ -7500,11 +7516,11 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(d.get("display.width").unwrap(), "2560");
         assert_eq!(d.get("fefw.ultrawide").unwrap(), "auto");
 
-        // 21:9: a 3360 x 1440 output, the window that shows it, and the same
-        // ratio in the play-mode key F1's Aspect ratio writes.
+        // 21:9: the 3440 x 1440 panel shape, and the same ratio in the
+        // play-mode key F1's Aspect ratio writes.
         g.aspect = "21:9".into();
         let d = desired_values(&g, &audio);
-        assert_eq!(d.get("fefw.output").unwrap(), "3360x1440");
+        assert_eq!(d.get("fefw.output").unwrap(), "3440x1440");
         // The window stays the size the page picked: the engine letterboxes the
         // wider picture into it rather than making a window wider than the screen.
         assert_eq!(d.get("display.width").unwrap(), "2560");
@@ -7517,10 +7533,13 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         assert_eq!(d.get("fefw.output").unwrap(), "3840x1080");
         assert_eq!(d.get("display.width").unwrap(), "1920");
 
-        // 2160p stays inside 7680 x 2160.
+        // 2160p: 5120 x 2160 for 21:9 and the engine's 7680 limit for 32:9.
         g.resolution = "3840 × 2160".into();
+        g.aspect = "21:9".into();
         let d = desired_values(&g, &audio);
-        assert_eq!(d.get("fefw.output").unwrap(), "7680x2160");
+        assert_eq!(d.get("fefw.output").unwrap(), "5120x2160");
+        g.aspect = "32:9".into();
+        assert_eq!(desired_values(&g, &audio).get("fefw.output").unwrap(), "7680x2160");
 
         // F1's switch is written, not ignored.
         g.ultrawide = false;
@@ -7532,10 +7551,14 @@ I fefw: gameplay at 60 fps ([fefw] fps60 = 1, fps120 = 0), game clock log every 
         g.ultrawide = true;
         assert_eq!(desired_values(&g, &audio).get("fefw.output").unwrap(), "1440p");
         assert_eq!(wide_output("16:10", 1440), None);
-        assert_eq!(wide_output("21:9", 1440), Some((3360, 1440)));
+        assert_eq!(wide_output("21:9", 1440), Some((3440, 1440)));
+        assert_eq!(wide_output("21:9", 1080), Some((2560, 1080)));
+        assert_eq!(wide_output("32:9", 1440), Some((5120, 1440)));
         assert_eq!(wide_output("32:9", 2160), Some((7680, 2160)));
+        // A height no ultrawide panel uses (900p): the exact ratio, even pixels.
+        assert_eq!(wide_output("21:9", 900), Some((2100, 900)));
         // Even pixels, and never past the engine's height limit.
-        assert_eq!(wide_output("21:9", 1081), Some((2520, 1080)));
+        assert_eq!(wide_output("21:9", 1081), Some((2560, 1080)));
         assert_eq!(wide_output("32:9", 9999), Some((7680, 2160)));
     }
 

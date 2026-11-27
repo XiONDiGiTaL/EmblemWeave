@@ -341,8 +341,8 @@ fn advanced_graphics(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &p,
             "Aspect ratio",
-            "21:9 and 32:9 make the game render a wider picture (for example 3360 × 1440 at 2560 × 1440) and switch on the engine's ultrawide hooks. \
-             That is the same change as picking Output size 3440 x 1440 or 5120 x 1440 in F1: more of the 3D world, with the menus, HUD and cutscenes \
+            "21:9 and 32:9 make the game render a wider picture (3440 × 1440 at 2560 × 1440, the shape of a 3440-wide panel) and switch on the engine's \
+             ultrawide hooks. That is the same change as picking Output size 3440 x 1440 or 5120 x 1440 in F1: more of the 3D world, with the menus, HUD and cutscenes \
              kept in the centred 16:9 area. 16:10 letterboxes the 16:9 picture as before. Applies at the game's next start.",
             |ui| {
                 combo(ui, "aspect", &mut g.aspect, &["16:9", "16:10", "21:9", "32:9"]);
