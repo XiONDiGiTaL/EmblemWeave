@@ -2186,6 +2186,56 @@ pub fn refresh_build_stamp() -> Option<(String, String)> {
     Some((old, now.to_string()))
 }
 
+/// How the game folder relates to the launcher that is running it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildFreshness {
+    /// The release that wrote `fefw.ini`, or `None` for a build older than the stamp itself.
+    pub built: Option<String>,
+    /// The release that deliberately carried this build across an in-place update, when one did.
+    pub carried_by: Option<String>,
+    pub current: &'static str,
+}
+
+impl BuildFreshness {
+    /// Whether the build came from another release, whether or not it was carried across.
+    pub fn differs(&self) -> bool {
+        self.built.as_deref() != Some(self.current)
+    }
+
+    /// Whether the updater deliberately kept this build when it installed the running release. Play still uses it;
+    /// no rebuild is required (issue #56).
+    pub fn carried(&self) -> bool {
+        self.carried_by.as_deref() == Some(self.current)
+    }
+
+    /// Whether Overview should offer a rebuild because the folder was not carried across.
+    pub fn needs_rebuild(&self) -> bool {
+        self.differs() && !self.carried()
+    }
+}
+
+/// The build's version relative to this launcher, for the Overview's notice and compare popup. `None` when there is no
+/// built game to describe.
+pub fn build_freshness() -> Option<BuildFreshness> {
+    if !ready() {
+        return None;
+    }
+    Some(build_freshness_in(&run_dir()?, env!("CARGO_PKG_VERSION")))
+}
+
+/// The check behind [`build_freshness`], with the run folder and version passed in so it can be tested. `carried_by` is
+/// written by the updater after an in-place update: the build was deliberately kept, so a newer launcher must not ask for
+/// a rebuild merely because `built_by` names the release that compiled it (issue #56). `built_by` itself stays intact for
+/// reports and for the packed-package guard, which needs the engine's real age.
+fn build_freshness_in(dir: &Path, now: &'static str) -> BuildFreshness {
+    let ini = ini_map(&dir.join("fefw.ini"));
+    BuildFreshness {
+        built: ini.get("engine.built_by").cloned(),
+        carried_by: ini.get("engine.carried_by").cloned(),
+        current: now,
+    }
+}
+
 /// A game folder the launcher can play but that was built by another release and was not carried across by this
 /// launcher's updater. The Overview offers one press that rebuilds it and writes the packed-file overlay in the same
 /// run, so a manually mixed folder is not left behind (#24, #34). `built` is the release that wrote `fefw.ini`, or
@@ -2198,23 +2248,10 @@ pub fn stale_build() -> Option<(Option<String>, &'static str)> {
     stale_build_in(&run_dir()?, env!("CARGO_PKG_VERSION"))
 }
 
-/// The check behind [`stale_build`], with the run folder and version passed in so it can be tested. `carried_by` is
-/// written by the updater after an in-place update: the build was deliberately kept, so a newer launcher must not ask for
-/// a rebuild merely because `built_by` names the release that compiled it (issue #56). `built_by` itself stays intact for
-/// reports and for the packed-package guard, which needs the engine's real age.
+/// The rebuild notice's old two-value form, kept for the diagnostics report.
 fn stale_build_in(dir: &Path, now: &'static str) -> Option<(Option<String>, &'static str)> {
-    let ini = ini_map(&dir.join("fefw.ini"));
-    if ini
-        .get("engine.carried_by")
-        .is_some_and(|v| v.trim() == now)
-    {
-        return None;
-    }
-    match ini.get("engine.built_by").cloned() {
-        Some(v) if v == now => None,
-        Some(v) => Some((Some(v), now)),
-        None => Some((None, now)),
-    }
+    let freshness = build_freshness_in(dir, now);
+    freshness.needs_rebuild().then(|| (freshness.built, now))
 }
 
 /// Record that `release` carried this folder's existing build across an in-place update. The updater calls this after it
@@ -6013,9 +6050,14 @@ mod tests {
         .unwrap();
         // A launcher that only moved on is still told the build came from another release...
         assert!(stale_build_in(&dir, "0.1.40").is_some());
+        let fresh = build_freshness_in(&dir, "0.1.40");
+        assert!(fresh.differs() && !fresh.carried() && fresh.needs_rebuild());
         // ...until the updater records that it carried this build forward on purpose.
         carry_build_forward(&dir, "0.1.40").unwrap();
         assert_eq!(stale_build_in(&dir, "0.1.40"), None);
+        let carried = build_freshness_in(&dir, "0.1.40");
+        assert!(carried.differs() && carried.carried(), "Overview can still offer the comparison");
+        assert!(!carried.needs_rebuild(), "the carried build is ready to play");
         let text = std::fs::read_to_string(dir.join("fefw.ini")).unwrap();
         assert!(
             text.contains("built_by = 0.1.39"),

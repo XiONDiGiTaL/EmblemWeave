@@ -20,6 +20,7 @@ pub enum Popup {
     QuickHelp,
     GameStatus,
     BuildStatus,
+    BuildChanges,
     SetupGuide,
 }
 
@@ -134,24 +135,27 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             app.start(JobKind::Toolchain);
                         }
                     }
-                    // A game folder built by an older release keeps that release's engine, which is why an update can look like it changed
-                    // nothing: name the version and the one press that replaces it (#24, reported again on a build from before 0.1.20).
+                    // A game folder built by an older release still plays with the engine it was built with. Say so, and
+                    // offer the comparison rather than implying Play is blocked: an in-place update deliberately carries
+                    // the build forward (issue #56), while an older folder can be rebuilt for newer engine code (#24).
                     if ready && !building {
-                        let now = env!("CARGO_PKG_VERSION");
-                        // No stamp at all is a build from before the stamp existed, which is older than any release that writes one.
-                        let stale = match crate::engine::built_by() {
-                            Some(v) => v != now,
-                            None => true,
-                        };
-                        if stale {
-                            let built = crate::engine::built_by().unwrap_or_else(|| "an earlier release".to_string());
-                            ui.label(
-                                RichText::new(format!(
-                                    "This game folder was built by {built}; press Rebuild to update its engine to {now}."
-                                ))
-                                .size(12.5)
-                                .color(p.warn),
-                            );
+                        if let Some(freshness) = app.stale_build_cache.clone() {
+                            if freshness.differs() {
+                                let now = env!("CARGO_PKG_VERSION");
+                                let built = freshness.built.as_deref().unwrap_or("an earlier release");
+                                let text = if freshness.carried() {
+                                    format!("This build was kept across the update to {now}; it plays as-is. Rebuild only if you want the newer engine code.")
+                                } else {
+                                    format!("This game folder was built by {built}; it plays as-is. Rebuild only if you want the newer engine code.")
+                                };
+                                ui.label(RichText::new(text).size(12.5).color(p.body));
+                                if widgets::button(ui, &p, "Compare changes", true)
+                                    .on_hover_text("See what the releases since this build changed, and what a rebuild would compile in")
+                                    .clicked()
+                                {
+                                    app.overview_popup = Some(Popup::BuildChanges);
+                                }
+                            }
                         }
                         // Code mods installed or updated since the last build bring hook sites the game lacks (their code would not run),
                         // or a .sites file has a problem that will stop the build.
@@ -451,6 +455,9 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let p = app.config.theme.palette();
+    let freshness = app.stale_build_cache.clone().or_else(crate::engine::build_freshness);
+    let built = freshness.as_ref().and_then(|f| f.built.clone());
+    let changes = (kind == Popup::BuildChanges).then(|| crate::build_notes::current(built.as_deref()));
     let (title, subtitle) = match kind {
         Popup::WhatsNew => {
             let update = match &app.update.state {
@@ -471,6 +478,13 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
                 "Not built yet"
             };
             ("Build status", summary.to_string())
+        }
+        Popup::BuildChanges => {
+            let to = env!("CARGO_PKG_VERSION");
+            match built.as_deref() {
+                Some(from) => ("Build changes", format!("{from} → {to}")),
+                None => ("Build changes", format!("Up to {to}")),
+            }
         }
         Popup::SetupGuide => {
             let stages = setup_stages(app);
@@ -502,7 +516,12 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
                     color: Color32::from_black_alpha(150),
                 })
                 .show(ui, |ui| {
-                    ui.set_min_width(280.0);
+                    if kind == Popup::BuildChanges {
+                        ui.set_min_width(420.0);
+                        ui.set_max_width(440.0);
+                    } else {
+                        ui.set_min_width(280.0);
+                    }
                     ui.vertical(|ui| {
                         ui.add_space(theme::SPACE_S);
                         ui.label(
@@ -512,18 +531,71 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
                         );
                         ui.add_space(theme::SPACE_XS);
                         ui.label(RichText::new(subtitle).size(13.0).color(p.body));
+                        if let Some(changes) = &changes {
+                            ui.add_space(theme::SPACE_S);
+                            egui::ScrollArea::vertical()
+                                .id_salt("build-changes")
+                                .max_height(crate::widgets::list_height(ui, 0.42).max(260.0))
+                                .show(ui, |ui| {
+                                    if changes.notes.is_empty() {
+                                        ui.label(
+                                            RichText::new(
+                                                "The shipped release notes for this version were not found. A rebuild still compiles the engine sources that came with this launcher.",
+                                            )
+                                            .size(12.5)
+                                            .color(p.muted),
+                                        );
+                                    }
+                                    for note in &changes.notes {
+                                        ui.label(
+                                            RichText::new(format!("EmblemWeave {}", note.version))
+                                                .font(theme::semibold(13.0))
+                                                .color(p.accent_hi),
+                                        );
+                                        if !note.summary.is_empty() {
+                                            ui.label(RichText::new(&note.summary).size(12.0).color(p.muted));
+                                        }
+                                        for point in &note.points {
+                                            ui.horizontal_top(|ui| {
+                                                ui.label(RichText::new("•").size(12.5).color(p.accent));
+                                                ui.add(
+                                                    egui::Label::new(RichText::new(point).size(12.5).color(p.body))
+                                                        .wrap(),
+                                                );
+                                            });
+                                        }
+                                        ui.add_space(theme::SPACE_S);
+                                    }
+                                    if changes.older > 0 {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Plus {} earlier release(s). A rebuild compiles all of them, not only the notes shown.",
+                                                changes.older
+                                            ))
+                                            .size(11.5)
+                                            .color(p.muted),
+                                        );
+                                    }
+                                });
+                        }
                         ui.add_space(theme::SPACE_M);
                         ui.horizontal(|ui| {
                             if widgets::button(ui, &p, "Close", true).clicked() {
                                 close = true;
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if widgets::button(ui, &p, "Open page", true).clicked() {
+                                if kind == Popup::BuildChanges {
+                                    if widgets::primary_button(ui, &p, "Rebuild now", !app.busy() && crate::engine::ready()).clicked() {
+                                        app.start(JobKind::Engine);
+                                        close = true;
+                                    }
+                                } else if widgets::button(ui, &p, "Open page", true).clicked() {
                                     match kind {
                                         Popup::WhatsNew => app.page = Page::About,
                                         Popup::QuickHelp => app.page = Page::Troubleshoot,
                                         Popup::GameStatus => app.page = Page::Overview,
                                         Popup::BuildStatus => app.page = Page::Recompile,
+                                        Popup::BuildChanges => {}
                                         Popup::SetupGuide => app.page = Page::Setup,
                                     }
                                     close = true;

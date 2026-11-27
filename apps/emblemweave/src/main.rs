@@ -47,6 +47,7 @@ mod sites;
 mod startup_overlay;
 mod snapshots;
 mod theme;
+mod build_notes;
 mod build_versioning;
 mod build_versioning_cli;
 mod object_store;
@@ -211,8 +212,8 @@ pub struct App {
     pub reuse: Option<crate::engine::Existing>,
     /// Background channel for the async reuse offer detection.
     reuse_arc: std::sync::Arc<std::sync::Mutex<Option<crate::engine::Existing>>>,
-    /// Cached stale build check result, updated periodically in background.
-    stale_build_cache: Option<(Option<String>, &'static str)>,
+    /// Cached build freshness, updated periodically in background.
+    pub stale_build_cache: Option<crate::engine::BuildFreshness>,
     /// When the stale build cache was last refreshed.
     stale_build_cached_at: Option<Instant>,
     /// `--tour`: walk through the features by itself, for recordings.
@@ -469,10 +470,14 @@ impl App {
             app.notify(e, Tone::Bad);
         }
         app.note("Launcher started", Tone::Neutral);
-        // Say this at startup, while the player is still on Overview: a folder from an older release is fixed there, before Play.
-        if let Some((built, now)) = crate::engine::stale_build() {
-            let built = built.unwrap_or_else(|| "an older release".to_string());
-            app.notify(format!("This game folder was built by {built}; Overview has Repair / Rebuild now to update it to {now}."), Tone::Warn);
+        // Say this at startup, while the player is still on Overview. An older build still plays; the compare popup is
+        // how a player decides whether a rebuild is worth it.
+        if let Some(freshness) = crate::engine::build_freshness().filter(|f| f.needs_rebuild()) {
+            let built = freshness.built.as_deref().unwrap_or("an older release");
+            app.notify(
+                format!("This game folder was built by {built}; it still plays. Overview can compare what a rebuild would change."),
+                Tone::Neutral,
+            );
         }
         app.start(JobKind::Detect);
         // Started from RecompLauncher, which installs the releases itself.
@@ -706,6 +711,8 @@ impl App {
                 }
                 Some(JobResult::Engine(dir)) => {
                     drop(p);
+                    self.stale_build_cache = None;
+                    self.stale_build_cached_at = None;
                     self.notify(
                         format!("The game is built and ready to play ({})", dir.display()),
                         Tone::Ok,
@@ -1241,14 +1248,12 @@ impl App {
         }
     }
 
-    /// Refresh the stale build cache if it's older than 30 seconds.
+    /// Refresh the build freshness if it is older than 30 seconds. A finished build clears it at once.
     fn poll_stale_build(&mut self) {
         let now = Instant::now();
         let should_refresh = self.stale_build_cached_at.map_or(true, |t| now.duration_since(t) > Duration::from_secs(30));
         if should_refresh {
-            if let Some(stale) = crate::engine::stale_build() {
-                self.stale_build_cache = Some(stale);
-            }
+            self.stale_build_cache = crate::engine::build_freshness();
             self.stale_build_cached_at = Some(now);
         }
     }
