@@ -12,6 +12,9 @@
 //   * steady clock: ticks since start-up (kernel::system_tick, 19.2 MHz, 1 tick = 625/12 ns) + a fixed epoch of 3600 s + the internal
 //     offset + the test offset (both in ns, TimeSpanType). Seconds are the floor of that sum; the sequence is monotonic.
 //   * every change of an offset rewrites the shared memory, so the guest's fast GetCurrentTime path sees the same values.
+//   * that path reads posix time as a context's offset + steady time, so the contexts also go stale when the host clock moves against
+//     the steady clock: the host clock is set or synchronised, or the performance counter stands still while the PC sleeps (Proton).
+//     Once the shared memory is handed out, a thread compares the two every second and rewrites the contexts after 500 ms of movement.
 //
 // Time shared memory (0x1000 bytes, offsets as TimeSharedMemory.cs writes them). A block is a u32 index at `off`, `pad` bytes, then two
 // slots; the live slot is (index & 1). Writers bump the index after writing the free slot.
@@ -27,10 +30,12 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -45,6 +50,8 @@
 
 #include "nxrt/config.h"
 #include "nxrt/kernel.h"
+#include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "nxrt/tt.h"
 #include "services_internal.h"
 #include "timezone.h"
@@ -58,6 +65,8 @@ constexpr uint64_t kSteadyEpochNs = kSteadyEpochSeconds * 1000000000ull;
 constexpr uint8_t kSourceId[16] = {'n', 'x', 'r', 't', '-', 's', 't', 'e', 'a', 'd', 'y', '-', 'c', 'l', 'k', '1'};   // clock_source_id
 constexpr uint32_t kShmSize = 0x1000;
 constexpr int64_t kRtcEpochUnix = 946684800;                            // 2000-01-01T00:00:00Z in posix seconds (RTC counts from here)
+constexpr auto kShmCheckPeriod = std::chrono::seconds(1);               // how often the clock contexts in the shared memory are checked
+constexpr int64_t kShmMaxDriftNs = 500000000;                           // movement of host against steady clock that rewrites them
 
 constexpr uint32_t kOffSteady = 0x000, kPadSteady = 4;
 constexpr uint32_t kOffLocal = 0x038, kPadLocal = 4;
@@ -116,18 +125,24 @@ struct State {
     std::string host_name;
     std::vector<uint8_t> host_rule, utc_rule;
     int64_t location_updated = 0;                         // steady seconds when the device location was last set
+    int64_t shm_lead_ns = 0;                              // host minus steady clock when the shared memory contexts were last written
     std::unique_ptr<ServiceSharedMemory> shm;
     ServiceEvent clock_event, tz_event;                   // never signaled
+    std::thread refresher;                                // runs refresh_main from the first hand-out of the shared memory
+    std::condition_variable refresher_cv;
+    bool refresher_stop = false;
 };
 
+// Neither is ever destroyed: the refresher thread (joined by time_reset()) may still run while the process exits.
 std::mutex& mu() {
-    static std::mutex m;
-    return m;
+    static std::mutex* m = new std::mutex();
+    return *m;
 }
 State& raw_state() {
-    static State s;
-    return s;
+    static State* s = new State();
+    return *s;
 }
+std::atomic<int64_t> g_host_skew_ns{0};                   // added to the host clock: tests move it as a clock change would
 
 std::string ascii_lower(std::string s) {
     for (char& c : s)
@@ -148,19 +163,23 @@ uint64_t raw_ticks_ns() {
     return (t / hz) * 1000000000ull + (t % hz) * 1000000000ull / hz;
 }
 
-int64_t host_unix_now() {
+int64_t host_unix_ns() {
 #if defined(_WIN32)
     const uint64_t t = tt::wall_filetime();   // 100 ns ticks since 1601-01-01 (the host clock; a fixed epoch + virtual time in deterministic test mode)
-    return static_cast<int64_t>((t - 116444736000000000ull) / 10000000ull);
+    const int64_t ns = static_cast<int64_t>(t - 116444736000000000ull) * 100;
 #else
-    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 #endif
+    return ns + g_host_skew_ns.load(std::memory_order_relaxed);
 }
+int64_t host_unix_now() { return host_unix_ns() / 1000000000; }
 
 int64_t steady_total_ns(const State& s) {
     return static_cast<int64_t>(raw_ticks_ns() - s.tick0_ns) + static_cast<int64_t>(kSteadyEpochNs) + s.internal_ns + s.test_ns;
 }
 int64_t steady_secs(const State& s) { return steady_total_ns(s) / 1000000000; }
+// How far the host clock is ahead of the steady clock: constant while both run and nothing sets the host clock.
+int64_t host_lead_ns(const State& s) { return host_unix_ns() - steady_total_ns(s); }
 
 struct Now {
     int64_t host, steady;
@@ -241,20 +260,26 @@ void lifo_write(uint8_t* base, uint32_t off, uint32_t pad, const void* obj, uint
     std::memcpy(base + off, &n, 4);
 }
 
+// The local and network clock contexts from the clocks now. Caller holds mu().
+void write_clock_contexts(State& s, uint8_t* b) {
+    s.shm_lead_ns = host_lead_ns(s);   // read first: a clock change between the two reads then shows at the next check
+    const Now n = now_of(s);
+    const SysCtx lc = sys_ctx(n, s.local_delta);
+    lifo_write(b, kOffLocal, kPadLocal, &lc, sizeof lc);
+    const SysCtx nc = sys_ctx(n, s.network_delta);
+    lifo_write(b, kOffNetwork, kPadNetwork, &nc, sizeof nc);
+}
+
 void write_shm(State& s) {
     uint8_t* b = shm_base(s);
     if (!b) return;
-    const Now n = now_of(s);
 
     SteadyCtx sc{};
     sc.internal_offset = static_cast<uint64_t>(static_cast<int64_t>(kSteadyEpochNs) + s.internal_ns + s.test_ns);
     std::memcpy(sc.source, kSourceId, 16);
     lifo_write(b, kOffSteady, kPadSteady, &sc, sizeof sc);
 
-    const SysCtx lc = sys_ctx(n, s.local_delta);
-    lifo_write(b, kOffLocal, kPadLocal, &lc, sizeof lc);
-    const SysCtx nc = sys_ctx(n, s.network_delta);
-    lifo_write(b, kOffNetwork, kPadNetwork, &nc, sizeof nc);
+    write_clock_contexts(s, b);
 
     const uint8_t ac = s.auto_correction ? 1 : 0;
     lifo_write(b, kOffAutoCorr, kPadAutoCorr, &ac, 1);
@@ -269,6 +294,37 @@ void write_shm(State& s) {
     adj.limit = adj_ns;
     std::memcpy(adj.source, kSourceId, 16);
     lifo_write(b, kOffAdjust, kPadAdjust, &adj, sizeof adj);
+}
+
+// Rewrites the clock contexts when the host clock has moved against the steady clock since they were written. Caller holds mu().
+void refresh_shm(State& s) {
+    if (tt::deterministic()) return;   // both are the virtual clock there, and reading it would move it
+    uint8_t* b = shm_base(s);
+    if (!b || !mem::is_mapped(s.shm->host(), kShmSize)) return;
+    const int64_t moved = host_lead_ns(s) - s.shm_lead_ns;
+    if (moved > -kShmMaxDriftNs && moved < kShmMaxDriftNs) return;
+    write_clock_contexts(s, b);
+    NXLOG_I("time", "the host clock moved %+.3f s against the steady clock: shared memory clock contexts rewritten", static_cast<double>(moved) * 1e-9);
+}
+
+void refresh_main() {
+    State& s = raw_state();
+    std::unique_lock<std::mutex> lk(mu());
+    while (!s.refresher_cv.wait_for(lk, kShmCheckPeriod, [&] { return s.refresher_stop; })) refresh_shm(s);
+}
+
+void stop_refresher() {
+    State& s = raw_state();
+    std::thread t;
+    {
+        std::lock_guard<std::mutex> lk(mu());
+        s.refresher_stop = true;
+        t = std::move(s.refresher);
+    }
+    s.refresher_cv.notify_all();
+    if (t.joinable()) t.join();
+    std::lock_guard<std::mutex> lk(mu());
+    s.refresher_stop = false;
 }
 
 // Start-up state: every offset zero, the start tick taken now, the shared memory zeroed and written once.
@@ -582,6 +638,7 @@ std::shared_ptr<ipc::Service> make_static(const char* name, uint32_t perm) {
             std::lock_guard<std::mutex> lk(mu());
             State& st = state_locked();
             rsp.out_copy.push_back(st.shm->new_handle());
+            if (!st.refresher.joinable()) st.refresher = std::thread(refresh_main);
             return 0;
         });
         s.add_cmd(50, "SetStandardSteadyClockInternalOffset", [perm](ipc::Request& req, ipc::Response&) -> uint32_t {
@@ -656,9 +713,13 @@ void register_time() {
 }
 
 void time_reset() {
+    stop_refresher();
+    g_host_skew_ns.store(0);
     std::lock_guard<std::mutex> lk(mu());
     State& s = raw_state();
     if (s.created) init_locked(s);
 }
+
+void time_set_host_skew_for_test(int64_t ns) { g_host_skew_ns.store(ns); }
 
 }  // namespace nxrt::services
