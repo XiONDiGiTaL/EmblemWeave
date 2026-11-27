@@ -34,13 +34,9 @@ std::atomic<int> g_members[kGroups];
 std::atomic<int> g_blocked[kGroups];
 std::atomic<int> g_main_kind{-1};          // kind main is blocked in, -1 = running
 int64_t g_main_t0 = 0;                     // when main blocked (platform clock ticks)
-// Sharded kernel lock contention tracking (sync, mutex, cv, addr)
-std::atomic<uint64_t> g_sync_contended{0}, g_sync_wait_ticks{0};
-std::atomic<uint64_t> g_mutex_contended{0}, g_mutex_wait_ticks{0};
-std::atomic<uint64_t> g_cv_contended{0}, g_cv_wait_ticks{0};
-std::atomic<uint64_t> g_addr_contended{0}, g_addr_wait_ticks{0};
+std::atomic<uint64_t> g_k_contended{0}, g_k_wait_ticks{0};   // g_k acquisitions that found it held, and the time they waited
 struct Waker { uint64_t n[3] = {}, ticks[3] = {}; };
-std::unordered_map<std::string, Waker> g_wakers;   // who woke main, per kind, and how long main had been blocked
+std::unordered_map<std::string, Waker> g_wakers;   // g_k: who woke main, per kind, and how long main had been blocked
 
 int64_t now_ticks() {
     return static_cast<int64_t>(platform::clock_ticks());
@@ -103,9 +99,9 @@ void sampler() {
         NXLOG_I("kernel", "%s", out.c_str());
         {   // who main waited for
             std::unordered_map<std::string, Waker> w;
-            nxrt::platform::mutex_lock(detail::g_klocks.sync);
+            detail::g_k.lock();
             w.swap(g_wakers);
-            nxrt::platform::mutex_unlock(detail::g_klocks.sync);
+            detail::g_k.unlock();
             std::vector<std::pair<std::string, Waker>> v(w.begin(), w.end());
             auto tot = [](const Waker& x) { return x.ticks[0] + x.ticks[1] + x.ticks[2]; };
             std::sort(v.begin(), v.end(), [&](const auto& a, const auto& b) { return tot(a.second) > tot(b.second); });
@@ -118,17 +114,9 @@ void sampler() {
                 line += b;
             }
             NXLOG_I("kernel", "main woken in %llds by (blocked time ended by each waker):%s", static_cast<long long>(g_period_s), line.c_str());
-            // Report contention for each sharded lock
-            const uint64_t sync_c = g_sync_contended.exchange(0), sync_w = g_sync_wait_ticks.exchange(0);
-            const uint64_t mutex_c = g_mutex_contended.exchange(0), mutex_w = g_mutex_wait_ticks.exchange(0);
-            const uint64_t cv_c = g_cv_contended.exchange(0), cv_w = g_cv_wait_ticks.exchange(0);
-            const uint64_t addr_c = g_addr_contended.exchange(0), addr_w = g_addr_wait_ticks.exchange(0);
-            NXLOG_I("kernel", "kernel locks in %llds: sync %llu contended (%.1f ms, %.1f us each), mutex %llu contended (%.1f ms, %.1f us each), cv %llu contended (%.1f ms, %.1f us each), addr %llu contended (%.1f ms, %.1f us each)",
-                    static_cast<long long>(g_period_s),
-                    (unsigned long long)sync_c, sync_w * 1000.0 / freq, sync_c ? sync_w * 1e6 / freq / sync_c : 0.0,
-                    (unsigned long long)mutex_c, mutex_w * 1000.0 / freq, mutex_c ? mutex_w * 1e6 / freq / mutex_c : 0.0,
-                    (unsigned long long)cv_c, cv_w * 1000.0 / freq, cv_c ? cv_w * 1e6 / freq / cv_c : 0.0,
-                    (unsigned long long)addr_c, addr_w * 1000.0 / freq, addr_c ? addr_w * 1e6 / freq / addr_c : 0.0);
+            const uint64_t nc = g_k_contended.exchange(0), wt = g_k_wait_ticks.exchange(0);
+            NXLOG_I("kernel", "kernel lock (g_k) in %llds: %llu contended acquisitions, %.1f ms waiting in all (%.1f us each)", static_cast<long long>(g_period_s),
+                    (unsigned long long)nc, wt * 1000.0 / freq, nc ? wt * 1e6 / freq / nc : 0.0);
         }
         for (Hist& y : h) y = Hist{};
         total = 0;
@@ -171,10 +159,10 @@ void occ_name(KThread& t, const char* game_name) {
 
 void occ_lock_contended() {
     const int64_t t0 = now_ticks();
-    nxrt::platform::mutex_lock(detail::g_klocks.sync);
-    g_sync_contended.fetch_add(1, std::memory_order_relaxed);
-    g_sync_wait_ticks.fetch_add(static_cast<uint64_t>(now_ticks() - t0), std::memory_order_relaxed);
-    nxrt::platform::mutex_unlock(detail::g_klocks.sync);
+    detail::g_k.lock();
+    g_k_contended.fetch_add(1, std::memory_order_relaxed);
+    g_k_wait_ticks.fetch_add(static_cast<uint64_t>(now_ticks() - t0), std::memory_order_relaxed);
+    detail::g_k.unlock();
 }
 
 void occ_main_woken() {

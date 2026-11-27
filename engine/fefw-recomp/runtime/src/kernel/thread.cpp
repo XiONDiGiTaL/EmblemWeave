@@ -166,9 +166,10 @@ uint32_t thread_start(uint32_t handle) {
     auto t = handle_as<KThread>(handle);
     if (!t) return kInvalidHandle;
     {
-        detail::GuardSync g;
+        nxrt::platform::mutex_lock(detail::g_k.m);
         const bool already = t->started;
         t->started = true;
+        nxrt::platform::mutex_unlock(detail::g_k.m);
         if (already) return kInvalidState;
     }
     auto* box = new std::shared_ptr<KThread>(t);
