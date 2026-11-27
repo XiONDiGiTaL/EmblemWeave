@@ -23,6 +23,10 @@ const game::Info& data_info() {
         g.nvn_api_minor = 40;     // NintendoSDK 22.2.0's NVN2 driver: 231.40, shader binaries up to 201.20
         g.movie_fail_at_open = true;      // its movie player's constructor (main 0x1905920) aborts unless nn::movie::Initialize succeeds
         g.movie_video_decoder = true;     // AV1 movies through the host movie::VideoDecoder (subsdk2's), on the player's CPU-frame path
+        // The console gives the game 9 GiB. Its memory set-up takes min(available - 128 MiB, 8664 MiB) for its budgets (fefw_filecache.cpp),
+        // so 9 GiB and nxrt's 10.5 GiB give it the same ones, and the heap (committed whole) is about 1.5 GiB smaller.
+        // [memory] app_memory_mb = 10752 restores the old size.
+        g.switch2_memory = 9ull << 30;
         g.vi_hdr_status_sdr = true;       // the SDK's answer (format 1, HDR off) gives it 0 nits: NaN tone map and bloom (core/switch2.cpp)
         g.present_interval_hz = 60;       // logic steps 60 / target per frame; the present interval is 60 / target (notes/pacing.md)
         g.exe_name = "fefw.exe";

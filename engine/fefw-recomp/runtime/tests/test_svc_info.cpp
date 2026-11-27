@@ -82,7 +82,7 @@ NXTEST(info_alias_and_heap_regions) {
 NXTEST(info_total_and_used_memory) {
     Result r = call(kSvcGetInfo, 6);
     CHECK_EQ(r.rc, 0u);
-    CHECK_EQ(r.x1, nxrt::svc_total_memory());   // per platform: ~3.2 GiB Switch 1, 10.5 GiB Switch 2
+    CHECK_EQ(r.x1, nxrt::svc_total_memory());   // per platform: ~3.2 GiB Switch 1, the game's figure or 10.5 GiB Switch 2
     uint64_t used = nxrt::svc_current_heap_size() + 0x4000000ull;
     r = call(kSvcGetInfo, 7);
     CHECK_EQ(r.rc, 0u);
@@ -92,7 +92,7 @@ NXTEST(info_total_and_used_memory) {
     CHECK_EQ(r.x1, used);
     r = call(kSvcGetInfo, 21);   // TotalNonSystemMemorySize is the same value
     CHECK_EQ(r.rc, 0u);
-    CHECK_EQ(r.x1, nxrt::svc_total_memory());   // per platform: ~3.2 GiB Switch 1, 10.5 GiB Switch 2
+    CHECK_EQ(r.x1, nxrt::svc_total_memory());   // per platform: ~3.2 GiB Switch 1, the game's figure or 10.5 GiB Switch 2
 }
 
 NXTEST(info_debugger_resource_limit_idle_zero) {
@@ -283,7 +283,7 @@ NXTEST(system_info_unknown_type) {
 NXTEST(resource_limit_values) {
     Result r = call(kSvcLimitValue, 0x1234, 0);   // limit of PhysicalMemoryMax
     CHECK_EQ(r.rc, 0u);
-    CHECK_EQ(r.x1, nxrt::svc_total_memory());   // per platform: ~3.2 GiB Switch 1, 10.5 GiB Switch 2
+    CHECK_EQ(r.x1, nxrt::svc_total_memory());   // per platform: ~3.2 GiB Switch 1, the game's figure or 10.5 GiB Switch 2
     CHECK_EQ(call(kSvcLimitValue, 0x1234, 1).x1, 0x200u);   // ThreadCountMax
     CHECK_EQ(call(kSvcLimitValue, 0x1234, 2).x1, 0x600u);   // EventCountMax
     CHECK_EQ(call(kSvcLimitValue, 0x1234, 3).x1, 0x80u);    // TransferMemoryCountMax

@@ -41,8 +41,10 @@ constexpr uint64_t kSubAllCores = 0xFFFFFFFFFFFFFFFFull;        // ThreadTickCou
 uint64_t svc_total_memory() {
     const int64_t mb = config_get_int("memory", "app_memory_mb", 0);
     if (mb > 0) return static_cast<uint64_t>(mb) << 20;
-    // Switch 2 applications get far more memory (12 GiB console): 10.5 GiB, inside nxrt's 12 GiB heap region.
-    return game::info().platform == game::Platform::Switch2 ? kTotalMemorySwitch2 : kTotalMemoryAvailable;
+    // Switch 2 applications get far more memory (12 GiB console): the game's own figure, or 10.5 GiB, inside nxrt's 12 GiB heap region.
+    const game::Info& g = game::info();
+    if (g.platform != game::Platform::Switch2) return kTotalMemoryAvailable;
+    return g.switch2_memory ? g.switch2_memory : kTotalMemorySwitch2;
 }
 namespace {
 uint64_t used_memory() {

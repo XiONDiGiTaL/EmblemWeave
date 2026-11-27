@@ -566,7 +566,7 @@ bool heap_commit(uint64_t offset, uint64_t size) {
     const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);   // MEM_COMMIT makes committed pages read-write again
     std::unique_lock lk(g_heap_mu);
     if (!g_heap_size || end > g_heap_size) return false;   // the heap went away meanwhile
-    // The game sets a heap of about 11 GB at boot and all of it is committed here. When the system's commit charge is near its limit (just after
+    // The game sets a heap of about 9 GB at boot and all of it is committed here. When the system's commit charge is near its limit (just after
     // the launcher's setup, or with a small page file) this fails, the game turns the result into nn::os OutOfMemory (0x1003) and calls svcBreak.
     // The system grows a page file after such a failure and other processes give memory back, so wait a little and try again.
     // Windows: only for the out-of-commit errors (others will not change by waiting). The lock is let go while sleeping.
