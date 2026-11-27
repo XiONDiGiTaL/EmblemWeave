@@ -91,7 +91,10 @@ if(NXRT_DAV1D_ASM)
     target_compile_definitions(nxrt_dav1d PRIVATE $<$<COMPILE_LANGUAGE:C>:NXRT_DAV1D_ASM=1>)
 endif()
 set_property(TARGET nxrt_dav1d PROPERTY C_STANDARD 11)
-# Decoding speed matters in every configuration (a movie plays in real time): optimised, warnings off (third-party code)
-# Use generator expressions to select flags per compiler: MSVC gets /O2 /wd<warning>; clang-cl gets -w -fno-strict-aliasing -O2
+# Decoding speed matters in every configuration (a movie plays in real time): optimised, warnings off (third-party code).
+# One option per list element: a quoted "/O2 /wd4018 ..." reaches cl as a single argument, which it parses character by
+# character (/O , /Ow, /O9 ...) and discards, so none of the suppressions applied. C11 atomics need MSVC's opt-in.
 target_compile_options(nxrt_dav1d PRIVATE
-    "$<$<COMPILE_LANGUAGE:C>:$<$<CXX_COMPILER_ID:MSVC>:/O2 /wd4018 /wd4146 /wd4244 /wd4267 /wd4305 /wd4311 /wd4312 /wd4996>;$<$<CXX_COMPILER_ID:Clang>:-w -fno-strict-aliasing -O2>;$<$<CXX_COMPILER_ID:GNU>:-w -fno-strict-aliasing -O2>>")
+    $<$<AND:$<COMPILE_LANGUAGE:C>,$<CXX_COMPILER_ID:MSVC>>:/O2;/wd4018;/wd4146;/wd4244;/wd4267;/wd4305;/wd4311;/wd4312;/wd4996;/experimental:c11atomics>
+    $<$<AND:$<COMPILE_LANGUAGE:C>,$<CXX_COMPILER_ID:Clang>>:-w;-fno-strict-aliasing;-O2>
+    $<$<AND:$<COMPILE_LANGUAGE:C>,$<CXX_COMPILER_ID:GNU>>:-w;-fno-strict-aliasing;-O2>)
