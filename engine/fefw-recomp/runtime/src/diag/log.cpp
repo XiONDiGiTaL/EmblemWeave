@@ -58,7 +58,12 @@ std::mutex g_qmu;
 std::condition_variable g_qcv;
 std::vector<std::string> g_queue;          // formatted lines, newline included
 bool g_queue_flush = false;                // a queued warning: the writer flushes after this batch
-bool g_writer_started = false;
+// The writer thread, started by the first queued line. log_shutdown stops and joins it, and so does an exit handler, so it never
+// outlives g_qmu, g_qcv and g_queue: destroying a condition variable a thread still waits on is undefined behaviour at
+// exit. Heap-held so no std::thread destructor runs on a joinable thread at static destruction.
+std::thread* g_writer = nullptr;           // g_mu held to start or stop
+bool g_writer_stop = false;                // g_qmu held: the writer writes what is queued, then returns
+bool g_writer_atexit = false;              // the exit handler is registered once
 int g_async = -1;                          // -1: not read yet
 
 // [log] repeat_limit (default 30; env NXRT_LOG_REPEAT_LIMIT; 0 = off): at most this many Info / Debug / Trace lines from one call site
@@ -97,7 +102,8 @@ void writer_loop() {
     for (;;) {
         {
             std::unique_lock<std::mutex> q(g_qmu);
-            g_qcv.wait(q, [] { return !g_queue.empty(); });
+            g_qcv.wait(q, [] { return !g_queue.empty() || g_writer_stop; });
+            if (g_queue.empty()) return;   // stopping, and nothing is left to write
         }
         std::lock_guard<std::recursive_mutex> f(g_fmu);
         bool flush;
@@ -112,6 +118,32 @@ void writer_loop() {
         (void)flush;
         batch.clear();
     }
+}
+
+// Stops the writer once it has written what is queued, and waits for it. g_mu held, g_fmu not (the writer takes it). A later queued line
+// starts a new writer, so log_init after log_shutdown keeps working.
+void stop_writer_locked() {
+    if (!g_writer) return;
+    {
+        std::lock_guard<std::mutex> q(g_qmu);
+        g_writer_stop = true;
+    }
+    g_qcv.notify_all();
+    if (g_writer->get_id() == std::this_thread::get_id())
+        g_writer->detach();   // a crash inside the writer's own fwrite that ends in log_shutdown: it cannot wait for itself
+    else
+        g_writer->join();
+    delete g_writer;
+    g_writer = nullptr;
+    std::lock_guard<std::mutex> q(g_qmu);
+    g_writer_stop = false;
+}
+
+// Registered when the first writer starts, so it runs before the statics it uses (built earlier) are destroyed, even when the program
+// returns without log_shutdown.
+void stop_writer_at_exit() {
+    std::lock_guard<std::recursive_mutex> g(g_mu);
+    stop_writer_locked();
 }
 
 bool async_on() { return g_async > 0; }   // g_mu held
@@ -210,6 +242,7 @@ void log_init(const LogOptions& opt) {
 
 void log_shutdown() {
     std::lock_guard<std::recursive_mutex> g(g_mu);
+    stop_writer_locked();
     drain_sync(nullptr, true);
     std::lock_guard<std::recursive_mutex> f(g_fmu);
     if (g_file) {
@@ -379,9 +412,12 @@ void logv(LogLevel l, const char* tag, const char* fmt, va_list ap) {
                 g_queue.push_back(std::move(out));
                 if (li <= static_cast<int>(LogLevel::Warn)) g_queue_flush = true;
             }
-            if (!g_writer_started) {
-                g_writer_started = true;
-                std::thread(writer_loop).detach();
+            if (!g_writer) {
+                g_writer = new std::thread(writer_loop);
+                if (!g_writer_atexit) {
+                    g_writer_atexit = true;
+                    std::atexit(stop_writer_at_exit);
+                }
             }
             g_qcv.notify_one();
         } else {

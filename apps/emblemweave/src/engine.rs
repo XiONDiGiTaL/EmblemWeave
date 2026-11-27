@@ -5406,7 +5406,7 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
         // issue report (src/issue_upload.rs), which does nothing unless the player turned it on and named a server.
         let status = exited.or_else(|| child.wait().ok());
         *LAST_EXIT.lock().unwrap_or_else(|e| e.into_inner()) = status;
-        crate::issue_upload::after_run(&log, from, launched, status.and_then(|s| s.code()));
+        crate::issue_upload::after_run(&log, launched, status.and_then(|s| s.code()));
         LAUNCH_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });
 }

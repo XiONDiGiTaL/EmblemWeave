@@ -65,7 +65,7 @@ fn usable_url(raw: &str) -> Option<String> {
 
 /// Called by the launch watcher once the game has exited. Decides, prepares and sends in this (background) thread;
 /// every failure is silent, since a report must never get in the way of playing.
-pub fn after_run(log: &Path, from: u64, started: SystemTime, code: Option<i32>) {
+pub fn after_run(log: &Path, started: SystemTime, code: Option<i32>) {
     let (config, _) = crate::config::Config::load();
     if !config.reports.send {
         return;
@@ -73,7 +73,7 @@ pub fn after_run(log: &Path, from: u64, started: SystemTime, code: Option<i32>) 
     let Some(url) = endpoint(&config.reports.endpoint) else { return };
     let Some(state_dir) = crate::config::Config::dir() else { return };
     let Some(game_dir) = log.parent() else { return };
-    if let Some(p) = prepare(&state_dir, game_dir, log, from, started, code, &config.paths.game_root) {
+    if let Some(p) = prepare(&state_dir, game_dir, log, started, code, &config.paths.game_root) {
         send(&url, p);
     }
 }
@@ -151,12 +151,11 @@ fn prepare(
     state_dir: &Path,
     game_dir: &Path,
     log_path: &Path,
-    from: u64,
     started: SystemTime,
     code: Option<i32>,
     game_root: &str,
 ) -> Option<Prepared> {
-    let log_raw = read_run_log(log_path, from);
+    let log_raw = read_run_log(log_path, started);
     let metrics = parse_log_metrics(&log_raw);
     let fresh: Vec<&str> = PROBLEM_FILES
         .iter()
@@ -276,14 +275,22 @@ fn now_unix_s() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// This run's part of `fefw.log` (the runtime appends; `from` is the size before the launch). A very long run keeps its
-/// first 128 KiB and last 2 MiB so the scan stays quick.
-fn read_run_log(path: &Path, from: u64) -> String {
+/// This run's `fefw.log`. The runtime opens the log with "w" at start (src/diag/log.cpp), so the file holds this run alone
+/// from its first byte: an offset taken from the previous run's size would cut this run's start (its errors, GPU name and
+/// first frames). A log not written since `started` is the previous run's, left because this one never opened it, and is
+/// not this run's to report. A very long run keeps its first 128 KiB and last 2 MiB so the scan stays quick.
+fn read_run_log(path: &Path, started: SystemTime) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = fs::File::open(path) else { return String::new() };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = if from <= len { from } else { 0 };
-    let span = len - start;
+    let Ok(meta) = f.metadata() else { return String::new() };
+    // A second of slack for file systems that keep coarse times.
+    let since = started.checked_sub(std::time::Duration::from_secs(1)).unwrap_or(started);
+    if meta.modified().map_or(true, |t| t < since) {
+        return String::new();
+    }
+    let len = meta.len();
+    let start = 0;
+    let span = len;
     let mut read_at = |at: u64, n: usize| -> Vec<u8> {
         let mut buf = vec![0u8; n];
         if f.seek(SeekFrom::Start(at)).is_err() {
@@ -706,9 +713,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ew-report-log-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("fefw.log");
-        fs::write(&p, "old run\nnew run\n").unwrap();
-        assert_eq!(read_run_log(&p, 8), "new run\n");
-        assert_eq!(read_run_log(&p, 999), "old run\nnew run\n", "a log that was replaced is read whole");
+        let started = SystemTime::now() - std::time::Duration::from_secs(5);
+        // The runtime replaces the log at start, so a new run as long as the old one is still read from its first line.
+        fs::write(&p, "old run, long enough\n").unwrap();
+        fs::write(&p, "new run starts here\n").unwrap();
+        assert_eq!(read_run_log(&p, started), "new run starts here\n");
+        // A log last written before this run started is the previous run's: nothing of it is this run's.
+        let f = fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(started - std::time::Duration::from_secs(60)).unwrap();
+        drop(f);
+        assert_eq!(read_run_log(&p, started), "");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -721,17 +735,17 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         let started = SystemTime::now() - std::time::Duration::from_secs(5);
         fs::write(game.join("fefw.log"), "previous run\n").unwrap();
-        let from = fs::metadata(game.join("fefw.log")).unwrap().len();
         let game_s = game.display().to_string();
+        // The runtime starts the log over, as it does at every start.
         fs::write(
             game.join("fefw.log"),
-            format!("previous run\n[ 1.0 I t1 gfx] loading {game_s}\\romfs\\data.bin\n[ 2.0 E t1 crash] access violation\n"),
+            format!("[ 1.0 I t1 gfx] loading {game_s}\\romfs\\data.bin\n[ 2.0 E t1 crash] access violation\n"),
         )
         .unwrap();
         fs::write(game.join("fefw_crash.txt"), format!("LIKELY CAUSE: a texture in {game_s} is damaged\nstack...\n")).unwrap();
         fs::write(game.join("fefw.ini"), "[fefw]\nfps60 = 1\n[fs]\nsave_dir = D:/Private Saves\n").unwrap();
 
-        let p = prepare(&state, &game, &game.join("fefw.log"), from, started, Some(-1073741819), "").expect("a crash is reported");
+        let p = prepare(&state, &game, &game.join("fefw.log"), started, Some(-1073741819), "").expect("a crash is reported");
         assert_eq!(p.trigger, "crash");
         let saved = fs::read(game.join("fefw_last_report.json")).unwrap();
         assert_eq!(saved, p.json_bytes, "the copy beside the log is exactly the payload");
@@ -745,7 +759,7 @@ mod tests {
 
         // The same crash again today is not sent twice.
         record_sent(&state, p.now, p.trigger, &p.build_id, &p.sig);
-        assert!(prepare(&state, &game, &game.join("fefw.log"), from, started, Some(-1073741819), "").is_none());
+        assert!(prepare(&state, &game, &game.join("fefw.log"), started, Some(-1073741819), "").is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
