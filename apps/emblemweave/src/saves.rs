@@ -831,6 +831,32 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
         }
     }
 
+    // A save folder directly in the save root: a profile folder moved out by hand, or a tree recovered from an older
+    // build. The game only opens `account/DEFAULT_USER`, so this save is invisible without being named here. Reserved
+    // folders are skipped: `account` and `profiles` are scanned above, and `backups` is the launcher's own copy area.
+    for e in std::fs::read_dir(save_dir).into_iter().flatten().flatten() {
+        let path = e.path();
+        if !path.is_dir() || path == target {
+            continue;
+        }
+        let label = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if matches!(label.to_ascii_lowercase().as_str(), "account" | "profiles" | "backups") {
+            continue;
+        }
+        let Some(save) = save_below(&path) else {
+            continue;
+        };
+        let (files, modified) = summary(&save.join("000"));
+        if files > 0 {
+            out.push(OrphanSave {
+                description: format!("Save folder \"{label}\""),
+                path: save,
+                files,
+                modified,
+            });
+        }
+    }
+
     // Sort by modification time, newest first
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
     out.dedup_by(|a, b| a.path == b.path);
@@ -2735,6 +2761,35 @@ mod tests {
         assert!(
             store_profile(&save, "Nothing", "1").is_err(),
             "an empty save cannot be kept as a profile"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A recovered tree can hold the playthrough as `<save folder>/<id>/000` instead of under `account/`. The game
+    /// never opens it, so the Saves page must name it and offer to copy it into place (issue #79). Backups are not
+    /// orphans: the launcher already lists them as backups.
+    #[test]
+    fn a_save_folder_in_the_save_root_is_an_orphan() {
+        let root = temp("root-orphan");
+        let save = root.join("save");
+        write(&save.join("1795393583/000/Chapter_Led_1_4"), "progress");
+        write(&save.join("profiles/Kept/000/Auto"), "profile");
+        write(&save.join("backups/1-import/000/Auto"), "backup");
+        write(
+            &save.join("account").join(DEFAULT_USER).join("000/Auto"),
+            "current",
+        );
+
+        let found = find_orphan_saves(&save);
+        assert!(
+            found
+                .iter()
+                .any(|o| o.path.ends_with("1795393583") && o.files == 1 && o.description.contains("Save folder")),
+            "the root save is named: {found:?}"
+        );
+        assert!(
+            found.iter().all(|o| !o.path.ends_with("1-import")),
+            "the launcher's backup area is not an orphan: {found:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
