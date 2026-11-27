@@ -266,7 +266,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     if !*done && *page != Page::Overview {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.link(format!("Open {}", page.label())).clicked() {
-                                app.page = *page;
+                                app.open(*page);
                             }
                         });
                     }
@@ -408,13 +408,13 @@ fn quick_actions(app: &mut App, ui: &mut egui::Ui, p: &crate::theme::Palette) {
             .on_hover_text("Open the Saves page: profiles, the slots in this save and the editor")
             .clicked()
         {
-            app.page = crate::pages::Page::Saves;
+            app.open(crate::pages::Page::Saves);
         }
         if widgets::button(ui, p, &quick.mods_label, true).clicked() {
-            app.page = crate::pages::Page::Mods;
+            app.open(crate::pages::Page::Mods);
         }
         if widgets::button(ui, p, &quick.cheats_label, true).clicked() {
-            app.page = crate::pages::Page::Cheats;
+            app.open(crate::pages::Page::Cheats);
         }
     });
     if let Some(pr) = load {
@@ -654,12 +654,12 @@ pub fn popups(app: &mut App, ctx: &egui::Context) {
                                 }
                             } else if widgets::button(ui, &p, "Open page", true).clicked() {
                                 match kind {
-                                    Popup::WhatsNew => app.page = Page::About,
-                                    Popup::QuickHelp => app.page = Page::Troubleshoot,
-                                    Popup::GameStatus => app.page = Page::Overview,
-                                    Popup::BuildStatus => app.page = Page::Recompile,
+                                    Popup::WhatsNew => app.open(Page::About),
+                                    Popup::QuickHelp => app.open(Page::Troubleshoot),
+                                    Popup::GameStatus => app.open(Page::Overview),
+                                    Popup::BuildStatus => app.open(Page::Recompile),
                                     Popup::BuildChanges => {}
-                                    Popup::SetupGuide => app.page = Page::Setup,
+                                    Popup::SetupGuide => app.open(Page::Setup),
                                 }
                                 close = true;
                             }

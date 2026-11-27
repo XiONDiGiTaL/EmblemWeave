@@ -13,6 +13,7 @@ pub mod mods;
 pub mod overview;
 pub mod performance;
 pub mod recompile;
+pub mod report_issue;
 pub mod requirements;
 pub mod saves;
 pub mod setup;

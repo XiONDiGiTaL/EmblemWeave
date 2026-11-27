@@ -22,6 +22,7 @@ mod exe_icon;
 mod gamedata;
 mod i18n;
 mod ingame;
+mod issue_report;
 mod jobs;
 mod labb;
 mod logo;
@@ -164,6 +165,9 @@ pub struct App {
     saved: String,
     last_save_check: Instant,
     pub page: Page,
+    /// Bumped whenever navigation lands on a different page. Per-visit drawers
+    /// use it so they open collapsed each time their page is entered.
+    pub page_epoch: u32,
     /// The page the central scroll area was last laid out for, so a page opens
     /// at the top instead of inheriting the scroll position of the last one.
     page_seen: Option<Page>,
@@ -341,6 +345,7 @@ impl App {
             saved,
             last_save_check: Instant::now(),
             page: Page::Overview,
+            page_epoch: 0,
             page_seen: None,
             game: GameData::default(),
             jobs: Vec::new(),
@@ -1190,6 +1195,9 @@ impl App {
     /// Show `page`. An advanced page is an explicit request for Advanced mode, so the rail reveals its siblings instead
     /// of leaving the player on a page Standard does not list. Nothing else changes.
     pub fn open(&mut self, page: Page) {
+        if self.page != page {
+            self.page_epoch = self.page_epoch.wrapping_add(1);
+        }
         self.page = page;
         if !page.available(self.config.interface_mode) {
             self.config.interface_mode = crate::config::InterfaceMode::Advanced;
