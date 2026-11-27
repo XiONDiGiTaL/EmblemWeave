@@ -28,8 +28,9 @@
 namespace nxrt::kernel {
 namespace detail {
 
-// One kernel lock for every wait queue (thread.cpp and occupancy.cpp take the same lock).
-detail::KernelLock g_k;
+// Sharded kernel locks: one per wait queue type to reduce contention.
+// Lock order (must be consistent to avoid deadlocks): sync → mutex → cv → addr
+KernelLocks g_klocks;
 
 namespace {
 std::vector<KThread*> g_sync_waiters;    // in WaitSynchronization: woken by any change of waitable state
@@ -38,35 +39,8 @@ std::unordered_set<uint64_t> g_broadcast_mutexes; // mutexes that had a condvar 
 std::vector<KThread*> g_cv_waiters;      // waiting on a process-wide key
 std::vector<KThread*> g_addr_waiters;    // WaitForAddress
 
-// Per-lock Guard classes
-// All wait queues share the one kernel lock: the sharded queues left a window between handing a
-// mutex over and queueing its waiter, and an unlock in that window lost the wakeup. thread.cpp and
-// occupancy.cpp already take g_k, so the queues and the rest of the kernel stay consistent.
-struct GuardMutex {
-    GuardMutex() { g_k.lock(); }
-    ~GuardMutex() { g_k.unlock(); }
-};
-
-struct GuardCV {
-    GuardCV() { g_k.lock(); }
-    ~GuardCV() { g_k.unlock(); }
-};
-
-struct GuardAddr {
-    GuardAddr() { g_k.lock(); }
-    ~GuardAddr() { g_k.unlock(); }
-};
-
-struct GuardSync {
-    GuardSync() { g_k.lock(); }
-    ~GuardSync() { g_k.unlock(); }
-};
-
-// Legacy Guard for compatibility (stats, sync_reset, etc.)
-struct Guard {
-    Guard() { g_k.lock(); }
-    ~Guard() { g_k.unlock(); }
-};
+// Guard classes are defined in kernel_internal.h in the detail namespace.
+// This file is in the same namespace, so they are available without qualification.
 
 void remove_from(std::vector<KThread*>& v, KThread* t) { v.erase(std::remove(v.begin(), v.end(), t), v.end()); }
 
@@ -91,7 +65,7 @@ KThread* pick_best(std::vector<KThread*>& v, uint64_t KThread::*field, uint64_t 
     return best;
 }
 
-// Hands the mutex word at addr to its best waiter (or clears it). g_k held.
+// Hands the mutex word at addr to its best waiter (or clears it). mutex lock held.
 // If this mutex had a condvar broadcast, wake all waiters.
 void unlock_mutex(uint64_t addr) {
     // Collect all waiters for this mutex
@@ -165,8 +139,8 @@ int64_t qpc_now() {
 }
 
 // [kernel] wait_stats = <seconds> (env NXRT_KERNEL_WAIT_STATS, default 0 = off): per guest thread, how often it blocked in WaitForAddress,
-// ArbitrateLock and WaitProcessWideKeyAtomic, for how long, and the wake latency (wake_thread to the thread running again with the kernel
-// lock: the host's wake-up plus the lock), logged every <seconds>. Counted under g_k.
+// ArbitrateLock and WaitProcessWideKeyAtomic, for how long, and the wake latency (wake_thread to the thread running again with the appropriate
+// kernel lock: the host's wake-up plus the lock), logged every <seconds>. Counted under the sync lock.
 struct WaitStats {
     std::string name;
     int prio = 0, ideal = 0;
@@ -176,10 +150,10 @@ struct WaitStats {
 };
 constexpr int64_t kLatBoundsUs[7] = {5, 10, 20, 50, 100, 200, 500};
 std::atomic<std::unordered_map<const KThread*, WaitStats>*> g_stats{nullptr};
-std::unordered_map<const KThread*, int64_t> g_woken_at;   // g_k held; only while wait_stats is on
+std::unordered_map<const KThread*, int64_t> g_woken_at;   // sync lock held; only while wait_stats is on
 
 // [kernel] spin_us (env NXRT_KERNEL_SPIN_US, default 0 = off): a thread about to sleep in one of those waits first polls its wake flag
-// this long with g_k released, so a signal that comes within it reaches the thread without the host's sleep and wake-up.
+// this long with the kernel lock released, so a signal that comes within it reaches the thread without the host's sleep and wake-up.
 // [kernel] spin_threads / lock_spin_threads (comma lists of game thread name prefixes, `main` = the main thread; empty = every thread): only
 // those threads spin (spin_us) or poll a held mutex (lock_spin_us). spin_us for every thread was a loss in Dagsion (cpu-1 H: the job workers
 // and the GFX workers spin each time they go idle, on the processors and SMT siblings the game and render threads need); the waits that the
@@ -228,7 +202,7 @@ bool wait_spin_on() {
     }
     return !(v == "false" || v == "0" || v == "off" || v == "no");
 }
-const WaitTuning& wait_tuning() {      // first called before g_k is taken (config reads log)
+const WaitTuning& wait_tuning() {      // first called before any kernel lock is taken (config reads log)
     static const WaitTuning w = [] {
         WaitTuning v;
         v.hz = nxrt::platform::clock_hz();
@@ -262,9 +236,10 @@ void stats_report_loop(int64_t seconds) {
     for (;;) {
         nxrt::platform::sleep_ns(seconds * 1000000000);
         std::unordered_map<const KThread*, WaitStats> snap;
-        g_k.lock();
-        snap.swap(*g_stats.load(std::memory_order_acquire));
-        g_k.unlock();
+        {
+            Guard g;
+            snap.swap(*g_stats.load(std::memory_order_acquire));
+        }
         std::vector<const WaitStats*> rows;
         for (auto& kv : snap) rows.push_back(&kv.second);
         std::sort(rows.begin(), rows.end(), [](const WaitStats* a, const WaitStats* b) {
@@ -318,7 +293,7 @@ void sleep_locked(KThread& t, uint32_t ms, platform::Mutex* lock) {
     }
 }
 
-// Waits (g_k held, released while sleeping) until t.wake or the timeout; false on timeout.
+// Waits (appropriate kernel lock held, released while sleeping) until t.wake or the timeout; false on timeout.
 bool block_on_wake(KThread& t, int64_t timeout_ns, int kind, platform::Mutex* lock) {
     const int64_t until = timeout_ns < 0 ? 0 : now_ns() + timeout_ns;
     if (t.wake) return true;
@@ -382,7 +357,7 @@ bool block_on_wake(KThread& t, int64_t timeout_ns, int kind, platform::Mutex* lo
 
 void wake_thread(KThread& t, uint32_t result) {
     t.wait_result = result;                                // before the flag: a spinner reads the result once it sees the flag
-    __atomic_store_n(&t.wake, true, __ATOMIC_RELEASE);     // read without g_k by a thread spinning in block_on_wake
+    __atomic_store_n(&t.wake, true, __ATOMIC_RELEASE);     // read without kernel lock by a thread spinning in block_on_wake
     if (g_stats.load(std::memory_order_relaxed)) g_woken_at[&t] = qpc_now();
     if (g_occ_on && t.occ_group == 1) occ_main_woken();
     nxrt::platform::cond_signal(thread_cv(t));
@@ -402,18 +377,40 @@ void sync_reset() {
     g_cv_waiters.clear();
     g_addr_waiters.clear();
 }
-
 }  // namespace detail
 
 using namespace detail;
 
-// The kernel lock is a process-wide member of g_k; kept for callers that initialize at startup.
+// The kernel locks are process-wide members of g_klocks; kept for callers that initialize at startup.
 void init_kernel_locks() {}
 
 std::string sync_wait_report() {
     // Called from the watchdog thread while the process may be frozen: never block on the kernel lock.
-    if (!nxrt::platform::mutex_trylock(g_k.m)) return "kernel sync report: the kernel lock is held (a thread is inside a sync call)\n";
-    struct Release { ~Release() { nxrt::platform::mutex_unlock(g_k.m); } } release;
+    // Try to acquire all locks in order (sync → mutex → cv → addr).
+    if (!nxrt::platform::mutex_trylock(g_klocks.sync)) return "kernel sync report: the kernel lock is held (a thread is inside a sync call)\n";
+    if (!nxrt::platform::mutex_trylock(g_klocks.mutex)) {
+        nxrt::platform::mutex_unlock(g_klocks.sync);
+        return "kernel sync report: the kernel lock is held (a thread is inside a sync call)\n";
+    }
+    if (!nxrt::platform::mutex_trylock(g_klocks.cv)) {
+        nxrt::platform::mutex_unlock(g_klocks.mutex);
+        nxrt::platform::mutex_unlock(g_klocks.sync);
+        return "kernel sync report: the kernel lock is held (a thread is inside a sync call)\n";
+    }
+    if (!nxrt::platform::mutex_trylock(g_klocks.addr)) {
+        nxrt::platform::mutex_unlock(g_klocks.cv);
+        nxrt::platform::mutex_unlock(g_klocks.mutex);
+        nxrt::platform::mutex_unlock(g_klocks.sync);
+        return "kernel sync report: the kernel lock is held (a thread is inside a sync call)\n";
+    }
+    struct Release {
+        ~Release() {
+            nxrt::platform::mutex_unlock(g_klocks.addr);
+            nxrt::platform::mutex_unlock(g_klocks.cv);
+            nxrt::platform::mutex_unlock(g_klocks.mutex);
+            nxrt::platform::mutex_unlock(g_klocks.sync);
+        }
+    } release;
     std::string out = "kernel sync waiters:\n";
     char b[256];
     auto list = [&](const char* kind, const std::vector<KThread*>& v, uint64_t KThread::*field) {
@@ -455,7 +452,7 @@ uint32_t arbitrate_lock(uint32_t owner, uint64_t addr, uint32_t tag) {
     me.wait_mutex = addr;
     me.wait_tag = tag;
     g_mutex_waiters.push_back(&me);
-    block_on_wake(me, -1, 1, g_k.m);
+    block_on_wake(me, -1, 1, g_klocks.mutex);
     return me.wait_result;
 }
 
@@ -470,9 +467,9 @@ uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64
     if (mutex & 3 || key & 3) return kInvalidAddress;
     wait_tuning();
     const int64_t until = timeout_ns <= 0 ? 0 : now_ns() + timeout_ns;
+    KThread& me = self();
     {
-        Guard g;
-        KThread& me = self();
+        GuardCVMutex g;
         // Like Horizon: the condition variable's "has waiters" word is written BEFORE the mutex is released. The SDK's Signal/Broadcast
         // read that word in guest code and skip the SVC when it is 0; the other order lost wake-ups (Wonder: a thread took the freed mutex,
         // posted, saw 0, and the waiter then slept forever).
@@ -484,18 +481,28 @@ uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64
         g_cv_waiters.push_back(&me);
         store32(key, 1);
         unlock_mutex(mutex);
-        if (timeout_ns == 0 || !block_on_wake(me, timeout_ns, 2, g_k.m)) {
-            // Timed out (not handed the mutex): leave the condition variable or the mutex queue a signal moved us to, return without
-            // the mutex (the SDK re-locks it itself: TimedWait -> InternalCriticalSection::Enter).
-            remove_from(g_cv_waiters, &me);
-            remove_from(g_mutex_waiters, &me);
-            bool others = std::any_of(g_cv_waiters.begin(), g_cv_waiters.end(), [&](KThread* t) { return t->wait_key == key; });
-            if (!others) store32(key, 0);
-            return kTimedOut;
-        }
+    }
+    // Only the cv lock is held across the wait. The mutex must be free while this
+    // thread sleeps, or the signal path cannot take it to hand the mutex over.
+    bool woken;
+    {
+        GuardCV g;
+        woken = timeout_ns != 0 && block_on_wake(me, timeout_ns, 2, g_klocks.cv);
+    }
+    if (timeout_ns == 0 || !woken) {
+        GuardCVMutex g;
+        // Timed out (not handed the mutex): leave the condition variable or the mutex queue a signal moved us to, return without
+        // the mutex (the SDK re-locks it itself: TimedWait -> InternalCriticalSection::Enter).
+        remove_from(g_cv_waiters, &me);
+        remove_from(g_mutex_waiters, &me);
+        bool others = std::any_of(g_cv_waiters.begin(), g_cv_waiters.end(), [&](KThread* t) { return t->wait_key == key; });
+        if (!others) store32(key, 0);
+        return kTimedOut;
+    }
+    {
+        GuardCVMutex g;
         // Woken up. Check if we own the mutex (mutex word has our tag).
         // If not, we need to acquire it via arbitrate_lock.
-        // The kernel lock (g) is released here when the scope ends.
         uint32_t cur = load32(mutex);
         if ((cur & ~kHandleWaitMask) == tag) {
             // We own the mutex directly.
@@ -504,9 +511,8 @@ uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64
             if (!others) store32(key, 0);
             return kOk;
         }
-        // We don't own the mutex yet. We'll acquire it below after releasing the kernel lock.
     }
-    // Kernel lock released. Now acquire the mutex via arbitrate_lock.
+    // We don't own the mutex yet. We'll acquire it below after releasing the kernel lock.
     // Loop until we own the mutex or timeout.
     for (;;) {
         int64_t remaining_ns = timeout_ns <= 0 ? -1 : until - now_ns();
@@ -517,7 +523,7 @@ uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64
         uint32_t rc = arbitrate_lock(owner, mutex, tag);
         if (rc != kOk) {
             // Timeout or error - clean up (need to re-acquire kernel lock for cleanup)
-            Guard g;
+            GuardCVMutex g;
             KThread& me = self();
             remove_from(g_cv_waiters, &me);
             remove_from(g_mutex_waiters, &me);
@@ -548,7 +554,7 @@ uint32_t wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64
     }
     // We own the mutex.
     {
-        Guard g;
+        GuardCVMutex g;
         KThread& me = self();
         remove_from(g_cv_waiters, &me);
         bool others = std::any_of(g_cv_waiters.begin(), g_cv_waiters.end(), [&](KThread* t) { return t->wait_key == key; });
@@ -563,7 +569,7 @@ uint32_t signal_process_wide_key(uint64_t key, int32_t count) {
     const bool is_broadcast = count < 0;
     std::vector<KThread*> to_queue;
     {
-        Guard g;
+        GuardCVMutex g;
         while (count <= 0 || n < count) {
             KThread* t = pick_best(g_cv_waiters, &KThread::wait_key, key);
             if (!t) break;
@@ -628,7 +634,7 @@ uint32_t wait_for_address(uint64_t addr, uint32_t type, int32_t value, int64_t t
     me.wait_addr = addr;
     me.wait_result = 0;
     g_addr_waiters.push_back(&me);
-    if (!block_on_wake(me, timeout_ns, 0, g_k.m)) {
+    if (!block_on_wake(me, timeout_ns, 0, g_klocks.addr)) {
         remove_from(g_addr_waiters, &me);
         return kTimedOut;
     }
@@ -747,7 +753,7 @@ uint32_t wait_synchronization(const uint32_t* handles, int32_t count, int64_t ti
             objs[i]->consume();
             return kOk;
         }
-        sleep_locked(me, ms, g_k.m);
+        sleep_locked(me, ms, g_klocks.sync);
     }
 }
 
@@ -802,27 +808,27 @@ struct GaugeHook {
 
 // Length of one wait queue under the kernel lock. The sampler never waits for the kernel lock: -1 while a thread holds it.
 int64_t queue_len_mutex(const std::vector<KThread*>& v) {
-    if (!nxrt::platform::mutex_trylock(g_k.m)) return -1;
+    if (!nxrt::platform::mutex_trylock(g_klocks.mutex)) return -1;
     const int64_t n = static_cast<int64_t>(v.size());
-    nxrt::platform::mutex_unlock(g_k.m);
+    nxrt::platform::mutex_unlock(g_klocks.mutex);
     return n;
 }
 int64_t queue_len_cv(const std::vector<KThread*>& v) {
-    if (!nxrt::platform::mutex_trylock(g_k.m)) return -1;
+    if (!nxrt::platform::mutex_trylock(g_klocks.cv)) return -1;
     const int64_t n = static_cast<int64_t>(v.size());
-    nxrt::platform::mutex_unlock(g_k.m);
+    nxrt::platform::mutex_unlock(g_klocks.cv);
     return n;
 }
 int64_t queue_len_addr(const std::vector<KThread*>& v) {
-    if (!nxrt::platform::mutex_trylock(g_k.m)) return -1;
+    if (!nxrt::platform::mutex_trylock(g_klocks.addr)) return -1;
     const int64_t n = static_cast<int64_t>(v.size());
-    nxrt::platform::mutex_unlock(g_k.m);
+    nxrt::platform::mutex_unlock(g_klocks.addr);
     return n;
 }
 int64_t queue_len_sync(const std::vector<KThread*>& v) {
-    if (!nxrt::platform::mutex_trylock(g_k.m)) return -1;
+    if (!nxrt::platform::mutex_trylock(g_klocks.sync)) return -1;
     const int64_t n = static_cast<int64_t>(v.size());
-    nxrt::platform::mutex_unlock(g_k.m);
+    nxrt::platform::mutex_unlock(g_klocks.sync);
     return n;
 }
 
