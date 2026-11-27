@@ -304,6 +304,8 @@ fn old_versions_dir(exe: &Path) -> PathBuf {
 pub fn migrate_legacy_backup() {
     if let Some(exe) = current_exe() {
         migrate_backup(&exe);
+        // The previous launcher a headless update moved aside (see `swap_now`); it is no longer running by now.
+        let _ = std::fs::remove_file(replaced_exe(&exe));
     }
 }
 
@@ -614,8 +616,9 @@ pub fn install(
     swap_script(&staged, &target, &update_log(), failure_marker().as_deref(), true)
 }
 
-/// [`install`] for `--headless update`: the same staging and swap, but the new launcher is not opened afterwards; whoever
-/// ran the command (a Decky plugin, a script) decides what runs next.
+/// [`install`] for `--headless update`: the same staging, but the swap is done before this returns instead of by a script
+/// after exit, so `Ok` means the new launcher is in place. It is not opened afterwards; whoever ran the command (a Decky
+/// plugin, a script) decides what runs next.
 pub fn install_without_restart(
     new_exe: &Path,
     engine_root: Option<&Path>,
@@ -632,7 +635,35 @@ pub fn install_without_restart(
         keep_previous,
         release_tag,
     )?;
-    swap_script(&staged, &target, &update_log(), failure_marker().as_deref(), false)
+    swap_now(&staged, &target)?;
+    if let Some(marker) = failure_marker() {
+        let _ = std::fs::remove_file(marker);
+    }
+    Ok(())
+}
+
+/// The launcher a headless update moved aside: Windows lets a running executable be renamed but not replaced, so the old
+/// one waits under this name until the next start removes it.
+fn replaced_exe(target: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.replaced", target.display()))
+}
+
+/// Swap `staged` in for the running launcher at `target` before returning, so the caller learns whether it worked
+/// instead of trusting a script that runs after this process has gone. On any failure `target` is left as it was.
+fn swap_now(staged: &Path, target: &Path) -> Result<(), String> {
+    let aside = replaced_exe(target);
+    // A leftover from an earlier update that has not been cleaned up yet; if it cannot go, the rename below says why.
+    let _ = std::fs::remove_file(&aside);
+    if let Err(e) = std::fs::rename(target, &aside) {
+        let _ = std::fs::remove_file(staged);
+        return Err(format!("moving the running launcher aside: {e}"));
+    }
+    if let Err(e) = std::fs::rename(staged, target) {
+        let _ = std::fs::rename(&aside, target);
+        let _ = std::fs::remove_file(staged);
+        return Err(format!("putting the new launcher in place: {e}"));
+    }
+    Ok(())
 }
 
 /// The part of [`install`] that runs before the restart, with the running launcher's paths passed in so a test can drive
@@ -1379,5 +1410,23 @@ mod tests {
         assert!(download(&r, &std::env::temp_dir()).is_err());
         assert!(release_from_json(b"{}").is_err());
         assert!(release_from_json(b"not json").is_err());
+    }
+
+    #[test]
+    fn a_headless_swap_is_done_before_it_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("EmblemWeave.exe");
+        let staged = dir.path().join("EmblemWeave.exe.new");
+        write(&target, "old");
+        write(&staged, "new");
+        swap_now(&staged, &target).unwrap();
+        assert_eq!(read(&target), "new");
+        assert_eq!(read(&replaced_exe(&target)), "old");
+        assert!(!staged.exists());
+
+        // A staged file that is missing fails, and the launcher in place is untouched.
+        write(&target, "current");
+        assert!(swap_now(&staged, &target).is_err());
+        assert_eq!(read(&target), "current");
     }
 }

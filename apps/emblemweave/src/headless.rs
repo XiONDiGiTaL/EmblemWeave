@@ -190,7 +190,7 @@ fn update(out: &Out) -> i32 {
         .and_then(|exe| crate::updater::install_without_restart(&exe, crate::engine::root().as_deref(), true, &rel.tag));
     match r {
         Ok(()) => {
-            // The swap waits for this process to exit; it then moves the new launcher into place.
+            // The new launcher is already in place; the next start of it removes the old one, which this process still runs.
             out.result(&[("updated", Value::Bool(true)), ("version", Value::Str(rel.tag.clone()))]);
             0
         }
@@ -289,8 +289,30 @@ fn play(config: &Config, out: &Out) -> i32 {
         }
         std::thread::sleep(Duration::from_secs(1));
     }
-    out.result(&[("played", Value::Bool(seen))]);
-    if seen { 0 } else { 1 }
+    // The watcher records the game's own exit status as soon as the game ends, before it writes the report, so a crash
+    // is told apart from a normal quit even while a report is still being sent.
+    let status = crate::engine::last_game_exit();
+    let code = status.and_then(|s| s.code());
+    let error = if !seen {
+        Some("the game did not start".to_string())
+    } else {
+        match status {
+            Some(s) if s.success() => None,
+            Some(_) => Some(match code {
+                Some(c) => format!("the game exited with code {c} (0x{:08X})", c as u32),
+                None => "the game was ended by a signal".into(),
+            }),
+            None => Some("the game's exit status is unknown".into()),
+        }
+    };
+    let mut fields = vec![("played", Value::Bool(seen)), ("exit_code", Value::opt(code.map(|c| c.to_string())))];
+    match (&error, out.json) {
+        (Some(e), true) => fields.push(("error", Value::Str(e.clone()))),
+        (Some(e), false) => eprintln!("error: {e}"),
+        (None, _) => {}
+    }
+    out.result(&fields);
+    if error.is_some() { 1 } else { 0 }
 }
 
 #[cfg(test)]

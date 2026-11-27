@@ -5259,9 +5259,18 @@ static WATCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize
 /// Launch threads still alive: the watch, then the wait for the exit and the opt-in report.
 static LAUNCH_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// How the last launched game ended, set by its watcher as soon as the game exits (before the opt-in report).
+static LAST_EXIT: std::sync::Mutex<Option<std::process::ExitStatus>> = std::sync::Mutex::new(None);
+
 /// Whether a launch thread is still running (the game, or its issue report after it).
 pub fn launch_threads_active() -> bool {
     LAUNCH_THREADS.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+/// The exit status of the last game this launcher started, once it has exited; `None` while it runs or when the wait
+/// for it failed.
+pub fn last_game_exit() -> Option<std::process::ExitStatus> {
+    *LAST_EXIT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Whether a launch is still being watched, so the window keeps repainting
@@ -5386,6 +5395,7 @@ fn tidy_link_temps(builds: &Path) -> usize {
 fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
     WATCHING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     LAUNCH_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    *LAST_EXIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     std::thread::spawn(move || {
         let launched = std::time::SystemTime::now();
         let exited = {
@@ -5395,6 +5405,7 @@ fn watch_first_frame(mut child: std::process::Child, log: PathBuf, from: u64) {
         // The window stops repainting for the launch here; this thread stays until the game exits, for the opt-in
         // issue report (src/issue_upload.rs), which does nothing unless the player turned it on and named a server.
         let status = exited.or_else(|| child.wait().ok());
+        *LAST_EXIT.lock().unwrap_or_else(|e| e.into_inner()) = status;
         crate::issue_upload::after_run(&log, from, launched, status.and_then(|s| s.code()));
         LAUNCH_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });

@@ -73,6 +73,7 @@ std::string repo() {
     return repo_ok(r) ? r : (repo_ok(kRepo) ? std::string(kRepo) : std::string());
 }
 
+#ifdef _WIN32
 struct Handle {
     HINTERNET h = nullptr;
     ~Handle() {
@@ -81,7 +82,6 @@ struct Handle {
     explicit operator bool() const { return h != nullptr; }
 };
 
-#ifdef _WIN32
 // The body of GET https://api.github.com/repos/<repo>/releases/latest, false with *why.
 bool fetch_latest(const char* repo, std::string* body, std::string* why) {
     const auto failed = [why](const char* what) {

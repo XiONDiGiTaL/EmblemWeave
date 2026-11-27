@@ -48,10 +48,18 @@ pub fn endpoint(config_value: &str) -> Option<String> {
 fn usable_url(raw: &str) -> Option<String> {
     let url = raw.trim().trim_end_matches('/');
     let ok_chars = url.chars().all(|c| c.is_ascii_graphic()) && !url.contains(['"', '\'', '\\', '<', '>', '`']);
-    let https = url.strip_prefix("https://").is_some_and(|h| !h.is_empty());
-    let local = ["http://localhost", "http://127.0.0.1"]
-        .iter()
-        .any(|p| url.strip_prefix(p).is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/'])));
+    // The host is judged from the authority (everything up to the first '/', '?' or '#'), and an authority holding
+    // credentials is refused outright: in `http://localhost:80@far.example` curl reads `localhost:80` as a user name and
+    // connects to far.example.
+    let authority = |rest: &str| -> Option<String> {
+        let a = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        (!a.is_empty() && !a.contains('@')).then(|| a.to_ascii_lowercase())
+    };
+    let https = url.strip_prefix("https://").and_then(authority).is_some();
+    let local = url.strip_prefix("http://").and_then(authority).is_some_and(|a| {
+        let (host, port) = a.split_once(':').unwrap_or((&a, ""));
+        matches!(host, "localhost" | "127.0.0.1") && port.chars().all(|c| c.is_ascii_digit())
+    });
     (ok_chars && (https || local)).then(|| url.to_string())
 }
 
@@ -609,6 +617,12 @@ mod tests {
         assert_eq!(usable_url("https://reports.example.com/"), Some("https://reports.example.com".into()));
         assert_eq!(usable_url("http://localhost:8787"), Some("http://localhost:8787".into()));
         assert_eq!(usable_url("http://localhost.evil.com"), None);
+        assert_eq!(usable_url("http://127.0.0.1/v"), Some("http://127.0.0.1/v".into()));
+        assert_eq!(usable_url("http://localhost:80@reports.example.com"), None, "credentials hide the real host");
+        assert_eq!(usable_url("http://localhost@reports.example.com"), None);
+        assert_eq!(usable_url("http://localhost:x@reports.example.com/"), None);
+        assert_eq!(usable_url("https://user@reports.example.com"), None);
+        assert_eq!(usable_url("https:///path"), None);
         assert_eq!(usable_url("https://a.example/x\" -o C:/x"), None, "nothing that could reach curl as another argument");
     }
 
