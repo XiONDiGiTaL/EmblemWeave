@@ -53,8 +53,10 @@ fn external_dll() -> Option<PathBuf> {
 }
 
 /// Stage an externally supplied DLL, keeping a newer installed copy rather than
-/// downgrading it. The manifest beside the DLL wins when present; otherwise the
-/// embedded manifest and version describe the staged payload.
+/// downgrading it. The manifest beside the DLL wins when present and valid;
+/// otherwise the embedded manifest and version describe the staged payload.
+/// An external package with a missing, malformed, or version-less manifest is
+/// never allowed to overwrite a known newer installed version.
 fn ensure_external_in(mods: &Path, dll: &Path) -> Result<Option<String>, String> {
     let package = match dll.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
         Some("exefs") | Some("lib") => dll.parent().and_then(|p| p.parent()).unwrap_or(Path::new(".")),
@@ -67,17 +69,33 @@ fn ensure_external_in(mods: &Path, dll: &Path) -> Result<Option<String>, String>
     let target = exefs.join(DLL_NAME);
     let installed = manifest_version(&folder.join("plugin.json"));
 
-    if let (Some(ext), Some(inst)) = (&external_version, &installed) {
-        if version_tuple(inst) > version_tuple(ext) {
-            return Ok(None);
-        }
+    // Determine whether the installed version is newer than what we can verify
+    // for the external package. If the external version is unknown (missing,
+    // malformed, or no version field), we must not overwrite a newer install.
+    let installed_is_newer_than_known_external = match (&external_version, &installed) {
+        (Some(ext), Some(inst)) => version_tuple(inst) > version_tuple(ext),
+        (None, Some(inst)) => version_tuple(inst) > version_tuple(BUNDLED_VERSION),
+        _ => false,
+    };
+
+    if installed_is_newer_than_known_external {
+        return Ok(None);
     }
 
     std::fs::create_dir_all(&exefs)
         .map_err(|e| format!("creating {}: {e}", exefs.display()))?;
     write_atomic(&target, &std::fs::read(dll).map_err(|e| format!("reading {}: {e}", dll.display()))?)?;
-    if external_manifest.is_file() {
-        write_atomic(&folder.join("plugin.json"), &std::fs::read(&external_manifest).map_err(|e| format!("reading {}: {e}", external_manifest.display()))?)?;
+
+    // Only copy the external manifest if it is valid JSON with a version field.
+    // Otherwise fall back to the embedded manifest to avoid installing a
+    // malformed or incomplete manifest.
+    let external_manifest_is_valid = external_manifest.is_file()
+        && manifest_version(&external_manifest).is_some();
+    if external_manifest_is_valid {
+        write_atomic(
+            &folder.join("plugin.json"),
+            &std::fs::read(&external_manifest).map_err(|e| format!("reading {}: {e}", external_manifest.display()))?,
+        )?;
     } else {
         write_atomic(&folder.join("plugin.json"), PLUGIN_JSON.as_bytes())?;
     }
@@ -271,5 +289,152 @@ mod tests {
             "trinity.enabled=0\n"
         );
         let _ = std::fs::remove_dir_all(mods);
+    }
+
+    // --- External DLL version-safety regression tests ---
+
+    /// External DLL with no manifest when a newer installation exists:
+    /// the installed DLL and manifest must be preserved.
+    #[test]
+    fn external_dll_no_manifest_preserves_newer_install() {
+        let root = temp("external-no-manifest");
+        let mods = root.join("mods");
+        let folder = mods.join(MOD_FOLDER);
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("plugin.json"), r#"{"version":"9.9.9"}"#).unwrap();
+        std::fs::write(folder.join("exefs").join(DLL_NAME), b"installed newer").unwrap();
+        // External DLL has no plugin.json alongside it
+        std::fs::write(root.join(DLL_NAME), b"external payload").unwrap();
+        assert!(ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"installed newer"
+        );
+        assert_eq!(
+            installed_version(&folder.join("plugin.json")).as_deref(),
+            Some("9.9.9")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// External DLL with malformed JSON manifest when a newer installation exists:
+    /// the installed DLL and manifest must be preserved; malformed manifest not copied.
+    #[test]
+    fn external_dll_malformed_manifest_preserves_newer_install() {
+        let root = temp("external-malformed");
+        let mods = root.join("mods");
+        let folder = mods.join(MOD_FOLDER);
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("plugin.json"), r#"{"version":"9.9.9"}"#).unwrap();
+        std::fs::write(folder.join("exefs").join(DLL_NAME), b"installed newer").unwrap();
+        std::fs::write(root.join(DLL_NAME), b"external payload").unwrap();
+        std::fs::write(root.join("plugin.json"), "not valid json").unwrap();
+        assert!(ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"installed newer"
+        );
+        assert_eq!(
+            installed_version(&folder.join("plugin.json")).as_deref(),
+            Some("9.9.9")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// External manifest with missing version field when a newer installation exists:
+    /// the installed DLL and manifest must be preserved; incomplete manifest not copied.
+    #[test]
+    fn external_dll_manifest_missing_version_preserves_newer_install() {
+        let root = temp("external-no-version");
+        let mods = root.join("mods");
+        let folder = mods.join(MOD_FOLDER);
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("plugin.json"), r#"{"version":"9.9.9"}"#).unwrap();
+        std::fs::write(folder.join("exefs").join(DLL_NAME), b"installed newer").unwrap();
+        std::fs::write(root.join(DLL_NAME), b"external payload").unwrap();
+        std::fs::write(root.join("plugin.json"), r#"{"name":"TrinityCore"}"#).unwrap(); // no version
+        assert!(ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"installed newer"
+        );
+        assert_eq!(
+            installed_version(&folder.join("plugin.json")).as_deref(),
+            Some("9.9.9")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Valid external manifest and successful installation (no prior install):
+    /// external DLL and manifest are installed with the external version.
+    #[test]
+    fn external_dll_valid_manifest_installs_successfully() {
+        let root = temp("external-valid");
+        let mods = root.join("mods");
+        std::fs::write(root.join(DLL_NAME), b"external payload v1").unwrap();
+        std::fs::write(root.join("plugin.json"), r#"{"version":"1.5.0"}"#).unwrap();
+        let msg = ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().unwrap();
+        assert!(msg.contains("installed from"));
+        assert!(msg.contains("1.5.0"));
+        let folder = mods.join(MOD_FOLDER);
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"external payload v1"
+        );
+        assert_eq!(
+            installed_version(&folder.join("plugin.json")).as_deref(),
+            Some("1.5.0")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Valid external manifest with an older version than the installed copy:
+    /// the installed DLL and manifest must be preserved.
+    #[test]
+    fn external_dll_older_version_preserves_newer_install() {
+        let root = temp("external-older");
+        let mods = root.join("mods");
+        let folder = mods.join(MOD_FOLDER);
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("plugin.json"), r#"{"version":"5.0.0"}"#).unwrap();
+        std::fs::write(folder.join("exefs").join(DLL_NAME), b"installed v5").unwrap();
+        std::fs::write(root.join(DLL_NAME), b"external v2").unwrap();
+        std::fs::write(root.join("plugin.json"), r#"{"version":"2.0.0"}"#).unwrap();
+        assert!(ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"installed v5"
+        );
+        assert_eq!(
+            installed_version(&folder.join("plugin.json")).as_deref(),
+            Some("5.0.0")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Valid external manifest with a newer version than the installed copy:
+    /// the external DLL and manifest replace the installed copy.
+    #[test]
+    fn external_dll_newer_version_replaces_install() {
+        let root = temp("external-newer-v");
+        let mods = root.join("mods");
+        let folder = mods.join(MOD_FOLDER);
+        std::fs::create_dir_all(folder.join("exefs")).unwrap();
+        std::fs::write(folder.join("plugin.json"), r#"{"version":"2.0.0"}"#).unwrap();
+        std::fs::write(folder.join("exefs").join(DLL_NAME), b"installed v2").unwrap();
+        std::fs::write(root.join(DLL_NAME), b"external v5").unwrap();
+        std::fs::write(root.join("plugin.json"), r#"{"version":"5.0.0"}"#).unwrap();
+        let msg = ensure_external_in(&mods, &root.join(DLL_NAME)).unwrap().unwrap();
+        assert!(msg.contains("installed from"));
+        assert!(msg.contains("5.0.0"));
+        assert_eq!(
+            std::fs::read(folder.join("exefs").join(DLL_NAME)).unwrap(),
+            b"external v5"
+        );
+        assert_eq!(
+            installed_version(&folder.join("plugin.json")).as_deref(),
+            Some("5.0.0")
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
