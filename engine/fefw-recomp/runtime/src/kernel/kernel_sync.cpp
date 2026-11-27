@@ -679,6 +679,11 @@ uint32_t wait_for_address(uint64_t addr, uint32_t type, int32_t value, int64_t t
     return me.wait_result;
 }
 
+size_t address_waiter_count(uint64_t addr) {
+    Guard g;
+    return static_cast<size_t>(std::count_if(g_addr_waiters.begin(), g_addr_waiters.end(), [&](KThread* t) { return t->wait_addr == addr; }));
+}
+
 uint32_t signal_to_address(uint64_t addr, uint32_t type, int32_t value, int32_t count) {
     if (addr & 3) return kInvalidAddress;
     if (type > 2) return kInvalidEnum;
