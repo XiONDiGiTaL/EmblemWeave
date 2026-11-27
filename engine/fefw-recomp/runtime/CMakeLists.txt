@@ -77,10 +77,17 @@ if(NOT EXISTS "${NXRT_RECOMP_INCLUDE}/nxrecomp/ctx.h" AND EXISTS "${CMAKE_CURREN
 endif()
 
 if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    # clang-cl and MSVC. /EHsc: host C++ (ipc.cpp's service call, crash.cpp's terminate path) uses try/throw. Guest exceptions
-    # have their own layer in src/eh.
-    add_compile_options(/EHsc /W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
-                        -Wno-cast-function-type-strict -Wno-language-extension-token)
+    # cl.exe and clang-cl share the MSVC frontend variant but not the warning switches: cl.exe rejects every -Wno-*
+    # option with D8021 (issue #115). MSVC spells the one suppression this tree needs as /wd4100 (unused parameter);
+    # the other options here silence clang diagnostics that MSVC does not emit at /W3, so it needs no equivalent and
+    # they must not be passed to it. /EHsc: host C++ (ipc.cpp's service call, crash.cpp's terminate path) uses try/throw;
+    # guest exceptions have their own layer in src/eh.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        add_compile_options(/EHsc /W3 /wd4100)
+    else()
+        add_compile_options(/EHsc /W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
+                            -Wno-cast-function-type-strict -Wno-language-extension-token)
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # GCC and Clang on Linux. -Wno-* for the same reasons the clang-cl line has them: generated and third-party code.
     add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type)

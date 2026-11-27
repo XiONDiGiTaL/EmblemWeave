@@ -29,7 +29,11 @@ function(nxrt_lift_case name)
   else()
     add_executable(native_${name} "${L_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/native/native_main.cpp")
     target_include_directories(native_${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native" "${NXRT_RECOMP_ROOT}/oracle/e2e/progs")
-    target_compile_options(native_${name} PRIVATE -Wno-everything)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        target_compile_options(native_${name} PRIVATE /W3 /wd4100)
+    else()
+        target_compile_options(native_${name} PRIVATE -Wno-everything)
+    endif()
     set_target_properties(native_${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/native")
     add_custom_command(OUTPUT "${expected}"
       COMMAND native_${name} "${expected}"
