@@ -153,31 +153,68 @@ pub fn carried(piece: &Piece) -> bool {
     dir().is_some_and(|tools| carried_in(&tools, piece))
 }
 
-/// Names the carried pieces whose stamp is still there but whose files are partly gone, with the way back. None when
-/// every carried piece is whole. A piece that was never carried is left to the first-run fetch, which installs it without
-/// being asked.
-fn damage_note_in(tools: &Path) -> Option<String> {
-    let bin = tools.join("bin");
-    let mut lines = Vec::new();
-    for piece in PIECES {
-        if !bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file() {
-            continue;
-        }
-        let missing = missing_in(tools, piece);
-        if missing.is_empty() {
-            continue;
-        }
-        let list = missing.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
-        lines.push(format!("  {}: {list}", piece.name));
+/// One carried piece whose files are partly gone: enough to report on Overview and repair with one press.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Damage {
+    pub name: &'static str,
+    pub missing: Vec<PathBuf>,
+}
+
+impl Damage {
+    /// `LLVM (clang-cl, lld-link and llvm-rc): lld-link.exe` for a one-line report.
+    pub fn summary(&self) -> String {
+        let files = self
+            .missing
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}: {files}", self.name)
     }
-    if lines.is_empty() {
+}
+
+/// The carried pieces whose stamp is still there but whose files are partly gone, with the missing paths. A piece that
+/// was never carried is left to the first-run fetch, which installs it without being asked.
+fn damage_in(tools: &Path) -> Vec<Damage> {
+    let bin = tools.join("bin");
+    PIECES
+        .iter()
+        .filter(|piece| bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file())
+        .filter_map(|piece| {
+            let missing = missing_in(tools, piece);
+            (!missing.is_empty()).then_some(Damage { name: piece.name, missing })
+        })
+        .collect()
+}
+
+/// The pieces a repair has to fetch again, in the same order as [`PIECES`].
+fn damaged_in(tools: &Path) -> Vec<&'static Piece> {
+    let bin = tools.join("bin");
+    PIECES
+        .iter()
+        .filter(|piece| bin.join(format!("{STAMP_PREFIX}{}", piece.key)).is_file())
+        .filter(|piece| !missing_in(tools, piece).is_empty())
+        .collect()
+}
+
+/// The damage report for the engine this launcher runs, for the Overview. Empty when every carried piece is whole.
+pub fn damage() -> Vec<Damage> {
+    dir().map(|tools| damage_in(&tools)).unwrap_or_default()
+}
+
+/// Names the carried pieces whose files are partly gone, with the way back. None when every carried piece is whole.
+fn damage_note_in(tools: &Path) -> Option<String> {
+    let damaged = damage_in(tools);
+    if damaged.is_empty() {
         return None;
     }
+    let lines = damaged.iter().map(|d| format!("  {}", d.summary())).collect::<Vec<_>>();
     Some(format!(
         "files the toolchain EmblemWeave carried into tools\\bin needs are missing:\n{}\n\nAn antivirus quarantine removes \
          files like these and leaves the install stamp behind, so the build would fail at its first link or resource compile. \
-         Put them back with `EmblemWeave.exe --fetch-tools` (it re-fetches and checks the same pinned archives), or restore \
-         them from the antivirus quarantine. Then press Rebuild.",
+         Put them back with Repair on Overview (or `EmblemWeave.exe --fetch-tools`), or restore them from the antivirus \
+         quarantine. Then press Rebuild.",
         lines.join("\n")
     ))
 }
@@ -314,6 +351,19 @@ fn trim_after_fetch(r: Result<(), String>) -> Result<(), String> {
         clean_downloads();
     }
     r
+}
+
+/// Re-fetch the carried pieces whose files are partly gone. Only those pieces are downloaded; a whole toolchain returns
+/// without touching the network. `progress` covers the selected pieces, 0..1. This is what Overview's Repair runs, so a
+/// player no longer needs `EmblemWeave.exe --fetch-tools` after an antivirus quarantine.
+pub fn repair_damaged(progress: &dyn Fn(f32, String)) -> Result<(), String> {
+    let tools = dir().ok_or("the engine folder engine/fefw-recomp was not found")?;
+    let damaged = damaged_in(&tools);
+    if damaged.is_empty() {
+        progress(1.0, "The carried toolchain is complete".into());
+        return Ok(());
+    }
+    trim_after_fetch(install_selected(&damaged, progress))
 }
 
 /// Starts the first-run fetch in the background, once. Only the pieces the PC does not already have are downloaded.
@@ -788,12 +838,38 @@ mod tests {
         let note = damage_note_in(tools).expect("the damaged piece is reported");
         assert!(note.contains("lld-link.exe"), "{note}");
         assert!(note.contains("quarantine"), "{note}");
+        assert!(note.contains("Repair on Overview"), "{note}");
         assert!(note.contains("--fetch-tools"), "{note}");
         assert!(!note.contains("CMake"), "an untouched piece is not reported: {note}");
 
         fs::remove_dir_all(tools.join("lib").join("clang")).unwrap();
         let note = damage_note_in(tools).expect("the resource headers are reported too");
         assert!(note.contains("include"), "{note}");
+    }
+
+    /// The Overview's Repair button must re-fetch exactly the pieces the report names, not the whole toolchain.
+    #[test]
+    fn a_repair_targets_only_the_damaged_pieces() {
+        let temp = tempfile::tempdir().unwrap();
+        let tools = temp.path();
+        plant_carried_toolchain(tools);
+        assert!(damaged_in(tools).is_empty());
+        assert!(damage_in(tools).is_empty());
+
+        fs::remove_file(tools.join("bin").join("lld-link.exe")).unwrap();
+        let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
+        assert_eq!(keys, vec!["clang"]);
+        let damage = damage_in(tools);
+        assert_eq!(damage.len(), 1);
+        assert!(
+            damage[0].summary().contains("lld-link.exe"),
+            "the report names the missing file: {}",
+            damage[0].summary()
+        );
+
+        fs::remove_file(tools.join("bin").join("cmake.exe")).unwrap();
+        let keys = damaged_in(tools).iter().map(|p| p.key).collect::<Vec<_>>();
+        assert_eq!(keys, vec!["clang", "cmake"], "the report keeps the pieces' order");
     }
 
     #[test]

@@ -93,8 +93,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     });
                     ui.add_space(4.0);
                     let missing = crate::engine::missing_tools();
+                    let damage = crate::portable::damage();
                     let (text, colour) = if building {
                         ("Building the game from your dump; progress is in the status bar and on Diagnostics.".to_string(), p.body)
+                    } else if !damage.is_empty() {
+                        ("Some files of the carried build toolchain are missing: repair them before rebuilding.".to_string(), p.bad)
                     } else if ready {
                         ("Ready to play. Saves are kept in EmblemWeave's save folder; RomFS mods go in the run folder's mods folder.".to_string(), p.ok)
                     } else if !missing.is_empty() {
@@ -103,6 +106,34 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         ("Not built yet: press Build the game. It runs once, on this PC, from your own dump.".to_string(), p.warn)
                     };
                     ui.label(RichText::new(text).size(12.5).color(colour));
+                    // An antivirus quarantine removes individual files but leaves the carried-toolchain stamps, so without
+                    // this report the first sign was a build that failed at its first link or .rc compile (issue #116).
+                    if !building && !damage.is_empty() {
+                        ui.add_space(6.0);
+                        let list = damage.iter().map(|d| d.summary()).collect::<Vec<_>>().join("; ");
+                        let paths = damage
+                            .iter()
+                            .flat_map(|d| d.missing.iter().map(|p| p.display().to_string()))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.label(
+                            RichText::new(format!(
+                                "Missing: {list}. A quarantine can leave the install record behind; the build would stop at its first link or resource compile."
+                            ))
+                            .size(12.5)
+                            .color(p.bad),
+                        );
+                        let repairing = app.running(JobKind::Toolchain).is_some();
+                        let label = if repairing { "Repairing the build tools…" } else { "Repair build tools" };
+                        if widgets::button(ui, &p, label, !repairing && !app.busy())
+                            .on_hover_text(format!(
+                                "{paths}\n\nDownloads only these pieces again and checks each archive against its pinned SHA-256. Rebuild afterwards."
+                            ))
+                            .clicked()
+                        {
+                            app.start(JobKind::Toolchain);
+                        }
+                    }
                     // A game folder built by an older release keeps that release's engine, which is why an update can look like it changed
                     // nothing: name the version and the one press that replaces it (#24, reported again on a build from before 0.1.20).
                     if ready && !building {

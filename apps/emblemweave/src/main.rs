@@ -578,6 +578,7 @@ impl App {
                 }
             },
             JobKind::VideoRuntime => jobs::video_runtime(),
+            JobKind::Toolchain => jobs::toolchain(),
         };
         if kind != JobKind::Detect {
             self.note(format!("{} started", kind.title()), Tone::Accent);
@@ -707,6 +708,13 @@ impl App {
                     drop(p);
                     self.notify(
                         format!("The game is built and ready to play ({})", dir.display()),
+                        Tone::Ok,
+                    );
+                }
+                Some(JobResult::Toolchain) => {
+                    drop(p);
+                    self.notify(
+                        "The build toolchain is repaired. Press Rebuild when you are ready.",
                         Tone::Ok,
                     );
                 }

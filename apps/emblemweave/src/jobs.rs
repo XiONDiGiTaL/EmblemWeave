@@ -54,6 +54,8 @@ pub enum JobResult {
     Repaired(Option<PathBuf>),
     /// The optional D3D11VA movie runtime was downloaded and installed.
     VideoRuntime(PathBuf),
+    /// The carried build toolchain's damaged pieces were fetched again.
+    Toolchain,
 }
 
 #[derive(Debug, Default)]
@@ -86,6 +88,8 @@ pub enum JobKind {
     Repair,
     /// Downloads and verifies the optional FFmpeg/D3D11VA movie runtime.
     VideoRuntime,
+    /// Re-fetches the carried build-tool pieces an antivirus quarantine partly removed.
+    Toolchain,
 }
 
 impl JobKind {
@@ -98,6 +102,7 @@ impl JobKind {
             JobKind::Engine => "Building the game",
             JobKind::Repair => "Checking the game folder",
             JobKind::VideoRuntime => "Installing the D3D11VA runtime",
+            JobKind::Toolchain => "Repairing the build tools",
         }
     }
 
@@ -110,6 +115,7 @@ impl JobKind {
             JobKind::Engine => "engine",
             JobKind::Repair => "repair",
             JobKind::VideoRuntime => "video-runtime",
+            JobKind::Toolchain => "toolchain",
         }
     }
 }
@@ -332,6 +338,13 @@ impl Ctx {
     /// `[123/206]`; the status strip and the time-left estimate read it.
     pub fn fraction(&self, fraction: f32) {
         self.with(|p| p.fraction = fraction.clamp(0.0, 1.0));
+    }
+    /// Update the status line and its fraction without adding a log line per download tick.
+    pub fn progress(&self, fraction: f32, message: impl Into<String>) {
+        self.with(|p| {
+            p.fraction = fraction.clamp(0.0, 1.0);
+            p.message = message.into();
+        });
     }
     pub fn start(&self, i: usize) {
         self.with(|p| {
@@ -1058,6 +1071,23 @@ pub fn video_runtime() -> Job {
         ctx.end(1, StageStatus::Done, dest.display().to_string());
         Ok(JobResult::VideoRuntime(dest))
     })
+}
+
+// ---- carried toolchain --------------------------------------------------------------
+
+/// Re-fetch the carried build-tool pieces the Overview's damage report selected. Unlike the first-run fetch this ignores
+/// system copies: the player pressed Repair for the carried ones.
+pub fn toolchain() -> Job {
+    spawn(
+        JobKind::Toolchain,
+        &["Re-fetch the missing toolchain files"],
+        |ctx| {
+            ctx.start(0);
+            crate::portable::repair_damaged(&|fraction, line| ctx.progress(fraction, line))?;
+            ctx.end(0, StageStatus::Done, "the carried toolchain is complete");
+            Ok(JobResult::Toolchain)
+        },
+    )
 }
 
 // ---- boot ---------------------------------------------------------------------------
