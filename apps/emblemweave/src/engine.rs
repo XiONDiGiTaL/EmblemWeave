@@ -5423,6 +5423,14 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
                 ));
             }
         }
+        // A stamped slot is repaired only after checking that it is not
+        // hiding a newer save. Promoting the tutorial autosave while the
+        // player's route save sits in Backups is the #79 shape; stop and ask
+        // for the backup instead of starting the older save silently.
+        let recoverable = crate::saves::recoverable_saves(&save_dir);
+        if let Some(note) = crate::saves::backup_named_blocker(&save_dir, &recoverable) {
+            return Err(note);
+        }
         // A slot moved back from the backups folder by hand keeps the
         // timestamp prefix the launcher gave it (`1795325701-Auto`), and the
         // game opens only `Auto`, so it starts a new game (#79). Put a copy

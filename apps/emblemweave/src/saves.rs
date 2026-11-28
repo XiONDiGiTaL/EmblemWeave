@@ -2887,6 +2887,107 @@ The game was not started on an empty save. Open Saves and load or restore one, o
     ))
 }
 
+/// Why Play must not promote a stamped slot in this account yet.
+///
+/// The game opens only `Auto`, so a file moved back from `backups/` as
+/// `<stamp>-Auto` is repaired to `Auto` before Play. That is right when the
+/// stamped file is the player's save. It is wrong when the account contains
+/// only an old stamped autosave and a newer whole-save backup or profile is
+/// available: promoting the old file starts the game on that file and hides
+/// the newer playthrough (the #79 shape: the tutorial autosave came back while
+/// the four-hour save sat in `backups/`).
+///
+/// Returns `None` when the account already has a game-named slot, when it has
+/// no stamped slot, or when no recoverable save is newer than the newest
+/// stamped file. A player who deliberately moves the only copy back can still
+/// Play; the guard only asks for a choice when the launcher knows of a newer
+/// copy.
+pub fn backup_named_blocker(save_dir: &Path, recoverable: &[Recoverable]) -> Option<String> {
+    backup_named_blocker_inner(save_dir, recoverable, true)
+}
+
+/// The Saves page's cheap form of [`backup_named_blocker`]: it reports the
+/// account that has no game-named slot at all, without reading and hashing
+/// every current slot on each frame. Play uses the full form, which also
+/// notices an old stamped file that a previous Play already copied to `Auto`.
+pub fn backup_named_blocker_preview(
+    save_dir: &Path,
+    recoverable: &[Recoverable],
+) -> Option<String> {
+    backup_named_blocker_inner(save_dir, recoverable, false)
+}
+
+fn backup_named_blocker_inner(
+    save_dir: &Path,
+    recoverable: &[Recoverable],
+    compare_copies: bool,
+) -> Option<String> {
+    let dir = account_dir(save_dir).join("000");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut stamped: Vec<(String, PathBuf, SystemTime)> = Vec::new();
+    let mut game_named: Vec<PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        if !is_slot_candidate(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if stamped_slot_name(name).is_some() {
+            if let Ok(modified) = e.metadata().and_then(|m| m.modified()) {
+                stamped.push((name.to_owned(), path, modified));
+            }
+        } else {
+            game_named.push(path);
+        }
+    }
+    let (stamped_name, _, stamped_at) = stamped.iter().max_by_key(|(_, _, t)| *t)?;
+    let mut promoted_copies = true;
+    if compare_copies {
+        // A previous Play may already have copied the stamped tutorial save to
+        // `Auto` (the Play repair) while leaving the stamped original beside it.
+        // That `Auto` is still the old save, not a reason to let the tutorial
+        // start: compare the game-named slots with the stamped files. If every
+        // one is an exact copy, there is no newer game-named save in the account.
+        for path in &game_named {
+            let Some((size, digest)) = file_sha256(path).ok() else {
+                promoted_copies = false;
+                break;
+            };
+            let duplicate = stamped.iter().any(|(_, stamped_path, _)| {
+                file_sha256(stamped_path)
+                    .map(|(s, d)| s == size && d == digest)
+                    .unwrap_or(false)
+            });
+            if !duplicate {
+                promoted_copies = false;
+                break;
+            }
+        }
+    }
+    if !game_named.is_empty() && (!compare_copies || !promoted_copies) {
+        return None;
+    }
+    let newer = recoverable
+        .iter()
+        .filter(|r| r.modified.is_some_and(|t| t > *stamped_at))
+        .max_by(|a, b| a.modified.cmp(&b.modified))?;
+    let promoted = if game_named.is_empty() {
+        ""
+    } else {
+        " (or the game-named copy made from it)"
+    };
+    Some(format!(
+        "The current save holds only the backup-named file {stamped_name}{promoted}, which is not a newer save. \
+         A newer save is available: {} \"{}\" ({}). Restore it on Saves before playing. If {stamped_name} is the \
+         save you want, rename it to Auto. The game was not started on the older autosave; nothing was changed.",
+        newer.kind.label(),
+        newer.name,
+        when(newer.modified)
+    ))
+}
+
 /// Put a whole backup folder back as the current save. The save it replaces is
 /// moved to the backups first, so a restore can be undone.
 pub fn restore_backup(
@@ -4868,6 +4969,68 @@ mod tests {
             repair_backup_named_slots(&save).unwrap().is_empty(),
             "a restart finds nothing left to repair"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The account holds only the tutorial autosave under a backup name while
+    /// a newer whole-save backup holds the real playthrough. Play must ask for
+    /// the backup instead of promoting the old stamped file and starting the
+    /// tutorial (#79).
+    #[test]
+    fn a_stamped_tutorial_autosave_does_not_hide_a_newer_backup() {
+        let root = temp("stamped-newer-backup");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        write_bytes(&dir.join("1795325701-Auto"), &valid_slot(b"tutorial"));
+        let newer = save.join("backups").join("2999999999");
+        write_bytes(&newer.join("000").join("Auto"), &valid_slot(b"four hours"));
+        write_bytes(&newer.join("000").join("Global"), b"global data");
+
+        let recoverable = recoverable_saves(&save);
+        let note = backup_named_blocker(&save, &recoverable)
+            .expect("the newer backup must stop an old stamped autosave");
+        assert!(note.contains("1795325701-Auto"), "{note}");
+        assert!(note.contains("2999999999"), "{note}");
+        assert!(note.contains("Restore it on Saves"), "{note}");
+
+        // A Play repair from an older build may already have copied the
+        // stamped tutorial to Auto. The copy must not make the guard think a
+        // newer game-named save exists.
+        assert_eq!(repair_backup_named_slots(&save).unwrap().len(), 1);
+        assert!(
+            backup_named_blocker(&save, &recoverable_saves(&save)).is_some(),
+            "an Auto that is only a copy of the stamped save is still stale"
+        );
+
+        // A genuinely different game-named slot is what Play opens; the guard
+        // must not stand in the way of a healthy current save.
+        write_bytes(&dir.join("Auto"), &valid_slot(b"current"));
+        assert!(
+            backup_named_blocker(&save, &recoverable_saves(&save)).is_none(),
+            "the guard only speaks for an account with no game-named slot"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stamped autosave with no newer copy is the player's only save. The
+    /// guard stays out of the way and the existing Play repair still promotes
+    /// it to Auto.
+    #[test]
+    fn a_stamped_autosave_without_a_newer_backup_is_still_repaired() {
+        let root = temp("stamped-only-repair");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let bytes = valid_slot(b"the only save");
+        write_bytes(&dir.join("1795325701-Auto"), &bytes);
+        let older = save.join("backups").join("1000000000");
+        write_bytes(&older.join("000").join("Auto"), &valid_slot(b"older"));
+
+        assert!(
+            backup_named_blocker(&save, &recoverable_saves(&save)).is_none(),
+            "an older backup must not block the player's only save"
+        );
+        assert_eq!(repair_backup_named_slots(&save).unwrap().len(), 1);
+        assert_eq!(std::fs::read(dir.join("Auto")).unwrap(), bytes);
         let _ = std::fs::remove_dir_all(root);
     }
 

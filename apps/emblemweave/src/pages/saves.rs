@@ -568,6 +568,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         );
         ui.add_space(theme::SPACE_S);
+    } else if let Some(note) =
+        crate::saves::backup_named_blocker_preview(&save_dir, &recoverable)
+    {
+        // The account has a current save, but only under a backup name the
+        // game cannot open. Warn beside the Backups list before Play is used.
+        widgets::status_line(ui, &p, Tone::Warn, "Older save only", &note);
+        ui.add_space(theme::SPACE_S);
     }
     ui.label(
         crate::i18n::text("Independent playthroughs")
