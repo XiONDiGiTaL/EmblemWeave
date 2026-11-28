@@ -16,7 +16,7 @@ test in this audit; "amber" means the mechanism exists but is unproven; "red" me
 | Performance consistency | Amber | Pipeline cache exists; no frame-time evidence for the Z1 Extreme report |
 | Documentation | Green | Install, package, portable, upgrade/recovery and validation pages are accurate and specific |
 | Licensing | Amber | All vendored trees ship notices; GPL source links for FFmpeg unverified; fetched libs unnoted |
-| Automated QA | Amber | 30 tooling tests + launcher skip baseline; no launch, GPU, or runtime build check |
+| Automated QA | Amber | 47 tooling tests + launcher skip baseline; launch and GPU behavior are still field checks |
 | Outstanding critical defects | Red | Exit-path crash (#77) and HDR restore (#78) are not demonstrated |
 
 ## Build reliability: Amber

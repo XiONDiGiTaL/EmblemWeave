@@ -160,7 +160,8 @@ This check proves file identity, not that the game launches. Launch testing and 
 `.github/workflows/release-validation.yml` runs the Python tests, `check_release.py` and PowerShell parsing on every pull
 request and on pushes touching the release tools. `.github/workflows/release.yml` runs the same tests, builds the
 Windows zip with `-RequireConfigureCheck`, uploads `release-manifest.json`, verifies the manifest again in the publish
-job, and writes a combined `SHA256SUMS` for the Windows zip, Linux translator and manifest before uploading.
+job, and writes the exact three-entry `SHA256SUMS` for the Windows zip, Linux translator and manifest with
+`tools/release_sums.py finalize` before uploading.
 
 ## Release checklist
 

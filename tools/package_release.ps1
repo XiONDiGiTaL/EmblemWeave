@@ -10,7 +10,9 @@
 #   pwsh -File tools/package_release.ps1 -AllowDirty      # explicitly package uncommitted changes
 #   pwsh -File tools/package_release.ps1 -AllowStaleBuild  # reuse an executable whose stamp does not match
 #
-# Writes target\pkg\EmblemWeave-v<version>-windows-x64.zip, release-manifest.json and prints the zip's size and sha256.
+# Writes target\pkg\EmblemWeave-v<version>-windows-x64.zip, release-manifest.json, manifest.json and SHA256SUMS,
+# then prints the zip's size and sha256. SHA256SUMS is regenerated from the finished artifacts on every run, so a
+# direct package run cannot leave the previous build's checksums behind.
 param(
     [string]$Version = '',
     [switch]$SkipBuild,
@@ -403,9 +405,22 @@ try {
         releaseManifest = [System.IO.Path]::GetFileName($manifestPath)
         releaseManifestSha256 = $manifestSha
     }
-    $manifest | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path (Split-Path $zip) 'manifest.json')
-    Write-Host "manifest: $(Join-Path (Split-Path $zip) 'manifest.json')"
+    $packageManifest = Join-Path (Split-Path $zip) 'manifest.json'
+    $manifest | ConvertTo-Json | Set-Content -Encoding utf8 $packageManifest
+
+    # 8. The combined checksums are written only after the zip, the per-file manifest and manifest.json are final.
+    # tools/release_sums.py replaces the file (never merges it), cross-checks manifest.json against the bytes on disk,
+    # refuses a missing or unexpected artifact, excludes itself, and re-reads its own output before returning.
+    $sums = Join-Path (Split-Path $zip) 'SHA256SUMS'
+    & $py.Source 'tools/release_sums.py' 'finalize' `
+        '--sums' $sums `
+        '--artifact' $zip `
+        '--artifact' $manifestPath `
+        '--package-manifest' $packageManifest
+    if ($LASTEXITCODE -ne 0) { throw "the release checksums could not be finalized: $sums" }
+    Write-Host "manifest: $packageManifest"
     Write-Host "release manifest: $manifestPath"
+    Write-Host "checksums: $sums"
 } finally {
     Pop-Location
 }

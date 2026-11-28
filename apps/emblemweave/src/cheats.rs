@@ -30,10 +30,18 @@ pub const GAME_EXE: &str = "fefw.exe";
 // ------------------------------------------------------------------ process
 
 pub trait Memory {
+    /// Copy bytes from the target. This is a synchronous ReadProcessMemory on Windows: it has no timeout,
+    /// cancellation parameter or overlapped form, so a call can return only when the memory manager completes it.
+    /// Callers must not assume that a cancel flag can interrupt a read already in progress.
     fn read(&self, addr: u64, buf: &mut [u8]) -> bool;
     fn write(&self, addr: u64, data: &[u8]) -> bool;
     /// Committed, readable and writable regions within `[lo, hi)`.
     fn regions(&self, lo: u64, hi: u64) -> Vec<(u64, u64)>;
+    /// Whether the target can still answer a read. The process implementation checks the process handle; test
+    /// doubles default to available so unrelated cheats do not need to implement it.
+    fn available(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(windows)]
@@ -128,6 +136,10 @@ pub mod process {
             unsafe { WriteProcessMemory(self.handle, addr as _, data.as_ptr() as _, data.len(), &mut n) != 0 && n == data.len() }
         }
 
+        fn available(&self) -> bool {
+            self.alive()
+        }
+
         fn regions(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
             let mut out = Vec::new();
             let mut a = lo;
@@ -193,6 +205,9 @@ pub mod process {
         }
         fn regions(&self, _lo: u64, _hi: u64) -> Vec<(u64, u64)> {
             Vec::new()
+        }
+        fn available(&self) -> bool {
+            false
         }
     }
 }
@@ -433,6 +448,8 @@ pub struct ScanProgress {
     pub cancelled: bool,
     /// Whether the scan timed out.
     pub timed_out: bool,
+    /// Whether the game process disappeared while the scan was reading it.
+    pub device_lost: bool,
 }
 
 /// Scan for unit records in the game's memory.
@@ -453,16 +470,14 @@ pub fn scan_units(
 
     // First pass: guest range only.
     let (mut units, mut prog) = scan_units_in(mem, GUEST_RANGE, &config, cancel, &deadline, &start, progress);
-    if units.is_empty() && !prog.cancelled && !prog.timed_out {
-        // Fallback: scan committed RW regions, but limit total bytes.
+    if units.is_empty() && !prog.cancelled && !prog.timed_out && !prog.device_lost {
+        // Fallback: scan committed RW regions, but limit total bytes. The same cancel, deadline and device checks
+        // apply; a process that disappeared in the first pass is not read again.
         let fallback_range = (0x1_0000, 0x7FFF_FFFF_FFFF);
-        let mut fallback_config = config;
-        // For fallback, we use the regions() iterator which already limits to committed RW.
-        // We additionally cap by max_fallback_bytes in scan_units_in.
         let (more, prog2) = scan_units_in(
             mem,
             fallback_range,
-            &fallback_config,
+            &config,
             cancel,
             &deadline,
             &start,
@@ -474,7 +489,57 @@ pub fn scan_units(
 
     prog.elapsed_secs = start.elapsed().as_secs_f64();
     prog.remaining_secs = deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64();
+    if let Some(p) = progress {
+        let mut pg = p.lock().unwrap_or_else(|e| e.into_inner());
+        pg.elapsed_secs = prog.elapsed_secs;
+        pg.remaining_secs = prog.remaining_secs;
+        pg.cancelled |= prog.cancelled;
+        pg.timed_out |= prog.timed_out;
+        pg.device_lost |= prog.device_lost;
+    }
     (units, prog)
+}
+
+/// What the UI should do with a finished scan. Cancelled, timed-out and disconnected scans discard whatever partial
+/// addresses the workers collected, so a late completion can never replace the unit list with incomplete results.
+pub fn scan_outcome(units: Vec<u64>, prog: &ScanProgress) -> Result<Vec<u64>, String> {
+    if prog.device_lost {
+        Err("The game closed during the scan; no partial results were used.".into())
+    } else if prog.cancelled {
+        Err("Scan cancelled by user".into())
+    } else if prog.timed_out {
+        Err(format!(
+            "Scan timed out after {:.1}s ({} units found)",
+            prog.elapsed_secs,
+            units.len()
+        ))
+    } else {
+        Ok(units)
+    }
+}
+
+fn publish_progress(
+    progress: Option<&std::sync::Mutex<ScanProgress>>,
+    total_pieces: usize,
+    completed: usize,
+    units_found: usize,
+    start: &std::time::Instant,
+    deadline: &std::time::Instant,
+    cancel: Option<&ScanCancelToken>,
+    device_lost: bool,
+) {
+    let Some(p) = progress else { return };
+    let mut pg = p.lock().unwrap_or_else(|e| e.into_inner());
+    pg.total_pieces = total_pieces;
+    pg.completed_pieces = completed;
+    pg.units_found = units_found;
+    pg.elapsed_secs = start.elapsed().as_secs_f64();
+    pg.remaining_secs = deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64();
+    // The UI sets cancelled as soon as Cancel is pressed, even while a read is blocked. Never clear a flag another
+    // thread already set; only add to it.
+    pg.cancelled |= cancel.is_some_and(ScanCancelToken::is_cancelled);
+    pg.timed_out |= std::time::Instant::now() >= *deadline;
+    pg.device_lost |= device_lost;
 }
 
 fn scan_units_in(
@@ -515,16 +580,22 @@ fn scan_units_in(
     let next = std::sync::atomic::AtomicUsize::new(0);
     let found = std::sync::Mutex::new(Vec::new());
     let completed = std::sync::atomic::AtomicUsize::new(0);
+    let lost = std::sync::atomic::AtomicBool::new(false);
 
     let max_threads = if config.max_threads == 0 {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8)
     } else {
         config.max_threads.min(8)
     };
+    let threads = max_threads.max(1).min(pieces.len().max(1));
 
-    // Spawn worker threads with lower priority.
+    publish_progress(progress, total_pieces, 0, 0, start, deadline, cancel, false);
+
+    // Spawn worker threads with lower priority. The scope joins every one before this function returns, including
+    // after cancellation, so no worker can outlive the call or write into state the caller has dropped. A read that is
+    // already inside ReadProcessMemory cannot be interrupted: these workers observe cancellation at read boundaries.
     std::thread::scope(|sc| {
-        for _ in 0..max_threads {
+        for _ in 0..threads {
             let _ = std::thread::Builder::new()
                 .name("feu-scan".into())
                 .spawn_scoped(sc, || {
@@ -533,7 +604,7 @@ fn scan_units_in(
                     {
                         use windows_sys::Win32::System::Threading::{
                             GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-                            THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_IDLE,
+                            THREAD_PRIORITY_IDLE,
                         };
                         let priority = match config.thread_priority {
                             "low" => THREAD_PRIORITY_BELOW_NORMAL,
@@ -545,11 +616,36 @@ fn scan_units_in(
 
                     let mut buf = Vec::new();
                     loop {
-                        // Check cancellation and timeout.
-                        if cancel.map_or(false, |c| c.is_cancelled()) {
+                        // Check cancellation, the deadline and the target before starting another read. These checks
+                        // bound the wait between reads, not the duration of a read already in flight.
+                        if cancel.is_some_and(ScanCancelToken::is_cancelled)
+                            || std::time::Instant::now() >= *deadline
+                            || lost.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            publish_progress(
+                                progress,
+                                total_pieces,
+                                completed.load(std::sync::atomic::Ordering::Relaxed),
+                                found.lock().unwrap_or_else(|e| e.into_inner()).len(),
+                                start,
+                                deadline,
+                                cancel,
+                                lost.load(std::sync::atomic::Ordering::Relaxed),
+                            );
                             return;
                         }
-                        if std::time::Instant::now() >= *deadline {
+                        if !mem.available() {
+                            lost.store(true, std::sync::atomic::Ordering::Relaxed);
+                            publish_progress(
+                                progress,
+                                total_pieces,
+                                completed.load(std::sync::atomic::Ordering::Relaxed),
+                                found.lock().unwrap_or_else(|e| e.into_inner()).len(),
+                                start,
+                                deadline,
+                                cancel,
+                                true,
+                            );
                             return;
                         }
 
@@ -560,22 +656,46 @@ fn scan_units_in(
                         if piece_size == 0 || piece_size > 256 * 1024 * 1024 {
                             // Sanity check: skip impossibly large pieces.
                             completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            publish_progress(
+                                progress,
+                                total_pieces,
+                                completed.load(std::sync::atomic::Ordering::Relaxed),
+                                found.lock().unwrap_or_else(|e| e.into_inner()).len(),
+                                start,
+                                deadline,
+                                cancel,
+                                false,
+                            );
                             continue;
                         }
 
                         buf.resize(piece_size, 0);
-                        if !mem.read(a, &mut buf) {
-                            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            // Update progress periodically.
-                            if completed.load(std::sync::atomic::Ordering::Relaxed) % 16 == 0 {
-                                if let Some(p) = progress {
-                                    let mut pg = p.lock().unwrap();
-                                    pg.completed_pieces = completed.load(std::sync::atomic::Ordering::Relaxed);
-                                    pg.units_found = found.lock().unwrap().len();
-                                    pg.elapsed_secs = start.elapsed().as_secs_f64();
-                                    pg.remaining_secs = deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64();
-                                }
-                            }
+                        let read_ok = mem.read(a, &mut buf);
+                        completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // A read may return after Cancel or the deadline, and the process may have exited while it
+                        // was in flight. Discard the buffer and this piece's results in all three cases.
+                        let alive = mem.available();
+                        if !alive {
+                            lost.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let stop = cancel.is_some_and(ScanCancelToken::is_cancelled)
+                            || std::time::Instant::now() >= *deadline
+                            || !alive;
+                        publish_progress(
+                            progress,
+                            total_pieces,
+                            completed.load(std::sync::atomic::Ordering::Relaxed),
+                            found.lock().unwrap_or_else(|e| e.into_inner()).len(),
+                            start,
+                            deadline,
+                            cancel,
+                            !alive,
+                        );
+                        if stop {
+                            return;
+                        }
+                        if !read_ok {
                             continue;
                         }
 
@@ -589,43 +709,51 @@ fn scan_units_in(
                         }
 
                         if !local.is_empty() {
-                            found.lock().unwrap().extend(local);
+                            found.lock().unwrap_or_else(|e| e.into_inner()).extend(local);
                         }
-
-                        completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                        // Update progress every 16 pieces.
-                        if completed.load(std::sync::atomic::Ordering::Relaxed) % 16 == 0 {
-                            if let Some(p) = progress {
-                                let mut pg = p.lock().unwrap();
-                                pg.completed_pieces = completed.load(std::sync::atomic::Ordering::Relaxed);
-                                pg.units_found = found.lock().unwrap().len();
-                                pg.elapsed_secs = start.elapsed().as_secs_f64();
-                                pg.remaining_secs = deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64();
-                            }
-                        }
+                        publish_progress(
+                            progress,
+                            total_pieces,
+                            completed.load(std::sync::atomic::Ordering::Relaxed),
+                            found.lock().unwrap_or_else(|e| e.into_inner()).len(),
+                            start,
+                            deadline,
+                            cancel,
+                            false,
+                        );
                     }
                 });
         }
     });
 
-    let mut v = found.into_inner().unwrap();
+    let mut v = found.into_inner().unwrap_or_else(|e| e.into_inner());
     v.sort_unstable();
     v.dedup();
 
-    let elapsed = start.elapsed().as_secs_f64();
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64();
-
+    let cancelled = cancel.is_some_and(ScanCancelToken::is_cancelled);
+    let device_lost = lost.load(std::sync::atomic::Ordering::Relaxed);
     let prog = ScanProgress {
         total_pieces,
         completed_pieces: completed.load(std::sync::atomic::Ordering::Relaxed),
         units_found: v.len(),
-        elapsed_secs: elapsed,
-        remaining_secs: remaining,
-        cancelled: cancel.map_or(false, |c| c.is_cancelled()),
-        timed_out: std::time::Instant::now() >= *deadline,
+        elapsed_secs: start.elapsed().as_secs_f64(),
+        remaining_secs: deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
+        cancelled,
+        // A user who cancelled while a blocked read was returning should see the cancellation, not a timeout that
+        // happened to expire first.
+        timed_out: !cancelled && std::time::Instant::now() >= *deadline,
+        device_lost,
     };
-
+    publish_progress(
+        progress,
+        total_pieces,
+        prog.completed_pieces,
+        prog.units_found,
+        start,
+        deadline,
+        cancel,
+        device_lost,
+    );
     (v, prog)
 }
 
@@ -1711,6 +1839,125 @@ mod tests {
         Fake(Mutex::new(vec![0; 0x10000]))
     }
 
+    /// A read gate for the blocked-read test: the worker announces that it is inside `read`, then waits until the test
+    /// releases it. This models a synchronous ReadProcessMemory that cannot be interrupted from another thread.
+    #[derive(Default)]
+    struct Gate {
+        entered: Mutex<bool>,
+        released: Mutex<bool>,
+        cv: std::sync::Condvar,
+    }
+
+    impl Gate {
+        fn enter_and_wait(&self) {
+            *self.entered.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            self.cv.notify_all();
+            let mut released = self.released.lock().unwrap_or_else(|e| e.into_inner());
+            while !*released {
+                released = self.cv.wait(released).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+
+        fn wait_until_entered(&self, timeout: std::time::Duration) -> bool {
+            let deadline = std::time::Instant::now() + timeout;
+            let mut entered = self.entered.lock().unwrap_or_else(|e| e.into_inner());
+            while !*entered {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return false;
+                }
+                let (guard, _) = self.cv.wait_timeout(entered, left).unwrap_or_else(|e| e.into_inner());
+                entered = guard;
+            }
+            true
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// A test target with no unit records. It can cancel after its first read, block that read, or disappear while it
+    /// is in flight, so the scan's boundary checks are exercised without a real game process.
+    struct Controlled {
+        size: u64,
+        reads: std::sync::atomic::AtomicUsize,
+        available: std::sync::atomic::AtomicBool,
+        cancel_after_first: Option<Arc<ScanCancelToken>>,
+        gate: Option<Arc<Gate>>,
+        lose_after_first: bool,
+    }
+
+    impl Controlled {
+        fn new(size: u64) -> Self {
+            Self {
+                size,
+                reads: Default::default(),
+                available: std::sync::atomic::AtomicBool::new(true),
+                cancel_after_first: None,
+                gate: None,
+                lose_after_first: false,
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl Memory for Controlled {
+        fn read(&self, _a: u64, b: &mut [u8]) -> bool {
+            let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n == 0 {
+                if let Some(gate) = &self.gate {
+                    gate.enter_and_wait();
+                }
+                if let Some(cancel) = &self.cancel_after_first {
+                    cancel.cancel();
+                }
+                if self.lose_after_first {
+                    self.available.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            if !self.available() {
+                return false;
+            }
+            b.fill(0);
+            true
+        }
+
+        fn write(&self, _a: u64, _d: &[u8]) -> bool {
+            false
+        }
+
+        fn regions(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+            let (s, e) = (HEAP_BASE, HEAP_BASE + self.size);
+            if e <= lo || s >= hi {
+                vec![]
+            } else {
+                vec![(s.max(lo), e.min(hi))]
+            }
+        }
+
+        fn available(&self) -> bool {
+            self.available.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    fn empty_progress() -> ScanProgress {
+        ScanProgress {
+            total_pieces: 0,
+            completed_pieces: 0,
+            units_found: 0,
+            elapsed_secs: 0.0,
+            remaining_secs: 0.0,
+            cancelled: false,
+            timed_out: false,
+            device_lost: false,
+        }
+    }
+
     #[test]
     fn static_store_and_pointer_chain() {
         let m = fake();
@@ -2003,6 +2250,7 @@ unregistersymbol(diet)
             remaining_secs: 0.0,
             cancelled: false,
             timed_out: false,
+            device_lost: false,
         }));
 
         let (units, prog) = scan_units(&m, config, Some(&cancel), Some(&progress));
@@ -2044,6 +2292,7 @@ unregistersymbol(diet)
             remaining_secs: 0.0,
             cancelled: false,
             timed_out: false,
+            device_lost: false,
         }));
 
         let (units, prog) = scan_units(&m, config, Some(&cancel), Some(&progress));
@@ -2085,6 +2334,7 @@ unregistersymbol(diet)
             remaining_secs: 0.0,
             cancelled: false,
             timed_out: false,
+            device_lost: false,
         }));
 
         let (units, prog) = scan_units(&m, config, Some(&cancel), Some(&progress));
@@ -2108,5 +2358,168 @@ unregistersymbol(diet)
             // The important thing is that the code path uses elapsed_secs.
             assert!(prog.elapsed_secs > 0.0);
         }
-}
+    }
+
+    fn one_thread(timeout_secs: f64) -> ScanUnitsConfig {
+        ScanUnitsConfig {
+            timeout_secs,
+            max_fallback_bytes: 2 * 1024 * 1024 * 1024,
+            thread_priority: "low",
+            max_threads: 1,
+        }
+    }
+
+    #[test]
+    fn scan_normal_completion_publishes_final_progress() {
+        let m = Controlled::new(0x10000);
+        let progress = Arc::new(Mutex::new(empty_progress()));
+        let (units, prog) = scan_units(&m, one_thread(5.0), None, Some(&progress));
+
+        assert!(units.is_empty());
+        assert!(!prog.cancelled && !prog.timed_out && !prog.device_lost);
+        // No unit was found in the guest pass, so the same region is deliberately read once more by the fallback
+        // pass. Progress describes the pass that finished last, which is one piece.
+        assert_eq!(m.reads(), 2);
+        assert_eq!(scan_outcome(units, &prog), Ok(Vec::new()));
+        let pg = progress.lock().unwrap();
+        assert_eq!((pg.completed_pieces, pg.total_pieces), (1, 1));
+        assert!(!pg.cancelled && !pg.timed_out && !pg.device_lost);
+    }
+
+    #[test]
+    fn scan_cancelled_between_reads_stops_before_the_next_piece() {
+        let cancel = Arc::new(ScanCancelToken::new());
+        let mut m = Controlled::new(128 << 20);
+        m.cancel_after_first = Some(cancel.clone());
+
+        let (units, prog) = scan_units(&m, one_thread(30.0), Some(&cancel), None);
+
+        assert!(units.is_empty());
+        assert!(prog.cancelled);
+        assert!(!prog.device_lost);
+        assert_eq!(m.reads(), 1, "the second piece must not be read after cancellation");
+        let err = scan_outcome(units, &prog).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn scan_cancelled_while_a_read_is_blocked_only_stops_when_the_read_returns() {
+        let gate = Arc::new(Gate::default());
+        let mut m = Controlled::new(0x10000);
+        m.gate = Some(gate.clone());
+        let m = Arc::new(m);
+        let cancel = Arc::new(ScanCancelToken::new());
+        let progress = Arc::new(Mutex::new(empty_progress()));
+        let cancel_in = cancel.clone();
+        let progress_in = progress.clone();
+        let mem_in = m.clone();
+
+        let worker = std::thread::spawn(move || {
+            scan_units(
+                mem_in.as_ref(),
+                one_thread(30.0),
+                Some(&cancel_in),
+                Some(&progress_in),
+            )
+        });
+        assert!(
+            gate.wait_until_entered(std::time::Duration::from_secs(5)),
+            "the worker never entered the simulated read"
+        );
+        assert!(!worker.is_finished(), "a blocked read must keep the worker inside the call");
+
+        // The page thread is not blocked: it can cancel and update progress while the read is in flight. This is UI
+        // responsiveness at the application layer, not a claim that the read was interrupted.
+        cancel.cancel();
+        let lock_started = std::time::Instant::now();
+        {
+            let mut pg = progress.lock().unwrap_or_else(|e| e.into_inner());
+            pg.cancelled = true;
+        }
+        assert!(
+            lock_started.elapsed() < std::time::Duration::from_millis(500),
+            "the UI state lock was held by the blocked read"
+        );
+        assert!(!worker.is_finished(), "ReadProcessMemory cannot be cancelled mid-call");
+
+        gate.release();
+        let (units, prog) = worker.join().expect("scan worker panicked");
+        assert!(units.is_empty(), "a read that returned after cancellation is discarded");
+        assert!(prog.cancelled);
+        assert_eq!(m.reads(), 1);
+        assert!(scan_outcome(units, &prog).unwrap_err().contains("cancelled"));
+    }
+
+    #[test]
+    fn scan_stops_when_the_game_disappears_during_a_read() {
+        let mut m = Controlled::new(0x10000);
+        m.lose_after_first = true;
+        let progress = Arc::new(Mutex::new(empty_progress()));
+
+        let (units, prog) = scan_units(&m, one_thread(30.0), None, Some(&progress));
+
+        assert!(units.is_empty());
+        assert!(prog.device_lost);
+        assert!(!prog.cancelled);
+        assert_eq!(m.reads(), 1, "no further read is attempted after the process disappears");
+        let err = scan_outcome(units, &prog).unwrap_err();
+        assert!(err.contains("game closed"), "{err}");
+        assert!(progress.lock().unwrap().device_lost);
+    }
+
+    #[test]
+    fn repeated_cancellation_is_idempotent() {
+        let cancel = Arc::new(ScanCancelToken::new());
+        for _ in 0..8 {
+            cancel.cancel();
+        }
+        let m = Controlled::new(0x10000);
+        for _ in 0..3 {
+            let (units, prog) = scan_units(&m, one_thread(30.0), Some(&cancel), None);
+            assert!(prog.cancelled, "every repeated scan sees the same cancellation");
+            assert!(units.is_empty());
+            assert!(scan_outcome(units, &prog).is_err());
+        }
+        assert_eq!(m.reads(), 0, "a pre-cancelled scan reads no memory");
+    }
+
+    #[test]
+    fn scoped_scan_workers_release_their_state_after_return() {
+        for _ in 0..8 {
+            let cancel = Arc::new(ScanCancelToken::new());
+            let progress = Arc::new(Mutex::new(empty_progress()));
+            let m = Controlled::new(0x10000);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let (units, prog) = scan_units(&m, one_thread(5.0), Some(&cancel), Some(&progress));
+                    assert!(scan_outcome(units, &prog).is_ok());
+                });
+            });
+            assert_eq!(Arc::strong_count(&cancel), 1, "a worker retained the cancellation token");
+            assert_eq!(Arc::strong_count(&progress), 1, "a worker retained the progress state");
+        }
+    }
+
+    #[test]
+    fn late_or_partial_scan_results_are_not_accepted() {
+        let mut prog = empty_progress();
+        assert_eq!(scan_outcome(vec![HEAP_BASE + 1], &prog), Ok(vec![HEAP_BASE + 1]));
+
+        prog.cancelled = true;
+        assert!(scan_outcome(vec![HEAP_BASE + 1], &prog)
+            .unwrap_err()
+            .contains("cancelled"));
+
+        prog.cancelled = false;
+        prog.timed_out = true;
+        assert!(scan_outcome(vec![HEAP_BASE + 1], &prog)
+            .unwrap_err()
+            .contains("timed out"));
+
+        prog.timed_out = false;
+        prog.device_lost = true;
+        assert!(scan_outcome(vec![HEAP_BASE + 1], &prog)
+            .unwrap_err()
+            .contains("game closed"));
+    }
 }

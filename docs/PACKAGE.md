@@ -115,7 +115,9 @@ Two things keep it that way, and both run on every release:
 * `tools/package_release.ps1` writes the zip entry by entry instead of handing the folder to a compressor. Each
   name is built with `/`, each folder gets its own entry, and the tree's executable bits are set on the entries
   that need them. It then runs the verifier below against the file it just wrote and fails the release if the
-  verifier does.
+  verifier does. Once the zip, release manifest and manifest are final, it replaces `SHA256SUMS` through
+  `tools/release_sums.py`: the exact artifact set is checked, a missing or extra file fails, and an entry for
+  `SHA256SUMS` itself or a duplicate is refused.
 * `tools/verify_archive.py` reads an archive back and refuses it when an entry is absolute (`/x`, `C:/x`), carries
   a drive letter, climbs out with `..`, starts with `./` or `.\`, uses a backslash, contains a control character,
   or collides with another entry's name or case (which is how a Windows build produces a zip that drops a file on

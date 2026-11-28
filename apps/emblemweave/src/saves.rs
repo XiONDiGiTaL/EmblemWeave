@@ -2809,6 +2809,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The user can click Use this save after the source has already gone (another program moved it, or a removable
+    /// drive was unplugged). The error must be reported without first moving the current playthrough to Backups.
+    #[test]
+    fn adopting_a_vanished_orphan_fails_without_touching_the_current_save() {
+        let root = temp("orphan-vanished");
+        let save = root.join("save");
+        let current = account_dir(&save).join("000/Auto");
+        write(&current, "current playthrough");
+        let before = std::fs::read(&current).unwrap();
+        let missing = save.join("1795393583/000");
+        let orphan = OrphanSave {
+            description: "Save folder \"1795393583\"".into(),
+            path: save.join("1795393583"),
+            files: 1,
+            modified: None,
+        };
+
+        let error = adopt_orphan_save(&orphan, &save, FALLBACK_TITLE_ID, "1").unwrap_err();
+        assert!(!error.is_empty(), "the page can show why it failed");
+        assert!(missing.parent().is_some_and(|p| !p.exists()));
+        assert_eq!(std::fs::read(&current).unwrap(), before, "current save untouched");
+        assert!(
+            !save.join("backups").exists(),
+            "a failed import must not create a backup or move the current save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A folder named `000` with a text file in it is not a playthrough. Only an extensionless game slot makes a
     /// root-level folder an orphan; otherwise an unrelated folder (a note, an export, a tool's cache) is offered as a
     /// save and adopting it would replace the current playthrough with junk.

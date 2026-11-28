@@ -672,29 +672,40 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                 let progress = app.cheats_ui.scan_progress.clone();
                 let start = app.cheats_ui.scan_start;
 
-                let (completed, total, found, elapsed, cancelled, timed_out) = if let Some(p) = progress {
-                    let pg = p.lock().unwrap();
-                    (pg.completed_pieces, pg.total_pieces, pg.units_found, pg.elapsed_secs, pg.cancelled, pg.timed_out)
+                let (completed, total, found, elapsed, cancelled, timed_out, device_lost) = if let Some(ref p) = progress {
+                    let pg = p.lock().unwrap_or_else(|e| e.into_inner());
+                    (pg.completed_pieces, pg.total_pieces, pg.units_found, pg.elapsed_secs, pg.cancelled, pg.timed_out, pg.device_lost)
                 } else {
-                    (0, 0, 0, 0.0, false, false)
+                    (0, 0, 0, 0.0, false, false, false)
                 };
 
-                let status = if timed_out {
-                    "Timed out"
+                // Cancel and the deadline are observed when a read returns. The status says so rather than implying a
+                // ReadProcessMemory call in flight can be interrupted.
+                let status = if device_lost {
+                    "The game closed; finishing the scan…".to_string()
+                } else if timed_out {
+                    "Timed out; waiting for the current memory read to return".to_string()
                 } else if cancelled {
-                    "Cancelled"
+                    "Cancelling; waiting for the current memory read to return".to_string()
                 } else if total > 0 {
-                    &format!("Scanning… {}/{} pieces, {} units found ({:.1}s)", completed, total, found, elapsed)
+                    format!("Scanning… {}/{} pieces, {} units found ({:.1}s)", completed, total, found, elapsed)
                 } else {
-                    "Searching…"
+                    "Searching…".to_string()
                 };
 
-                if widgets::button(ui, &p, "Cancel", true).clicked() {
+                if widgets::button(ui, &p, "Cancel", !cancelled && !device_lost).clicked() {
                     if let Some(c) = cancel {
                         c.cancel();
                     }
+                    // Show the request immediately even while a read is blocked. The worker keeps running until that
+                    // read returns, so this is deliberately "Cancelling", not "Cancelled".
+                    if let Some(pg) = &progress {
+                        let mut pg = pg.lock().unwrap_or_else(|e| e.into_inner());
+                        pg.cancelled = true;
+                        pg.elapsed_secs = start.map_or(pg.elapsed_secs, |s| s.elapsed().as_secs_f64());
+                    }
                 }
-                ui.label(crate::i18n::text(status).color(p.muted));
+                ui.label(crate::i18n::text(&status).color(p.muted));
             } else {
                 if widgets::button(ui, &p, "Find units", game.is_some()).clicked() {
                     if let Some(g) = game.clone() {
@@ -707,6 +718,7 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                             remaining_secs: 0.0,
                             cancelled: false,
                             timed_out: false,
+                            device_lost: false,
                         }));
                         let start = Instant::now();
                         let out_cancel = cancel.clone();
@@ -717,14 +729,8 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
                         std::thread::spawn(move || {
                             let config = ScanUnitsConfig::default();
                             let (units, prog) = cheats::scan_units(g.as_ref(), config, Some(&out_cancel), Some(&out_progress));
-                            let result = if prog.cancelled {
-                                Err("Scan cancelled by user".into())
-                            } else if prog.timed_out {
-                                Err(format!("Scan timed out after {:.1}s ({} units found)", prog.elapsed_secs, units.len()))
-                            } else {
-                                Ok(units)
-                            };
-                            *out_slot.lock().unwrap() = Some(result);
+                            let result = cheats::scan_outcome(units, &prog);
+                            *out_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
                         });
 
                         app.cheats_ui.searching = Some(slot);

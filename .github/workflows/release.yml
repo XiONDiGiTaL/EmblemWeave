@@ -203,10 +203,11 @@ jobs:
             --archive "dist/EmblemWeave-v${VERSION}-windows-x64.zip" \
             --manifest dist/release-manifest.json
           python tools/verify_archive.py "dist/EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" --require linux-x64/spirv_harness
-          (cd dist && sha256sum \
-            "EmblemWeave-v${VERSION}-windows-x64.zip" \
-            "EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" \
-            release-manifest.json > SHA256SUMS)
+          (cd dist && python ../tools/release_sums.py finalize \
+            --sums SHA256SUMS \
+            --artifact "EmblemWeave-v${VERSION}-windows-x64.zip" \
+            --artifact "EmblemWeave-v${VERSION}-shader-translator-linux-x64.tar.gz" \
+            --artifact release-manifest.json)
           cat dist/SHA256SUMS
       - name: Write the notes
         env:

@@ -63,7 +63,7 @@ The release path is:
   excluded. The generated Windows translator is added explicitly and the copied tree is verified before archiving.
 - The translator's Ryujinx MIT notice and Microsoft .NET license/third-party notices are tracked under
   `engine/fefw-recomp/tools/shaders/licenses/`, copied beside `spirv_harness.exe`, and named in the required-file checks.
-- `tools/release.ps1` writes `SHA256SUMS`, verifies the manifest before upload and publishes the zip, manifest and sums.
+- `tools/package_release.ps1` writes `SHA256SUMS` after the archive and both manifests are final, through the strict atomic `tools/release_sums.py finalize`. It refuses a stale, extra, duplicate, self-referential or mismatched entry. `tools/release.ps1` only verifies those sums before upload and publishes the zip, manifest and sums.
 - `tools/install_local.ps1` stages the new launcher beside the target, verifies its hash, atomically replaces the target
   and restores the pre-install copy if the replacement or final hash check fails.
 - `.github/workflows/release.yml` runs the release tests, requires the configure check, uploads the manifest and verifies
@@ -95,7 +95,7 @@ python tools/verify_install.py --root verify/EmblemWeave-v0.1.41 --manifest rele
 
 ## Verification performed
 
-- `python -m unittest discover -s tools/tests -v`: 30 tests passed.
+- `python -m unittest discover -s tools/tests -v`: 47 tests passed, including the stale-SHA256SUMS regression.
 - `python -m py_compile tools/*.py`: passed.
 - `python tools/check_release.py`: release metadata agrees on 0.1.41.
 - PowerShell parser: `package_release.ps1`, `release.ps1` and `install_local.ps1` parse.

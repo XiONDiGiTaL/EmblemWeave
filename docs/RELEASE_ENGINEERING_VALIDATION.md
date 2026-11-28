@@ -12,7 +12,7 @@ Audit date: 2026-11-22. Repository state: `main` at `35e2e79`, four commits past
 | Check | Command | Result |
 | --- | --- | --- |
 | Tooling compiles | `python -m py_compile tools/*.py` | exit 0 |
-| Tooling tests | `python -m unittest discover -s tools/tests` | 30 tests, OK (1.0 s) |
+| Tooling tests | `python -m unittest discover -s tools/tests` | 47 tests, OK |
 | Version pointers | `python tools/check_release.py` | `release metadata agrees on 0.1.41 (v0.1.41)` |
 | Engine file list | `python tools/verify_engine_tree.py list --source .` | 1,738 tracked files, JSON array |
 | Shipped archive | `python tools/verify_archive.py target/pkg/EmblemWeave-v0.1.41-windows-x64.zip --require ...` | ok, 10,167 files in 592 folders |
@@ -38,18 +38,19 @@ with `cancel-in-progress: false` prevents two publishes for one tag from interle
 The job graph is `prepare → windows + linux-translator → publish → site`:
 
 - **prepare** rejects a version that disagrees with `docs/changelog/<version>.md` or `Cargo.toml`, then runs
-  `check_release.py` and the 30 tooling tests. A missing changelog or a stale site pointer therefore fails before
+  `check_release.py` and the 47 tooling tests. A missing changelog or a stale site pointer therefore fails before
   anything is built.
 - **windows** stages the pinned Ryujinx commit (`RYUBING_REV`) into `tools/shaders/third_party/ryubing`, builds the
   launcher and zip with `-RequireConfigureCheck`, and uploads `*.zip`, `manifest.json` and `release-manifest.json`.
 - **linux-translator** publishes the self-contained `linux-x64/spirv_harness`, checks that it exists and is executable,
   tars it, and verifies the tar (including the executable bit) before upload.
 - **publish** downloads both artifacts, re-verifies the zip against an explicit `--require` list, verifies
-  `release-manifest.json`, writes `SHA256SUMS` for the zip, tar and manifest, then creates or edits the GitHub release.
+  `release-manifest.json`, writes the exact three-entry `SHA256SUMS` with `tools/release_sums.py finalize`, then creates
+  or edits the GitHub release.
 - **site** stamps `docs/index.html` and `docs/release.json`, commits them to `main`, and runs a post-deploy smoke check
   against `https://xiondigital.net/EmblemWeave/`.
 
-`.github/workflows/release-validation.yml` is the fast gate: `py_compile`, the same 30 tests, `check_release.py`, and a
+`.github/workflows/release-validation.yml` is the fast gate: `py_compile`, the same 47 tests, `check_release.py`, and a
 PowerShell parse of the three release scripts. It runs on every pull request and on pushes touching `tools/**`,
 `release*.yml`, `docs/release.json`, `Cargo.toml` or `README.md`, with `contents: read`.
 

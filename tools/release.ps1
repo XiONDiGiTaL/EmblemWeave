@@ -64,11 +64,13 @@ try {
     if (-not (Test-Path -LiteralPath $releaseManifest -PathType Leaf)) {
         throw "package_release.ps1 did not write $releaseManifest"
     }
-    $manifestHash = (Get-FileHash -LiteralPath $releaseManifest -Algorithm SHA256).Hash.ToLowerInvariant()
-    @(
-        "$($manifest.zipSha)  $($manifest.zip)",
-        "$manifestHash  release-manifest.json"
-    ) | Set-Content -Encoding ascii $shaFile
+    # package_release.ps1 is the one writer of SHA256SUMS. Do not write it again here: a second implementation is how
+    # the previous candidate kept an old checksum file. Verify the finished file instead.
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $py) { throw 'python is needed to verify the release checksums (tools/release_sums.py)' }
+    & $py.Source 'tools/release_sums.py' 'verify' '--sums' $shaFile '--artifact' $zipPath '--artifact' $releaseManifest
+    if ($LASTEXITCODE -ne 0) { throw "the package checksums do not match the release artifacts: $shaFile" }
 
     # 3. The notes: install steps, the hash just measured, then the changelog body. The Linux translator is built and
     # attached by the tag workflow on an Ubuntu runner; this local script packages the Windows zip only.
