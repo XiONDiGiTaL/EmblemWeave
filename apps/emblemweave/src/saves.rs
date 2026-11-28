@@ -750,6 +750,21 @@ pub struct OrphanSave {
     pub modified: Option<std::time::SystemTime>,
 }
 
+/// Whether `save` holds at least one file the game would write as a slot. The game's slots are extensionless
+/// (`Auto`, `Global`, `Chapter_*`, `Route_*`, `<timestamp>-Auto`); an unrelated folder that happens to contain
+/// `000/readme.txt` must not be offered as a playthrough. Extra files are still counted by [`summary`] when the
+/// folder does hold a slot, so a save with stray files remains visible.
+fn holds_a_slot(save: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(save.join("000")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        path.is_file() && !is_metadata_file(&name) && Path::new(&name).extension().is_none()
+    })
+}
+
 /// Find all saves in the save directory that the game does not read.
 /// These are saves in `profiles/`, in `account/<other user>/`, or nested one level below the game's own account folder.
 ///
@@ -764,7 +779,7 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
     if let Some(save) = save_below(&target) {
         if save != target {
             let (files, modified) = summary(&save.join("000"));
-            if files > 0 {
+            if files > 0 && holds_a_slot(&save) {
                 out.push(OrphanSave {
                     description: "Nested below the game's account folder".into(),
                     path: save,
@@ -787,7 +802,7 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
                 continue;
             };
             let (files, modified) = summary(&save.join("000"));
-            if files > 0 && save != target {
+            if files > 0 && save != target && holds_a_slot(&save) {
                 out.push(OrphanSave {
                     description: format!(
                         "Profile \"{}\"",
@@ -817,7 +832,7 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
                 continue;
             };
             let (files, modified) = summary(&save.join("000"));
-            if files > 0 {
+            if files > 0 && holds_a_slot(&save) {
                 out.push(OrphanSave {
                     description: format!(
                         "Account folder \"{}\"",
@@ -847,7 +862,7 @@ pub fn find_orphan_saves(save_dir: &Path) -> Vec<OrphanSave> {
             continue;
         };
         let (files, modified) = summary(&save.join("000"));
-        if files > 0 {
+        if files > 0 && holds_a_slot(&save) {
             out.push(OrphanSave {
                 description: format!("Save folder \"{label}\""),
                 path: save,
@@ -2791,6 +2806,36 @@ mod tests {
             found.iter().all(|o| !o.path.ends_with("1-import")),
             "the launcher's backup area is not an orphan: {found:?}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A folder named `000` with a text file in it is not a playthrough. Only an extensionless game slot makes a
+    /// root-level folder an orphan; otherwise an unrelated folder (a note, an export, a tool's cache) is offered as a
+    /// save and adopting it would replace the current playthrough with junk.
+    #[test]
+    fn an_unrelated_populated_000_folder_is_not_offered_as_a_save() {
+        let root = temp("orphan-unrelated");
+        let save = root.join("save");
+        write(&save.join("weird/000/readme.txt"), "not a save");
+        write(&save.join("notes/000/changelog.md"), "also not a save");
+
+        let found = find_orphan_saves(&save);
+        assert!(found.is_empty(), "no folder without a slot is offered: {found:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A real save that also carries stray files stays visible, and the file count still tells the player what is in
+    /// the folder.
+    #[test]
+    fn a_save_with_a_stray_file_is_still_offered() {
+        let root = temp("orphan-stray");
+        let save = root.join("save");
+        write(&save.join("1795393583/000/Chapter_Led_1_4"), "progress");
+        write(&save.join("1795393583/000/notes.txt"), "stray");
+
+        let found = find_orphan_saves(&save);
+        assert_eq!(found.len(), 1, "the real save is offered: {found:?}");
+        assert_eq!(found[0].files, 2, "the stray file is counted, not hidden");
         let _ = std::fs::remove_dir_all(root);
     }
 

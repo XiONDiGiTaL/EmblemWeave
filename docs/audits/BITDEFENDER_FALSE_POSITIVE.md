@@ -89,10 +89,51 @@ that orchestration into Rust would remove the `cmd`/PowerShell layers but would 
 with a new build driver, which is a larger correctness risk than the behavior it removes. The launcher already logs
 the exact command and the full child output, which is the transparency this workflow can provide without changing it.
 
-## 7. Residual risk and next steps
+## 7. Code signing assessment (2026-11-28)
 
-- The launcher and the carried tools are unsigned. Code signing is the strongest available mitigation for reputation-
-  based behavioral scoring; it requires a certificate and is not implemented here.
+Authenticode status was read from the actual candidate and the fresh carried toolchain with
+`Get-AuthenticodeSignature`:
+
+| Binary | Status | Publisher |
+| --- | --- | --- |
+| `EmblemWeave.exe` (candidate and debug build) | NotSigned | — |
+| `clang-cl.exe`, `lld-link.exe`, `llvm-rc.exe` | NotSigned | — |
+| `cmake.exe` | Valid | Kitware, Inc. |
+| `python.exe` | Valid | Python Software Foundation |
+| `ninja.exe` | NotSigned | — |
+
+What signing the launcher would and would not do:
+
+- A valid OV or EV Authenticode signature gives Windows a verified publisher name and lets SmartScreen reputation
+  accumulate against that publisher across releases. It does not guarantee the first download avoids a SmartScreen
+  prompt. Microsoft documents that EV no longer bypasses SmartScreen; OV and EV now build reputation the same way.
+- Signing the launcher alone leaves the `cmd.exe -> cmake.exe -> ninja.exe` rebuild tree unchanged. Any behavioral
+  score on the compiler/linker activity would still see the same process tree; only the launcher's own reputation
+  and publisher identity change.
+- Signing the carried tools is not appropriate: three are third-party upstream binaries, and re-signing them changes
+  the bytes the archive hash and manifest pin. It would also assert a publisher relationship the project does not
+  have. Upstream signing (as Kitware and the PSF already do) is the correct layer for those files.
+- Signing the release ZIP is not an Authenticode operation; ZIP integrity is already covered by `SHA256SUMS`,
+  `release-manifest.json` and the updater's hash check.
+
+Practical options and 2026 costs (published list prices, before any reseller discount):
+
+| Option | Approximate cost | Notes |
+| --- | --- | --- |
+| Azure Artifact Signing (formerly Trusted Signing) Basic | $9.99/month ($119.88/year) | 5,000 signatures/month; Microsoft holds the key; organisation eligibility is limited to the US, Canada, EU and UK, individuals to the US and Canada |
+| OV code-signing certificate | $150–300/year plus a hardware token or cloud-signing subscription | Works worldwide; private key must be in certified hardware since June 2023; certificates issued from March 2026 are capped at about 460 days, so renew annually |
+| EV code-signing certificate | $400+/year plus token/HSM | No longer an instant SmartScreen bypass; mainly enterprise procurement and driver work |
+| Self-signed certificate | free | Does not establish public trust; unsuitable for distribution |
+
+Decision for this pass: **not implemented.** No certificate, Azure account, hardware token or expense was authorised,
+and no executable was modified or renamed. The launcher remains unsigned. If signing is approved later, sign the
+launcher (and any first-party helper executables) with a timestamped signature, keep the certificate identity stable
+across releases, and leave the carried upstream tools byte-identical to their pinned archives.
+
+## 8. Residual risk and next steps
+
+- The launcher and three carried tools are unsigned. Code signing would improve publisher identity and reputation for
+  the launcher, but it is not implemented here and would not change the rebuild process tree.
 - A Bitdefender false-positive submission should include the detection ID, the build log, and the exact files. Without
   a protected test machine the score cannot be reproduced or shown to be cleared.
 - If the detection recurs, the useful evidence is the Advanced Threat Defense notification with the scored file path
