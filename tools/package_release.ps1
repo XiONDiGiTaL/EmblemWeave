@@ -280,7 +280,7 @@ try {
     $required = @(
         'EmblemWeave.exe', 'portable.txt', 'recomplauncher.json', 'README.md', 'LICENSE', 'docs/PACKAGE.md', 'docs/INSTALL.md',
         'docs/USAGE.md', 'docs/BUILDING.md', 'docs/SECURITY.md', 'docs/TERMS.md', 'docs/PRIVACY.md',
-        'docs/LEGAL.md', 'docs/DMCA.md', 'docs/RELEASE_VALIDATION.md', 'docs/PORTABLE_INSTALLATION.md',
+        'docs/LEGAL.md', 'docs/DMCA.md', 'docs/PORTABLE_INSTALLATION.md',
         'docs/UPGRADE_AND_RECOVERY.md',
         'docs/screenshots/overview.png', 'docs/changelog/README.md',
         'tools/verify_archive.py', 'tools/release_manifest.py', 'tools/verify_install.py',
