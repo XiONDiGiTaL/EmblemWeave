@@ -94,7 +94,6 @@ shipped because the engine source tree is in the zip.
 | `zbic` (kinnay/zbic) | GPL-2.0 | separate-process ZBIC bridge | no |
 | Pillow | HPND | icon/asset helpers | no |
 | zstandard (Python) | BSD-3-Clause | asset checks | no |
-| Ghidra | Apache-2.0 | interactive analysis | no |
 | Ryujinx `Ryujinx.Common`, `Spv.Generator`, `Ryujinx.Graphics.Shader` | MIT | staged translator sources | only as compiled translator |
 | `astc-encoder`, `bc7enc_rdo`, `ispc` (fetched by texture tools) | Apache-2.0 / MIT / BSD-3-Clause | texture transcoders | source fetched at build; not in the player zip |
 

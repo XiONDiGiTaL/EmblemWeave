@@ -206,7 +206,7 @@ user. The current fixes cover the known path and profile cases but not every
 emulator layout.
 
 **Who needs it.** Users importing saves from yuzu, suyu, sudachi, citron, Eden,
-Lichii, Fritchii or torzu.
+Fritchii or torzu.
 
 **Requirements.** Representative save trees from each supported emulator; the
 probe and import tests; a read-only source path; atomic writes and backups;

@@ -53,7 +53,6 @@ adapted into it. That project's repository has since been removed; its final rel
 | Unicorn | GPL-2.0 | development-only CPU oracle (`tools/oracle_lockstep.py`), used from Python as a separate process; not linked, not shipped |
 | `zstandard`, Pillow | BSD-3-Clause / HPND | development-only helpers for checking assets and generating the icon; not shipped |
 | `zbic` (kinnay/zbic) | **GPL-2.0** | development-only ZBIC bridge, invoked as a separate process by `tools/zbic_extract.py`; not linked, not vendored, not shipped |
-| Ghidra | Apache-2.0 | interactive analysis (not redistributed) |
 
 `zbic` is used out-of-process and is not a dependency of any shipped binary. Because it is GPL-2.0, an in-tree port must be written from the format description rather than copied, and the resulting licensing decision recorded before any port lands.
 

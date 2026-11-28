@@ -68,7 +68,7 @@ The decoded `rtld` rodata yields real symbols, e.g. `_ZN2nn4init5StartEmmPFvvES2
 
 `app` uses compression flag bit 7. Its text segment begins with the ASCII magic `ZBIC` where a standard Zstandard frame would carry `28 B5 2F FD`. The frame header that follows declares a content size of `0x01a452f0` = 27,546,352, which matches the header's text size exactly.
 
-Public documentation and implementations agree that ZBIC is otherwise Zstandard (1.5.7) with `FSE_readNCount` replaced by a Binary Interpolative Coding reader. Because a decoder is publicly available (`kinnay/zbic`, Atmosphère, `alula/beetool`, and the Ghidra Switch Loader), the game module **is** recoverable today:
+Public documentation and implementations agree that ZBIC is otherwise Zstandard (1.5.7) with `FSE_readNCount` replaced by a Binary Interpolative Coding reader. Because a decoder is publicly available (`kinnay/zbic`, Atmosphère and `alula/beetool`), the game module **is** recoverable today:
 
 ```
 main: module='app' flags=0xbf zbic=True bss=0x109d30
@@ -102,7 +102,7 @@ Every decoded size matches the declaration, so `tools/zbic_extract.py` is a trus
 | **B. Full decompilation to source** | Not tractable: 27.5 MB of text with stripped symbols and heavy inlining. Viable only for small, hot subsystems later. |
 | **C. Hybrid** | **Recommended end state.** Static recompilation for bulk code, hand-written native implementations for the platform layer (graphics, audio, input, filesystem), and reconstructed high-level code where behaviour must be cleanly reimplemented. |
 
-Frameworks examined: N64Recomp and XenonRecomp target other ISAs (MIPS, PPC) and cannot be reused; McSema and Remill lift to LLVM IR but bring no Switch loader, no service layer and no graphics; Ghidra is the right tool for *analysis*, not for runnable translations. The public Switch recompilation projects (`ssbu-recomp`, `smo-recomp`, `dkb-pc-recomp`) are title-specific, and together they confirm the shape of the work: a lifter, a per-title runtime and shader translation.
+Frameworks examined: N64Recomp and XenonRecomp target other ISAs (MIPS, PPC) and cannot be reused; McSema and Remill lift to LLVM IR but bring no Switch loader, no service layer and no graphics; static inspection answers analysis questions, not runnable translations. The public Switch recompilation projects (`ssbu-recomp`, `smo-recomp`, `dkb-pc-recomp`) are title-specific, and together they confirm the shape of the work: a lifter, a per-title runtime and shader translation.
 
 **Recommendation: Option C**, with the lifter and runtime built here as the reusable core.
 

@@ -181,7 +181,7 @@ A bug report with the failing task's log attached is worth more than any descrip
 
 ## An emulator save is not offered
 
-The **Save data** section scans the yuzu NAND layout used by yuzu, suyu, sudachi, Citron, Eden, LICHII, Fritchii and torzu:
+The **Save data** section scans the yuzu NAND layout used by yuzu, suyu, sudachi, Citron, Eden, Fritchii and torzu:
 
     %APPDATA%\<emulator>\nand\user\save\<save id>\<profile>\<title id>
 

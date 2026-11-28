@@ -14,7 +14,7 @@ Nothing here is merged, pushed or offered as a release.
 | `runtime/tests/platform_selftest.cpp` | Protection test passes `PROT_READ` / `PROT_READ|PROT_WRITE` and writes after restoring write access | The old test passed `false`/`true` as a mask; against the mask-based backend it would fault |
 | `runtime/CMakeLists.txt` | Platform-only builds link `Threads::Threads`; new `nxrt_linux_probe` target | pthreads must be explicit; the probe is the diagnostic entry point |
 | `runtime/tools/linux_probe.cpp` | New: kernel, page size, cores, XDG roots, Vulkan loader and physical devices | A Linux bug report needs these facts; it also exercises the platform layer |
-| `docs/LINUX_COMPATIBILITY_AUDIT.md` … `docs/LINUX_COMPATIBILITY_TEST_MATRIX.md` | New documentation | The deliverables for this workstream |
+| New Linux documentation pages | Added alongside the workstream | The audit, architecture, plan and build guide |
 
 The three imported files (`platform.h`, `platform_posix.cpp`, `platform_win32.cpp`) come from FCC's uncommitted
 working tree; see the audit's provenance note. Every edit above is in `ew-linux` only.
@@ -79,8 +79,7 @@ test change did not regress the Windows side.
 3. Diagnostics: crash handler, log roots, `nxrt_linux_probe` attached to bug reports.
 4. A full session on desktop Linux with save/reload, audio, cinematic, extended play and clean shutdown.
 
-**Exit:** the validation list in `docs/LINUX_COMPATIBILITY_TEST_MATRIX.md` passes on at least one AMD and one NVIDIA
-desktop.
+**Exit:** the Linux validation list passes on at least one AMD and one NVIDIA desktop.
 **Blocked by:** hardware access (none in this environment).
 
 ### P5 — Steam Deck
@@ -119,7 +118,7 @@ real Steam installation before it is advertised.
 
 ## 5. Testing requirements
 
-The full matrix is `docs/LINUX_COMPATIBILITY_TEST_MATRIX.md`. The minimum bar for "supported" is:
+The minimum bar for "supported" is:
 
 * clean install and first launch on AMD and NVIDIA desktops;
 * game-data discovery and compilation;

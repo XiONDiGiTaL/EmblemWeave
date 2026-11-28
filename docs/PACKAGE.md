@@ -23,7 +23,7 @@ SHA256SUMS               combined checksums for the zip, translator and manifest
 ├── docs/                  every guide page the README links, the changelog and its screenshots
 │   ├── PACKAGE.md         this file
 │   ├── INSTALL.md, USAGE.md, BUILDING.md, SECURITY.md, TERMS.md, PRIVACY.md, LEGAL.md, DMCA.md
-│   ├── RELEASE_VALIDATION.md, PORTABLE_INSTALLATION.md, UPGRADE_AND_RECOVERY.md
+│   ├── PORTABLE_INSTALLATION.md, UPGRADE_AND_RECOVERY.md
 │   ├── changelog/         what changed in each release, newest first
 │   └── screenshots/       the images the README shows
 ├── tools/                 offline archive, manifest and install verifiers (Python standard library)
@@ -175,8 +175,7 @@ python tools\release_manifest.py verify --archive EmblemWeave-vX.Y.Z-windows-x64
 python tools\verify_install.py --root . --manifest ..\release-manifest.json
 ```
 
-The last command checks an unpacked install against the manifest; user data and generated build output are ignored. See
-[RELEASE_VALIDATION.md](RELEASE_VALIDATION.md) for the full checklist. The source for the tag is public, so the strongest
+The last command checks an unpacked install against the manifest; user data and generated build output are ignored. The source for the tag is public, so the strongest
 check is to build the launcher yourself (`cargo build --release -p emblemweave`) and compare behaviour.
 
 ## Rebuilding the package

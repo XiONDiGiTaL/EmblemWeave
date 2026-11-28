@@ -4,11 +4,10 @@
 with the parts that have already been built and run marked, so that "native Linux support" is a thing somebody
 finishes rather than a sentence in a README.
 
-> **Linux compatibility workstream (isolated branch `linux/compat-prototype`).** The audit, the Proton Hotfix
-> reverse engineering, the architecture and the current test results are in
-> [LINUX_COMPATIBILITY_AUDIT.md](LINUX_COMPATIBILITY_AUDIT.md), [PROTON_HOTFIX_REVERSE_ENGINEERING.md](PROTON_HOTFIX_REVERSE_ENGINEERING.md),
-> [LINUX_ARCHITECTURE.md](LINUX_ARCHITECTURE.md), [LINUX_IMPLEMENTATION_PLAN.md](LINUX_IMPLEMENTATION_PLAN.md) and
-> [LINUX_COMPATIBILITY_TEST_MATRIX.md](LINUX_COMPATIBILITY_TEST_MATRIX.md). Build commands are in
+> **Linux compatibility workstream (isolated branch `linux/compat-prototype`).** The audit, the architecture and
+> the current test results are in
+> [LINUX_COMPATIBILITY_AUDIT.md](LINUX_COMPATIBILITY_AUDIT.md),
+> [LINUX_ARCHITECTURE.md](LINUX_ARCHITECTURE.md) and [LINUX_IMPLEMENTATION_PLAN.md](LINUX_IMPLEMENTATION_PLAN.md). Build commands are in
 > [LINUX_BUILD.md](LINUX_BUILD.md). As of that work, the POSIX platform layer builds and passes its self-test on
 > Linux, and the launcher links and opens a window under WSLg on X11 and Wayland; the engine still does not build
 > there and no gameplay has been tested.

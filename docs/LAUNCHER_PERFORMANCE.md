@@ -293,8 +293,7 @@ Current `main` was measured again after the native move guard. Caption drag: 0 p
 remaining measured UI-thread cost was the Overview's per-frame save/mod/cheat scan: a pointer
 sweep fell from 39.8 % to 21.1-26.8 % after caching that display state for one second, and startup
 CPU through the first nine seconds fell from 1.92 s to 1.00 s. Launcher tests: 432 passed, 0 failed,
-13 ignored. The reporter's Windows 10/11 hardware is still not reproduced. See
-`docs/audits/ISSUE_REMEDIATION_STATUS.md` for the run details.
+13 ignored. The reporter's Windows 10/11 hardware is still not reproduced.
 
 ## 2026-11-26 Slowness on the Mods and Graphics pages
 
