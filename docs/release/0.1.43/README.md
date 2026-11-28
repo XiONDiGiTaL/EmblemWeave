@@ -17,7 +17,7 @@ This folder groups the release-facing material that is ready for the 0.1.43 publ
 
 - **#115** (Windows SDK build failure) is the only issue this material treats as a confirmed code/build fix: the 0.1.43 candidate builds with Windows SDK 10.0.19041.0 and 10.0.28000.0, 634/634 targets each, and links `fefw.exe`.
 - **#117** (Obelisk Chamber freeze) has the single-lock fix integrated and passed an isolated live retest for the freeze, but the in-game character switch was not visually confirmed and the issue is not reporter-confirmed.
-- **#79 Report C** (route completion) is **not fixed or confirmed**. The save-discovery, stamped-slot, locking and atomic-commit improvements are real and tested, but a route-completed save → restart → Continue cycle is still missing.
+- **#79 Report C** (route completion) is **not fully confirmed**. The reporter's `otherdata.zip` now shows the account on the old stamped tutorial autosave and a newer post-route backup that boots to the title with Continue enabled; a new Play guard refuses to promote the stale stamped file over that backup and points the player to Saves. The route-completed save → normal exit → restart → Continue sequence itself still has no captured reporter session. The save-discovery, stamped-slot, locking and atomic-commit improvements remain tested but unconfirmed for that field cycle.
 - **#76**, **#77**, **#59**, **#70/#75**, **#37/#41**, **#29** and **#7** have partial, unconfirmed or unsupported status as recorded in the issue map. Do not describe them as fixed.
 
 The issue map is traceability, not a promise. No issue was commented on, closed or relabelled while preparing this material.
