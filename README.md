@@ -45,12 +45,13 @@ an in-game menu, and a recompilation pipeline you can watch run.
 You supply the game from your own legally obtained copy. EmblemWeave contains no
 game code, no assets and no keys, and it only ever reads your files.
 
-> **Current release: 0.1.43.** This is a release candidate: no `v0.1.43` tag or GitHub release
-> exists yet, and the 0.1.42 package is still the current public download. The
-> [changelog](docs/changelog/0.1.43.md) covers Windows SDK 10.0.19041 builds, the Obelisk Chamber
-> stall, and the 0.2.12-0.2.13 engine work. Linux and Steam Deck remain source-build work and are
-> not advertised as downloadable releases. Field limitations from 0.1.42 for #37, #41, #75, #77,
-> #78 and #79 remain documented in the changelog. The prepared release material, including the
+> **Current release: 0.1.42.** 0.1.43 is in development as a release candidate: no `v0.1.43`
+> tag or GitHub release exists yet, and the 0.1.42 package is still the current public download. The
+> [0.1.43 changelog](docs/changelog/0.1.43.md) covers Windows SDK 10.0.19041 builds, the Obelisk
+> Chamber stall, and the 0.2.12-0.2.13 engine work; the [0.1.42 release notes](docs/changelog/0.1.42.md)
+> remain the public record. Linux and Steam Deck remain source-build work and are not advertised
+> as downloadable releases. Field limitations from 0.1.42 for #37, #41, #75, #77, #78 and #79
+> remain documented in the changelog. The prepared release material, including the
 > [issue map](docs/release/0.1.43/ISSUE_MAP.md) and [publication checklist](docs/release/0.1.43/PUBLICATION_CHECKLIST.md),
 > lives in [docs/release/0.1.43](docs/release/0.1.43/README.md).
 

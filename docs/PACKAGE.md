@@ -11,6 +11,12 @@ index all name the same version. Run without `--version`, it checks that the pub
 `Cargo.toml` to name one newer development version, provided that version has a draft changelog and an index row. The
 version bump and the site stamp are therefore checked together instead of being discovered after the zip is published.
 
+An unpublished candidate can be packed without flipping the public pointers:
+`tools/package_release.ps1 -Candidate`. Its check requires the public 0.1.42 pointers to remain agreed, the candidate
+changelog and index row to exist, and the site's download button to stay on the always-valid releases page. The
+resulting `manifest.json` records `candidate: true`; it is not a publication step and must not be uploaded as a public
+release until the publication checklist flips the pointers.
+
 ```
 EmblemWeave-vX.Y.Z-windows-x64.zip
 release-manifest.json    sidecar: SHA-256 of every file, plus source/build provenance

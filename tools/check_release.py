@@ -52,9 +52,16 @@ def version_key(version: str) -> tuple[int, int, int]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", help="the version the caller is packaging; every pointer must already name it")
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="package an unpublished candidate while the public pointers still name the published release",
+    )
     args = parser.parse_args(argv)
 
     cargo = cargo_version()
+    if args.candidate and args.version is None:
+        args.version = cargo
     release = json.loads(read("docs/release.json"))
     published = release.get("version")
     if not isinstance(published, str) or not re.fullmatch(r"\d+\.\d+\.\d+", published):
@@ -68,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if packaging and args.version != cargo:
         problems.append(f"the caller is packaging {args.version!r}, Cargo.toml says {cargo!r}")
-    if packaging and args.version != published:
+    if packaging and args.version != published and not args.candidate:
         problems.append(
             f"the caller is packaging {args.version!r}, but docs/release.json still names the published "
             f"{published!r}; bump the release pointers before packaging"
@@ -88,7 +95,12 @@ def main(argv: list[str] | None = None) -> int:
 
     index = read("docs/index.html")
     need(f'id="version">v{published}<' in index, "docs/index.html version badge is not the published release")
-    need(f'href="{download}"' in index, "docs/index.html download button is not the published asset")
+    download_hrefs = [download]
+    if args.candidate:
+        # An unpublished candidate must leave the site's public download on the
+        # always-valid releases page, never point it at a tag that does not exist.
+        download_hrefs.append(f"{REPO}/releases/latest")
+    need(any(f'href="{href}"' in index for href in download_hrefs), "docs/index.html download button is not the published asset")
     need(f'id="badge-release">release {published}<' in index, "docs/index.html release badge is not the published release")
     need(f"site.css?v={published}" in index, "docs/index.html stylesheet cache key is not the published release")
     need(f"site.js?v={published}" in index, "docs/index.html script cache key is not the published release")
@@ -127,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if cargo == published:
         print(f"release metadata agrees on {published} ({tag})")
+    elif args.candidate:
+        print(f"candidate {target} is packable; public release metadata still agrees on {published} ({tag})")
     else:
         print(f"published release metadata agrees on {published} ({tag}); {cargo} is unreleased development")
     return 0

@@ -9,6 +9,7 @@
 #   pwsh -File tools/package_release.ps1 -Deterministic   # fixed zip entry timestamps
 #   pwsh -File tools/package_release.ps1 -AllowDirty      # explicitly package uncommitted changes
 #   pwsh -File tools/package_release.ps1 -AllowStaleBuild  # reuse an executable whose stamp does not match
+#   pwsh -File tools/package_release.ps1 -Candidate       # pack 0.1.43 without flipping the public 0.1.42 pointers
 #
 # Writes target\pkg\EmblemWeave-v<version>-windows-x64.zip, release-manifest.json, manifest.json and SHA256SUMS,
 # then prints the zip's size and sha256. SHA256SUMS is regenerated from the finished artifacts on every run, so a
@@ -20,6 +21,7 @@ param(
     [switch]$RequireConfigureCheck,
     [switch]$AllowStaleBuild,
     [switch]$AllowDirty,
+    [switch]$Candidate,
     [switch]$Deterministic
 )
 $ErrorActionPreference = 'Stop'
@@ -42,8 +44,13 @@ try {
     $pyCheck = Get-Command python -ErrorAction SilentlyContinue
     if (-not $pyCheck) { $pyCheck = Get-Command py -ErrorAction SilentlyContinue }
     if (-not $pyCheck) { throw 'python is needed to check the release metadata (tools/check_release.py)' }
-    & $pyCheck.Source 'tools/check_release.py' --version $Version
-    if ($LASTEXITCODE -ne 0) { throw "release metadata does not agree on $Version; fix it before packing" }
+    $checkArgs = @('tools/check_release.py', '--version', $Version)
+    if ($Candidate) { $checkArgs += '--candidate' }
+    & $pyCheck.Source @checkArgs
+    if ($LASTEXITCODE -ne 0) {
+        if ($Candidate) { throw "the $Version candidate and the published pointers do not agree; fix them before packing" }
+        throw "release metadata does not agree on $Version; fix it before packing"
+    }
     # The build drives two cmd scripts, and cmd parses a batch file whole before running any line of it: one
     # unbalanced parenthesis in build_game.cmd or nx_env.cmd stops every build, and a broken script cannot
     # report that about itself. Nothing else runs these checks automatically (there is no CI), so they run here,
@@ -404,6 +411,7 @@ try {
         launcherDirty = $builtDirty
         releaseManifest = [System.IO.Path]::GetFileName($manifestPath)
         releaseManifestSha256 = $manifestSha
+        candidate = [bool]$Candidate
     }
     $packageManifest = Join-Path (Split-Path $zip) 'manifest.json'
     $manifest | ConvertTo-Json | Set-Content -Encoding utf8 $packageManifest
