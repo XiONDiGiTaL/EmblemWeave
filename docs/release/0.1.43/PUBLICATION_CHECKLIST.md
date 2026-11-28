@@ -29,14 +29,14 @@
 - [ ] `docs/changelog/0.1.43.md`: change the status line from release candidate/not published to published, and keep the verification table and known issues.
 - [ ] `docs/release.json`: set `version` to `0.1.43`, `tag` to `v0.1.43`, and `download` to the exact published Windows zip URL. The release workflow stamps this file; if it did not, set it by hand and re-check the site.
 - [ ] `docs/index.html`: static fallback version/badge and download link must be the published release (or the always-valid releases page); `site.js` then replaces them from `release.json`/the GitHub API.
-- [ ] `fallback/index.html` and `fallback/release.json`: set the current version and download, then redeploy the Cloudflare Worker `emblemweave` asset set. This Worker is a separate deployment from `docs/`.
+- [ ] `fallback/index.html`, `fallback/release.json` and `fallback/worker.js`: set the current version and download, then redeploy the Cloudflare Worker `emblemweave` asset set. This Worker is a separate deployment from `docs/`.
 - [ ] `docs/release/0.1.43/README.md`: replace “prepared, not published” with the publication date and asset link.
 - [ ] Remove any “0.1.42 is current” or “release candidate” wording that remains in the public pages.
 
 ## 4. Site, fallback and mirrors
 
 - [ ] Deploy the updated `docs/` site through the normal host (GitHub Pages or the configured host). This is a separate, authorized deployment; a git push alone does not prove the fallback was redeployed.
-- [ ] Deploy `fallback/index.html` and `fallback/release.json` to the `emblemweave` Cloudflare Worker with the same asset routing, then check `https://emblemweave.xiondigital.workers.dev/` and `/release.json`.
+- [ ] Deploy `fallback/index.html`, `fallback/release.json` and `fallback/worker.js` to the `emblemweave` Cloudflare Worker with the same asset routing, then check `https://emblemweave.xiondigital.workers.dev/`, `/release.json` and a missing path (expect 404).
 - [ ] Open the live site and the fallback URL; check the hero download, the badge, the Guides/Docs links, the screenshots and the legal links.
 - [ ] Confirm `release.json` is served with the published version and the download returns the package.
 - [ ] Push the release commit to GitHub, GitLab and GitGud. Do not push to the `metrist` upstream.
