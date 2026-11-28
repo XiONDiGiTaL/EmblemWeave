@@ -4,6 +4,8 @@ One file per release, newest first. Each file is what the release notes said, wo
 description of the current state instead of a wall of history.
 
 **0.1.43** is prepared as the next release and has not been published; **0.1.42** is the current public release.
+The prepared 0.1.43 material, including the issue map and publication checklist, is in
+[release/0.1.43](../release/0.1.43/README.md).
 
 | Version | Date | In one line |
 | --- | --- | --- |

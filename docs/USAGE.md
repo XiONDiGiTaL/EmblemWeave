@@ -2,6 +2,8 @@
 
 The rail groups pages by what you are doing. This page is the full tour: every page, the display settings, upscaling files, and the in-game menu.
 
+> Looking for a task-based walkthrough? Start with the [Documentation hub](GUIDES.md), the [Launcher guide](LAUNCHER_GUIDE.md) and the [F1 menu guide](F1_MENU_GUIDE.md). The rest of this page is the full page reference.
+
 A new installation starts in **Standard** mode. It has **Home** (Overview), **Game** (Game Setup, Requirements), **Library**
 (Saves, Mods, Cheats), **Runtime** (Graphics, Audio, Controls), **System** (Troubleshooter) and **Settings** (Appearance,
 About). **Appearance → Interface → Advanced** adds **Recompilation**, **Diagnostics** and **Game Log** without moving files
@@ -10,6 +12,13 @@ Game Log link reveals Advanced automatically. The choice is saved.
 
 The top strip is the launcher's own shell, with the window controls, version and build revision; the strip along the bottom
 carries the current job and the readiness line.
+
+## Two in-game menus
+
+- **F1** opens the engine's settings overlay: graphics, performance, upscaling, pacing, audio, Advanced (Controls / Game / Mods), Diagnostics and System.
+- **F10** (or **Back + RB**) opens EmblemWeave's in-game menu: pause/resume, a screenshot, restart at the title screen, stop and return to the launcher, quick cheats, cheat codes/tables, display settings and the controls in use.
+
+The two menus share the same `fefw.ini` and `controls.ini`; see the [F1 menu guide](F1_MENU_GUIDE.md) for the tab-by-tab walkthrough.
 
 ## The rail and the pages
 

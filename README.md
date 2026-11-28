@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://xiondigital.net/EmblemWeave/">Site</a> ·
   <a href="https://github.com/XiONDiGiTaL/EmblemWeave/releases">Releases</a> ·
-  <a href="docs/OVERVIEW.md">Docs</a> ·
+  <a href="docs/GUIDES.md">Guides</a> ·
   <a href="https://github.com/XiONDiGiTaL/EmblemWeave/wiki">Wiki</a> ·
   <a href="https://github.com/XiONDiGiTaL/EmblemWeave">GitHub</a> ·
   <a href="https://gitlab.com/XiONDiGiTaL/emblemweave">GitLab</a> ·
@@ -50,7 +50,9 @@ game code, no assets and no keys, and it only ever reads your files.
 > [changelog](docs/changelog/0.1.43.md) covers Windows SDK 10.0.19041 builds, the Obelisk Chamber
 > stall, and the 0.2.12-0.2.13 engine work. Linux and Steam Deck remain source-build work and are
 > not advertised as downloadable releases. Field limitations from 0.1.42 for #37, #41, #75, #77,
-> #78 and #79 remain documented in the changelog.
+> #78 and #79 remain documented in the changelog. The prepared release material, including the
+> [issue map](docs/release/0.1.43/ISSUE_MAP.md) and [publication checklist](docs/release/0.1.43/PUBLICATION_CHECKLIST.md),
+> lives in [docs/release/0.1.43](docs/release/0.1.43/README.md).
 
 ## Documentation
 
@@ -58,6 +60,9 @@ game code, no assets and no keys, and it only ever reads your files.
 | --- | --- |
 | 🚀 **Start here** |  |
 | [Overview](docs/OVERVIEW.md) | What EmblemWeave does, the engine underneath, and the feature list. |
+| [Documentation hub](docs/GUIDES.md) | Task-first index for the launcher, F1 menu, saves and troubleshooting. |
+| [Launcher guide](docs/LAUNCHER_GUIDE.md) | Step-by-step first run, build, Play, saves, mods and updates. |
+| [F1 menu guide](docs/F1_MENU_GUIDE.md) | The engine's in-game settings overlay, tab by tab, and how it differs from F10. |
 | [Install and play](docs/INSTALL.md) | Download, unzip, choose your dump, build once, play. |
 | [Using EmblemWeave](docs/USAGE.md) | The rail of pages and the full page-by-page guide. |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | When the build or the game stops, and how to report it. |
@@ -71,6 +76,7 @@ game code, no assets and no keys, and it only ever reads your files.
 | [Development status](docs/DEVELOPMENT.md) | Playable-build evidence, engine integration and known limitations. |
 | [Roadmap](docs/ROADMAP.md) | What is planned next, in priority order. |
 | [Changelog](docs/changelog/README.md) | What changed in each release, newest first. |
+| [0.1.43 issue map](docs/release/0.1.43/ISSUE_MAP.md) | What 0.1.43 changes for each open issue, with commit evidence and what remains unconfirmed. |
 | [Screenshots](docs/SCREENSHOTS.md) | The launcher's pages, from the current source tree. |
 | 📚 **Reference** |  |
 | [Key capabilities](docs/CAPABILITIES.md) | The deeper technical capabilities behind the feature list. |

@@ -24,7 +24,7 @@ feature as working before it is.
 | | |
 | --- | --- |
 | **Play natively** | Build the game once from your own dump, then play it at 60 fps with sound and its cutscenes, windowed or full screen. |
-| **In-game enhancements** | F10 or Back + RB while playing: pause, screenshot, restart, stop and return, display settings and cheats. |
+| **In-game enhancements** | F10 or Back + RB opens EmblemWeave's menu: pause, screenshot, restart, stop and return, display settings and cheats. F1 opens the engine's own settings overlay for graphics, performance, upscaling, pacing, audio, controls and diagnostics; see the [F1 menu guide](F1_MENU_GUIDE.md). |
 | **Saves** | Save profiles to switch between, imports saves from Switch emulators, and a save editor (gold, renown, level, experience, stats, weapon masteries, items and spells). |
 | **Mods** | Install RomFS mods from GameBanana (browse the game's list or paste a link), a .zip, .7z or .rar archive, or a folder, and switch each on or off. Mods are made by their authors and hosted by GameBanana; EmblemWeave does not review or host them. |
 | **Cheats** | Quick per-unit cheats (infinite HP, quick level-up, max stats), Atmosphere cheat codes, and Cheat Engine tables with live, editable, freezable values. |
