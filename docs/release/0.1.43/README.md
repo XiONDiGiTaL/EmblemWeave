@@ -24,6 +24,6 @@ The issue map is traceability, not a promise. No issue was commented on, closed 
 
 ## Publication status
 
-The release becomes public only after the tag and GitHub release exist and the asset checksums are verified. The README, `docs/STATUS.md`, `docs/changelog/README.md`, `docs/release.json` and the site's static fallback must be switched in the same publication step. Until then, the correct public statement is: **0.1.42 is the current public release; 0.1.43 is a prepared release candidate.**
+The release becomes public only after the tag and GitHub release exist and the asset checksums are verified. The README, `docs/STATUS.md`, `docs/changelog/README.md`, `docs/release.json`, the site's static fallback and the Cloudflare `emblemweave` fallback asset set must be switched in the same publication step. Until then, the correct public statement is: **0.1.42 is the current public release; 0.1.43 is a prepared release candidate.**
 
 See [PUBLICATION_CHECKLIST.md](PUBLICATION_CHECKLIST.md) for the exact order.

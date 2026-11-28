@@ -25,6 +25,7 @@ __pycache__/
 !/recomplauncher.json
 # The site reads these at runtime; they are release data, not local reports.
 !docs/release.json
+!fallback/release.json
 !docs/mirrors.json
 # The native Trinity page embeds canonical snapshots at compile time.
 !apps/emblemweave/src/pages/trinity_catalog.json
