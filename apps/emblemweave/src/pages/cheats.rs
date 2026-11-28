@@ -728,7 +728,12 @@ pub fn quick(app: &mut App, ui: &mut egui::Ui) {
 
                         std::thread::spawn(move || {
                             let config = ScanUnitsConfig::default();
-                            let (units, prog) = cheats::scan_units(g.as_ref(), config, Some(&out_cancel), Some(&out_progress));
+                            let (units, prog) = crate::scan_helper::scan_units_supervised(
+                                g.pid,
+                                config,
+                                Some(&out_cancel),
+                                Some(&out_progress),
+                            );
                             let result = cheats::scan_outcome(units, &prog);
                             *out_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
                         });

@@ -2523,3 +2523,309 @@ unregistersymbol(diet)
             .contains("game closed"));
     }
 }
+/// Live Find Units probe (#76): runs the real scan against a running `fefw.exe`, times every read and, when a read
+/// stays inside `ReadProcessMemory`, suspends that worker and records its instruction pointer and module. It is a
+/// diagnostic, not a product path: `#[ignore]` keeps it out of the normal suite, and it needs a live game.
+#[cfg(all(test, windows, target_arch = "x86_64"))]
+mod live_probe {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT, CONTEXT_CONTROL_AMD64};
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleFileNameA, GetModuleHandleExA, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
+    use windows_sys::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThreadId, OpenProcess, OpenThread, ResumeThread, SuspendThread, PROCESS_QUERY_INFORMATION,
+        THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME,
+    };
+
+    #[derive(Clone, Copy)]
+    struct ReadAt {
+        addr: u64,
+        len: usize,
+        started: Instant,
+    }
+
+    struct Probe {
+        game: process::Process,
+        log: Mutex<std::fs::File>,
+        in_flight: Mutex<HashMap<u32, ReadAt>>,
+        reads: AtomicU64,
+        bytes: AtomicU64,
+        read_ns: AtomicU64,
+        slowest: Mutex<(u64, Duration)>,
+    }
+
+    impl Probe {
+        fn open(game: process::Process, log: std::fs::File) -> Self {
+            Self {
+                game,
+                log: Mutex::new(log),
+                in_flight: Mutex::new(HashMap::new()),
+                reads: AtomicU64::new(0),
+                bytes: AtomicU64::new(0),
+                read_ns: AtomicU64::new(0),
+                slowest: Mutex::new((0, Duration::ZERO)),
+            }
+        }
+
+        fn note(&self, text: &str) {
+            let mut f = self.log.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = writeln!(f, "{text}");
+            let _ = f.flush();
+        }
+    }
+
+    impl Memory for Probe {
+        fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
+            let tid = unsafe { GetCurrentThreadId() };
+            let started = Instant::now();
+            self.in_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(tid, ReadAt { addr, len: buf.len(), started });
+            let ok = self.game.read(addr, buf);
+            self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&tid);
+            let took = started.elapsed();
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
+            self.read_ns.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+            {
+                let mut slow = self.slowest.lock().unwrap_or_else(|e| e.into_inner());
+                if took > slow.1 {
+                    *slow = (addr, took);
+                }
+            }
+            if took >= Duration::from_millis(100) {
+                self.note(&format!(
+                    "read addr=0x{addr:x} len={} ok={ok} took={:.3}s tid={tid}",
+                    buf.len(),
+                    took.as_secs_f64()
+                ));
+            }
+            ok
+        }
+
+        fn write(&self, addr: u64, data: &[u8]) -> bool {
+            self.game.write(addr, data)
+        }
+
+        fn regions(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+            self.game.regions(lo, hi)
+        }
+
+        fn available(&self) -> bool {
+            self.game.available()
+        }
+    }
+
+    /// Where `tid` is right now: instruction pointer, its module and offset. The thread is suspended only long enough
+    /// to read the context.
+    unsafe fn thread_where(pid: u32, tid: u32) -> String {
+        let th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, 0, tid);
+        if th.is_null() {
+            return format!("thread {tid}: OpenThread failed");
+        }
+        let suspended = SuspendThread(th) != u32::MAX;
+        let mut ctx: CONTEXT = std::mem::zeroed();
+        ctx.ContextFlags = CONTEXT_CONTROL_AMD64;
+        let mut out = format!("thread {tid}: context unavailable");
+        if suspended && GetThreadContext(th, &mut ctx) != 0 {
+            let rip = ctx.Rip;
+            let mut module = [0u8; 260];
+            let mut base: HANDLE = std::ptr::null_mut();
+            let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+            if GetModuleHandleExA(flags, rip as *const u8, &mut base) != 0 {
+                let n = GetModuleFileNameA(base, module.as_mut_ptr(), module.len() as u32) as usize;
+                let name = String::from_utf8_lossy(&module[..n.min(module.len())]).into_owned();
+                let short = name.rsplit(['\\', '/']).next().unwrap_or(&name).to_string();
+                out = format!("thread {tid}: rip=0x{rip:x} {short}+0x{:x}", rip.saturating_sub(base as u64));
+            } else {
+                out = format!("thread {tid}: rip=0x{rip:x} (no module)");
+            }
+            // The allocation base says whether the address is stack, heap or image even when no module owns it.
+            let process = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+            if !process.is_null() {
+                let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+                if VirtualQueryEx(process, rip as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0 {
+                    out.push_str(&format!(" region_base=0x{:x}", mbi.AllocationBase as u64));
+                }
+                CloseHandle(process);
+            }
+        }
+        if suspended {
+            ResumeThread(th);
+        }
+        CloseHandle(th);
+        out
+    }
+
+    fn monitor(probe: Arc<Probe>, done: Arc<AtomicBool>, progress: Arc<Mutex<ScanProgress>>) {
+        let mut reported: Option<u32> = None;
+        let mut next_beat = Instant::now() + Duration::from_secs(2);
+        while !done.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = Instant::now();
+            if now >= next_beat {
+                next_beat = now + Duration::from_secs(2);
+                let pg = *progress.lock().unwrap_or_else(|e| e.into_inner());
+                probe.note(&format!(
+                    "beat pieces={}/{} units={} elapsed={:.1}s reads={} bytes={}",
+                    pg.completed_pieces,
+                    pg.total_pieces,
+                    pg.units_found,
+                    pg.elapsed_secs,
+                    probe.reads.load(Ordering::Relaxed),
+                    probe.bytes.load(Ordering::Relaxed)
+                ));
+            }
+            let stuck: Vec<(u32, ReadAt)> = probe
+                .in_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(t, r)| (*t, *r))
+                .collect();
+            for (tid, r) in stuck {
+                if r.started.elapsed() < Duration::from_millis(1500) || reported == Some(tid) {
+                    continue;
+                }
+                reported = Some(tid);
+                let where_ = unsafe { thread_where(probe.game.pid, tid) };
+                probe.note(&format!(
+                    "BLOCKED addr=0x{:x} len={} in flight {:.3}s; {where_}",
+                    r.addr,
+                    r.len,
+                    r.started.elapsed().as_secs_f64()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a running fefw.exe; drives the real Find Units scan against it"]
+    fn live_find_units_probe() {
+        let Some(pid) = process::find(GAME_EXE) else {
+            eprintln!("no {GAME_EXE} is running; start a disposable session first");
+            return;
+        };
+        let Some(game) = process::Process::open(pid) else {
+            eprintln!("could not open {GAME_EXE} (pid {pid})");
+            return;
+        };
+        let dir = std::path::Path::new("tmp/issue76");
+        std::fs::create_dir_all(dir).unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("probe_{stamp}.log"));
+        let file = std::fs::File::create(&path).unwrap();
+        eprintln!("probe log: {}", path.display());
+
+        let timeout: f64 = std::env::var("EW_PROBE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+        let cap: u64 = std::env::var("EW_PROBE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+        let threads: usize = std::env::var("EW_PROBE_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let cap_gb: f64 = std::env::var("EW_PROBE_CAP_GB").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
+        let cancel_after: Option<f64> = std::env::var("EW_PROBE_CANCEL_AFTER").ok().and_then(|v| v.parse().ok());
+
+        let probe = Arc::new(Probe::open(game, file));
+        let cancel = Arc::new(ScanCancelToken::new());
+        let progress = Arc::new(Mutex::new(ScanProgress {
+            total_pieces: 0,
+            completed_pieces: 0,
+            units_found: 0,
+            elapsed_secs: 0.0,
+            remaining_secs: timeout,
+            cancelled: false,
+            timed_out: false,
+            device_lost: false,
+        }));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let mon = {
+            let (p, d, g) = (probe.clone(), done.clone(), progress.clone());
+            std::thread::spawn(move || monitor(p, d, g))
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        {
+            let (p, c, g) = (probe.clone(), cancel.clone(), progress.clone());
+            std::thread::spawn(move || {
+                let cfg = ScanUnitsConfig {
+                    timeout_secs: timeout,
+                    max_threads: threads,
+                    max_fallback_bytes: (cap_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+                    ..Default::default()
+                };
+                let (units, prog) = scan_units(p.as_ref(), cfg, Some(c.as_ref()), Some(g.as_ref()));
+                let _ = tx.send((units, prog));
+            });
+        }
+        if let Some(after) = cancel_after {
+            let c = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs_f64(after));
+                eprintln!("cancel requested after {after:.1}s");
+                c.cancel();
+            });
+        }
+
+        let result = rx.recv_timeout(Duration::from_secs(cap));
+        done.store(true, Ordering::Relaxed);
+        let _ = mon.join();
+        let total = started.elapsed().as_secs_f64();
+        let (units, prog) = match result {
+            Ok(r) => r,
+            Err(_) => {
+                let stuck: Vec<String> = probe
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(|(t, r)| {
+                        format!(
+                            "tid {t} addr=0x{:x} len={} {:.1}s",
+                            r.addr,
+                            r.len,
+                            r.started.elapsed().as_secs_f64()
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "SCAN DID NOT RETURN after {total:.1}s (cap {cap}s); in flight: {}",
+                    if stuck.is_empty() { "none".to_string() } else { stuck.join(", ") }
+                );
+                probe.note(&format!("SCAN DID NOT RETURN after {total:.1}s; in flight: {stuck:?}"));
+                std::process::exit(3);
+            }
+        };
+        let slow = *probe.slowest.lock().unwrap_or_else(|e| e.into_inner());
+        let reads = probe.reads.load(Ordering::Relaxed);
+        let bytes = probe.bytes.load(Ordering::Relaxed);
+        let read_time = probe.read_ns.load(Ordering::Relaxed) as f64 / 1e9;
+        let summary = format!(
+            "SUMMARY total={total:.2}s reads={reads} bytes={bytes} read_time={read_time:.2}s ({:.0}% of scan) slowest_read=0x{:x}/{:.3}s pieces={}/{} units={} elapsed={:.2}s cancelled={} timed_out={} device_lost={} outcome={:?}",
+            if prog.elapsed_secs > 0.0 { read_time / prog.elapsed_secs * 100.0 } else { 0.0 },
+            slow.0,
+            slow.1.as_secs_f64(),
+            prog.completed_pieces,
+            prog.total_pieces,
+            prog.units_found,
+            prog.elapsed_secs,
+            prog.cancelled,
+            prog.timed_out,
+            prog.device_lost,
+            scan_outcome(units.clone(), &prog).map(|u| u.len())
+        );
+        eprintln!("{summary}");
+        probe.note(&summary);
+    }
+}

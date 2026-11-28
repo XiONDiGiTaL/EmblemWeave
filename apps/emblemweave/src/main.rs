@@ -43,6 +43,7 @@ mod portraits;
 mod report;
 mod savefile;
 mod saves;
+mod scan_helper;
 mod shell;
 mod sites;
 mod startup_overlay;
@@ -410,6 +411,15 @@ impl App {
         // Command line: `--page <name>` opens a page, `--boot-test` runs the
         // boot test as soon as the game data is detected.
         let args: Vec<String> = std::env::args().collect();
+    // The Find Units helper is a single-use child of the launcher, not a GUI run (#76): it owns the
+    // ReadProcessMemory loop so the launcher can terminate it when a read never returns.
+    if args.len() >= 6 && args[1] == scan_helper::HELPER_ARG {
+        let pid: u32 = args[2].parse().unwrap_or(0);
+        let timeout: f64 = args[3].parse().unwrap_or(30.0);
+        let cap: u64 = args[4].parse().unwrap_or(0);
+        let threads: usize = args[5].parse().unwrap_or(0);
+        std::process::exit(scan_helper::helper_main(pid, timeout, cap, threads));
+    }
         // A screenshot/layout run can pin the UI scale and the page's scroll
         // position, so the same row is captured at 100 % and 200 %.
         if let Some(scale) = capture_scale(&args) {

@@ -94,3 +94,20 @@ blocked read rather than pretending it can be interrupted.
 - Measure Find Units frame time in battle.
 - If the stall is inside `ReadProcessMemory`, implement the single-use helper process and test cancel, timeout,
   process exit and repeated scans against the real game.
+
+## Update 2026-11-28: the block was reproduced; the helper is implemented
+
+A disposable session (Dagson Base, 60 fps) reproduced the stall with the launcher-side cap raised to the pre-0.1.43
+behaviour: the scan read 30.8 GB, one `ReadProcessMemory` call stayed in `ntdll.dll+0x162534`
+(`NtReadVirtualMemory`) for **20.2 s**, the game fell to **6.4 fps**, and the scan timed out at 31 s with no units.
+With the product's 2 GB cap the same scan completes in **0.80 s** with the slowest read at **10-15 ms**. The worker is
+therefore inside `ReadProcessMemory`, as the API analysis predicted; the earlier "not implemented because no real
+block was reproduced" decision is superseded.
+
+The single-use helper described under "Options considered" is now implemented: `scan_helper.rs` starts
+`EmblemWeave.exe --scan-units-helper` in a Job Object with kill-on-close, reads progress and results as JSON from its
+stdout, and terminates the job on cancel, deadline, device loss or drop. Find Units uses it; the in-process scan is the
+fallback when the helper cannot start. Real-game results: cancel returned in 1.05 s, a 0.5 s deadline returned in
+1.44 s, game termination was reported as `device_lost` in 1.29 s, and no helper process remained after any run.
+
+Evidence, protocol and the test matrix: `docs/FIND_UNITS_HELPER.md`.
