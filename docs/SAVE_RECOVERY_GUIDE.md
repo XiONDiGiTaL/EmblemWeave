@@ -46,10 +46,17 @@ A profile is an independent copy you can switch to later without touching the cu
 2. Choose **Save the current save as a profile** (after the step above) or
    **Import a profile backup or a save folder** (to add a folder without changing the current
    save).
-3. Type a name and press **Create**. The profile appears in the carousel; **Load Profile**
-   installs it when you want it.
 
 ![Create profile with Save the current save as a profile selected](screenshots/saves-keep-profile.png)
+
+3. Type a name and press **Create**. The profile appears in the carousel.
+
+![Chapter 4 created and selected in the carousel](screenshots/saves-profile-created.png)
+
+4. Select the profile and press **Load Profile**. It is copied into the account folder the game
+   reads, and the save that was there moves to `backups\<stamp>` first.
+
+![Chapter 4 loaded: Currently loaded, and Current save reads Loaded: Chapter 4](screenshots/saves-profile-loaded.png)
 
 ## A stamped slot file inside the account folder
 

@@ -61,6 +61,7 @@ game code, no assets and no keys, and it only ever reads your files.
 | [Install and play](docs/INSTALL.md) | Download, unzip, choose your dump, build once, play. |
 | [Using EmblemWeave](docs/USAGE.md) | The rail of pages and the full page-by-page guide. |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | When the build or the game stops, and how to report it. |
+| [Save recovery](docs/SAVE_RECOVERY_GUIDE.md) | An old save the game does not read: use it, keep it as a profile, or recover a stamped slot. |
 | 🛠️ **Build and run** |  |
 | [System requirements](docs/REQUIREMENTS.md) | Hardware, Windows and the build tools the game needs. |
 | [Building from source](docs/BUILDING.md) | The launcher, the command-line tools and the engine build. |
