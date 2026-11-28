@@ -576,6 +576,16 @@ uint32_t Volume::commit() {
     std::lock_guard<std::mutex> lk(s.mu);
     SaveFolderLock lock(to_u8(s.root));
     std::error_code ec;
+    // A marker left by a failed roll-forward is the only copy of a decided save. Never replace it with a newer journal:
+    // finish it first, or refuse the new commit and keep it for the next mount.
+    if (stdfs::exists(s.marker, ec)) {
+        const int pending = apply_marker(s.marker);
+        if (pending < 0) {
+            NXLOG_E("fs", "save commit %s: a decided commit is still pending; refusing to replace it", to_u8(s.root).c_str());
+            return rc::kGenericFailure;
+        }
+        NXLOG_W("fs", "save commit %s: finished the pending decided commit (%d changes)", to_u8(s.root).c_str(), pending);
+    }
     if (s.tomb.empty() && !stdfs::exists(s.work, ec)) return 0;
 
     // Phase 1: flush the changed files, write the change list, make it the decided marker with one rename.

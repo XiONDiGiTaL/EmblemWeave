@@ -329,6 +329,32 @@ NXTEST(journal_commit_that_cannot_delete_stays_decided) {
     CHECK(!stdfs::exists(file));
 }
 
+// A new save must not replace a decided marker that the mount could not apply. The pending commit is the only copy of
+// those changes; a fresh journal renamed over it would lose them silently.
+NXTEST(journal_commit_refuses_to_replace_a_pending_decided_marker) {
+    TempDir t("pendingmarker");
+    stdfs::create_directories(t.p / "save");
+    std::ofstream(t.p / "save" / "blocked") << "a file where the folder must go";
+    {
+        std::ofstream marker(t.p / "save.commit", std::ios::binary);
+        marker << "W " << (t.p / "save.work.4000000000").string() << "\n";
+        marker << "R " << (t.p / "save").string() << "\n";
+        marker << "M blocked\n";
+    }
+
+    Volume v(t.root("save"), true, false, 0);
+    CHECK(stdfs::exists(t.p / "save.commit"));
+    CHECK(put(v, "/new", "N"));
+    CHECK(v.commit() != 0);
+    CHECK_MSG(stdfs::exists(t.p / "save.commit"), "the pending decided commit must survive a refused new commit");
+
+    stdfs::remove(t.p / "save" / "blocked");
+    CHECK_EQ(v.commit(), 0u);
+    CHECK(!stdfs::exists(t.p / "save.commit"));
+    CHECK(stdfs::is_directory(t.p / "save" / "blocked"));
+    CHECK_EQ(read_all(v, "/new"), std::string("N"));
+}
+
 NXTEST(journal_rename_directory_with_committed_children) {
     TempDir t("rendir");
     Volume v(t.root("save"), true, false, 0);
