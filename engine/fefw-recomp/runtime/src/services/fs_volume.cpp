@@ -108,10 +108,20 @@ int apply_marker(const stdfs::path& marker, int stop_after = 0) {
         else if (line[0] == 'R') root = u8(arg);
         else if (work.empty() || root.empty()) continue;
         else if (line[0] == 'D') {
-            stdfs::remove_all(root / u8(arg), ec);
+            std::error_code step_ec;
+            stdfs::remove_all(root / u8(arg), step_ec);
+            if (step_ec) {
+                NXLOG_E("fs", "commit: deleting %s failed: %s", arg.c_str(), step_ec.message().c_str());
+                return -1;
+            }
             n++;
         } else if (line[0] == 'M') {
-            stdfs::create_directories(root / u8(arg), ec);
+            std::error_code step_ec;
+            stdfs::create_directories(root / u8(arg), step_ec);
+            if (step_ec) {
+                NXLOG_E("fs", "commit: creating folder %s failed: %s", arg.c_str(), step_ec.message().c_str());
+                return -1;
+            }
             n++;
         } else if (line[0] == 'F') {
             const stdfs::path a = work / u8(arg), b = root / u8(arg);
@@ -375,7 +385,11 @@ void Volume::recover(const std::string& root_s) {
     const stdfs::path marker(root.string() + ".commit");
     if (stdfs::exists(marker, ec)) {
         const int n = apply_marker(marker);
-        NXLOG_W("fs", "a commit of %s was interrupted after it was decided: finished now (%d changes)", root_s.c_str(), n);
+        if (n < 0) {
+            NXLOG_E("fs", "a commit of %s was interrupted after it was decided and could not be applied; it stays decided for the next attempt", root_s.c_str());
+        } else {
+            NXLOG_W("fs", "a commit of %s was interrupted after it was decided: finished now (%d changes)", root_s.c_str(), n);
+        }
     }
     // Work folders and journals of processes that no longer run.
     const stdfs::path dir = root.parent_path();

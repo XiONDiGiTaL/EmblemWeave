@@ -280,6 +280,55 @@ NXTEST(journal_delete_then_recreate_same_path) {
     CHECK_EQ(s, std::string("new"));
 }
 
+// A decided commit whose folder step fails must stay decided. The old applier ignored the error, counted the step and
+// removed the marker, so recovery reported success while the folder the save expected was never created.
+NXTEST(journal_commit_that_cannot_make_a_folder_stays_decided) {
+    TempDir t("blockeddir");
+    stdfs::create_directories(t.p / "save");
+    std::ofstream(t.p / "save" / "blocked") << "a file where the folder must go";
+    {
+        std::ofstream marker(t.p / "save.commit", std::ios::binary);
+        marker << "W " << (t.p / "save.work.4000000000").string() << "\n";
+        marker << "R " << (t.p / "save").string() << "\n";
+        marker << "M blocked\n";
+    }
+
+    Volume::recover(t.root("save"));
+    CHECK_MSG(stdfs::exists(t.p / "save.commit"), "a marker whose folder step failed must stay decided");
+    CHECK(stdfs::is_regular_file(t.p / "save" / "blocked"));
+
+    stdfs::remove(t.p / "save" / "blocked");
+    Volume::recover(t.root("save"));
+    CHECK(!stdfs::exists(t.p / "save.commit"));
+    CHECK(stdfs::is_directory(t.p / "save" / "blocked"));
+}
+
+// The delete step has the same contract. An open handle without FILE_SHARE_DELETE makes DeleteFileW fail; the marker
+// must survive that attempt and roll forward once the handle is closed.
+NXTEST(journal_commit_that_cannot_delete_stays_decided) {
+    TempDir t("blockeddel");
+    stdfs::create_directories(t.p / "save");
+    const stdfs::path file = t.p / "save" / "held";
+    std::ofstream(file) << "held open";
+    {
+        std::ofstream marker(t.p / "save.commit", std::ios::binary);
+        marker << "W " << (t.p / "save.work.4000000000").string() << "\n";
+        marker << "R " << (t.p / "save").string() << "\n";
+        marker << "D held\n";
+    }
+
+    HANDLE held = CreateFileW(file.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+    Volume::recover(t.root("save"));
+    CHECK_MSG(stdfs::exists(t.p / "save.commit"), "a marker whose delete step failed must stay decided");
+    CHECK(stdfs::is_regular_file(file));
+
+    CloseHandle(held);
+    Volume::recover(t.root("save"));
+    CHECK(!stdfs::exists(t.p / "save.commit"));
+    CHECK(!stdfs::exists(file));
+}
+
 NXTEST(journal_rename_directory_with_committed_children) {
     TempDir t("rendir");
     Volume v(t.root("save"), true, false, 0);
