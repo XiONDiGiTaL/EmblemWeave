@@ -255,7 +255,21 @@ fn clock() -> String {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> App {
-        let (mut config, warning) = Config::load();
+        let (mut config, mut warning) = Config::load();
+        // Finish or roll back an import killed in an earlier process before any
+        // page reads the save folder. Leaving it until Play would show an empty
+        // current save and invite the player to start over.
+        if let Some(save_dir) = Config::save_dir() {
+            if let Err(e) = crate::saves::recover_interrupted_import(&save_dir) {
+                let message = format!(
+                    "An interrupted save import could not be resolved: {e}. Its staged copy and backups were left in place."
+                );
+                warning = Some(match warning {
+                    Some(previous) => format!("{previous} {message}"),
+                    None => message,
+                });
+            }
+        }
         // `--game <path>`: the dump to use, as if it had been chosen on Game Setup (a launcher, script or shortcut
         // passes it). Without it the saved choice stands.
         if let Some(game) = game_arg(&std::env::args().collect::<Vec<_>>()) {
@@ -1638,20 +1652,26 @@ fn import_save_cli(source: &str) -> std::process::ExitCode {
 
 /// `--recover-saves`: copy every `<stamp>-<slot>` file in the game's account
 /// save to the name the game opens, the same repair Play runs before it starts
-/// the game (#79), and print what was recovered. It runs without the window so
-/// a save moved back out of `backups/` can be fixed when the launcher cannot
-/// open; nothing is renamed, deleted or overwritten.
+/// the game (#79), finish or roll back an interrupted import, and print what
+/// was recovered. It runs without the window so a save moved back out of
+/// `backups/` can be fixed when the launcher cannot open. It never starts the
+/// game, and it does not delete the only copy of a save.
 fn recover_saves_cli() -> i32 {
     let Some(save_dir) = config::Config::save_dir() else {
         eprintln!("APPDATA is not set");
         return 1;
     };
+    match saves::recover_interrupted_import(&save_dir) {
+        Ok(0) => {}
+        Ok(n) => println!("Completed or rolled back {n} interrupted save import step(s)."),
+        Err(e) => {
+            eprintln!("recover-saves: an interrupted save import could not be resolved: {e}");
+            return 1;
+        }
+    }
     match saves::repair_backup_named_slots(&save_dir) {
         Ok(repaired) if repaired.is_empty() => {
-            println!(
-                "no backup-named slot needed recovery in {}",
-                saves::account_dir(&save_dir).display()
-            );
+            println!("no backup-named slot needed recovery");
             0
         }
         Ok(repaired) => {

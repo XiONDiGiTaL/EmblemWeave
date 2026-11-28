@@ -8,10 +8,14 @@
 //! `nand/user/save/0000000000000000/<user>/<title id>`, so a save moves between
 //! them as a copy of that folder's contents.
 //!
-//! Import never touches the source. If the account folder already holds a
-//! save, it is moved to `<save folder>/backups/<time>/` first, so an import
-//! can always be undone. When the game has not created its save yet, the
-//! import writes the `.meta` the engine expects.
+//! Import never touches the source. It copies into a staging folder beside the
+//! account, hashes every file, and only then moves the existing save to
+//! `<save folder>/backups/<time>/` and renames the verified stage into place.
+//! A forced stop therefore leaves the old save active or the verified stage
+//! recoverable; a partial account is never visible to the game. A sidecar
+//! records each step so the next launch can finish or roll back an interrupted
+//! import. When the game has not created its save yet, the import writes the
+//! `.meta` the engine expects.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -584,8 +588,9 @@ fn nand_named(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Copy `source` into the game's account save, moving any existing save to
-/// `<save folder>/backups/<stamp>/` first.
+/// Copy `source` into the game's account save. The replacement is staged and
+/// verified first; only then is an existing save moved to
+/// `<save folder>/backups/<stamp>/` and the stage promoted.
 pub fn import(
     source: &Path,
     save_dir: &Path,
@@ -611,6 +616,9 @@ pub fn import(
         SaveSource::Flat(dir) => (dir.as_path(), true),
     };
     let target = account_dir(save_dir);
+    // Finish or roll back an import killed in an earlier run before looking at
+    // this source. The active account is then old-or-new, never a partial copy.
+    recover_interrupted_import(save_dir)?;
     // A profile or a backup under the save folder is fine; the current save, its account folder, or a folder holding the save
     // folder, is not.
     if from.starts_with(&target)
@@ -620,75 +628,665 @@ pub fn import(
     {
         return Err("the source and the save folder overlap".into());
     }
-    // Back up only a save that is really there. A folder holding just the account's `.meta` is the empty save the
-    // game writes on first start; moving it aside would hide that metadata from the import below.
-    let backup = if target.is_dir() && has_save(&target) {
-        let to = save_dir.join("backups").join(stamp);
-        std::fs::create_dir_all(save_dir.join("backups"))
-            .map_err(|e| format!("creating the backups folder: {e}"))?;
-        std::fs::rename(&target, &to)
-            .map_err(|e| format!("moving the current save to {}: {e}", to.display()))?;
-        Some(to)
+    let pending = stage_import(from, flat, &target, save_dir, title_id, stamp)?;
+    pending.commit()
+}
+
+/// A sibling name for a temporary folder or sidecar. Keeping it beside the
+/// target means promotion is one rename on the same volume.
+fn side_path(base: &Path, tag: &str) -> PathBuf {
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let name = base
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    for n in 0u32.. {
+        let candidate = parent.join(format!(".{name}.emblemweave-{tag}-{stamp}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Delete a service-owned sidecar or staging tree. A symlink is removed as a
+/// link, never followed into the directory it names.
+fn remove_path(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// A file copied into a staging folder, hashed so a later recovery can prove
+/// the replacement is complete without the original source.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct StagedFile {
+    path: String,
+    size: u64,
+    sha256: String,
+}
+
+/// The sidecar that makes an interrupted import recoverable.
+///
+/// It is written after the stage is verified and before the active save is
+/// moved. A crash at any later step leaves enough information for the next
+/// launch to either finish promotion or put the previous save back.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ImportState {
+    stage: PathBuf,
+    backup: Option<PathBuf>,
+    old_target: Option<PathBuf>,
+    meta_created: bool,
+    files: Vec<StagedFile>,
+}
+
+/// Deterministic pause for the crash-injection tests. Debug builds only; a
+/// release binary has no test hook and the variable has no effect.
+#[cfg(debug_assertions)]
+fn import_test_pause(point: &str) {
+    let Ok(wanted) = std::env::var("EMBLEMWAVE_TEST_IMPORT_PAUSE") else {
+        return;
+    };
+    if wanted == point {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn import_test_pause(_point: &str) {}
+
+/// A fully copied import waiting to be renamed into place.
+///
+/// The staging folder is a sibling of the account folder, so the final rename
+/// stays on one filesystem and cannot expose a half-copied account to the game.
+struct PendingImport {
+    stage: PathBuf,
+    target: PathBuf,
+    backup: Option<PathBuf>,
+    old_target: Option<PathBuf>,
+    state: PathBuf,
+    meta_created: bool,
+    files: Vec<StagedFile>,
+    from: PathBuf,
+}
+
+impl PendingImport {
+    fn commit(self) -> Result<Imported, String> {
+        // The old save stays active while the replacement is staged. Only now,
+        // after every copied file has been verified, is it moved to backups.
+        let backup_moved = if let Some(backup) = &self.backup {
+            if !self.target.is_dir() || !has_save(&self.target) {
+                self.discard_stage();
+                return Err(
+                    "the save to back up changed while the import was staged; nothing was changed"
+                        .into(),
+                );
+            }
+            if backup.exists() {
+                self.discard_stage();
+                return Err(format!(
+                    "the backup folder {} already exists; the import was not applied",
+                    backup.display()
+                ));
+            }
+            if let Err(e) = std::fs::rename(&self.target, backup) {
+                self.discard_stage();
+                return Err(format!(
+                    "moving the current save to {}: {e}; the current save was left in place",
+                    backup.display()
+                ));
+            }
+            true
+        } else {
+            false
+        };
+        import_test_pause("after-backup");
+        let old_moved = if !backup_moved {
+            if let Some(old) = &self.old_target {
+                if self.target.exists() {
+                    if has_save(&self.target) {
+                        self.discard_stage();
+                        return Err(
+                            "a new save appeared while the import was staged; it was not overwritten"
+                                .into(),
+                        );
+                    }
+                    if let Err(e) = std::fs::rename(&self.target, old) {
+                        self.discard_stage();
+                        return Err(format!(
+                            "moving the empty account folder {} aside: {e}; nothing was changed",
+                            self.target.display()
+                        ));
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                if self.target.exists() {
+                    self.discard_stage();
+                    return Err(
+                        "a save appeared while the import was staged; it was not overwritten"
+                            .into(),
+                    );
+                }
+                false
+            }
+        } else {
+            false
+        };
+        if let Err(e) = std::fs::rename(&self.stage, &self.target) {
+            let restored = self.restore_previous(backup_moved, old_moved);
+            if restored {
+                self.discard_stage();
+            }
+            return Err(format!(
+                "renaming {} to {}: {e}{}",
+                self.stage.display(),
+                self.target.display(),
+                if restored {
+                    "; the previous save was restored"
+                } else {
+                    "; the previous save remains in backup and the next launch will retry"
+                }
+            ));
+        }
+        import_test_pause("after-promotion");
+        if old_moved {
+            if let Some(old) = &self.old_target {
+                let _ = remove_path(old);
+            }
+        }
+        let _ = std::fs::remove_file(&self.state);
+        Ok(Imported {
+            files: self.files.len(),
+            backup: self.backup,
+            from: Some(self.from),
+            readable: true,
+        })
+    }
+
+    /// Put the old save back after a failed promotion. A backup is copied back,
+    /// not consumed, so the visible backup history survives a failed import.
+    fn restore_previous(&self, backup_moved: bool, old_moved: bool) -> bool {
+        if backup_moved {
+            if let Some(backup) = &self.backup {
+                return restore_tree(backup, &self.target).is_ok();
+            }
+        }
+        if old_moved {
+            if let Some(old) = &self.old_target {
+                return std::fs::rename(old, &self.target).is_ok();
+            }
+        }
+        true
+    }
+
+    fn discard_stage(&self) {
+        let _ = std::fs::remove_dir_all(&self.stage);
+        if self.meta_created {
+            let _ = std::fs::remove_file(self.target.with_extension("meta"));
+        }
+        let _ = std::fs::remove_file(&self.state);
+    }
+}
+
+/// Copy a resolved import into a staging folder, verify it, and record enough
+/// state for recovery. The active save is not moved here.
+fn stage_import(
+    from: &Path,
+    flat: bool,
+    target: &Path,
+    save_dir: &Path,
+    title_id: u64,
+    stamp: &str,
+) -> Result<PendingImport, String> {
+    let had_save = target.is_dir() && has_save(target);
+    let backup = if had_save {
+        Some(plan_backup_path(save_dir, stamp)?)
     } else {
         None
     };
-    let copied = if flat {
-        copy_flat(from, &target.join("000"))
+    let old_target = if !had_save && target.exists() {
+        Some(side_path(target, "import-old"))
     } else {
-        copy_tree(from, &target)
+        None
     };
-    match copied {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "the account save folder has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    let stage = side_path(target, "import");
+    let state_path = side_path(target, "import-state");
+    let meta = target.with_extension("meta");
+    let mut meta_created = false;
+    let staged = (|| -> Result<Vec<StagedFile>, String> {
+        std::fs::create_dir_all(&stage)
+            .map_err(|e| format!("creating the staging folder: {e}"))?;
+        import_test_pause("staging");
+        // Preserve anything already in an empty account folder. A saved account
+        // is left active and is not copied into the stage.
+        if !had_save && target.is_dir() {
+            copy_tree(target, &stage)?;
+        }
+        if flat {
+            copy_flat(from, &stage.join("000"))?;
+        } else {
+            copy_tree(from, &stage)?;
+        }
+        let files = verify_stage(from, flat, &stage)?;
+        if summary(&stage.join("000")).0 == 0 {
+            return Err(format!(
+                "{} did not leave the save in {}; the previous save was left in place",
+                from.display(),
+                target.join("000").display()
+            ));
+        }
+        let user = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !meta.is_file() {
+            if let Some(text) = meta_text(title_id, &user) {
+                let tmp = side_path(&meta, "import-meta");
+                if let Err(e) = std::fs::write(&tmp, &text) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(format!("writing {}: {e}", meta.display()));
+                }
+                if let Err(e) = std::fs::rename(&tmp, &meta) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(format!("writing {}: {e}", meta.display()));
+                }
+                meta_created = true;
+                if std::fs::read_to_string(&meta).ok().as_deref() != Some(text.as_str()) {
+                    let _ = std::fs::remove_file(&meta);
+                    return Err(format!("verifying {}", meta.display()));
+                }
+            }
+        }
+        let state = ImportState {
+            stage: stage.clone(),
+            backup: backup.clone(),
+            old_target: old_target.clone(),
+            meta_created,
+            files: files.clone(),
+        };
+        write_import_state(&state_path, &state)?;
+        Ok(files)
+    })();
+    match staged {
         Ok(files) => {
-            let user = target
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let meta = target.with_extension("meta");
-            if !meta.is_file() {
-                if let Some(text) = meta_text(title_id, &user) {
-                    if let Err(e) = std::fs::write(&meta, text) {
-                        // The copied tree is not a usable installed save without
-                        // its journal metadata. Put the previous save back.
-                        let _ = std::fs::remove_dir_all(&target);
-                        if let Some(b) = &backup {
-                            let _ = std::fs::rename(b, &target);
-                        }
-                        return Err(format!("writing {}: {e}", meta.display()));
-                    }
-                }
-            }
-            let readable = summary(&target.join("000")).0 > 0;
-            if !readable {
-                // Never call an import that landed outside `000` a success: the game would open an empty save. Put the
-                // previous save back instead of leaving the wrong tree in place.
-                let _ = std::fs::remove_dir_all(&target);
-                if let Some(b) = &backup {
-                    let _ = std::fs::rename(b, &target);
-                }
-                return Err(format!(
-                    "{} did not leave the save in {}; the previous save was put back",
-                    from.display(),
-                    target.join("000").display()
-                ));
-            }
-            Ok(Imported {
-                files,
+            import_test_pause("staged");
+            Ok(PendingImport {
+                stage,
+                target: target.to_path_buf(),
                 backup,
-                from: Some(from.to_path_buf()),
-                readable,
+                old_target,
+                state: state_path,
+                meta_created,
+                files,
+                from: from.to_path_buf(),
             })
         }
         Err(e) => {
-            // Put the previous save back rather than leave a partial copy.
-            let _ = std::fs::remove_dir_all(&target);
-            if let Some(b) = &backup {
-                let _ = std::fs::rename(b, &target);
+            let _ = std::fs::remove_dir_all(&stage);
+            let _ = std::fs::remove_file(&state_path);
+            if meta_created {
+                let _ = std::fs::remove_file(&meta);
             }
             Err(e)
         }
     }
 }
 
+/// Plan a backup folder without moving anything. Existing history is never
+/// overwritten; a second import in the same second gets a suffix.
+fn plan_backup_path(save_dir: &Path, stamp: &str) -> Result<PathBuf, String> {
+    if stamp.is_empty() || stamp.contains(['/', '\\']) {
+        return Err("the import has no valid backup stamp".into());
+    }
+    let dir = save_dir.join("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating the backups folder: {e}"))?;
+    let first = dir.join(stamp);
+    if !first.exists() {
+        return Ok(first);
+    }
+    for n in 2u32.. {
+        let candidate = dir.join(format!("{stamp}-{n}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("a free backup suffix always exists")
+}
+
+/// Hash every source file and compare it with the copy in `stage`. The returned
+/// manifest lets a later launch verify the stage after the source is gone.
+fn verify_stage(from: &Path, flat: bool, stage: &Path) -> Result<Vec<StagedFile>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![from.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| format!("reading {} for verification: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("reading {} for verification: {e}", dir.display()))?;
+            let src = entry.path();
+            if src.is_dir() {
+                if !flat {
+                    stack.push(src);
+                }
+                continue;
+            }
+            if flat && entry.file_name().to_str().is_some_and(is_metadata_file) {
+                continue;
+            }
+            let (size, source_hash) = file_sha256(&src)?;
+            let dst = if flat {
+                stage.join("000").join(entry.file_name())
+            } else {
+                let rel = src
+                    .strip_prefix(from)
+                    .map_err(|_| format!("{} is not below {}", src.display(), from.display()))?;
+                stage.join(rel)
+            };
+            let (dst_size, dst_hash) = file_sha256(&dst).map_err(|e| {
+                format!(
+                    "the staged copy of {} is missing or unreadable: {e}",
+                    src.display()
+                )
+            })?;
+            if size != dst_size || source_hash != dst_hash {
+                return Err(format!(
+                    "{} did not copy identically into the staging folder",
+                    src.display()
+                ));
+            }
+            let rel = dst
+                .strip_prefix(stage)
+                .map_err(|_| format!("{} is not below {}", dst.display(), stage.display()))?;
+            files.push(StagedFile {
+                path: rel.to_string_lossy().replace('\\', "/"),
+                size,
+                sha256: hex_bytes(&source_hash),
+            });
+        }
+    }
+    if files.is_empty() {
+        return Err(format!("{} holds no save files", from.display()));
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+fn file_sha256(path: &Path) -> Result<(u64, [u8; 32]), String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let size = file
+        .metadata()
+        .map_err(|e| format!("reading the size of {}: {e}", path.display()))?
+        .len();
+    Ok((size, hasher.finalize().into()))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn write_import_state(path: &Path, state: &ImportState) -> Result<(), String> {
+    let data = serde_json::to_vec(state)
+        .map_err(|e| format!("recording the import recovery state: {e}"))?;
+    let tmp = side_path(path, "tmp");
+    if let Err(e) = std::fs::write(&tmp, data) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("writing {}: {e}", path.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("writing {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
+fn read_import_state(path: &Path) -> Option<ImportState> {
+    let data = std::fs::read(path).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+/// Copy a tree to a temporary sibling and rename it into place. Used to put a
+/// backup back without consuming the backup entry.
+fn restore_tree(from: &Path, to: &Path) -> Result<(), String> {
+    let tmp = side_path(to, "import-restore");
+    if let Err(e) = copy_tree(from, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    // A restore is a copy too. Promote only after every file has been hashed
+    // against the backup; a short copy must not become the active save.
+    if let Err(e) = verify_stage(from, false, &tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("the backup copy could not be verified: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, to) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("restoring {} to {}: {e}", from.display(), to.display()));
+    }
+    Ok(())
+}
+
+fn import_state_prefix(target: &Path) -> String {
+    format!(
+        ".{}.emblemweave-import-state-",
+        target.file_name().unwrap_or_default().to_string_lossy()
+    )
+}
+
+fn import_stage_prefix(target: &Path) -> String {
+    format!(
+        ".{}.emblemweave-import-",
+        target.file_name().unwrap_or_default().to_string_lossy()
+    )
+}
+
+fn is_stage_entry(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
+}
+
+fn state_paths_are_safe(target: &Path, save_dir: &Path, state: &ImportState) -> bool {
+    let stage_name = state
+        .stage
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if state.stage.parent() != target.parent()
+        || !is_stage_entry(&stage_name, &import_stage_prefix(target))
+    {
+        return false;
+    }
+    if let Some(backup) = &state.backup {
+        let backup_name = backup
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if backup.parent() != Some(save_dir.join("backups").as_path())
+            || backup_name.is_empty()
+            || backup_name == "."
+            || backup_name == ".."
+        {
+            return false;
+        }
+    }
+    if let Some(old) = &state.old_target {
+        let old_name = old
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let old_prefix = format!(
+            ".{}.emblemweave-import-old-",
+            target.file_name().unwrap_or_default().to_string_lossy()
+        );
+        if old.parent() != target.parent() || !is_stage_entry(&old_name, &old_prefix) {
+            return false;
+        }
+    }
+    true
+}
+
+fn verify_recorded_stage(state: &ImportState) -> Result<(), String> {
+    for file in &state.files {
+        let rel = Path::new(&file.path);
+        if rel.is_absolute()
+            || rel.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("the import record names an unsafe path".into());
+        }
+        let path = state.stage.join(rel);
+        let (size, hash) = file_sha256(&path)?;
+        if size != file.size || hex_bytes(&hash) != file.sha256 {
+            return Err(format!("{} is not the verified copy", path.display()));
+        }
+    }
+    if state.files.is_empty() || summary(&state.stage.join("000")).0 == 0 {
+        return Err("the staged save is empty".into());
+    }
+    Ok(())
+}
+
+/// Finish or roll back imports interrupted by a crash, kill or power loss.
+///
+/// The active save is either the old one, the verified replacement, or absent
+/// while the recorded stage/backup is still recoverable. It is never a partial
+/// replacement. Safe to call repeatedly; only completed actions are forgotten.
+pub fn recover_interrupted_import(save_dir: &Path) -> Result<usize, String> {
+    let target = account_dir(save_dir);
+    let Some(parent) = target.parent() else {
+        return Ok(0);
+    };
+    let prefix = import_state_prefix(&target);
+    let mut states: Vec<PathBuf> = std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect();
+    states.sort();
+    let mut seen_stages = std::collections::HashSet::new();
+    let mut actions = 0usize;
+    for state_path in states {
+        let Some(state) = read_import_state(&state_path) else {
+            let _ = std::fs::remove_file(&state_path);
+            continue;
+        };
+        if !state_paths_are_safe(&target, save_dir, &state) {
+            let _ = std::fs::remove_file(&state_path);
+            continue;
+        }
+        seen_stages.insert(state.stage.clone());
+        let meta = target.with_extension("meta");
+        if target.exists() {
+            let stage_present = state.stage.exists();
+            if stage_present {
+                // The active folder won the race (the old save was never moved,
+                // or the user started the game). Never remove its metadata: the
+                // import may have repaired a missing meta just before stopping.
+                let _ = remove_path(&state.stage);
+            } else if let Some(old) = &state.old_target {
+                if old.exists() {
+                    let _ = remove_path(old);
+                }
+            }
+            let _ = std::fs::remove_file(&state_path);
+            actions += 1;
+            continue;
+        }
+        let staged_ok = verify_recorded_stage(&state).is_ok();
+        if staged_ok {
+            match std::fs::rename(&state.stage, &target) {
+                Ok(()) => {
+                    if let Some(old) = &state.old_target {
+                        let _ = remove_path(old);
+                    }
+                    let _ = std::fs::remove_file(&state_path);
+                    actions += 1;
+                    continue;
+                }
+                Err(_) => {}
+            }
+        }
+        let mut restored = false;
+        if let Some(backup) = &state.backup {
+            if backup.is_dir() {
+                restored = restore_tree(backup, &target).is_ok();
+            }
+        }
+        if !restored {
+            if let Some(old) = &state.old_target {
+                if old.exists() {
+                    restored = std::fs::rename(old, &target).is_ok();
+                }
+            }
+        }
+        if !restored && state.backup.is_none() && state.old_target.is_none() {
+            restored = true;
+        }
+        if restored {
+            let _ = remove_path(&state.stage);
+            let _ = std::fs::remove_file(&state_path);
+            if state.meta_created {
+                let _ = std::fs::remove_file(&meta);
+            }
+            actions += 1;
+        }
+    }
+    // A partial stage with no state was interrupted before the old save was
+    // touched. It is never a readable replacement; remove it.
+    let stage_prefix = import_stage_prefix(&target);
+    let orphans: Vec<PathBuf> = std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| is_stage_entry(n, &stage_prefix))
+                && !seen_stages.contains(p)
+        })
+        .collect();
+    for path in orphans {
+        let _ = remove_path(&path);
+        actions += 1;
+    }
+    Ok(actions)
+}
 /// What to say about an import result, and whether it is good news.
 ///
 /// The wording lives here rather than on a page so `--import-save` prints the same sentence the window shows without reaching
@@ -1086,29 +1684,40 @@ fn describe_account(root: &Path, indent: &str) -> String {
     s
 }
 
+/// A relative label for a path inside the save folder. Diagnostic reports keep
+/// the useful structure (`account/<user>/000/Auto`) without exposing the
+/// local user name or install path.
+fn shown_path(save_dir: &Path, path: &Path) -> String {
+    match path.strip_prefix(save_dir) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().replace('\\', "/"),
+        Ok(_) => "<save folder>".into(),
+        Err(_) => "<outside save folder>".into(),
+    }
+}
+
 /// A read-only, content-free inventory of the save tree for the Troubleshooter
 /// report.
 ///
 /// It records the account folder, profiles and backups with slot/file counts,
 /// total sizes and timestamps. Slot contents are never opened, hashed or
-/// copied: this section is safe to attach to a public issue even when the save
-/// itself is not included.
+/// copied, and local paths are reduced to relative labels: this section is safe
+/// to attach to a public issue even when the save itself is not included.
 pub fn save_inventory(save_dir: &Path, title_id: u64) -> String {
     let mut s = String::new();
-    s.push_str("save inventory (metadata only; no save contents)\n");
-    s.push_str(&format!("save dir: {}\n", save_dir.display()));
+    s.push_str("save inventory (metadata only; no save contents or local paths)\n");
+    s.push_str("save folder: <local path omitted>\n");
     s.push_str(&format!("title id: {title_id:016X}\n"));
     s.push_str(&format!("expected user: {DEFAULT_USER}\n\n"));
 
     let account = account_dir(save_dir);
     let stats = inventory_stats(&account);
-    s.push_str(&format!("account: {}\n", account.display()));
+    s.push_str(&format!("account: {}\n", shown_path(save_dir, &account)));
     s.push_str(&format!(
         "  current save: {}\n",
         if has_save(&account) { "yes" } else { "no" }
     ));
     if let Some(nested) = save_below(&account).filter(|p| p.as_path() != account.as_path()) {
-        s.push_str(&format!("  nested save: {}\n", nested.display()));
+        s.push_str(&format!("  nested save: {}\n", shown_path(save_dir, &nested)));
     }
     s.push_str(&format!(
         "  slots={} files={} bytes={} newest={}\n",
@@ -1137,7 +1746,7 @@ pub fn save_inventory(save_dir: &Path, title_id: u64) -> String {
         s.push_str(&format!(
             "  \"{}\": path={} slots={} files={} bytes={} newest={}\n",
             p.name,
-            p.path.display(),
+            shown_path(save_dir, &p.path),
             stats.slots,
             stats.files,
             stats.bytes,
@@ -1155,7 +1764,7 @@ pub fn save_inventory(save_dir: &Path, title_id: u64) -> String {
         s.push_str(&format!(
             "  \"{}\": path={} kind={} slots={} files={} bytes={} created={} newest={}\n",
             b.name,
-            b.path.display(),
+            shown_path(save_dir, &b.path),
             if b.name.contains("-profile-") {
                 "profile backup"
             } else {
@@ -1180,7 +1789,7 @@ pub fn save_inventory(save_dir: &Path, title_id: u64) -> String {
             "  {} \"{}\": path={} slots={} files={} bytes={} newest={}\n",
             r.kind.label(),
             r.name,
-            r.path.display(),
+            shown_path(save_dir, &r.path),
             r.slots,
             stats.files,
             stats.bytes,
@@ -1200,15 +1809,15 @@ pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
     let mut s = String::new();
     s.push_str("EmblemWeave save manifest\n");
     s.push_str("=======================\n\n");
-    s.push_str(&format!("save dir: {}\n", save_dir.display()));
+    s.push_str("save folder: <local path omitted>\n");
     s.push_str(&format!("title id: {title_id:016X}\n"));
     s.push_str(&format!("expected user: {DEFAULT_USER}\n"));
     let account = account_dir(save_dir);
     let meta = account_meta_path(save_dir);
-    s.push_str(&format!("account: {}\n", account.display()));
+    s.push_str(&format!("account: {}\n", shown_path(save_dir, &account)));
     s.push_str(&format!("account exists: {}\n", account.exists()));
     s.push_str(&format!("000 exists: {}\n", account.join("000").exists()));
-    s.push_str(&format!("meta: {}\n", meta.display()));
+    s.push_str(&format!("meta: {}\n", shown_path(save_dir, &meta)));
     if meta.is_file() {
         let size = std::fs::metadata(&meta).map(|m| m.len()).unwrap_or(0);
         s.push_str(&format!("meta state: present ({size} bytes)\n"));
@@ -1360,7 +1969,7 @@ pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
         s.push_str(&format!(
             "  \"{}\": {} ({} files, {} slots, {})\n",
             p.name,
-            p.path.display(),
+            shown_path(save_dir, &p.path),
             p.files,
             slot_file_count(&p.path),
             when(p.modified)
@@ -1376,7 +1985,7 @@ pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
         s.push_str(&format!(
             "  {}: {} ({} files, {})\n",
             b.name,
-            b.path.display(),
+            shown_path(save_dir, &b.path),
             b.files,
             when(b.modified)
         ));
@@ -1392,7 +2001,7 @@ pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
             "  {} \"{}\": {} ({} files, {} slots, {})\n",
             r.kind.label(),
             r.name,
-            r.path.display(),
+            shown_path(save_dir, &r.path),
             r.files,
             r.slots,
             when(r.modified)
@@ -2655,11 +3264,22 @@ pub fn repair_note(repaired: &[RepairedSlot]) -> String {
     match repaired.len() {
         0 => String::new(),
         1 => format!(
-            "Recovered the save the game could not open: {list}. The copy is what the game reads, the original is untouched, and the game is starting now."
+            "Recovered the save the game could not open: {list}. The copy is what the game reads, and the original is untouched."
         ),
         n => format!(
-            "Recovered {n} saves the game could not open: {list}. The copies are what the game reads, the originals are untouched, and the game is starting now."
+            "Recovered {n} saves the game could not open: {list}. The copies are what the game reads, and the originals are untouched."
         ),
+    }
+}
+
+/// The same report for the pre-Play repair, where the launch really does carry
+/// on after the copy. The CLI uses `repair_note` and must not claim this.
+pub fn repair_note_before_play(repaired: &[RepairedSlot]) -> String {
+    let note = repair_note(repaired);
+    if note.is_empty() {
+        note
+    } else {
+        format!("{note} The game is starting now.")
     }
 }
 
@@ -2786,6 +3406,31 @@ mod tests {
     fn write_bytes(p: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, bytes).unwrap();
+    }
+
+    /// Rewrite the recovery sidecar to model a kill at a later commit step.
+    fn write_state(
+        pending: &PendingImport,
+        backup: Option<PathBuf>,
+        old_target: Option<PathBuf>,
+    ) {
+        let state = ImportState {
+            stage: pending.stage.clone(),
+            backup,
+            old_target,
+            meta_created: pending.meta_created,
+            files: pending.files.clone(),
+        };
+        write_import_state(&pending.state, &state).unwrap();
+    }
+
+    /// Model the exact point after `rename(target, backup)` and before the
+    /// staged save is renamed into place.
+    fn move_old_save_to_backup(pending: &PendingImport, save: &Path, stamp: &str) -> PathBuf {
+        let backup = plan_backup_path(save, stamp).unwrap();
+        std::fs::rename(&pending.target, &backup).unwrap();
+        write_state(pending, Some(backup.clone()), None);
+        backup
     }
 
     #[test]
@@ -3100,6 +3745,10 @@ mod tests {
         );
         assert!(!text.contains(secret), "save contents must never enter the report");
         assert!(
+            !text.contains(&save.to_string_lossy().into_owned()),
+            "a public diagnostic must not expose the local save path:\n{text}"
+        );
+        assert!(
             !text.contains("sha256="),
             "the inventory is metadata-only; the detailed manifest keeps hashes"
         );
@@ -3128,6 +3777,10 @@ mod tests {
         assert!(
             text.contains("commit state:\n  (no decided marker, journal or work folder)"),
             "a clean save tree says it has no pending commit: {text}"
+        );
+        assert!(
+            !text.contains(&save.to_string_lossy().into_owned()),
+            "the diagnostic bundle must not expose the local save path:\n{text}"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3251,6 +3904,232 @@ mod tests {
             std::fs::read_to_string(src.join("000/Auto")).unwrap(),
             "new"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stop before commit must leave the old save active. Its staging folder
+    /// and uncommitted sidecar are removed, and no backup is invented.
+    #[test]
+    fn an_interrupted_import_before_commit_keeps_the_old_save() {
+        let root = temp("import-before-commit");
+        let (src, save) = (root.join("src"), root.join("save"));
+        write(&src.join("000/Auto"), "new save");
+        let user = account_dir(&save);
+        write(&user.join("000/Auto"), "old save");
+
+        let pending = stage_import(&src, false, &user, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        let stage = pending.stage.clone();
+        let state = pending.state.clone();
+        let backup = pending.backup.clone().expect("a backup was planned");
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "old save",
+            "staging never moves the active save"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stage.join("000/Auto")).unwrap(),
+            "new save"
+        );
+        assert!(!backup.exists(), "staging does not move the backup either");
+        assert_eq!(
+            stage.parent(),
+            user.parent(),
+            "the staging folder and account are on the same filesystem"
+        );
+        drop(pending);
+
+        assert!(recover_interrupted_import(&save).unwrap() >= 1);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "old save",
+            "a kill before commit cannot lose the old save"
+        );
+        assert!(!stage.exists(), "the uncommitted stage is removed");
+        assert!(!state.exists(), "the sidecar is removed");
+        assert!(!backup.exists());
+        assert!(
+            user.with_extension("meta").is_file(),
+            "the meta written before the stop is a harmless repair, not deleted"
+        );
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "old save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A kill after the old save has moved to backups but before promotion is
+    /// resumed: the verified stage becomes active and the backup stays intact.
+    #[test]
+    fn an_interrupted_import_after_backup_resumes_the_verified_stage() {
+        let root = temp("import-resume");
+        let (src, save) = (root.join("src"), root.join("save"));
+        write(&src.join("000/Auto"), "new save");
+        let user = account_dir(&save);
+        write(&user.join("000/Auto"), "old save");
+
+        let pending = stage_import(&src, false, &user, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        let stage = pending.stage.clone();
+        let state = pending.state.clone();
+        let backup = move_old_save_to_backup(&pending, &save, "resume");
+        assert!(!user.exists(), "the old save is out of the active path");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("000/Auto")).unwrap(),
+            "old save"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stage.join("000/Auto")).unwrap(),
+            "new save"
+        );
+
+        assert!(recover_interrupted_import(&save).unwrap() >= 1);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "new save",
+            "the fully verified stage is promoted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("000/Auto")).unwrap(),
+            "old save",
+            "the old save remains in backup history"
+        );
+        assert!(!stage.exists());
+        assert!(!state.exists());
+        assert!(user.with_extension("meta").is_file());
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "new save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A kill after backup followed by a damaged stage must roll back to the
+    /// backup. The rollback is a verified copy, and the backup itself remains.
+    #[test]
+    fn a_damaged_stage_after_backup_restores_the_old_save() {
+        let root = temp("import-rollback");
+        let (src, save) = (root.join("src"), root.join("save"));
+        write(&src.join("000/Auto"), "new save");
+        let user = account_dir(&save);
+        write(&user.join("000/Auto"), "old save");
+
+        let pending = stage_import(&src, false, &user, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        let stage = pending.stage.clone();
+        let state = pending.state.clone();
+        let backup = move_old_save_to_backup(&pending, &save, "rollback");
+        std::fs::remove_file(stage.join("000/Auto")).unwrap();
+
+        assert!(recover_interrupted_import(&save).unwrap() >= 1);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "old save",
+            "an unverifiable replacement is never promoted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("000/Auto")).unwrap(),
+            "old save",
+            "rollback copies the backup instead of consuming it"
+        );
+        assert!(!stage.exists());
+        assert!(!state.exists());
+        assert!(!user.with_extension("meta").exists());
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "old save"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A kill after promotion but before the sidecar is removed only needs
+    /// cleanup: the new save and the old backup both stay.
+    #[test]
+    fn a_kill_after_promotion_finishes_cleanup_without_rolling_back() {
+        let root = temp("import-after-promotion");
+        let (src, save) = (root.join("src"), root.join("save"));
+        write(&src.join("000/Auto"), "new save");
+        let user = account_dir(&save);
+        write(&user.join("000/Auto"), "old save");
+
+        let pending = stage_import(&src, false, &user, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        let state = pending.state.clone();
+        let backup = move_old_save_to_backup(&pending, &save, "promoted");
+        std::fs::rename(&pending.stage, &user).unwrap();
+
+        assert!(recover_interrupted_import(&save).unwrap() >= 1);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "new save"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("000/Auto")).unwrap(),
+            "old save"
+        );
+        assert!(!state.exists());
+        assert!(user.with_extension("meta").is_file());
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An empty account folder is moved aside only at commit. If the process
+    /// dies after that move, recovery resumes the stage and removes the empty
+    /// folder; files that were already in the empty folder stay in the save.
+    #[test]
+    fn an_interrupted_import_of_an_empty_account_resumes_and_discards_the_empty_old() {
+        let root = temp("import-empty-old");
+        let (src, save) = (root.join("src"), root.join("save"));
+        write(&src.join("000/Auto"), "new save");
+        let user = account_dir(&save);
+        write(&user.join("keep.txt"), "keep me");
+
+        let pending = stage_import(&src, false, &user, &save, FALLBACK_TITLE_ID, "1").unwrap();
+        let old = pending.old_target.clone().expect("the empty account is planned");
+        assert_eq!(
+            std::fs::read_to_string(user.join("keep.txt")).unwrap(),
+            "keep me",
+            "an empty account is not moved while staging"
+        );
+        std::fs::rename(&pending.target, &old).unwrap();
+        write_state(&pending, None, Some(old.clone()));
+
+        assert!(recover_interrupted_import(&save).unwrap() >= 1);
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "new save"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user.join("keep.txt")).unwrap(),
+            "keep me",
+            "unrelated files in the empty account are preserved"
+        );
+        assert!(!old.exists());
+        assert!(!pending.state.exists());
+        assert!(user.with_extension("meta").is_file());
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A staging folder with no sidecar was interrupted before commit. It is
+    /// never a readable replacement, so recovery removes it and leaves the
+    /// active save untouched.
+    #[test]
+    fn a_partial_stage_without_state_is_removed_and_the_active_save_stays() {
+        let root = temp("import-orphan-stage");
+        let save = root.join("save");
+        let user = account_dir(&save);
+        write(&user.join("000/Auto"), "old save");
+        let stage = side_path(&user, "import");
+        write(&stage.join("000/Auto"), "partial");
+
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 1);
+        assert!(!stage.exists());
+        assert_eq!(
+            std::fs::read_to_string(user.join("000/Auto")).unwrap(),
+            "old save"
+        );
+        assert_eq!(recover_interrupted_import(&save).unwrap(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3730,7 +4609,13 @@ mod tests {
         }];
         let note = repair_note(&repaired);
         assert!(note.contains("1795325701-Auto -> Auto"), "{note}");
-        assert!(note.contains("starting now"), "{note}");
+        assert!(
+            !note.to_lowercase().contains("starting now"),
+            "the CLI does not launch the game: {note}"
+        );
+        assert!(note.contains("original is untouched"), "{note}");
+        let before_play = repair_note_before_play(&repaired);
+        assert!(before_play.contains("starting now"), "{before_play}");
         assert!(!note.to_lowercase().contains("press play"), "{note}");
 
         let two = vec![

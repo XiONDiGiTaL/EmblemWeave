@@ -4083,6 +4083,12 @@ pub fn sync_save_dir(run_dir: &Path) -> Result<(), String> {
     let Some(intended) = Config::save_dir() else {
         return Ok(()); // No data root configured; nothing to sync
     };
+    // An import killed in an earlier run is finished or rolled back before the
+    // game can see the folder. Its staged copy is never promoted until it has
+    // been verified, so the active account is old-or-new, never partial.
+    crate::saves::recover_interrupted_import(&intended).map_err(|e| {
+        format!("an interrupted save import could not be resolved: {e}; the game was not started")
+    })?;
     // A populated `000` with its `.meta` missing looks like an empty save to
     // the runtime. Repair only the missing metadata here, before Play, and
     // leave every save file untouched (issue #79).
@@ -5426,7 +5432,7 @@ pub fn play(config: &crate::config::Config, allow_empty: bool) -> Result<(), Str
                 // The copy is already where the game reads it, so this launch
                 // can go ahead: say which save was recovered and carry on
                 // instead of asking for a second Play.
-                let note = crate::saves::repair_note(&repaired);
+                let note = crate::saves::repair_note_before_play(&repaired);
                 crate::crash::note(&note);
                 alert(note, true);
             }
