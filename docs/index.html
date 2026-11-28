@@ -29,10 +29,11 @@
     <a href="#engine" data-sfx="hover">Engine</a>
     <a href="#screens" data-sfx="hover">Screens</a>
     <a href="#mirrors" data-sfx="hover">Mirrors</a>
+    <a class="docs" href="https://github.com/XiONDiGiTaL/EmblemWeave/blob/main/docs/GUIDES.md">Guides</a>
     <a class="docs" href="https://github.com/XiONDiGiTaL/EmblemWeave#readme">Docs</a>
   </nav>
   <div class="hud-right">
-    <span class="build" id="version">v0.1.43</span>
+    <span class="build" id="version">v0.1.42</span>
     <button id="sound" class="icon" title="Sound on or off" aria-pressed="true">♪</button>
   </div>
 </header>
@@ -47,11 +48,11 @@
       <h1>A feature-rich recompilation launcher for <em>Fire Emblem: Fortune's Weave</em>, with integrated mod management and in-game enhancements.</h1>
       <p class="lede">EmblemWeave builds the game ahead of time from your own dump and plays it natively, with no emulator. Mods, save profiles, cheats, an in-game menu and a recompilation pipeline you can watch run.</p>
       <div class="cta">
-        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/download/v0.1.43/EmblemWeave-v0.1.43-windows-x64.zip" data-sfx="coin">Download for Windows</a>
+        <a class="btn primary" id="download" href="https://github.com/XiONDiGiTaL/EmblemWeave/releases/latest" data-sfx="coin">Download for Windows</a>
         <a class="btn ghost" href="https://github.com/XiONDiGiTaL/EmblemWeave" data-sfx="click">Source on GitHub</a>
       </div>
       <ul class="badges">
-        <li id="badge-release">release 0.1.43</li>
+        <li id="badge-release">release 0.1.42</li>
         <li>Windows x64</li>
         <li>GPL-3.0</li>
         <li>No game code included</li>
@@ -68,10 +69,10 @@
       <article data-sfx-hover="hover"><h3>Graphics choices</h3><p>TAAU, FSR 1, NVIDIA Image Scaling, FSR 4.1.2 / 3.1, DLSS / DLAA and XeSS, each with a real availability check. FSR 3.1 plus FSR 3 frame generation is validated at 60 rendered → 120 presented fps on an RX 7900 XT; FSR 4.1.2 upscaling is verified on the same GPU.</p></article>
       <article data-sfx-hover="hover"><h3>Frame generation that works</h3><p>One press sets FSR 4.1.2 when AMD's SDK 2.4 loader pair is installed (FSR 3.1 otherwise), FSR 3 frame generation, the FSR 3 DLSS replacement and Vsync off. The engine also logs the presented rate so the title bar shows the generated frames, not just the rendered ones.</p></article>
       <article data-sfx-hover="hover"><h3>ReShade, on your terms</h3><p>The Graphics page detects ReShade's Vulkan layer, checks this build in <code>ReShadeApps.ini</code>, opens the official setup for <code>fefw.exe</code>, and switches the layer off for this game only. No ReShade binaries are bundled.</p></article>
-      <article data-sfx-hover="hover"><h3>An in-game menu</h3><p><kbd>F10</kbd> pauses the game, takes a screenshot, restarts or stops it, and reaches quick cheats, display settings and controls.</p></article>
+      <article data-sfx-hover="hover"><h3>Two in-game menus</h3><p><kbd>F10</kbd> pauses the game, takes a screenshot, restarts or stops it, and reaches quick cheats, display settings and controls. <kbd>F1</kbd> opens the engine's own overlay for graphics, performance, upscaling, pacing, audio and controls.</p></article>
       <article data-sfx-hover="hover"><h3>Diagnostics that explain</h3><p>Every stage reports, engine logs are read back, crashes are decoded, and the CPU, GPU and toolchain are recorded for bug reports.</p></article>
     </div>
-    <p class="note">The 0.1.43 download fixes the launcher-started runtime build failing with "The input line is too long" on a long Windows environment. It carries the existing build across an in-place update, so it opens ready to play without rebuilding. Field limitations and open issues from 0.1.42 are listed in the changelog.</p>
+    <p class="note">0.1.42 is the current public download. The <a href="https://github.com/XiONDiGiTaL/EmblemWeave/blob/main/docs/changelog/0.1.43.md">0.1.43 release notes</a> and <a href="https://github.com/XiONDiGiTaL/EmblemWeave/blob/main/docs/GUIDES.md">guides</a> are prepared in the repository; downloads, checksums and full release notes are on the GitHub releases page. Field limitations and open issues are listed in the changelog.</p>
   </section>
 
   <section id="engine" class="section">
