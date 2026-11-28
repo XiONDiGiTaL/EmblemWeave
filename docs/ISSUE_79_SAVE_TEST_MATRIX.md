@@ -191,3 +191,34 @@ above is one — it names the screen, the slot and the loaded scene, and §0.7 o
 `ISSUE_79_SAVE_FORENSIC_ANALYSIS.md` records the timings and the stamped-only
 control. It still does not cover a physical controller, battle or menu saves, or a
 save write followed by a restart.
+
+---
+
+## G. Executed 2026-11-28: the ten recovery cases, the lock, and the route build
+
+Current code at `fbcfe2c6` plus this round's changes; runtime tests in
+`engine/fefw-recomp/runtime/build/release3` (`NXRT_BUILD_TESTS=ON`), launcher tests with
+`cargo test -p emblemweave --locked saves::tests`.
+
+| # (assignment) | Case | Result | Test / evidence |
+| --- | --- | --- | --- |
+| 1 | A valid `Auto` exists | **PASS** | `the_slot_repair_never_overwrites_a_slot_or_promotes_other_files` (the current autosave is kept) |
+| 2 | Only a timestamped `Auto` exists | **PASS** | `the_saves_page_recovers_a_stamped_slot_the_same_way_play_does`; `an_autosave_moved_to_backups_and_back_by_hand_opens_after_a_restart` |
+| 3 | Valid `Auto` and a timestamped copy | **PASS** | `the_slot_repair_never_overwrites…` (existing slot wins, stamped copy left in place) |
+| 4 | Several timestamped autosaves | **PASS** | `the_newest_stamped_autosave_is_the_one_recovered` (newest stamp wins, older copies kept) |
+| 5 | Timestamped manual chapter saves (and `Route_*`) | **PASS** | `every_stamped_manual_chapter_save_is_recovered`; `a_stamped_route_file_is_recovered_under_its_game_name` |
+| 6 | Corrupt stamped slot | **PASS (not promoted)** | `a_stamped_slot_the_native_decoder_rejects_is_not_promoted`; `a_stamped_slot_with_a_bad_payload_checksum_is_not_promoted` |
+| 7 | Truncated/incomplete stamped slot | **PASS (not promoted, older tried)** | `a_stamped_autosave_that_cannot_be_read_does_not_hide_an_older_valid_one` |
+| 8 | Existing current save takes precedence | **PASS** | same tests as 1/3; `recover_stamped_slot` returns `None` when the game name exists |
+| 9 | Recovery repeated | **PASS (idempotent)** | second call returns empty in `the_newest_stamped_autosave…` and `the_saves_page_recovers…` |
+| 10 | Recovery interrupted / filesystem error | **PASS (no partial slot)** | `a_recovered_slot_arrives_through_a_temporary_name`; `a_recovery_that_cannot_write_leaves_no_slot_behind` (promotion is copy-then-rename) |
+| — | `Global` is never promoted | **PASS** | `a_stamped_global_is_not_recovered` |
+| — | Cross-process save-folder lock | **PASS**, and the test fails without the wait | `svc_fs_volume.save_folder_lock_waits_for_another_process` |
+| — | Commit/recovery crash handling | **PASS** (13 pre-existing cases) | `nxrt_tests svc_fs_volume`: 14 passed, 0 failed |
+| — | Platform lock primitives | **PASS** | `nxrt_platform_selftest.exe`: 0 failures |
+| — | Launcher save tests | **PASS** | 75 passed, 0 failed (`saves::tests`) |
+| — | Recovered save loads in-game, final build | **PASS** | Continue → Chapter 4 “The Indelible Past”, Dagson Base field; `(10 files in 000, meta present)`; 23-file fixture byte-identical |
+| — | Route played to completion, then restart | **BLOCKED** | no save with the route's remaining battles; the scripted pad could not open the in-game save menu on this runtime |
+
+The route-completion analysis is `docs/ISSUE_79_ROUTE_COMPLETION_ANALYSIS.md`. Rows 10–13 and 15–18 of
+§B (portable and moved installs, profile UI) remain untested, and no row here used a reporter's live save.

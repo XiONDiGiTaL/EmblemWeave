@@ -425,6 +425,19 @@ void* named_mutex_create(const char* name, bool* already_exists) {
     return m;
 }
 
+bool named_mutex_lock(void* handle) {
+    if (!handle) return false;
+    // WAIT_ABANDONED means the previous owner died while holding it: this call now owns the mutex, which is exactly what a
+    // crash-interrupted save commit needs. CreateMutexA with bInitialOwner FALSE does not own it, so this is the wait the
+    // save folder relies on.
+    const DWORD r = WaitForSingleObject(static_cast<HANDLE>(handle), INFINITE);
+    return r == WAIT_OBJECT_0 || r == WAIT_ABANDONED;
+}
+
+void named_mutex_unlock(void* handle) {
+    if (handle) ReleaseMutex(static_cast<HANDLE>(handle));
+}
+
 void named_mutex_destroy(void* handle) {
     if (handle) CloseHandle(static_cast<HANDLE>(handle));
 }

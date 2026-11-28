@@ -9,6 +9,7 @@
 #include <fstream>
 
 #include "../src/services/fs_volume.h"
+#include "nxrt/platform.h"
 #include "test_framework.h"
 
 NXTEST_GROUP(svc_fs_volume)
@@ -63,6 +64,50 @@ bool names_are(Volume& v, const std::string& dir, std::initializer_list<const ch
 }
 
 }  // namespace
+
+// Runs as `nxrt_tests --child save_folder_lock_probe <root> <marker>`: wait for the save folder's lock, then leave the
+// marker. Started by save_folder_lock_waits_for_another_process below.
+NXTEST_CHILD(save_folder_lock_probe) {
+    // The framework drops "<exe> --child <name>": argv[0] is the save root, argv[1] the marker file.
+    if (argc < 2) return 2;
+    nxrt::services::fs::SaveFolderLock held(argv[0]);
+    if (!held.held()) return 3;
+    std::ofstream marker(argv[1], std::ios::binary | std::ios::trunc);
+    marker << "locked";
+    marker.close();
+    return 0;
+}
+
+// Two processes opening one save folder must not commit or recover at the same time (#79). The lock is a named mutex:
+// creating it only makes the name exist, so the holder has to wait on it. The 0.1.43 platform port created the mutex and
+// dropped that wait; this starts a second copy of this executable and proves it blocks until the lock is released.
+NXTEST(save_folder_lock_waits_for_another_process) {
+    TempDir t("lock");
+    const stdfs::path marker = t.p / "child-took-the-lock";
+
+    char exe[MAX_PATH] = {};
+    REQUIRE(GetModuleFileNameA(nullptr, exe, MAX_PATH) != 0);
+    std::string cmd = std::string("\"") + exe + "\" --child save_folder_lock_probe \"" + t.root("save") + "\" \"" + marker.string() + "\"";
+    STARTUPINFOA si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    DWORD waited = WAIT_FAILED;
+    DWORD code = 1;
+    {
+        nxrt::services::fs::SaveFolderLock held(t.root("save"));
+        REQUIRE(held.held());
+        REQUIRE(CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) != 0);
+        Sleep(600);
+        CHECK_MSG(!stdfs::exists(marker), "the second process must wait while this one holds the save folder");
+    }   // the lock is released here; the waiting child must now get in
+    waited = WaitForSingleObject(pi.hProcess, 10000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CHECK_EQ(waited, WAIT_OBJECT_0);
+    CHECK_EQ(code, 0u);
+    CHECK(stdfs::exists(marker));
+}
 
 NXTEST(normalize_paths) {
     std::string out;

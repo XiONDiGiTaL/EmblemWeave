@@ -30,6 +30,25 @@ constexpr uint32_t kWriteNotPermitted = 0x307602, kReadOnlyFileSystem = 0x313802
 
 enum OpenMode : uint32_t { kModeRead = 1, kModeWrite = 2, kModeAppend = 4 };
 
+// The cross-process lock name for one save folder. One folder always maps to one name, so commit and recovery from two
+// processes serialise on it.
+std::string save_folder_lock_name(const std::string& root);
+
+// Holds the save folder's cross-process lock for the caller's scope. commit() and recover() take it so two processes
+// never apply the same decided commit at once. Creating the named mutex only makes the name exist, so the constructor
+// waits for ownership; `held()` is false when the lock could not be taken (the callers log that and continue).
+class SaveFolderLock {
+public:
+    explicit SaveFolderLock(const std::string& root);
+    ~SaveFolderLock();
+    SaveFolderLock(const SaveFolderLock&) = delete;
+    SaveFolderLock& operator=(const SaveFolderLock&) = delete;
+    bool held() const { return handle_ != nullptr; }
+
+private:
+    void* handle_ = nullptr;
+};
+
 // An open file. Positioned I/O, safe to call from several threads.
 class VFile {
 public:

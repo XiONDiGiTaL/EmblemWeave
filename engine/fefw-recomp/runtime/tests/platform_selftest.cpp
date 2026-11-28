@@ -161,6 +161,21 @@ int main() {
         }
     }
 
+    // named mutex: the name is kept while a handle is open, and the explicit lock is what a caller holds it with. The
+    // save folder takes this lock around commit and recovery, so a second process cannot apply the same commit.
+    {
+        const std::string name = "nxrt_selftest_mutex_" + std::to_string(process_id());
+        bool already = false;
+        void* m = named_mutex_create(name.c_str(), &already);
+        check(m != nullptr, "named_mutex_create creates a named mutex");
+        check(!already, "a fresh name is not already held");
+        check(named_mutex_lock(m), "named_mutex_lock takes the mutex");
+        named_mutex_unlock(m);
+        check(named_mutex_lock(m), "named_mutex_lock takes it again after an unlock");
+        named_mutex_unlock(m);
+        named_mutex_destroy(m);
+    }
+
     // process identity, library names, the CSPRNG and the scheduler snapshot.
     check(process_id() != 0, "process_id names this process");
     check(process_alive(process_id()), "process_alive sees this process");

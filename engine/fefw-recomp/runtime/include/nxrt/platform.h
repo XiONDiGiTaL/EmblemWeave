@@ -191,9 +191,15 @@ int thread_current_processor();
 bool process_get_affinity_mask(uint64_t* proc_mask, uint64_t* sys_mask);
 // Set the process priority class. Returns false on failure.
 bool process_set_priority_class(int priority_class);
-// Named mutex for cross-process coordination (used for console core slot allocation).
-// Returns a handle (opaque pointer) or nullptr on failure/already exists.
+// Named mutex for cross-process coordination (used for console core slot allocation and for the save folder).
+// Returns a handle (opaque pointer) or nullptr on failure. The handle keeps the name alive while it is open, which is how
+// the console core slots are held for the life of a process.
 void* named_mutex_create(const char* name, bool* already_exists);
+// Waits until this process owns the mutex, then returns true. A caller that needs mutual exclusion around a group of
+// file operations (the save folder's commit and recovery) locks explicitly; the thread that locked it unlocks it.
+// On POSIX create already holds the file lock, so locking a handle it owns is a no-op that still returns true.
+bool named_mutex_lock(void* handle);
+void named_mutex_unlock(void* handle);
 void named_mutex_destroy(void* handle);
 
 // Shared memory section for the guest heap (like Windows SEC_RESERVE section with multiple view mappings).

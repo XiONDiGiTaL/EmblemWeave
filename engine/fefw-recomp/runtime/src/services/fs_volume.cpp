@@ -90,23 +90,6 @@ private:
     std::mutex size_mu_;
 };
 
-// A mutex shared by every process that opens the same save folder: commit and recovery do not interleave.
-class RootLock {
-public:
-    explicit RootLock(const std::string& root) {
-        const size_t h = std::hash<std::string>{}(root);
-        char name[64];
-        std::snprintf(name, sizeof name, "nxrt_save_%016llx", static_cast<unsigned long long>(h));
-        handle_ = nxrt::platform::named_mutex_create(name, nullptr);
-    }
-    ~RootLock() {
-        if (handle_) nxrt::platform::named_mutex_destroy(handle_);
-    }
-
-private:
-    void* handle_ = nullptr;
-};
-
 // Applies a decided commit. Marker lines: "W <work folder>", "R <committed folder>", then "D rel" (delete), "M rel" (make folder),
 // "F rel" (move file work -> committed). Every step can be repeated, so a commit interrupted here is finished by running it again.
 // Returns the number of steps, -1 when the marker cannot be read. `stop_after` (> 0) stops after that many steps (crash simulation).
@@ -152,6 +135,28 @@ int apply_marker(const stdfs::path& marker, int stop_after = 0) {
 }
 
 }  // namespace
+
+std::string save_folder_lock_name(const std::string& root) {
+    char name[64];
+    std::snprintf(name, sizeof name, "nxrt_save_%016llx", static_cast<unsigned long long>(std::hash<std::string>{}(root)));
+    return name;
+}
+
+SaveFolderLock::SaveFolderLock(const std::string& root) {
+    const std::string name = save_folder_lock_name(root);
+    handle_ = nxrt::platform::named_mutex_create(name.c_str(), nullptr);
+    if (handle_ && !nxrt::platform::named_mutex_lock(handle_)) {
+        nxrt::platform::named_mutex_destroy(handle_);
+        handle_ = nullptr;
+    }
+    if (!handle_) NXLOG_W("fs", "could not lock the save folder %s: committing without the cross-process lock", root.c_str());
+}
+
+SaveFolderLock::~SaveFolderLock() {
+    if (!handle_) return;
+    nxrt::platform::named_mutex_unlock(handle_);
+    nxrt::platform::named_mutex_destroy(handle_);
+}
 
 // ---- path hygiene ----------------------------------------------------------------------------------------------------------------
 
@@ -365,7 +370,7 @@ void Volume::set_crash_point_for_tests(int point) { g_crash_point = point; }
 
 void Volume::recover(const std::string& root_s) {
     const stdfs::path root = u8(root_s);
-    RootLock lock(root_s);
+    SaveFolderLock lock(root_s);
     std::error_code ec;
     const stdfs::path marker(root.string() + ".commit");
     if (stdfs::exists(marker, ec)) {
@@ -555,7 +560,7 @@ uint32_t Volume::commit() {
     if (read_only_) return 0;
     Impl& s = *p_;
     std::lock_guard<std::mutex> lk(s.mu);
-    RootLock lock(to_u8(s.root));
+    SaveFolderLock lock(to_u8(s.root));
     std::error_code ec;
     if (s.tomb.empty() && !stdfs::exists(s.work, ec)) return 0;
 
@@ -604,7 +609,20 @@ uint32_t Volume::commit() {
     s.tomb.clear();
     stdfs::remove_all(s.work, ec);
     stdfs::create_directories(s.work, ec);
-    NXLOG_I("fs", "save commit %s: %d changes applied", to_u8(s.root).c_str(), changes);
+    // The names, not just the count: a save that rewrites Auto, Global and the route data is what a chapter or route
+    // completion writes, and a report with those names can tell that apart from a commit of one file. Names only; no
+    // save contents are logged.
+    std::string names;
+    for (const std::string& f : files) {
+        if (names.size() + f.size() > 240) {
+            names += ", ...";
+            break;
+        }
+        if (!names.empty()) names += ", ";
+        names += f;
+    }
+    NXLOG_I("fs", "save commit %s: %d changes applied%s%s", to_u8(s.root).c_str(), changes, names.empty() ? "" : ": ",
+            names.c_str());
     return 0;
 }
 

@@ -1220,6 +1220,21 @@ pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
     } else {
         s.push_str("meta state: missing\n");
     }
+    if meta.is_file() {
+        // A metadata file the runtime wrote has these four keys. A truncated or
+        // foreign one is the difference between "the game creates an empty save"
+        // and "the save is there but the runtime will not mount it".
+        let text = std::fs::read_to_string(&meta).unwrap_or_default();
+        let missing: Vec<&str> = ["size=", "journal=", "owner=", "attr="]
+            .into_iter()
+            .filter(|key| !text.lines().any(|line| line.starts_with(key)))
+            .collect();
+        if missing.is_empty() {
+            s.push_str("meta keys: size, journal, owner and attr are present\n");
+        } else {
+            s.push_str(&format!("meta keys: missing {}\n", missing.join(", ")));
+        }
+    }
 
     let mut entries: Vec<(String, u64, Option<SystemTime>)> = Vec::new();
     let mut stack = vec![save_dir.to_path_buf()];
@@ -1262,6 +1277,78 @@ pub fn save_manifest(save_dir: &Path, title_id: u64) -> String {
     }
     if total > entries.len() {
         s.push_str(&format!("  ... {} more files not listed\n", total - entries.len()));
+    }
+
+    // Whether each file the game reads is actually a save the launcher and the
+    // runtime's decoder accept. Only names, sizes and verdicts: no contents.
+    s.push_str("\naccount slots:\n");
+    let slot_dir = account.join("000");
+    let mut slot_files: Vec<PathBuf> = std::fs::read_dir(&slot_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_slot_candidate(p))
+        .collect();
+    slot_files.sort();
+    if slot_files.is_empty() {
+        s.push_str("  (none)\n");
+    }
+    for path in slot_files.iter().take(40) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        match crate::savefile::Slot::open(path) {
+            Ok(slot) => {
+                let verify = slot.verify();
+                s.push_str(&format!(
+                    "  {name} size={size} parse=ok verify={} native={}\n",
+                    if verify.is_empty() { "ok".to_string() } else { verify.join("; ") },
+                    match slot.native_check() {
+                        Ok(()) => "ok".to_string(),
+                        Err(e) => e,
+                    }
+                ));
+            }
+            Err(e) => s.push_str(&format!("  {name} size={size} parse={e}\n")),
+        }
+    }
+    if slot_files.len() > 40 {
+        s.push_str(&format!("  ... {} more slots not checked\n", slot_files.len() - 40));
+    }
+
+    // A decided commit or an uncommitted work folder is the runtime's journal
+    // state; seeing one here says the previous session did not finish its save.
+    s.push_str("\ncommit state:\n");
+    let mut pending = 0usize;
+    if let (Some(parent), Some(stem)) = (
+        account.parent(),
+        account.file_name().map(|n| n.to_string_lossy().into_owned()),
+    ) {
+        let mut names: Vec<String> = std::fs::read_dir(parent)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let tail = name.strip_prefix(&stem)?.to_string();
+                (tail.starts_with(".commit") || tail.starts_with(".work.") || tail.starts_with(".journal."))
+                    .then_some(name)
+            })
+            .collect();
+        names.sort();
+        for name in &names {
+            pending += 1;
+            let path = parent.join(name);
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            s.push_str(&format!("  {name} size={size} modified={}\n", when(modified)));
+        }
+    }
+    if pending == 0 {
+        s.push_str("  (no decided marker, journal or work folder)\n");
     }
 
     s.push_str("\nprofiles:\n");
@@ -1426,6 +1513,18 @@ pub fn stamped_slot_name(name: &str) -> Option<&str> {
         return None;
     }
     Some(slot)
+}
+
+/// The game names its per-route file `Route_<id>`: same save container as the
+/// slots (the header and the native decode are checked like any other), but
+/// `kind_of` calls it `Other` because it is not one of the listed slots. A
+/// stamped one is still a file the player moved back from `backups/`, so
+/// recovery puts it under its game name exactly as it does for `Auto` and the
+/// chapter saves; `Global` (a different format) stays excluded.
+fn is_recoverable_slot(name: &str) -> bool {
+    let plain = stamped_slot_name(name).unwrap_or(name).to_ascii_lowercase();
+    matches!(kind_of(name), SlotKind::Auto | SlotKind::Manual)
+        || (plain.starts_with("route_") && is_slot_candidate(Path::new(name)))
 }
 
 fn kind_of(name: &str) -> SlotKind {
@@ -2456,7 +2555,7 @@ pub fn repair_backup_named_slots(save_dir: &Path) -> Result<Vec<RepairedSlot>, S
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(out);
     };
-    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let mut found: Vec<(String, u64, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -2468,17 +2567,23 @@ pub fn repair_backup_named_slots(save_dir: &Path) -> Result<Vec<RepairedSlot>, S
         let Some(slot_name) = stamped_slot_name(name) else {
             continue;
         };
-        // Only a name the game itself opens: Auto and the manual chapter
-        // saves. Global has a different header and Route_* is not a slot.
-        if !matches!(kind_of(slot_name), SlotKind::Auto | SlotKind::Manual)
-            || !is_slot_candidate(Path::new(slot_name))
-        {
+        // Only a name the game itself opens: Auto, the manual chapter saves
+        // and the per-route file. Global has a different header.
+        if !is_recoverable_slot(slot_name) || !is_slot_candidate(Path::new(slot_name)) {
             continue;
         }
-        found.push((slot_name.to_string(), path));
+        let stamp = name
+            .split_once('-')
+            .and_then(|(s, _)| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        found.push((slot_name.to_string(), stamp, path));
     }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, from) in found {
+    // For one slot name, the newest stamp is the save the player moved back
+    // last, so it is the one copied; an older stamp is then left alone because
+    // the target exists (or, when the newest fails verification, the next one
+    // is tried instead of whichever file the directory happened to list first).
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, _, from) in found {
         if let Some(to) = recover_stamped_slot(&from)? {
             out.push(RepairedSlot { from, to });
         }
@@ -2500,9 +2605,7 @@ pub fn recover_stamped_slot(path: &Path) -> Result<Option<PathBuf>, String> {
     let Some(slot_name) = stamped_slot_name(name) else {
         return Ok(None);
     };
-    if !matches!(kind_of(slot_name), SlotKind::Auto | SlotKind::Manual)
-        || !is_slot_candidate(Path::new(slot_name))
-    {
+    if !is_recoverable_slot(slot_name) || !is_slot_candidate(Path::new(slot_name)) {
         return Ok(None);
     }
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -2520,8 +2623,18 @@ pub fn recover_stamped_slot(path: &Path) -> Result<Option<PathBuf>, String> {
     if !slot_problems(&parsed).is_empty() {
         return Ok(None);
     }
-    std::fs::copy(path, &to)
-        .map_err(|e| format!("copying {} to {}: {e}", path.display(), to.display()))?;
+    // Copy under a temporary name and rename it into place: an interrupted
+    // copy leaves no half-written `Auto` for the game to reject, and the
+    // rename cannot replace a slot that appeared while the copy ran (on
+    // Windows it fails; elsewhere the exists() check above decided).
+    let tmp = dir.join(format!("{slot_name}.emblemweave-recovering"));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::copy(path, &tmp)
+        .map_err(|e| format!("copying {} to {}: {e}", path.display(), tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &to) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("renaming {} to {}: {e}", tmp.display(), to.display()));
+    }
     Ok(Some(to))
 }
 
@@ -3004,6 +3117,42 @@ mod tests {
         assert!(text.contains("000/Auto"));
         assert!(text.contains("sha256="));
         assert!(text.contains("meta state: present"));
+        assert!(
+            text.contains("meta keys: size, journal, owner and attr are present"),
+            "the manifest says whether the metadata is complete: {text}"
+        );
+        assert!(
+            text.contains("  Auto size=14 parse=not a Fortune's Weave save slot"),
+            "a file the game cannot open is reported as such: {text}"
+        );
+        assert!(
+            text.contains("commit state:\n  (no decided marker, journal or work folder)"),
+            "a clean save tree says it has no pending commit: {text}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A save the decoder accepts is reported as intact, and a decided commit
+    /// left beside the account folder is named: the two facts a report needs to
+    /// tell a missing save from an unfinished one.
+    #[test]
+    fn save_manifest_checks_the_slots_and_the_pending_commit() {
+        let root = temp("manifest-slots");
+        let save = root.join("save");
+        let account = account_dir(&save);
+        write_bytes(&account.join("000/Auto"), &valid_slot(b"a readable autosave"));
+        ensure_account_meta(&save, FALLBACK_TITLE_ID).unwrap();
+        write_bytes(&account.with_extension("commit"), b"W x\nR y\n");
+
+        let text = save_manifest(&save, FALLBACK_TITLE_ID);
+        assert!(
+            text.contains("Auto size=") && text.contains("parse=ok verify=ok native=ok"),
+            "the readable slot is reported intact: {text}"
+        );
+        assert!(
+            text.contains("\ncommit state:\n  0100000000000000706d635257464546.commit size=8"),
+            "the decided commit is named: {text}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3654,6 +3803,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The game keeps its route progress in `Route_<id>`, a file with the same
+    /// container header as the slots. A stamped one is recovered like `Auto`;
+    /// without this it stayed unrecovered while the autosave came back, which is
+    /// the route-completion state a player would notice as missing.
+    #[test]
+    fn a_stamped_route_file_is_recovered_under_its_game_name() {
+        let root = temp("recover-route");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let stamped = dir.join("1795393583-Route_Ism");
+        let bytes = valid_slot(b"route progress");
+        write_bytes(&stamped, &bytes);
+
+        let to = recover_stamped_slot(&stamped).unwrap().expect("the route file is recovered");
+        assert_eq!(to, dir.join("Route_Ism"));
+        assert_eq!(std::fs::read(&to).unwrap(), bytes);
+        assert_eq!(std::fs::read(&stamped).unwrap(), bytes, "the original stays");
+        assert!(
+            recover_stamped_slot(&stamped).unwrap().is_none(),
+            "the restored name now wins"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `Global` holds a different kind of data; a stamped copy of it is not a
+    /// slot and must not be promoted under the global name.
+    #[test]
+    fn a_stamped_global_is_not_recovered() {
+        let root = temp("recover-global");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let stamped = dir.join("1795325701-Global");
+        write_bytes(&stamped, &valid_slot(b"not a slot"));
+
+        assert!(recover_stamped_slot(&stamped).unwrap().is_none());
+        assert!(!dir.join("Global").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_recovered_slot_arrives_through_a_temporary_name() {
+        let root = temp("recover-temp");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let stamped = dir.join("1795325701-Auto");
+        let bytes = valid_slot(b"recovered atomically");
+        write_bytes(&stamped, &bytes);
+
+        let to = recover_stamped_slot(&stamped).unwrap().expect("recovered");
+        assert_eq!(std::fs::read(&to).unwrap(), bytes);
+        assert!(
+            !dir.join("Auto.emblemweave-recovering").exists(),
+            "the temporary copy is renamed away, not left beside the slot"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Recovery that cannot write must fail without leaving a slot the game
+    /// would read: the temporary copy is never promoted under the game name.
+    #[test]
+    fn a_recovery_that_cannot_write_leaves_no_slot_behind() {
+        let root = temp("recover-fails");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let stamped = dir.join("1795325701-Auto");
+        let bytes = valid_slot(b"the save that could not be copied");
+        write_bytes(&stamped, &bytes);
+        // The temporary name is taken by a folder, so the copy cannot start.
+        std::fs::create_dir(dir.join("Auto.emblemweave-recovering")).unwrap();
+
+        assert!(recover_stamped_slot(&stamped).is_err(), "the failure is reported");
+        assert!(
+            !dir.join("Auto").exists(),
+            "no partial Auto is left for the game to open"
+        );
+        assert_eq!(std::fs::read(&stamped).unwrap(), bytes, "the original is untouched");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_stamped_slot_the_native_decoder_rejects_is_not_promoted() {
         let root = temp("stamped-native-bad");
@@ -3831,8 +4059,10 @@ mod tests {
         let dir = account_dir(&save).join("000");
         write_bytes(&dir.join("Auto"), &valid_slot(b"current"));
         write_bytes(&dir.join("1795325701-Auto"), &valid_slot(b"older"));
-        // Not a slot the game opens: left alone even though it parses.
-        write_bytes(&dir.join("1795325701-Route_Ism"), &valid_slot(b"route"));
+        // Names the game does not open are left alone even though they parse:
+        // `Global` has its own format and `Notes` is not a slot at all.
+        write_bytes(&dir.join("1795325701-Notes"), &valid_slot(b"not a slot"));
+        write_bytes(&dir.join("1795325701-Global"), &valid_slot(b"global in a slot shape"));
         // A stamped file that does not parse is not promoted either.
         write_bytes(&dir.join("1795325702-Auto"), b"not a save");
 
@@ -3842,7 +4072,85 @@ mod tests {
             valid_slot(b"current"),
             "the current autosave is kept"
         );
-        assert!(!dir.join("Route_Ism").exists());
+        assert!(!dir.join("Notes").exists());
+        assert!(!dir.join("Global").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two autosaves moved back from `backups/` at different times: the one
+    /// with the newest stamp is the save the player moved back last, so it is
+    /// the one the game must open. Before the stamps were compared the winner
+    /// was whichever file the directory happened to list first.
+    #[test]
+    fn the_newest_stamped_autosave_is_the_one_recovered() {
+        let root = temp("stamped-newest");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let older = valid_slot(b"older autosave");
+        let newer = valid_slot(b"newer autosave");
+        write_bytes(&dir.join("1795325701-Auto"), &older);
+        write_bytes(&dir.join("1795393583-Auto"), &newer);
+
+        let repaired = repair_backup_named_slots(&save).unwrap();
+        assert_eq!(repaired.len(), 1, "one name can be recovered, not two");
+        assert_eq!(repaired[0].from, dir.join("1795393583-Auto"));
+        assert_eq!(
+            std::fs::read(dir.join("Auto")).unwrap(),
+            newer,
+            "the newest move is the save that opens"
+        );
+        assert!(dir.join("1795325701-Auto").is_file(), "the older copy stays where it was");
+        assert!(dir.join("1795393583-Auto").is_file(), "the recovered original stays where it was");
+        assert!(
+            repair_backup_named_slots(&save).unwrap().is_empty(),
+            "a restart finds nothing left to recover"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The newest stamped file is a truncated copy of a move that did not
+    /// finish. It must not block the older stamped autosave that still reads.
+    #[test]
+    fn a_stamped_autosave_that_cannot_be_read_does_not_hide_an_older_valid_one() {
+        let root = temp("stamped-fallback");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let older = valid_slot(b"the autosave that still reads");
+        let mut damaged = valid_slot(b"a copy of the move that failed");
+        damaged.truncate(damaged.len() - 3);
+        write_bytes(&dir.join("1795325701-Auto"), &older);
+        write_bytes(&dir.join("1795393583-Auto"), &damaged);
+
+        let repaired = repair_backup_named_slots(&save).unwrap();
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0].from, dir.join("1795325701-Auto"));
+        assert_eq!(std::fs::read(dir.join("Auto")).unwrap(), older);
+        assert!(
+            std::fs::read(dir.join("1795393583-Auto")).unwrap() == damaged,
+            "the damaged copy is kept unchanged for repair"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A manual chapter save moved back from `backups/` under two names is
+    /// recovered under both: the game lists each chapter slot separately.
+    #[test]
+    fn every_stamped_manual_chapter_save_is_recovered() {
+        let root = temp("stamped-chapters");
+        let save = root.join("save");
+        let dir = account_dir(&save).join("000");
+        let one = valid_slot(b"chapter one");
+        let two = valid_slot(b"chapter two");
+        write_bytes(&dir.join("1795325701-Chapter_Led_1_1"), &one);
+        write_bytes(&dir.join("1795393583-Chapter_Led_1_2"), &two);
+
+        let mut repaired = repair_backup_named_slots(&save).unwrap();
+        repaired.sort_by(|a, b| a.to.cmp(&b.to));
+        assert_eq!(repaired.len(), 2);
+        assert_eq!(std::fs::read(dir.join("Chapter_Led_1_1")).unwrap(), one);
+        assert_eq!(std::fs::read(dir.join("Chapter_Led_1_2")).unwrap(), two);
+        assert!(dir.join("1795325701-Chapter_Led_1_1").is_file());
+        assert!(dir.join("1795393583-Chapter_Led_1_2").is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 

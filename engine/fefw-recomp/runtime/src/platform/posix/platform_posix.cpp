@@ -518,6 +518,30 @@ void* named_mutex_create(const char* name, bool* already_exists) {
 #endif
 }
 
+bool named_mutex_lock(void* handle) {
+#if defined(__linux__)
+    auto* m = static_cast<NamedMutex*>(handle);
+    if (!m || m->fd < 0) return false;
+    // create already took the lock, so this is normally a no-op; after an unlock it re-acquires.
+    while (flock(m->fd, LOCK_EX) != 0) {
+        if (errno != EINTR) return false;
+    }
+    return true;
+#else
+    (void)handle;
+    return false;
+#endif
+}
+
+void named_mutex_unlock(void* handle) {
+#if defined(__linux__)
+    auto* m = static_cast<NamedMutex*>(handle);
+    if (m && m->fd >= 0) flock(m->fd, LOCK_UN);
+#else
+    (void)handle;
+#endif
+}
+
 void named_mutex_destroy(void* handle) {
 #if defined(__linux__)
     auto* m = static_cast<NamedMutex*>(handle);
